@@ -1,48 +1,49 @@
 const std = @import("std");
 const Entitys = @import("./entitys.zig");
 pub const h = "hello3";
-pub const vertices =[_]f32{
+pub const vertices =[_][30]f32{[_]f32{
     -0.5, -0.5, -0.5,  0.0, 0.0,
      0.5, -0.5, -0.5,  1.0, 0.0,
      0.5,  0.5, -0.5,  1.0, 1.0,
      0.5,  0.5, -0.5,  1.0, 1.0,
     -0.5,  0.5, -0.5,  0.0, 1.0,
     -0.5, -0.5, -0.5,  0.0, 0.0,
-
+    },[_]f32{
     -0.5, -0.5,  0.5,  0.0, 0.0,
      0.5, -0.5,  0.5,  1.0, 0.0,
      0.5,  0.5,  0.5,  1.0, 1.0,
      0.5,  0.5,  0.5,  1.0, 1.0,
     -0.5,  0.5,  0.5,  0.0, 1.0,
     -0.5, -0.5,  0.5,  0.0, 0.0,
-
+  },[_]f32{
     -0.5,  0.5,  0.5,  1.0, 0.0,
     -0.5,  0.5, -0.5,  1.0, 1.0,
     -0.5, -0.5, -0.5,  0.0, 1.0,
     -0.5, -0.5, -0.5,  0.0, 1.0,
     -0.5, -0.5,  0.5,  0.0, 0.0,
     -0.5,  0.5,  0.5,  1.0, 0.0,
-
+},[_]f32{
      0.5,  0.5,  0.5,  1.0, 0.0,
      0.5,  0.5, -0.5,  1.0, 1.0,
      0.5, -0.5, -0.5,  0.0, 1.0,
      0.5, -0.5, -0.5,  0.0, 1.0,
      0.5, -0.5,  0.5,  0.0, 0.0,
      0.5,  0.5,  0.5,  1.0, 0.0,
-
+},[_]f32{
     -0.5, -0.5, -0.5,  0.0, 1.0,
      0.5, -0.5, -0.5,  1.0, 1.0,
      0.5, -0.5,  0.5,  1.0, 0.0,
      0.5, -0.5,  0.5,  1.0, 0.0,
     -0.5, -0.5,  0.5,  0.0, 0.0,
     -0.5, -0.5, -0.5,  0.0, 1.0,
-
+},[_]f32{
     -0.5,  0.5, -0.5,  0.0, 1.0,
      0.5,  0.5, -0.5,  1.0, 1.0,
      0.5,  0.5,  0.5,  1.0, 0.0,
      0.5,  0.5,  0.5,  1.0, 0.0,
     -0.5,  0.5,  0.5,  0.0, 0.0,
-    -0.5,  0.5, -0.5,  0.0, 1.0
+    -0.5,  0.5, -0.5,  0.0, 1.0,
+    },
 };
 
 var GeneralPurposeAllocator  = std.heap.GeneralPurposeAllocator(.{}){};
@@ -53,36 +54,29 @@ var GeneralPurposeAllocator  = std.heap.GeneralPurposeAllocator(.{}){};
 pub const Chunk = struct {
     blocks: [32][32][32]u32,
     pos:@Vector(3, i32),
-    vertices:?std.ArrayList(f32),
-
     pub fn initctoblock(block:Materials,pos:@Vector(3, i32)) !Chunk{
         //const allocator = GeneralPurposeAllocator.allocator();
-        var chunk = Chunk{
+        return Chunk{
         .blocks=[_][32][32]u32{ [_][32]u32{[_]u32{@intFromEnum(block)} ** 32} ** 32} ** 32,
         .pos = pos,
-        .vertices = null,
         };
-        chunk.vertices = try CalculateVertices(&chunk,GeneralPurposeAllocator.allocator());
-        return chunk;
     }
 
 };
 
 pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
-    var v:[30]f32 = undefined;
-    @memcpy(&v, vertices[(face*30)..(face*30)+30]);
-    for(0..v.len)|i|{
+    var v:[30]f32 = vertices[face];
+    for(0..30)|i|{
         if(i % 5 == 0){v[i] += x;}
-        if(i % 5 == 1){v[i] += y;}
-        if(i % 5 == 2){v[i] += z;}
-
+        else if(i % 5 == 1){v[i] += y;}
+        else if(i % 5 == 2){v[i] += z;}
     }
     return v;
 }
 
- pub fn CalculateVertices(chunk:*Chunk,allocator:std.mem.Allocator) !std.ArrayList(f32){
+ pub fn CalculateVertices(chunk:*Chunk,allocator:std.mem.Allocator) ![]f32{
         var verts = std.ArrayList(f32).init(allocator);
-        //_ = try verts.addManyAsArray(vertices.len);
+        defer verts.deinit();
         const blocks = chunk.blocks;
         for (0..32) |x|{
             for (0..32) |y| {
@@ -95,10 +89,10 @@ pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
                           _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),3));
                         }
                         if (y != 31 and blocks[x][y+1][z] == @intFromEnum(Materials.Air) or y == 31){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),4));
+                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),5));
                         }
                         if (y != 0 and blocks[x][y-1][z] == @intFromEnum(Materials.Air)  or y == 0){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),5));
+                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),4));
                         }
                         if (z != 31 and blocks[x][y][z+1] == @intFromEnum(Materials.Air) or z == 31){
                           _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),1));
@@ -110,7 +104,7 @@ pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
                 }
             }
         }
-        return verts;
+        return verts.items;
 
     }
 

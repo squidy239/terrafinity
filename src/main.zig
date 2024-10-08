@@ -74,23 +74,27 @@ pub fn main() !void {
         const chx = @as(i32,@intFromFloat(player.pos[0]/32.0));
         const chy = @as(i32,@intFromFloat(player.pos[1]/32.0));
         const chz = @as(i32,@intFromFloat(player.pos[2]/32.0));
-        const render_distance = [_]i32{10,3,10};
+        const render_distance = [_]i32{30,3,3};
         var x:i32 = -render_distance[0];
         var y:i32 = -render_distance[1];
         var z:i32 = -render_distance[2];
+        var genedchunks:u32 = 0;
         while (x < render_distance[0]) {
             while (y < render_distance[1]) {
                 while (z < render_distance[2]) {
                                 //std.debug.print("::{}::", .{chx});
-                                const chptr = overworld.Chunks.get(@Vector(3, i32){chx+x,chy+y,chz+z});
+                                const chptr = overworld.Chunks.getPtr(@Vector(3, i32){chx+x,chy+y,chz+z});
                                 if (chptr == null){
-                                std.debug.print("len: {}  ", .{overworld.Chunks.count()});
-                                if (chy+y > 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.Air, @Vector(3, i32){chx+x,chy+y,chz+z}));}
-                                else if (chy+y <= 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.TestBlock, @Vector(3, i32){chx+x,chy+y,chz+z}));}
-
-                                continue;
-                                }
-                                    _ = try render.RenderChunkFrame(@constCast(&chptr.?),player.pos,player.cameraUp,player.cameraFront);
+                                    if(genedchunks < 50){
+                                        std.debug.print("len: {}  ", .{overworld.Chunks.count()});
+                                        if (chy+y > 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.Air, @Vector(3, i32){chx+x,chy+y,chz+z}));}
+                                        else if (chy+y <= 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.TestBlock, @Vector(3, i32){chx+x,chy+y,chz+z}));}
+                                        genedchunks+=1;
+                                        continue;
+                                    }
+                                    }   else {
+                                        //const v = try world.CalculateVertices(chptr.?, allocator);
+                                        _ = try render.RenderChunkFrame(@constCast(chptr.?),player.pos,player.cameraUp,player.cameraFront,(@constCast(&render.vertices)));}
                                     z+=1;
                         }
                         z = -render_distance[2];
@@ -156,7 +160,6 @@ fn prossesInput(window:*glfw.Window, dt:f64) void {
     if (window.getKey(glfw.Key.F11) == glfw.Action.press){
         if (!fullscreen) {window.maximize(); fullscreen = true;}
         }
-
 }
 fn normalize(self: anytype) @TypeOf(self) {
     return self / @as(@TypeOf(self), @splat(len(self)));

@@ -21,7 +21,7 @@ var VAO:c_uint = undefined;
 var VBO:c_uint = undefined;
 var texture= [_]c_uint{undefined};
 //-------------------------------------------------------------------------
-const vertices =[_]f32{
+pub const vertices =[_]f32{
     -0.5, -0.5, -0.5,  0.0, 0.0,
      0.5, -0.5, -0.5,  1.0, 0.0,
      0.5,  0.5, -0.5,  1.0, 1.0,
@@ -86,11 +86,9 @@ fn eql(o:[]f32,t:[]f32) void {
         i+=1;
     }
 }
-pub fn RenderChunkFrame(chunk:*world.Chunk,cameraPos:zm.Vec3f,cameraUp:zm.Vec3f,cameraFront:zm.Vec3f) !void{
-        if(chunk.vertices == null) chunk.vertices = try world.CalculateVertices(@constCast(chunk),allocator);
-        const ver = chunk.vertices.?.items;
+pub fn RenderChunkFrame(chunk:*world.Chunk,cameraPos:zm.Vec3f,cameraUp:zm.Vec3f,cameraFront:zm.Vec3f,ver:[]f32) !void{
         //gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(&ver), gl.DYNAMIC_DRAW);
-        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(ver[0..]), gl.STREAM_DRAW);
+        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(ver), gl.STREAM_DRAW);
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), width/height, 0.0001, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
         gl.UniformMatrix4fv(projectionlocation,1, gl.TRUE,@ptrCast(&(proj)));
