@@ -88,7 +88,7 @@ fn eql(o:[]f32,t:[]f32) void {
 }
 pub fn RenderChunkFrame(chunk:*world.Chunk,cameraPos:zm.Vec3f,cameraUp:zm.Vec3f,cameraFront:zm.Vec3f,ver:[]f32) !void{
         //gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(&ver), gl.DYNAMIC_DRAW);
-        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(ver), gl.STREAM_DRAW);
+        gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * @as(isize,@intCast(ver.len)), @ptrCast(ver[0..]), gl.STREAM_DRAW);
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), width/height, 0.0001, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
         gl.UniformMatrix4fv(projectionlocation,1, gl.TRUE,@ptrCast(&(proj)));
@@ -99,7 +99,6 @@ pub fn RenderChunkFrame(chunk:*world.Chunk,cameraPos:zm.Vec3f,cameraUp:zm.Vec3f,
         const mo = zm.Mat4f.translation(@floatFromInt(32*chunk.pos[0]),@floatFromInt(32*chunk.pos[1]),@floatFromInt(32*chunk.pos[2]));
         const modellocation = gl.GetUniformLocation(shaderprogram, "model");
         gl.UniformMatrix4fv(modellocation,1, gl.TRUE,@ptrCast(&(mo)));
-        gl.BindTextures(gl.TEXTURE_2D, 1,@ptrCast(&texture));
         gl.DrawArrays(gl.TRIANGLES, 0, @intCast(ver.len/5));
         //gl.DrawArrays(gl.TRIANGLES, 0, @as(c_int,@intCast(ver.len)));
         //gl.DrawElements(gl.TRIANGLES, @as(c_int,@intCast(36)), gl.UNSIGNED_INT,0);
@@ -152,11 +151,11 @@ pub fn InitRenderer()!void{
     // set texture1 filtering parameters
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
+    gl.BindTextures(gl.TEXTURE_2D, 1,@ptrCast(&texture));
     gl.AttachShader(shaderprogram, vertexshader);
     gl.AttachShader(shaderprogram, fragshader);
     gl.LinkProgram(shaderprogram);  
-    gl.PolygonMode(gl.FRONT_AND_BACK, gl.TRIANGLES);
+    gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE);
     gl.VertexAttribPointer(0, 3, gl.FLOAT,gl.FALSE, 5 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(1, 2, gl.FLOAT,gl.FALSE,  5 * @sizeOf(f32), 3 * @sizeOf(f32));

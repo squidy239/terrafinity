@@ -65,7 +65,7 @@ pub fn main() !void {
     _ = try render.InitRenderer();
     _ = try overworld.Chunks.put(@Vector(3, i32){0,10,0}, try world.Chunk.initctoblock(world.Materials.Air, @Vector(3, i32){0,0,0}));
     var lasttime:f64 = 0;
-    while (true) {
+    while (!glfw.Window.shouldClose(window)) {
         const currenttime = glfw.getTime();
         gl.ClearColor(0, 0.2, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -74,7 +74,7 @@ pub fn main() !void {
         const chx = @as(i32,@intFromFloat(player.pos[0]/32.0));
         const chy = @as(i32,@intFromFloat(player.pos[1]/32.0));
         const chz = @as(i32,@intFromFloat(player.pos[2]/32.0));
-        const render_distance = [_]i32{30,3,3};
+        const render_distance = [_]i32{5,3,5};
         var x:i32 = -render_distance[0];
         var y:i32 = -render_distance[1];
         var z:i32 = -render_distance[2];
@@ -85,16 +85,20 @@ pub fn main() !void {
                                 //std.debug.print("::{}::", .{chx});
                                 const chptr = overworld.Chunks.getPtr(@Vector(3, i32){chx+x,chy+y,chz+z});
                                 if (chptr == null){
-                                    if(genedchunks < 50){
-                                        std.debug.print("len: {}  ", .{overworld.Chunks.count()});
+                                    if(genedchunks < 2){
+                                        std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
                                         if (chy+y > 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.Air, @Vector(3, i32){chx+x,chy+y,chz+z}));}
                                         else if (chy+y <= 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.TestBlock, @Vector(3, i32){chx+x,chy+y,chz+z}));}
                                         genedchunks+=1;
+                                        //z+=1;
                                         continue;
                                     }
-                                    }   else {
-                                        //const v = try world.CalculateVertices(chptr.?, allocator);
-                                        _ = try render.RenderChunkFrame(@constCast(chptr.?),player.pos,player.cameraUp,player.cameraFront,(@constCast(&render.vertices)));}
+                                    }else {
+                                        if (chptr.?.vertices == null) {const v = (try world.CalculateVertices(chptr.?, allocator));
+                                        chptr.?.vertices = v.items;
+                                        errdefer v.deinit();}
+                                        _ = try render.RenderChunkFrame(@constCast(chptr.?),player.pos,player.cameraUp,player.cameraFront,chptr.?.vertices.?);
+                                       }
                                     z+=1;
                         }
                         z = -render_distance[2];

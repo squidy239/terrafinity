@@ -54,11 +54,13 @@ var GeneralPurposeAllocator  = std.heap.GeneralPurposeAllocator(.{}){};
 pub const Chunk = struct {
     blocks: [32][32][32]u32,
     pos:@Vector(3, i32),
+    vertices:?[]f32,
     pub fn initctoblock(block:Materials,pos:@Vector(3, i32)) !Chunk{
         //const allocator = GeneralPurposeAllocator.allocator();
         return Chunk{
         .blocks=[_][32][32]u32{ [_][32]u32{[_]u32{@intFromEnum(block)} ** 32} ** 32} ** 32,
         .pos = pos,
+        .vertices = null,
         };
     }
 
@@ -74,9 +76,9 @@ pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
     return v;
 }
 
- pub fn CalculateVertices(chunk:*Chunk,allocator:std.mem.Allocator) ![]f32{
+ pub fn CalculateVertices(chunk:*Chunk,allocator:std.mem.Allocator) !std.ArrayList(f32){
         var verts = std.ArrayList(f32).init(allocator);
-        defer verts.deinit();
+        errdefer verts.deinit();
         const blocks = chunk.blocks;
         for (0..32) |x|{
             for (0..32) |y| {
@@ -104,7 +106,7 @@ pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
                 }
             }
         }
-        return verts.items;
+        return verts;
 
     }
 
