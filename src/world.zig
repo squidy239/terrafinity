@@ -85,22 +85,22 @@ pub fn translatedface(x:f32,y:f32,z:f32,face:u8) [30]f32{
                 for (0..32) |z| {
                     if (blocks[x][y][z] != @intFromEnum(Materials.Air)){
                         if (x != 31 and blocks[x+1][y][z] == @intFromEnum(Materials.Air) or x == 31){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),2));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),3)[0..30]);
                         }
                         if (x != 0 and blocks[x-1][y][z] == @intFromEnum(Materials.Air)  or x == 0){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),3));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),2)[0..30]);
                         }
                         if (y != 31 and blocks[x][y+1][z] == @intFromEnum(Materials.Air) or y == 31){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),5));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),5)[0..30]);
                         }
                         if (y != 0 and blocks[x][y-1][z] == @intFromEnum(Materials.Air)  or y == 0){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),4));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),4)[0..30]);
                         }
                         if (z != 31 and blocks[x][y][z+1] == @intFromEnum(Materials.Air) or z == 31){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),1));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),1)[0..30]);
                         }
                         if (z != 0 and blocks[x][y][z-1] == @intFromEnum(Materials.Air)  or z == 0){
-                          _ = try verts.appendSlice(&translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),0));
+                          _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z),0)[0..30]);
                         }
                     }
                 }

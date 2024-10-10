@@ -9,6 +9,7 @@ const vsync = false;
 const world = @import("./world.zig");
 const render = @import("./render.zig");
 const Entity = @import("./entitys.zig");
+const ChunkGen = @import("./chunk/GenerateChunk.zig");
 const ArrayList = std.ArrayList;
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var width:f32 = 800;
@@ -21,7 +22,7 @@ var player = Entity.Player{
         .cameraFront = @Vector(3, f32){0.0,0.0,-1.0},
         .pos = @Vector(3, f32){0.0,0.0,3.0},
         .cameraUp = @Vector(3, f32){0.0,1.0,0.0},
-        .speed = @Vector(3, f32){50.0,50.0,50.0},
+        .speed = @Vector(3, f32){500.0,500.0,500.0},
         .pitch = 0.0,
         .yaw = 0.0,
         .roll = 0.0,
@@ -74,21 +75,21 @@ pub fn main() !void {
         const chx = @as(i32,@intFromFloat(player.pos[0]/32.0));
         const chy = @as(i32,@intFromFloat(player.pos[1]/32.0));
         const chz = @as(i32,@intFromFloat(player.pos[2]/32.0));
-        const render_distance = [_]i32{5,3,5};
+        const render_distance = [_]i32{10,6,10};
         var x:i32 = -render_distance[0];
         var y:i32 = -render_distance[1];
         var z:i32 = -render_distance[2];
         var genedchunks:u32 = 0;
+        
         while (x < render_distance[0]) {
             while (y < render_distance[1]) {
                 while (z < render_distance[2]) {
                                 //std.debug.print("::{}::", .{chx});
                                 const chptr = overworld.Chunks.getPtr(@Vector(3, i32){chx+x,chy+y,chz+z});
                                 if (chptr == null){
-                                    if(genedchunks < 2){
+                                    if(genedchunks < 4){
                                         std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
-                                        if (chy+y > 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.Air, @Vector(3, i32){chx+x,chy+y,chz+z}));}
-                                        else if (chy+y <= 0){_ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try world.Chunk.initctoblock(world.Materials.TestBlock, @Vector(3, i32){chx+x,chy+y,chz+z}));}
+                                        _ = try overworld.Chunks.put(@Vector(3, i32){chx+x,chy+y,chz+z}, try ChunkGen.GenChunk(0,@Vector(3, i32){chx+x,chy+y,chz+z}));
                                         genedchunks+=1;
                                         //z+=1;
                                         continue;
@@ -161,6 +162,7 @@ fn prossesInput(window:*glfw.Window, dt:f64) void {
         player.pos[1] += cameraSpeed[1];
     if (window.getKey(glfw.Key.left_shift)  == glfw.Action.press or window.getKey(glfw.Key.right_shift)  == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
+        
     if (window.getKey(glfw.Key.F11) == glfw.Action.press){
         if (!fullscreen) {window.maximize(); fullscreen = true;}
         }

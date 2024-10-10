@@ -155,7 +155,7 @@ pub fn InitRenderer()!void{
     gl.AttachShader(shaderprogram, vertexshader);
     gl.AttachShader(shaderprogram, fragshader);
     gl.LinkProgram(shaderprogram);  
-    gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE);
+    gl.PolygonMode(gl.FRONT_AND_BACK, gl.TRIANGLES);
     gl.VertexAttribPointer(0, 3, gl.FLOAT,gl.FALSE, 5 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(1, 2, gl.FLOAT,gl.FALSE,  5 * @sizeOf(f32), 3 * @sizeOf(f32));
