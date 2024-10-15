@@ -1,9 +1,9 @@
+const std = @import("std");
+
 pub const Chunk = struct {
     blocks: [32][32][32]u32,
-    pos:@Vector(3, i32),
-    air:bool,
+    pos: [3]i32,
+    vertices: ?[]f32,
 };
 
-pub const ChunkDiff = struct {
-    
-};
+pub const ChunkDiff = struct {};

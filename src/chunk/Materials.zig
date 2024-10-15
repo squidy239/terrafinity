@@ -4,5 +4,4 @@ pub const Materials = enum(u32) {
     Grass = 2,
     Clay = 3,
     Stone = 4,
-
 };

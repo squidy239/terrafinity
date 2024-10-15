@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
 
     const zm = b.dependency("zm", .{});
     exe.root_module.addImport("zm", zm.module("zm"));
-    
+
     const glfw_dep = b.dependency("zig_glfw", .{
         .target = target,
         .optimize = optimize,
