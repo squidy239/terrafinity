@@ -7,7 +7,9 @@ pub fn initctoblock(block: Blocks, pos: [3]i32) Chunk {
     return Chunk{
         .blocks = [_][32][32]u32{[_][32]u32{[_]u32{@intFromEnum(block)} ** 32} ** 32} ** 32,
         .pos = pos,
-        .vertices = null,
+        .vbo = null,
+        .vao = null,
+        .vlen = null,
     };
 }
 

@@ -103,7 +103,7 @@ pub fn CalculateVertices(chunk: *Chunk, allocator: std.mem.Allocator) !std.Array
 }
 
 pub const World = struct {
-    Chunks: std.AutoHashMap(@Vector(3, i32), Chunk),
+    Chunks: std.HashMap(@Vector(3, i32), Chunk, Chunk.ChunkContext, 50),
 };
 
 pub const Materials = enum(u32) {
