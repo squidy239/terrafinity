@@ -14,6 +14,7 @@ const Entity = @import("./entitys.zig");
 const ChunkGen = @import("./chunk/GenerateChunk.zig");
 const Mesher = @import("./chunk/MeshChunk.zig");
 const ArrayList = std.ArrayList;
+const ztracy = @import("ztracy");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var width: f32 = 800;
 var height: f32 = 600;
@@ -54,7 +55,7 @@ pub fn main() !void {
     glfw.makeContextCurrent(window);
 
     var overworld = world.World{
-        .Chunks = std.HashMap(@Vector(3, i32), Chunk, Chunk.ChunkContext, 50).init(allocator),
+        .Chunks = std.HashMap([3]i32, *Chunk, Chunk.ChunkContext, 80).init(allocator),
     };
 
     if (!procs.init(glfw.getProcAddress)) {
@@ -68,9 +69,12 @@ pub fn main() !void {
     _ = try render.InitRenderer();
       const e = gl.GetError();
                             if (e != gl.NO_ERROR) std.debug.print("{}", .{e});
-    _ = try overworld.Chunks.put(@Vector(3, i32){ 0, 10, 0 }, ChunkGen.initctoblock(Materials.Air, @Vector(3, i32){ 0, 0, 0 }));
     var lasttime: f64 = 0;
+            var torender = std.ArrayList(*Chunk).init(allocator);
+    var t = std.time.microTimestamp();
     while (!glfw.Window.shouldClose(window)) {
+        const frametime = ztracy.ZoneNC(@src(), "frametime", 0x00_ff_00_00);
+        defer frametime.End();
         const currenttime = glfw.getTime();
         gl.ClearColor(0, 0.2, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -79,59 +83,67 @@ pub fn main() !void {
         const chx = @as(i32, @intFromFloat(player.pos[0] / 32.0));
         const chy = @as(i32, @intFromFloat(player.pos[1] / 32.0));
         const chz = @as(i32, @intFromFloat(player.pos[2] / 32.0));
-        const render_distance = [_]i32{ 2, 2, 2 };
+        const render_distance = [_]i32{5, 2, 5};
         var x: i32 = -render_distance[0];
         var y: i32 = -render_distance[1];
         var z: i32 = -render_distance[2];
         var genedchunks: u32 = 0;
         const s = gl.GetError();
                             if (s != gl.NO_ERROR) std.debug.print("{}", .{s});
+        if (std.time.microTimestamp()-t > std.time.us_per_ms*4000){
+        t = std.time.microTimestamp();
         while (x < render_distance[0]) {
             while (y < render_distance[1]) {
                 while (z < render_distance[2]) {
+                     const perchunk = ztracy.ZoneNC(@src(), "perchunk", 0x00_ff_00_00);
+                     defer perchunk.End();
                     //std.debug.print("::{}::", .{chx});
-                    const chptr = overworld.Chunks.getPtr(@Vector(3, i32){ chx + x, chy + y, chz + z });
-                    //const st = std.time.microTimestamp();
+                    const g = ztracy.ZoneNC(@src(), "hashget", 0x00_ff_00_00);
+                    var st = try std.time.Timer.start();
+                    const chptr = overworld.Chunks.get([3]i32{ chx + x, chy + y, chz + z });
+                    std.debug.print("{}\n", .{st.read()});
+                    g.End();
                     if (chptr == null) {
-                        if (genedchunks < 40) {
+                        if (genedchunks < 4000) {
+                            const gen = ztracy.ZoneNC(@src(), "gen", 0x00_ff_00_00);
+                            defer gen.End();
                             //std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
-                            _ = try overworld.Chunks.put(@Vector(3, i32){ chx + x, chy + y, chz + z }, ChunkGen.GenChunk(0, @Vector(3, i32){ chx + x, chy + y, chz + z }));
+                            const cp = try allocator.create(Chunk);
+                            cp.* = ChunkGen.GenChunk(6, [3]i32{ chx + x, chy + y, chz + z });
+                            _ = try overworld.Chunks.put([3]i32{ chx + x, chy + y, chz + z }, cp);
                             genedchunks += 1;
                             //z+=1;
                             continue;
                         }
                     } else {
                         if (chptr.?.vbo == null) {
+                            const mesh = ztracy.ZoneNC(@src(), "mesh", 0x00_ff_00_00);
+                            defer mesh.End();
                             var vv = (try Mesher.FaceMesh(chptr.?, allocator));
                             defer vv.deinit();
                             const v = try vv.toOwnedSlice();
                             chptr.?.vlen = @intCast(v.len);
                             var tempvbo: c_uint = 0;
                             var tempvao: c_uint = 0;
-                            std.debug.print("\n\ncreating||\n", .{});
-                            gl.CreateVertexArrays(1, &tempvao);
-                            chptr.?.vao = tempvao;
-                            const b = gl.GetError();
-                            if (b != gl.NO_ERROR) std.debug.print("{}", .{b});
-                            gl.BindVertexArray(chptr.?.vao.?);
-                            gl.CreateBuffers(1, &tempvbo);
-                            chptr.?.vbo = tempvbo;
-                            gl.BindBuffer(gl.ARRAY_BUFFER, chptr.?.vbo.?);
-                            std.debug.print("||bind,{}||\n", .{v.len});
-                            gl.BufferData(gl.ARRAY_BUFFER, @intCast(v.len), v.ptr, gl.STATIC_DRAW);
-                            std.debug.print("||set||\n\n", .{});
+                            gl.GenVertexArrays(1, @ptrCast(&tempvao));
+                            gl.BindVertexArray(tempvao);
+
+                            gl.GenBuffers(1, @ptrCast(&tempvbo));
+                            gl.BindBuffer(gl.ARRAY_BUFFER, tempvbo);
+                            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(f32) * v.len), v.ptr, gl.STATIC_DRAW);
+            
                             gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 0);
                             gl.EnableVertexAttribArray(0);
                             gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 3 * @sizeOf(f32));
                             gl.EnableVertexAttribArray(1);
                             gl.BindVertexArray(0);
+                            chptr.?.vao = tempvao;
+                            chptr.?.vbo = tempvbo;
                             const a = gl.GetError();
                             if (a != gl.NO_ERROR) std.debug.panic("{}", .{a});
+                            _ = try torender.append(chptr.?);
                         }
-
-                        _ = try render.RenderChunkFrame(chptr.?.pos, chptr.?.vao.?, chptr.?.vbo.?, chptr.?.vlen.?, player.pos, player.cameraUp, player.cameraFront);
                     }
-                    //std.debug.print("{}\n", .{std.time.microTimestamp()-st});
                     z += 1;
                 }
                 z = -render_distance[2];
@@ -139,6 +151,11 @@ pub fn main() !void {
             }
             y = -render_distance[1];
             x += 1;
+        }}
+        for(torender.items)|c|{
+            const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x00_ff_00_00);
+            _ = try render.RenderChunkFrame(c.pos, c.vao.?, c.vbo.?, c.vlen.?, player.pos, player.cameraUp, player.cameraFront);
+            drawchunk.End();
         }
         window.swapBuffers();
         glfw.pollEvents();
