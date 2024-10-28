@@ -39,6 +39,9 @@
             .url = "git+https://github.com/griush/zm#24eb73d78b73322efbe84f0ccd5a23debc174920",
             .hash = "1220fca42cac0931a1a6af2ca0159b53c1c865a3746c5326d1f59cd9f78c495517e2",
         },
+        .ztracy = .{ .path = "./ztracy" },
+        
+
     },
 
     // Specifies the set of files and directories that are included in this package.
