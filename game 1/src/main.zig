@@ -57,7 +57,7 @@ pub fn main() !void {
     var overworld = world.World{
         .Chunks = std.HashMap([3]i32, *Chunk, Chunk.ChunkContext, 80).init(allocator),
     };
-
+    
     if (!procs.init(glfw.getProcAddress)) {
         @panic("could not get glproc");
     }
