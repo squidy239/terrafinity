@@ -1913,6 +1913,7 @@ test "reference all" {
 test "range of all 2D noise/fractal combinations" {
     const size = 768;
     var noise = Noise(f32){};
+    @setEvalBranchQuota(9999);
 
     inline for (@typeInfo(FractalType).Enum.fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;

@@ -14,7 +14,6 @@ const Entity = @import("./entitys.zig");
 const ChunkGen = @import("./chunk/GenerateChunk.zig");
 const Mesher = @import("./chunk/MeshChunk.zig");
 const ArrayList = std.ArrayList;
-const ztracy = @import("ztracy");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var width: f32 = 800;
 var height: f32 = 600;
@@ -73,8 +72,6 @@ pub fn main() !void {
             var torender = std.ArrayList(*Chunk).init(allocator);
     var t = std.time.microTimestamp();
     while (!glfw.Window.shouldClose(window)) {
-        const frametime = ztracy.ZoneNC(@src(), "frametime", 0x00_ff_00_00);
-        defer frametime.End();
         const currenttime = glfw.getTime();
         gl.ClearColor(0, 0.2, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -95,18 +92,12 @@ pub fn main() !void {
         while (x < render_distance[0]) {
             while (y < render_distance[1]) {
                 while (z < render_distance[2]) {
-                     const perchunk = ztracy.ZoneNC(@src(), "perchunk", 0x00_ff_00_00);
-                     defer perchunk.End();
                     //std.debug.print("::{}::", .{chx});
-                    const g = ztracy.ZoneNC(@src(), "hashget", 0x00_ff_00_00);
                     var st = try std.time.Timer.start();
                     const chptr = overworld.Chunks.get([3]i32{ chx + x, chy + y, chz + z });
                     std.debug.print("{}\n", .{st.read()});
-                    g.End();
                     if (chptr == null) {
                         if (genedchunks < 4000) {
-                            const gen = ztracy.ZoneNC(@src(), "gen", 0x00_ff_00_00);
-                            defer gen.End();
                             //std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
                             const cp = try allocator.create(Chunk);
                             cp.* = ChunkGen.GenChunk(6, [3]i32{ chx + x, chy + y, chz + z });
@@ -117,8 +108,6 @@ pub fn main() !void {
                         }
                     } else {
                         if (chptr.?.vbo == null) {
-                            const mesh = ztracy.ZoneNC(@src(), "mesh", 0x00_ff_00_00);
-                            defer mesh.End();
                             var vv = (try Mesher.FaceMesh(chptr.?, allocator));
                             defer vv.deinit();
                             const v = try vv.toOwnedSlice();
@@ -153,9 +142,7 @@ pub fn main() !void {
             x += 1;
         }}
         for(torender.items)|c|{
-            const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x00_ff_00_00);
             _ = try render.RenderChunkFrame(c.pos, c.vao.?, c.vbo.?, c.vlen.?, player.pos, player.cameraUp, player.cameraFront);
-            drawchunk.End();
         }
         window.swapBuffers();
         glfw.pollEvents();
