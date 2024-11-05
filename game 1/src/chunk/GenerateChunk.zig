@@ -35,18 +35,19 @@ pub fn GenChunk(seed: i32, Pos: [3]i32) Chunk {
             //std.debug.print("{}", .{h});
             const d = @divFloor(h, @as(i32, 32));
             if (d == Pos[1]) {
-                const y:usize = @intCast(@mod(h, 32));
+                const y: usize = @intCast(@mod(h, 32));
                 chunk.blocks[x][y][z] = @intFromEnum(Blocks.Grass);
-                for (0..y)|yy|{chunk.blocks[x][yy][z] = @intFromEnum(Blocks.Stone);}
-
-            }
-            else if (d > Pos[1]){
-                for (0..32)|yy|{chunk.blocks[x][yy][z] = @intFromEnum(Blocks.Stone);}
+                for (0..y) |yy| {
+                    chunk.blocks[x][yy][z] = @intFromEnum(Blocks.Stone);
+                }
+            } else if (d > Pos[1]) {
+                for (0..32) |yy| {
+                    chunk.blocks[x][yy][z] = @intFromEnum(Blocks.Stone);
+                }
             }
             //else {std.debug.print("{} ", .{@divFloor(h, @as(i32, 32))});}
-                          
 
         }
-    }                                         
+    }
     return chunk;
 }

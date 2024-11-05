@@ -89,10 +89,9 @@ pub fn FaceMesh(chunk: *Chunk, allocator: std.mem.Allocator) !std.ArrayList(f32)
         for (0..32) |y| {
             for (0..32) |z| {
                 if (blocks[x][y][z] != @intFromEnum(Materials.Air)) {
-                        if (x == 31 or blocks[x + 1][y][z] == @intFromEnum(Materials.Air)) {
-                            _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z), 3)[0..30]);
-                        }
-                
+                    if (x == 31 or blocks[x + 1][y][z] == @intFromEnum(Materials.Air)) {
+                        _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z), 3)[0..30]);
+                    }
 
                     if (x == 0 or blocks[x - 1][y][z] == @intFromEnum(Materials.Air)) {
                         _ = try verts.appendSlice(translatedface(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z), 2)[0..30]);

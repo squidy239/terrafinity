@@ -11,8 +11,8 @@ var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 //-----------------------------------------------------------------------
 var width: f32 = 1920;
 var height: f32 = 1080;
-pub var VAO:c_uint = undefined;
-pub var VBO:c_uint = undefined;
+pub var VAO: c_uint = undefined;
+pub var VBO: c_uint = undefined;
 var pitch: f64 = 0;
 var yaw: f64 = 0;
 const allocator = gpa.allocator();
@@ -43,7 +43,7 @@ pub fn RenderChunkFrame(chunkpos: [3]i32, vbo: c_uint, vao: c_uint, vlen: c_uint
     if (vlen == 0) return;
     //std.debug.print("\\{}/\n", .{vao});
     gl.BindVertexArray(vao);
-    
+
     gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
     const proj = zm.Mat4f.perspective(zm.toRadians(90.0), width / height, 0.1, 10000.0);
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
@@ -54,14 +54,13 @@ pub fn RenderChunkFrame(chunkpos: [3]i32, vbo: c_uint, vao: c_uint, vlen: c_uint
     const mo = zm.Mat4f.translation(@floatFromInt(32 * chunkpos[0]), @floatFromInt(32 * chunkpos[1]), @floatFromInt(32 * chunkpos[2]));
     const modellocation = gl.GetUniformLocation(shaderprogram, "model");
     gl.UniformMatrix4fv(modellocation, 1, gl.TRUE, @ptrCast(&(mo)));
-    
+
     gl.DrawArrays(gl.TRIANGLES, 0, @intCast(vlen));
     //gl.DrawArrays(gl.TRIANGLES, 0, @as(c_int,@intCast(ver.len)));
     //gl.DrawElements(gl.TRIANGLES, @as(c_int,@intCast(36)), gl.UNSIGNED_INT,0);
-                            if (gl.GetError() != @as(c_uint,gl.NO_ERROR)) std.debug.panic("{any}", .{(gl.GetError())});
+    if (gl.GetError() != @as(c_uint, gl.NO_ERROR)) std.debug.panic("{any}", .{(gl.GetError())});
 
     gl.BindVertexArray(0);
-
 }
 
 pub fn InitRenderer() !void {
@@ -71,10 +70,10 @@ pub fn InitRenderer() !void {
     gl.GenBuffers(1, @ptrCast(&VBO));
     gl.BindBuffer(gl.ARRAY_BUFFER, VBO);
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
-            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 0);
-                            gl.EnableVertexAttribArray(0);
-                            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 3 * @sizeOf(f32));
-                            gl.EnableVertexAttribArray(1);
+    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 0);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 3 * @sizeOf(f32));
+    gl.EnableVertexAttribArray(1);
     zstbi.init(allocator);
     defer zstbi.deinit();
     zstbi.setFlipVerticallyOnLoad(true);
@@ -82,15 +81,13 @@ pub fn InitRenderer() !void {
     defer textureimg.deinit();
 
     gl.GenTextures(1, &texture);
-    gl.TexParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.BindTextures(gl.TEXTURE_2D, 1, &texture);
-                    const b = gl.GetError();
-
+    const b = gl.GetError();
 
     gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGB, @intCast(textureimg.width), @intCast(textureimg.height), 0, gl.RGB, gl.UNSIGNED_BYTE, @ptrCast(textureimg.data));
-                            if (b != gl.NO_ERROR) std.debug.print("{}", .{b});
+    if (b != gl.NO_ERROR) std.debug.print("{}", .{b});
     gl.GenerateMipmap(gl.TEXTURE_2D);
-
 
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vs")), null);
@@ -99,7 +96,7 @@ pub fn InitRenderer() !void {
     const fragshader = gl.CreateShader(gl.FRAGMENT_SHADER);
     gl.ShaderSource(fragshader, 1, @ptrCast(&@embedFile("./fragshader.fs")), null);
     gl.CompileShader(fragshader);
-    
+
     shaderprogram = gl.CreateProgram();
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); // set texture wrapping to GL_REPEAT (default wrapping method)
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);

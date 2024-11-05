@@ -126,12 +126,12 @@ pub fn main() !void {
     for (0..40) |x| {
         for (0..20) |y| {
             for (0..40) |z| {
-                const testchunk = Generator.GenChunk(0, [3]i32{ @as(i32,@intCast(x))-20, @as(i32,@intCast(y))-10, @as(i32,@intCast(z))-20 });
+                const testchunk = Generator.GenChunk(0, [3]i32{ @as(i32, @intCast(x)) - 20, @as(i32, @intCast(y)) - 10, @as(i32, @intCast(z)) - 20 });
                 //_ = try LoadedChunks.put(testchunk.pos, testchunk);
                 //const ptr = LoadedChunks.getPtr([3]i32{ @intCast(x), @intCast(y), @intCast(z) }).?;
                 const me = try Render.MeshChunk_Normal(@constCast(&testchunk), allocator);
-                if(me.len > 0)
-                 _ = try ChunkMeshes.append(Render.CreateOrUpdateMeshVBO(me, testchunk.pos, ebo, facebuffer, null, gl.STATIC_DRAW));
+                if (me.len > 0)
+                    _ = try ChunkMeshes.append(Render.CreateOrUpdateMeshVBO(me, testchunk.pos, ebo, facebuffer, null, gl.STATIC_DRAW));
             }
         }
     }
@@ -164,7 +164,7 @@ pub fn main() !void {
         const modellocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
         //std.debug.print("{any}\n", .{player});
         for (ChunkMeshes.items) |mesh| {
-            gl.Uniform3i(modellocation, mesh.pos[0],mesh.pos[1],mesh.pos[2]);
+            gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
             //gl.BindBuffer(gl.ARRAY_BUFFER, mesh.vbo);
             //gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 40000);

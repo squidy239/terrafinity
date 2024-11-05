@@ -56,7 +56,7 @@ pub fn main() !void {
     var overworld = world.World{
         .Chunks = std.HashMap([3]i32, *Chunk, Chunk.ChunkContext, 80).init(allocator),
     };
-    
+
     if (!procs.init(glfw.getProcAddress)) {
         @panic("could not get glproc");
     }
@@ -64,12 +64,12 @@ pub fn main() !void {
     window.setSizeCallback(framebuffer_size_callback);
     glfw.Window.setInputMode(window, glfw.Window.InputMode.cursor, glfw.Window.InputModeCursor.disabled);
     glfw.Window.setCursorPosCallback(window, MouseCallback);
-  
+
     _ = try render.InitRenderer();
-      const e = gl.GetError();
-                            if (e != gl.NO_ERROR) std.debug.print("{}", .{e});
+    const e = gl.GetError();
+    if (e != gl.NO_ERROR) std.debug.print("{}", .{e});
     var lasttime: f64 = 0;
-            var torender = std.ArrayList(*Chunk).init(allocator);
+    var torender = std.ArrayList(*Chunk).init(allocator);
     var t = std.time.microTimestamp();
     while (!glfw.Window.shouldClose(window)) {
         const currenttime = glfw.getTime();
@@ -80,68 +80,69 @@ pub fn main() !void {
         const chx = @as(i32, @intFromFloat(player.pos[0] / 32.0));
         const chy = @as(i32, @intFromFloat(player.pos[1] / 32.0));
         const chz = @as(i32, @intFromFloat(player.pos[2] / 32.0));
-        const render_distance = [_]i32{5, 2, 5};
+        const render_distance = [_]i32{ 5, 2, 5 };
         var x: i32 = -render_distance[0];
         var y: i32 = -render_distance[1];
         var z: i32 = -render_distance[2];
         var genedchunks: u32 = 0;
         const s = gl.GetError();
-                            if (s != gl.NO_ERROR) std.debug.print("{}", .{s});
-        if (std.time.microTimestamp()-t > std.time.us_per_ms*4000){
-        t = std.time.microTimestamp();
-        while (x < render_distance[0]) {
-            while (y < render_distance[1]) {
-                while (z < render_distance[2]) {
-                    //std.debug.print("::{}::", .{chx});
-                    var st = try std.time.Timer.start();
-                    const chptr = overworld.Chunks.get([3]i32{ chx + x, chy + y, chz + z });
-                    std.debug.print("{}\n", .{st.read()});
-                    if (chptr == null) {
-                        if (genedchunks < 4000) {
-                            //std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
-                            const cp = try allocator.create(Chunk);
-                            cp.* = ChunkGen.GenChunk(6, [3]i32{ chx + x, chy + y, chz + z });
-                            _ = try overworld.Chunks.put([3]i32{ chx + x, chy + y, chz + z }, cp);
-                            genedchunks += 1;
-                            //z+=1;
-                            continue;
-                        }
-                    } else {
-                        if (chptr.?.vbo == null) {
-                            var vv = (try Mesher.FaceMesh(chptr.?, allocator));
-                            defer vv.deinit();
-                            const v = try vv.toOwnedSlice();
-                            chptr.?.vlen = @intCast(v.len);
-                            var tempvbo: c_uint = 0;
-                            var tempvao: c_uint = 0;
-                            gl.GenVertexArrays(1, @ptrCast(&tempvao));
-                            gl.BindVertexArray(tempvao);
+        if (s != gl.NO_ERROR) std.debug.print("{}", .{s});
+        if (std.time.microTimestamp() - t > std.time.us_per_ms * 4000) {
+            t = std.time.microTimestamp();
+            while (x < render_distance[0]) {
+                while (y < render_distance[1]) {
+                    while (z < render_distance[2]) {
+                        //std.debug.print("::{}::", .{chx});
+                        var st = try std.time.Timer.start();
+                        const chptr = overworld.Chunks.get([3]i32{ chx + x, chy + y, chz + z });
+                        std.debug.print("{}\n", .{st.read()});
+                        if (chptr == null) {
+                            if (genedchunks < 4000) {
+                                //std.debug.print("len: {}  \r", .{overworld.Chunks.count()});
+                                const cp = try allocator.create(Chunk);
+                                cp.* = ChunkGen.GenChunk(6, [3]i32{ chx + x, chy + y, chz + z });
+                                _ = try overworld.Chunks.put([3]i32{ chx + x, chy + y, chz + z }, cp);
+                                genedchunks += 1;
+                                //z+=1;
+                                continue;
+                            }
+                        } else {
+                            if (chptr.?.vbo == null) {
+                                var vv = (try Mesher.FaceMesh(chptr.?, allocator));
+                                defer vv.deinit();
+                                const v = try vv.toOwnedSlice();
+                                chptr.?.vlen = @intCast(v.len);
+                                var tempvbo: c_uint = 0;
+                                var tempvao: c_uint = 0;
+                                gl.GenVertexArrays(1, @ptrCast(&tempvao));
+                                gl.BindVertexArray(tempvao);
 
-                            gl.GenBuffers(1, @ptrCast(&tempvbo));
-                            gl.BindBuffer(gl.ARRAY_BUFFER, tempvbo);
-                            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(f32) * v.len), v.ptr, gl.STATIC_DRAW);
-            
-                            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 0);
-                            gl.EnableVertexAttribArray(0);
-                            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 3 * @sizeOf(f32));
-                            gl.EnableVertexAttribArray(1);
-                            gl.BindVertexArray(0);
-                            chptr.?.vao = tempvao;
-                            chptr.?.vbo = tempvbo;
-                            const a = gl.GetError();
-                            if (a != gl.NO_ERROR) std.debug.panic("{}", .{a});
-                            _ = try torender.append(chptr.?);
+                                gl.GenBuffers(1, @ptrCast(&tempvbo));
+                                gl.BindBuffer(gl.ARRAY_BUFFER, tempvbo);
+                                gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(f32) * v.len), v.ptr, gl.STATIC_DRAW);
+
+                                gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 0);
+                                gl.EnableVertexAttribArray(0);
+                                gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 5 * @sizeOf(f32), 3 * @sizeOf(f32));
+                                gl.EnableVertexAttribArray(1);
+                                gl.BindVertexArray(0);
+                                chptr.?.vao = tempvao;
+                                chptr.?.vbo = tempvbo;
+                                const a = gl.GetError();
+                                if (a != gl.NO_ERROR) std.debug.panic("{}", .{a});
+                                _ = try torender.append(chptr.?);
+                            }
                         }
+                        z += 1;
                     }
-                    z += 1;
+                    z = -render_distance[2];
+                    y += 1;
                 }
-                z = -render_distance[2];
-                y += 1;
+                y = -render_distance[1];
+                x += 1;
             }
-            y = -render_distance[1];
-            x += 1;
-        }}
-        for(torender.items)|c|{
+        }
+        for (torender.items) |c| {
             _ = try render.RenderChunkFrame(c.pos, c.vao.?, c.vbo.?, c.vlen.?, player.pos, player.cameraUp, player.cameraFront);
         }
         window.swapBuffers();

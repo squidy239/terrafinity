@@ -24,6 +24,13 @@ pub const MeshBufferIDs = struct {
     count: u32,
 };
 
+pub const Chunk = struct {
+    pos: [3]i32,
+    blocks: [ChunkSize][ChunkSize][ChunkSize]Blocks,
+    blockdata: ?*std.AutoHashMap([3]u5, []u32),
+    neighbors: [6]?*Chunk,
+};
+
 pub const Render = struct {
     const vertices = [_]f32{
         -0.5, -0.5, 0.0, // bottom left corner
@@ -155,9 +162,3 @@ pub const Generator = struct {
     }
 };
 
-pub const Chunk = struct {
-    pos: [3]i32,
-    blocks: [ChunkSize][ChunkSize][ChunkSize]Blocks,
-    blockdata: ?*std.AutoHashMap([3]u5, []u32),
-    neighbors: [6]?*Chunk,
-};
