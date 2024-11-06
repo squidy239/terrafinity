@@ -1,3 +1,14 @@
+pub var EntityId: u32 = 0;
+
+pub const EntityTypeCodes = enum(u20) {
+    Player = 0,
+};
+
+pub const EntityUUID = struct {
+    EntityType: EntityTypeCodes,
+    UUID: u32,
+};
+
 pub const Player = struct {
     pos: @Vector(3, f32),
     pitch: f32,
@@ -6,4 +17,7 @@ pub const Player = struct {
     speed: @Vector(3, f32),
     cameraUp: @Vector(3, f32),
     cameraFront: @Vector(3, f32),
+    GenDistance: [3]u32,
+    LoadDistance: [3]u32,
+    MeshDistance: [3]u32,
 };

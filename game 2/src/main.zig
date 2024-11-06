@@ -13,7 +13,8 @@ const Chunk = @import("./chunk/Chunk.zig").Chunk;
 const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
-
+const World = @import("./chunk/World.zig").World;
+const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
 const vertices = [_]f32{
     -0.5, -0.5, 0.0, // bottom left corner
     -0.5, 0.5, 0.0, // top left corner
@@ -35,7 +36,11 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 50.0, 50.0, 50.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
+    .GenDistance = [3]u32{ 30, 10, 30 },
+    .LoadDistance = [3]u32{ 30, 10, 30 },
+    .MeshDistance = [3]u32{ 30, 10, 30 },
 };
+
 var fullscreen: bool = false;
 pub fn main() !void {
     lastX = @floatFromInt(width / 2);
@@ -118,23 +123,13 @@ pub fn main() !void {
     //var ToMesh = std.PriorityQueue(*Chunk).init(allocator);
     //var ToGen = std.PriorityQueue().init(allocator);
     var inputtimer = try std.time.Timer.start();
-    //var gentimer = try std.time.Timer.start();
+    var gentimer = try std.time.Timer.start();
+    var togentimer = try std.time.Timer.start();
+
     //const gen_distance = [3]u32{ 5, 5, 5 };
     //const load_distance = [3]u32{ 5, 5, 5 };
     //const mesh_distance = [3]u32{ 5, 5, 5 };
-    var ChunkMeshes = std.ArrayList(RenderIDs).init(allocator);
-    for (0..40) |x| {
-        for (0..20) |y| {
-            for (0..40) |z| {
-                const testchunk = Generator.GenChunk(0, [3]i32{ @as(i32, @intCast(x)) - 20, @as(i32, @intCast(y)) - 10, @as(i32, @intCast(z)) - 20 });
-                //_ = try LoadedChunks.put(testchunk.pos, testchunk);
-                //const ptr = LoadedChunks.getPtr([3]i32{ @intCast(x), @intCast(y), @intCast(z) }).?;
-                const me = try Render.MeshChunk_Normal(@constCast(&testchunk), allocator);
-                if (me.len > 0)
-                    _ = try ChunkMeshes.append(Render.CreateOrUpdateMeshVBO(me, testchunk.pos, ebo, facebuffer, null, gl.STATIC_DRAW));
-            }
-        }
-    }
+    var MainWorld = World{ .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator), .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator), .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator), .ToGen = std.PriorityQueue([3]i32, *Entitys.Player, DistanceOrder).init(allocator, &player) };
 
     gl.Enable(gl.DEPTH_TEST);
     //gl.Enable(gl.CULL_FACE);
@@ -142,19 +137,16 @@ pub fn main() !void {
         gl.ClearColor(0, 0.2, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        //   if (gentimer.read() > std.time.ns_per_ms * 40) {
-        //       _ = try LoadedChunks.ensureTotalCapacity(load_distance[0] * load_distance[1] * load_distance[2]);
-        //       gentimer.reset();
-        //       for (0..gen_distance[0]) |x| {
-        //           for (0..gen_distance[1]) |y| {
-        //               for (0..gen_distance[2]) |z| {
-        //                   if (@abs([3]i32{ x, y, z }) < load_distance and !LoadedChunks.contains([3]i32{ x, y, z })) {
-        //                       LoadedChunks.Insert(&LoadedChunks, Chunk.Generator().GenChunk(0, [3]i32{ x, y, z }));
-        //                    }
-        //               }
-        //           }
-        //      }
-        //  }
+        if (gentimer.read() > std.time.ns_per_ms * 20) {
+            std.debug.print("gen\n", .{});
+            _ = try MainWorld.GenChunk(200000, player, allocator, ebo, facebuffer);
+            gentimer.reset();
+        }
+        if (togentimer.read() > std.time.ns_per_ms * 80) {
+            std.debug.print("add\n", .{});
+            _ = try MainWorld.AddToGen(player);
+            togentimer.reset();
+        }
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
         gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
@@ -163,7 +155,7 @@ pub fn main() !void {
         gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
         const modellocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
         //std.debug.print("{any}\n", .{player});
-        for (ChunkMeshes.items) |mesh| {
+        for (MainWorld.ChunkMeshes.items) |mesh| {
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
             //gl.BindBuffer(gl.ARRAY_BUFFER, mesh.vbo);

@@ -121,12 +121,15 @@ pub const Render = struct {
 
 pub const Generator = struct {
     pub fn InitChunkToBlock(block: Blocks, pos: [3]i32, neighbors: ?[6]?*Chunk) Chunk {
-        return Chunk{
+        var ch = Chunk{
             .pos = pos,
             .blockdata = null,
-            .blocks = [_][32][32]Blocks{[_][32]Blocks{[_]Blocks{block} ** 32} ** 32} ** 32,
+            .blocks = undefined,
             .neighbors = neighbors orelse [6]?*Chunk{ null, null, null, null, null, null },
         };
+        //this is annoying but zig dosent compile for relesefast when i directly initalize the array
+        @memset(&ch.blocks, [_][32]Blocks{[_]Blocks{block} ** 32} ** 32);
+        return ch;
     }
 
     pub fn GenChunk(seed: i32, Pos: [3]i32) Chunk {
@@ -161,4 +164,3 @@ pub const Generator = struct {
         return chunk;
     }
 };
-
