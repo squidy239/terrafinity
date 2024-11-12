@@ -3,17 +3,20 @@ const gl = @import("gl");
 const zm = @import("zm");
 const zstbi = @import("zstbi");
 const glfw = @import("glfw");
+const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
-var gpa = (std.heap.GeneralPurposeAllocator(.{}){});
+var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 const Entitys = @import("./entities/Entitys.zig");
 const Chunk = @import("./chunk/Chunk.zig").Chunk;
+const ChunkStates = @import("./chunk/Chunk.zig").ChunkState;
 const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
 const World = @import("./chunk/World.zig").World;
+var fast = false;
 const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
 const vertices = [_]f32{
     -0.5, -0.5, 0.0, // bottom left corner
@@ -34,15 +37,19 @@ var player: Entitys.Player = Entitys.Player{
     .cameraUp = @Vector(3, f32){ 0.0, 1.0, 0.0 },
     .pitch = 0,
     .roll = 0,
-    .speed = @Vector(3, f32){ 50.0, 50.0, 50.0 },
+    .speed = @Vector(3, f32){ 100.0, 100.0, 100.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 30, 10, 30 },
-    .LoadDistance = [3]u32{ 30, 10, 30 },
-    .MeshDistance = [3]u32{ 30, 10, 30 },
+    .GenDistance = [3]u32{ 40, 10,40 },
+    .LoadDistance = [3]u32{ 40, 10, 40 },
+    .MeshDistance = [3]u32{ 40, 10, 40 },
 };
 
 var fullscreen: bool = false;
 pub fn main() !void {
+    const cpu_count = try std.Thread.getCpuCount();
+    var pool: std.Thread.Pool = undefined;
+    _ = try pool.init(std.Thread.Pool.Options{ .allocator = allocator, .n_jobs = @intCast(cpu_count) });
+    defer pool.deinit();
     lastX = @floatFromInt(width / 2);
     lastY = @floatFromInt(height / 2);
     if (!glfw.init(.{})) {
@@ -124,28 +131,35 @@ pub fn main() !void {
     //var ToGen = std.PriorityQueue().init(allocator);
     var inputtimer = try std.time.Timer.start();
     var gentimer = try std.time.Timer.start();
-    var togentimer = try std.time.Timer.start();
 
     //const gen_distance = [3]u32{ 5, 5, 5 };
     //const load_distance = [3]u32{ 5, 5, 5 };
     //const mesh_distance = [3]u32{ 5, 5, 5 };
-    var MainWorld = World{ .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator), .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator), .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator), .ToGen = std.PriorityQueue([3]i32, *Entitys.Player, DistanceOrder).init(allocator, &player) };
-
+    var MainWorld = World{ .ChunksMutex = undefined, .ChunkStatesMutex = undefined, .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator), .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator), .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator), .ToGen = std.PriorityQueue([3]i32, *Entitys.Player, DistanceOrder).init(allocator, &player), .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator), .ToLoad = null, .ToLoadMutex = undefined, .ToLoadPos = null };
+    MainWorld.ToLoadMutex.lock();
+    MainWorld.ToLoadMutex.unlock();
     gl.Enable(gl.DEPTH_TEST);
     //gl.Enable(gl.CULL_FACE);
+
+    _ = try pool.spawn(World.GenChunk, .{ &MainWorld, 0.01 * std.time.ns_per_ms, 1000 , player, allocator });
+
+    _ = try pool.spawn(World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms});
     while (!window.shouldClose()) {
-        gl.ClearColor(0, 0.2, 0.5, 1.0);
+        const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
+        defer tracy_zone.End();
+        gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        if (gentimer.read() > std.time.ns_per_ms * 20) {
-            std.debug.print("gen\n", .{});
-            _ = try MainWorld.GenChunk(200000, player, allocator, ebo, facebuffer);
+        if (gentimer.read() > std.time.ns_per_ms * 2) {
+            if (MainWorld.ToGen.count() > 0) {
+                //std.debug.print("gen\n", .{});
+                const LoadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
+                defer LoadMeshes.End();
+                _ = try MainWorld.LoadMeshes(ebo, facebuffer);
+            } else {
+                //std.debug.print("0", .{});
+            }
             gentimer.reset();
-        }
-        if (togentimer.read() > std.time.ns_per_ms * 80) {
-            std.debug.print("add\n", .{});
-            _ = try MainWorld.AddToGen(player);
-            togentimer.reset();
         }
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
@@ -155,6 +169,8 @@ pub fn main() !void {
         gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
         const modellocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
         //std.debug.print("{any}\n", .{player});
+        //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
+        const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         for (MainWorld.ChunkMeshes.items) |mesh| {
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
@@ -162,6 +178,7 @@ pub fn main() !void {
             //gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 40000);
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
         }
+        drawtime.End();
         prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         window.swapBuffers();
         glfw.pollEvents();
@@ -214,6 +231,11 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
         player.pos[1] += cameraSpeed[1];
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
+    if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast){
+        player.speed += @splat(100.0);fast = true;}
+     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast){
+        player.speed -= @splat(100.0);fast = false;}
+
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
         const w = glfw.Monitor.getPrimary().?.getVideoMode().?.getWidth();

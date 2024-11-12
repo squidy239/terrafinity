@@ -16,6 +16,14 @@ test "Gen+Mesh" {
 //3 render distances, one chunks will be loaded in, one the meshes will still be loaded, and one chunks will generate in
 // if generation radis is bigger than loading radies than chunks will be compressed and written to the disk but the meshes will stay
 // might have more render distances for entities
+
+pub const ChunkState = enum(u8) {
+    Generating = 0,
+    InMemory = 1,
+    NotImportant = 2,
+    Mesh = 3,
+
+};
 pub const MeshBufferIDs = struct {
     vbo: c_uint,
     vao: c_uint,
@@ -50,7 +58,7 @@ pub const Render = struct {
         EncodedBlock[1] |= @as(u32, @intCast(@intFromEnum(blocktype))) << (@bitSizeOf(u32) - 20);
         return EncodedBlock;
     }
-    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator) ![]u32 {
+    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, borderingchunks: [6]?*Chunk) ![]u32 {
         var mesh = std.ArrayList(u32).init(allocator);
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
@@ -60,20 +68,25 @@ pub const Render = struct {
                     // 2 is top or bottom
                     //4 is side
                     if (chunk.blocks[x][y][z] != Blocks.Air) {
-                        if (x == 31) {} else if (chunk.blocks[x + 1][y][z] == Blocks.Air) {
+                        if (x == ChunkSize - 1) {} else if (chunk.blocks[x + 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
                         if (x == 0) {} else if (chunk.blocks[x - 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
-                        if (y == 31) {} else if (chunk.blocks[x][y + 1][z] == Blocks.Air) {
+
+                        if (y == ChunkSize - 1 and borderingchunks[2] != null and borderingchunks[2].?.blocks[x][0][z] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (y != ChunkSize - 1 and chunk.blocks[x][y + 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
+
+
                         if (y == 0) {} else if (chunk.blocks[x][y - 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
-                        if (z == 31) {} else if (chunk.blocks[x][y][z + 1] == Blocks.Air) {
+                        if (z == ChunkSize - 1) {} else if (chunk.blocks[x][y][z + 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
                         if (z == 0) {} else if (chunk.blocks[x][y][z - 1] == Blocks.Air) {
@@ -88,8 +101,11 @@ pub const Render = struct {
         return mesh.toOwnedSlice();
     }
 
-    pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
+    
+
+    pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: *[3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
         var NewMeshIDs: MeshBufferIDs = undefined;
+        std.debug.assert(mesh.len > 0);
         if (MeshIDs != null) {
             gl.BindVertexArray(MeshIDs.?.vao);
             gl.BindBuffer(gl.ARRAY_BUFFER, MeshIDs.?.vbo);
@@ -102,7 +118,7 @@ pub const Render = struct {
         }
 
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * mesh.len), mesh.ptr, usage);
-        NewMeshIDs.pos = pos;
+        NewMeshIDs.pos = pos.*;
         NewMeshIDs.count = @intCast(mesh.len);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
         gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
@@ -113,7 +129,7 @@ pub const Render = struct {
         gl.EnableVertexAttribArray(1);
         gl.VertexAttribDivisor(1, 1);
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-        std.debug.print("mesh made:{d}faces\n", .{mesh.len});
+        //std.debug.print("mesh made:{d}faces\n", .{mesh.len});
         gl.BindVertexArray(0);
         return MeshIDs orelse NewMeshIDs;
     }
@@ -128,32 +144,37 @@ pub const Generator = struct {
             .neighbors = neighbors orelse [6]?*Chunk{ null, null, null, null, null, null },
         };
         //this is annoying but zig dosent compile for relesefast when i directly initalize the array
-        @memset(&ch.blocks, [_][32]Blocks{[_]Blocks{block} ** 32} ** 32);
+        @memset(&ch.blocks, [1][ChunkSize]Blocks{[1]Blocks{block} ** ChunkSize} ** ChunkSize);
         return ch;
     }
 
-    pub fn GenChunk(seed: i32, Pos: [3]i32) Chunk {
-        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-        const TerrainNoise = Noise.Noise(f32){
-            .seed = seed,
-            .noise_type = .perlin,
-            .frequency = 0.08,
-            .fractal_type = .none,
-        };
+    pub fn PollHeight5(xz:[2]i32, TerrainNoise:Noise.Noise(f32), min:i32, max:i32)i32{
+        const p1 = TerrainNoise.genNoise2DRange(16.0 / ChunkSize + @as(f32, @floatFromInt(xz[0])), (16.0 / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p2 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p3 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p4 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p5 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        return @divFloor(p1 + p2 + p3 + p4 + p5,5);
+    }
 
-        for (0..32) |x| {
-            for (0..32) |z| {
-                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / 32) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / 32) + @as(f32, @floatFromInt(Pos[2])), i32, -128, 128);
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise:Noise.Noise(f32)) ?Chunk {
+        var IsImportent: bool = false;
+        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |z| {
+                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, -512, 512);
                 //std.debug.print("{}", .{h});
                 const d = @divFloor(h, @as(i32, 32));
                 if (d == Pos[1]) {
-                    const y: usize = @intCast(@mod(h, 32));
+                    const y: usize = @intCast(@mod(h, ChunkSize));
                     chunk.blocks[x][y][z] = (Blocks.Grass);
                     for (0..y) |yy| {
                         chunk.blocks[x][yy][z] = (Blocks.Stone);
                     }
+                    IsImportent = true;
                 } else if (d > Pos[1]) {
-                    for (0..32) |yy| {
+                    for (0..ChunkSize) |yy| {
                         chunk.blocks[x][yy][z] = (Blocks.Stone);
                     }
                 }
@@ -161,6 +182,10 @@ pub const Generator = struct {
 
             }
         }
-        return chunk;
+        if (IsImportent) {
+            return chunk;
+        } else {
+            return null;
+        }
     }
 };
