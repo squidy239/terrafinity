@@ -5,7 +5,7 @@ const zstbi = @import("zstbi");
 const glfw = @import("glfw");
 const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
-var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
+var gpa = (std.heap.GeneralPurposeAllocator(.{.thread_safe = true }){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
@@ -16,6 +16,8 @@ const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
 const World = @import("./chunk/World.zig").World;
+const pw = @import("./chunk/World.zig").pw;
+const Noise = @import("./chunk/fastnoise.zig");
 var fast = false;
 const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
 const vertices = [_]f32{
@@ -39,9 +41,9 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 100.0, 100.0, 100.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 40, 10,40 },
-    .LoadDistance = [3]u32{ 40, 10, 40 },
-    .MeshDistance = [3]u32{ 40, 10, 40 },
+    .GenDistance = [3]u32{ 40, 20, 40 },
+    .LoadDistance = [3]u32{ 40, 20, 40 },
+    .MeshDistance = [3]u32{ 40, 20, 40 },
 };
 
 var fullscreen: bool = false;
@@ -135,15 +137,36 @@ pub fn main() !void {
     //const gen_distance = [3]u32{ 5, 5, 5 };
     //const load_distance = [3]u32{ 5, 5, 5 };
     //const mesh_distance = [3]u32{ 5, 5, 5 };
-    var MainWorld = World{ .ChunksMutex = undefined, .ChunkStatesMutex = undefined, .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator), .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator), .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator), .ToGen = std.PriorityQueue([3]i32, *Entitys.Player, DistanceOrder).init(allocator, &player), .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator), .ToLoad = null, .ToLoadMutex = undefined, .ToLoadPos = null };
+    var MainWorld = World{
+        .ChunksMutex = undefined,
+        .ChunkStatesMutex = undefined,
+        .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
+        .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator),
+        .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
+        .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
+        .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator),
+        .ToLoad = null,
+        .ToLoadMutex = undefined,
+        .ToLoadPos = null,
+        .TerrainNoise = Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .simplex,
+            .frequency = 0.01,
+            .fractal_type = .none,
+        },
+        .min = -256,
+        .max = 512,
+    };
     MainWorld.ToLoadMutex.lock();
+    MainWorld.ToGen.context.world = &MainWorld;
     MainWorld.ToLoadMutex.unlock();
     gl.Enable(gl.DEPTH_TEST);
     //gl.Enable(gl.CULL_FACE);
 
-    _ = try pool.spawn(World.GenChunk, .{ &MainWorld, 0.01 * std.time.ns_per_ms, 1000 , player, allocator });
+    _ = try pool.spawn(World.GenChunk, .{ &MainWorld, 0.01 * std.time.ns_per_ms, 1000, player, allocator });
 
-    _ = try pool.spawn(World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms});
+    _ = try pool.spawn(World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms });
+    //_ = try MainWorld.ChunkMeshes.resize(MainWorld.ChunkMeshes.capacity + player.MeshDistance[0] * player.MeshDistance[1] + player.MeshDistance[2]);
     while (!window.shouldClose()) {
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
@@ -182,6 +205,7 @@ pub fn main() !void {
         prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         window.swapBuffers();
         glfw.pollEvents();
+        std.debug.print("{d}\r", .{player.pos});
     }
 }
 
@@ -231,11 +255,14 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
         player.pos[1] += cameraSpeed[1];
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
-    if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast){
-        player.speed += @splat(100.0);fast = true;}
-     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast){
-        player.speed -= @splat(100.0);fast = false;}
-
+    if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
+        player.speed += @splat(100.0);
+        fast = true;
+    }
+    if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
+        player.speed -= @splat(100.0);
+        fast = false;
+    }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
         const w = glfw.Monitor.getPrimary().?.getVideoMode().?.getWidth();

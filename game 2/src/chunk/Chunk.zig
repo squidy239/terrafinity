@@ -22,7 +22,6 @@ pub const ChunkState = enum(u8) {
     InMemory = 1,
     NotImportant = 2,
     Mesh = 3,
-
 };
 pub const MeshBufferIDs = struct {
     vbo: c_uint,
@@ -82,7 +81,6 @@ pub const Render = struct {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-
                         if (y == 0) {} else if (chunk.blocks[x][y - 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
@@ -100,8 +98,6 @@ pub const Render = struct {
         //return error.w;
         return mesh.toOwnedSlice();
     }
-
-    
 
     pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: *[3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
         var NewMeshIDs: MeshBufferIDs = undefined;
@@ -148,22 +144,23 @@ pub const Generator = struct {
         return ch;
     }
 
-    pub fn PollHeight5(xz:[2]i32, TerrainNoise:Noise.Noise(f32), min:i32, max:i32)i32{
-        const p1 = TerrainNoise.genNoise2DRange(16.0 / ChunkSize + @as(f32, @floatFromInt(xz[0])), (16.0 / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
-        const p2 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
-        const p3 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
-        const p4 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
-        const p5 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / ChunkSize) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
-        return @divFloor(p1 + p2 + p3 + p4 + p5,5);
+    pub fn PollHeight5(xz: [2]i32, TerrainNoise: Noise.Noise(f32), min: i32, max: i32) i32 {
+        const p1 = TerrainNoise.genNoise2DRange(16.0 / @as(f32, @floatFromInt(ChunkSize)) + @as(f32, @floatFromInt(xz[0])), (16.0 / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p2 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p3 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(0)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p4 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(0)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        const p5 = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(32)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[0])), (@as(f32, @floatFromInt(32)) / @as(f32, @floatFromInt(ChunkSize))) + @as(f32, @floatFromInt(xz[1])), i32, min, max);
+        return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise:Noise.Noise(f32)) ?Chunk {
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), min: i32, max: i32) ?Chunk {
+        
         var IsImportent: bool = false;
         var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
 
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, -512, 512);
+                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, min, max);
                 //std.debug.print("{}", .{h});
                 const d = @divFloor(h, @as(i32, 32));
                 if (d == Pos[1]) {

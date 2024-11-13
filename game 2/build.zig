@@ -10,16 +10,20 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const zstbi = b.dependency("zstbi", .{.target = target,
-        .optimize = optimize,});
+    const zstbi = b.dependency("zstbi", .{
+        .target = target,
+        .optimize = optimize,
+    });
     exe.root_module.addImport("zstbi", zstbi.module("root"));
     exe.linkLibrary(zstbi.artifact("zstbi"));
 
-    const zm = b.dependency("zm", .{.target = target,
-        .optimize = optimize,});
+    const zm = b.dependency("zm", .{
+        .target = target,
+        .optimize = optimize,
+    });
     exe.root_module.addImport("zm", zm.module("zm"));
 
- const options = .{
+    const options = .{
         .enable_ztracy = b.option(
             bool,
             "enable_ztracy",
@@ -37,22 +41,20 @@ pub fn build(b: *std.Build) void {
         ) orelse false,
     };
 
-    
     const ztracy = b.dependency("ztracy", .{
         .enable_ztracy = options.enable_ztracy,
         .enable_fibers = options.enable_fibers,
         .on_demand = options.on_demand,
     });
     exe.root_module.addImport("ztracy", ztracy.module("root"));
-    
+
     exe.linkLibrary(ztracy.artifact("tracy"));
 
-    
     const glfw_dep = b.dependency("glfw", .{
         .target = target,
         .optimize = optimize,
     });
-    
+
     exe.root_module.addImport("glfw", glfw_dep.module("zig-glfw"));
 
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{

@@ -2,6 +2,7 @@
 layout (location = 1) in uvec2 data;
 layout (location = 0) in vec3 incoords;
 uniform ivec3 chunkpos;
+out vec3 coordss;
 uniform mat4 view;
 uniform mat4 projection;
 out vec3 position;
@@ -64,6 +65,7 @@ void main(){
     position = chunkpos;
     blocktype = DecodeBlockType(data);
     vec3 coords = rotateVertex(DecodeSide(data), incoords);
+    coordss = coords;
     gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);
     
  

@@ -1,13 +1,13 @@
 #version 450 core
 out vec4 FragColor;
-in vec3 position;
+in flat vec3 position;
+in vec3 coordss;
 in flat uint blocktype;
 //uniform sampler2D ourTexture;
 //in vec2 TexCoord;
 void main()
-{   
-            FragColor = vec4(0.0,1.0,0.2,1.0);
-
-    FragColor = vec4(0,position.y/5,-position.y,1);
+{           
+    float cdfs = sqrt(pow(coordss.x,2)+pow(coordss.y,2)+pow(coordss.z,2));
+    FragColor = vec4(cdfs,position.y/5,-position.y-5,1);
     
-} 
+}                  
