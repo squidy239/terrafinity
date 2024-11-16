@@ -2,6 +2,8 @@ const Blocks = @import("Blocks.zig").Blocks;
 const std = @import("std");
 const Noise = @import("./fastnoise.zig");
 const gl = @import("gl");
+const ztracy = @import("ztracy");
+
 const zm = @import("zm");
 pub const ChunkSize = 32;
 test "Gen+Mesh" {
@@ -153,31 +155,108 @@ pub const Generator = struct {
         return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), min: i32, max: i32) ?Chunk {
-        
+    pub fn GenChunkOld(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32) ?Chunk {
+        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
+        defer gen.End();
         var IsImportent: bool = false;
+        const setair = ztracy.ZoneNC(@src(), "setair", 0x692de);
         var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-
+        setair.End();
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, min, max);
+                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, terrainmin, terrainmax);
                 //std.debug.print("{}", .{h});
-                const d = @divFloor(h, @as(i32, 32));
+                const d = h / 32;
                 if (d == Pos[1]) {
                     const y: usize = @intCast(@mod(h, ChunkSize));
                     chunk.blocks[x][y][z] = (Blocks.Grass);
                     for (0..y) |yy| {
-                        chunk.blocks[x][yy][z] = (Blocks.Stone);
+                        const cn = CaveNoise.genNoise3DAsType((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(yy)) / ChunkSize) + @as(f32, @floatFromInt(Pos[1])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), u8);
+                        if (cn > 100) {
+                            chunk.blocks[x][yy][z] = (Blocks.Stone);
+                        } else if (cn < 100)
+                            chunk.blocks[x][yy][z] = (Blocks.Air);
+                        IsImportent = true;
                     }
                     IsImportent = true;
                 } else if (d > Pos[1]) {
                     for (0..ChunkSize) |yy| {
-                        chunk.blocks[x][yy][z] = (Blocks.Stone);
+                        const cn = CaveNoise.genNoise3DAsType((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(yy)) / ChunkSize) + @as(f32, @floatFromInt(Pos[1])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), u8);
+                        if (cn > 100) {
+                            chunk.blocks[x][yy][z] = (Blocks.Stone);
+                        } else if (cn < 100)
+                            chunk.blocks[x][yy][z] = (Blocks.Air);
+                        IsImportent = true;
                     }
                 }
                 //else {std.debug.print("{} ", .{@divFloor(h, @as(i32, 32))});}
 
             }
+        }
+        if (IsImportent) {
+            return chunk;
+        } else {
+            return null;
+        }
+    }
+
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness:u8) ?Chunk {
+        const tpoos = Pos * @Vector(3, i32){ 32, 32, 32 };
+        var poos: [3]f32 = undefined;
+        poos[0] = @as(f32, @floatFromInt(tpoos[0]));
+        poos[1] = @as(f32, @floatFromInt(tpoos[1]));
+        poos[2] = @as(f32, @floatFromInt(tpoos[2]));
+        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
+        defer gen.End();
+        var IsImportent: bool = false;
+        const setair = ztracy.ZoneNC(@src(), "setair", 0x692de);
+        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+        setair.End();
+        var x: f32 = 0;
+        var y: f32 = 0;
+        var z: f32 = 0;
+        var xx: usize = 0;
+        var yy: usize = 0;
+        var zz: usize = 0;
+
+        //Terrain
+        while (xx < ChunkSize) {
+                while (zz < ChunkSize) {
+                    const tn = TerrainNoise.genNoise2DRange(x + poos[0], z + poos[2], i32, terrainmin, terrainmax);
+                    var h:i32 = 0;
+                    var c = false;
+                    if(@divFloor(tn,32) == Pos[1]){
+                        h = @mod(tn,ChunkSize);
+                        c = true;
+                    }
+                    // 
+                    else if(@divFloor(tn,32) > Pos[1]){
+                        h = ChunkSize-1;
+                        c = true;
+                    }
+                    if(c){
+                    while (yy <= h){
+                        const cn = CaveNoise.genNoise3DAsType(x + poos[0], y + poos[1], z + poos[2], u8);
+                       //const cn = 180;
+                        if (cn < caveness){
+                            if(yy == h){chunk.blocks[xx][yy][zz] = Blocks.Grass;}
+                            else {chunk.blocks[xx][yy][zz] = Blocks.Stone;}
+                            IsImportent = true;
+                        }
+                        y+=1.0;
+                        yy+=1;       
+                    }}
+                    
+
+                z+=1.0;
+                zz+=1;
+                y = 0.0;
+                yy = 0;
+            }
+            z = 0.0;
+            zz = 0;
+            xx += 1;
+            x += 1.0;
         }
         if (IsImportent) {
             return chunk;

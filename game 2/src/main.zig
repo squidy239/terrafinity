@@ -5,11 +5,12 @@ const zstbi = @import("zstbi");
 const glfw = @import("glfw");
 const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
-var gpa = (std.heap.GeneralPurposeAllocator(.{.thread_safe = true }){});
+var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 const Entitys = @import("./entities/Entitys.zig");
+const Textures = @import("./chunk/Blocks.zig").Textures;
 const Chunk = @import("./chunk/Chunk.zig").Chunk;
 const ChunkStates = @import("./chunk/Chunk.zig").ChunkState;
 const Generator = @import("./chunk/Chunk.zig").Generator;
@@ -39,11 +40,11 @@ var player: Entitys.Player = Entitys.Player{
     .cameraUp = @Vector(3, f32){ 0.0, 1.0, 0.0 },
     .pitch = 0,
     .roll = 0,
-    .speed = @Vector(3, f32){ 100.0, 100.0, 100.0 },
+    .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 40, 20, 40 },
-    .LoadDistance = [3]u32{ 40, 20, 40 },
-    .MeshDistance = [3]u32{ 40, 20, 40 },
+    .GenDistance = [3]u32{ 40, 10, 40 },
+    .LoadDistance = [3]u32{ 40, 10, 40 },
+    .MeshDistance = [3]u32{ 40, 10, 40 },
 };
 
 var fullscreen: bool = false;
@@ -90,12 +91,9 @@ pub fn main() !void {
     gl.CompileShader(fragshader);
 
     const shaderprogram = gl.CreateProgram();
-    //gl.BindTextures(gl.TEXTURE_2D, 1, @ptrCast(&texture));
     gl.AttachShader(shaderprogram, vertexshader);
     gl.AttachShader(shaderprogram, fragshader);
     gl.LinkProgram(shaderprogram);
-    // gl.PolygonMode(gl.FRONT_AND_BACK, gl.F);
-    //gl.Enable(gl.DEPTH_TEST);
     var linkstatus: c_int = undefined;
     gl.GetProgramiv(shaderprogram, gl.LINK_STATUS, &linkstatus);
     if (linkstatus == gl.FALSE) {
@@ -109,9 +107,7 @@ pub fn main() !void {
         return error.ShaderCompilationFailed;
     }
     gl.UseProgram(shaderprogram);
-    //var vao: c_uint = undefined;
-    //gl.GenVertexArrays(1, @ptrCast(&vao));
-    //gl.BindVertexArray(vao);
+
     var ebo: c_uint = undefined;
     gl.GenBuffers(1, @ptrCast(&ebo));
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
@@ -148,20 +144,46 @@ pub fn main() !void {
         .ToLoad = null,
         .ToLoadMutex = undefined,
         .ToLoadPos = null,
+        //.ToMesh = std.TailQueue(Chunk).Node,
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
-            .frequency = 0.01,
+            .frequency = 0.0004,
             .fractal_type = .none,
         },
-        .min = -256,
-        .max = 512,
+        .CaveNoise = Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .perlin,
+            .fractal_type = .none,
+            .frequency = 0.01,
+        },
+        .min = -255,
+        .max = 1024,
+        .caveness = 150,
     };
     MainWorld.ToLoadMutex.lock();
     MainWorld.ToGen.context.world = &MainWorld;
     MainWorld.ToLoadMutex.unlock();
     gl.Enable(gl.DEPTH_TEST);
     //gl.Enable(gl.CULL_FACE);
+    //gl.CullFace(gl.BACK);
+    //gl.FrontFace(gl.CW);
+
+    //load textures
+    var atlas = try Textures.LoadAtlas("./Textures/BlockTextures.png", allocator);
+    var BlockTextures: c_uint = undefined;
+    gl.GenTextures(1, @ptrCast(&BlockTextures));
+
+    gl.BindTexture(gl.TEXTURE_2D, BlockTextures);
+    gl.Enable(gl.BLEND);
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(atlas.width), @intCast(atlas.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(atlas.data));
+    gl.GenerateMipmap(gl.TEXTURE_2D);
+    const AtlasHeightLocation = gl.GetUniformLocation(shaderprogram, "AtlasHeight");
+    gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
+    atlas.deinit();
 
     _ = try pool.spawn(World.GenChunk, .{ &MainWorld, 0.01 * std.time.ns_per_ms, 1000, player, allocator });
 
@@ -184,7 +206,7 @@ pub fn main() !void {
             }
             gentimer.reset();
         }
-        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 10000.0);
+        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.5, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
         gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
         const view = zm.Mat4f.lookAt(player.pos, player.pos + player.cameraFront, player.cameraUp);
@@ -256,11 +278,11 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
     if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
-        player.speed += @splat(100.0);
+        player.speed += @splat(1000.0);
         fast = true;
     }
     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
-        player.speed -= @splat(100.0);
+        player.speed -= @splat(1000.0);
         fast = false;
     }
 

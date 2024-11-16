@@ -15,16 +15,15 @@ pub fn DistanceOrder(playerworld: pw, a: [3]i32, b: [3]i32) std.math.Order {
     const bb = [3]f32{ @floatFromInt(b[0]), @floatFromInt(b[1]), @floatFromInt(b[2]) };
     const player_location = [3]f32{ playerworld.player.pos[0] / 32, playerworld.player.pos[1] / 32, playerworld.player.pos[2] / 32 };
 
-    const d1 = @sqrt(std.math.pow(f32,player_location[0] - aa[0],2.0) + std.math.pow(f32,player_location[1] - aa[1],2.0) + std.math.pow(f32,player_location[2] - aa[2],2.0));
-    const d2 = @sqrt(std.math.pow(f32,player_location[0] - bb[0],2.0) + std.math.pow(f32,player_location[1] - bb[1],2.0) + std.math.pow(f32,player_location[2] - bb[2],2.0));
+    const d1 = @sqrt(std.math.pow(f32, player_location[0] - aa[0], 2.0) + std.math.pow(f32, player_location[1] - aa[1], 2.0) + std.math.pow(f32, player_location[2] - aa[2], 2.0));
+    const d2 = @sqrt(std.math.pow(f32, player_location[0] - bb[0], 2.0) + std.math.pow(f32, player_location[1] - bb[1], 2.0) + std.math.pow(f32, player_location[2] - bb[2], 2.0));
 
     if (d1 < d2) {
-       // std.debug.print("lt|{d}||{d}||{d}|\n", .{a,player_location,b});
+        // std.debug.print("lt|{d}||{d}||{d}|\n", .{a,player_location,b});
         return std.math.Order.lt;
     } else if (d1 > d2) {
-       // std.debug.print("gt|{d}||{d}|\n", .{a,b});
+        // std.debug.print("gt|{d}||{d}|\n", .{a,b});
         return std.math.Order.gt;
-
     } else {
         return std.math.Order.eq;
     }
@@ -37,10 +36,13 @@ pub const World = struct {
     ToGen: std.PriorityQueue([3]i32, pw, DistanceOrder),
     ToLoad: ?[][]u32,
     ToLoadPos: ?[][3]i32,
+    //  ToMesh: std.TailQueue(*Chunk),
     ToLoadMutex: std.Thread.Mutex,
     ChunksMutex: std.Thread.Mutex,
     ChunkStatesMutex: std.Thread.Mutex,
     TerrainNoise: Noise.Noise(f32),
+    CaveNoise: Noise.Noise(f32),
+    caveness:u8,
     min: i32,
     max: i32,
     pub fn GenChunk(self: *@This(), sleeptime: u64, maxcount: u32, player: Entitys.Player, allocator: std.mem.Allocator) !void {
@@ -64,7 +66,7 @@ pub const World = struct {
                 };
                 self.ToLoadMutex.unlock();
                 //seed 0
-                const chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.min, self.max) orelse {
+                const chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max ,self.caveness) orelse {
                     self.ChunkStatesMutex.lock();
                     _ = try self.ChunkStates.put(chunkpos, ChunkState.NotImportant);
                     self.ChunkStatesMutex.unlock();
@@ -77,7 +79,9 @@ pub const World = struct {
                 self.ChunksMutex.unlock();
                 _ = try self.ChunkStates.put(chunkpos, ChunkState.Mesh);
                 self.ChunkStatesMutex.unlock();
+                const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
                 const mesh = try Render.MeshChunk_Normal(@constCast(&chunk), allocator, GetNeighbors(self, chunkpos));
+                meshchunk.End();
                 if (mesh.len == 0) continue;
                 //std.debug.print("aa{any}\n", .{chunkpos});
                 _ = try l.append(mesh);
@@ -94,6 +98,10 @@ pub const World = struct {
             self.ToLoadMutex.unlock();
         }
     }
+
+    //pub fn MeshChunks(self: *@This(), sleeptime: u64, maxtime: u128, allocator: std.mem.Allocator) !void {
+
+    //}
 
     fn GetNeighbors(self: *@This(), pos: [3]i32) [6]?*Chunk {
         var chunks: [6]?*Chunk = undefined;
