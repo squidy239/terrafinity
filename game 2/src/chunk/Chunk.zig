@@ -98,7 +98,7 @@ pub const Render = struct {
         }
         //std.debug.print("{d}", .{mesh.items});
         //return error.w;
-        return mesh.toOwnedSlice();
+        return try mesh.toOwnedSlice();
     }
 
     pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {

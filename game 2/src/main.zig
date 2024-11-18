@@ -43,9 +43,9 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 40, 20, 40 },
-    .LoadDistance = [3]u32{ 40, 20, 40 },
-    .MeshDistance = [3]u32{ 40, 20, 40 },
+    .GenDistance = [3]u32{ 20, 10, 20 },
+    .LoadDistance = [3]u32{ 20, 10, 20 },
+    .MeshDistance = [3]u32{ 20, 10, 20 },
 };
 
 var fullscreen: bool = false;
@@ -142,9 +142,6 @@ pub fn main() !void {
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
         .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator),
-        .ToLoad = null,
-        .ToLoadMutex = .{},
-        .ToLoadPos = null,
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -167,9 +164,7 @@ pub fn main() !void {
         // 0 is most cavey 255 is least cavey
         .caveness = 190,
     };
-    MainWorld.ToLoadMutex.lock();
     MainWorld.ToGen.context.world = &MainWorld;
-    MainWorld.ToLoadMutex.unlock();
     gl.Enable(gl.DEPTH_TEST);
     //gl.Enable(gl.CULL_FACE);
     //gl.CullFace(gl.BACK);
@@ -192,7 +187,7 @@ pub fn main() !void {
     atlas.deinit();
 
     _ = try std.Thread.spawn(.{},World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for(0..cpu_count)|_|{_ = try std.Thread.spawn(.{},World.GenChunk, .{ &MainWorld, player, allocator });}
+    for(0..cpu_count-3)|_|{_ = try std.Thread.spawn(.{},World.GenChunk, .{ &MainWorld, player, allocator });}
 
     while (!window.shouldClose()) {
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
