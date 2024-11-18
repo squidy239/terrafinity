@@ -101,7 +101,9 @@ pub const Render = struct {
         return mesh.toOwnedSlice();
     }
 
-    pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: *[3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
+    pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
+        const createvbo = ztracy.ZoneNC(@src(), "createvbo", 0x00_ff_00_00);
+        defer createvbo.End();
         var NewMeshIDs: MeshBufferIDs = undefined;
         std.debug.assert(mesh.len > 0);
         if (MeshIDs != null) {
@@ -116,7 +118,7 @@ pub const Render = struct {
         }
 
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * mesh.len), mesh.ptr, usage);
-        NewMeshIDs.pos = pos.*;
+        NewMeshIDs.pos = pos;
         NewMeshIDs.count = @intCast(mesh.len);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
         gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
@@ -155,52 +157,7 @@ pub const Generator = struct {
         return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    pub fn GenChunkOld(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32) ?Chunk {
-        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
-        defer gen.End();
-        var IsImportent: bool = false;
-        const setair = ztracy.ZoneNC(@src(), "setair", 0x692de);
-        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-        setair.End();
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                const h = TerrainNoise.genNoise2DRange((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), i32, terrainmin, terrainmax);
-                //std.debug.print("{}", .{h});
-                const d = h / 32;
-                if (d == Pos[1]) {
-                    const y: usize = @intCast(@mod(h, ChunkSize));
-                    chunk.blocks[x][y][z] = (Blocks.Grass);
-                    for (0..y) |yy| {
-                        const cn = CaveNoise.genNoise3DAsType((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(yy)) / ChunkSize) + @as(f32, @floatFromInt(Pos[1])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), u8);
-                        if (cn > 100) {
-                            chunk.blocks[x][yy][z] = (Blocks.Stone);
-                        } else if (cn < 100)
-                            chunk.blocks[x][yy][z] = (Blocks.Air);
-                        IsImportent = true;
-                    }
-                    IsImportent = true;
-                } else if (d > Pos[1]) {
-                    for (0..ChunkSize) |yy| {
-                        const cn = CaveNoise.genNoise3DAsType((@as(f32, @floatFromInt(x)) / ChunkSize) + @as(f32, @floatFromInt(Pos[0])), (@as(f32, @floatFromInt(yy)) / ChunkSize) + @as(f32, @floatFromInt(Pos[1])), (@as(f32, @floatFromInt(z)) / ChunkSize) + @as(f32, @floatFromInt(Pos[2])), u8);
-                        if (cn > 100) {
-                            chunk.blocks[x][yy][z] = (Blocks.Stone);
-                        } else if (cn < 100)
-                            chunk.blocks[x][yy][z] = (Blocks.Air);
-                        IsImportent = true;
-                    }
-                }
-                //else {std.debug.print("{} ", .{@divFloor(h, @as(i32, 32))});}
-
-            }
-        }
-        if (IsImportent) {
-            return chunk;
-        } else {
-            return null;
-        }
-    }
-
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness:u8) ?Chunk {
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: u8) ?Chunk {
         const tpoos = Pos * @Vector(3, i32){ 32, 32, 32 };
         var poos: [3]f32 = undefined;
         poos[0] = @as(f32, @floatFromInt(tpoos[0]));
@@ -221,35 +178,42 @@ pub const Generator = struct {
 
         //Terrain
         while (xx < ChunkSize) {
-                while (zz < ChunkSize) {
-                    const tn = TerrainNoise.genNoise2DRange(x + poos[0], z + poos[2], i32, terrainmin, terrainmax);
-                    var h:i32 = 0;
-                    var c = false;
-                    if(@divFloor(tn,32) == Pos[1]){
-                        h = @mod(tn,ChunkSize);
-                        c = true;
-                    }
-                    // 
-                    else if(@divFloor(tn,32) > Pos[1]){
-                        h = ChunkSize-1;
-                        c = true;
-                    }
-                    if(c){
-                    while (yy <= h){
+            while (zz < ChunkSize) {
+                const tn = TerrainNoise.genNoise2DRange(x + poos[0], z + poos[2], i32, terrainmin, terrainmax);
+                var h: i32 = 0;
+                var Histopofchunk = false;
+                var c = false;
+                if (@divFloor(tn, 32) == Pos[1]) {
+                    h = @mod(tn, ChunkSize);
+                    c = true;
+                }
+                //
+                else if (@divFloor(tn, 32) > Pos[1]) {
+                    h = ChunkSize - 1;
+                    c = true;
+                    Histopofchunk = true;
+                }
+                if (c) {
+                    while (yy <= h) {
                         const cn = CaveNoise.genNoise3DAsType(x + poos[0], y + poos[1], z + poos[2], u8);
-                       //const cn = 180;
-                        if (cn < caveness){
-                            if(yy == h){chunk.blocks[xx][yy][zz] = Blocks.Grass;}
-                            else {chunk.blocks[xx][yy][zz] = Blocks.Stone;}
+                        //const cn = 180;
+                        if (cn < caveness) {
+                            if (!Histopofchunk and yy == h) {
+                                chunk.blocks[xx][yy][zz] = Blocks.Grass;
+                            } else if (!Histopofchunk and yy > h - 5) {
+                                chunk.blocks[xx][yy][zz] = Blocks.Dirt;
+                            } else {
+                                chunk.blocks[xx][yy][zz] = Blocks.Stone;
+                            }
                             IsImportent = true;
                         }
-                        y+=1.0;
-                        yy+=1;       
-                    }}
-                    
+                        y += 1.0;
+                        yy += 1;
+                    }
+                }
 
-                z+=1.0;
-                zz+=1;
+                z += 1.0;
+                zz += 1;
                 y = 0.0;
                 yy = 0;
             }

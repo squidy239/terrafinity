@@ -5,7 +5,7 @@ const zstbi = @import("zstbi");
 const glfw = @import("glfw");
 const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
-var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
+var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true}){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
@@ -18,6 +18,7 @@ const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
 const World = @import("./chunk/World.zig").World;
 const pw = @import("./chunk/World.zig").pw;
+const ChunkMesh = @import("./chunk/World.zig").ChunkMesh;
 const Noise = @import("./chunk/fastnoise.zig");
 var fast = false;
 const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
@@ -42,15 +43,16 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 40, 10, 40 },
-    .LoadDistance = [3]u32{ 40, 10, 40 },
-    .MeshDistance = [3]u32{ 40, 10, 40 },
+    .GenDistance = [3]u32{ 40, 20, 40 },
+    .LoadDistance = [3]u32{ 40, 20, 40 },
+    .MeshDistance = [3]u32{ 40, 20, 40 },
 };
 
 var fullscreen: bool = false;
 pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
+    //TODO fix pool size breaks at 1
     _ = try pool.init(std.Thread.Pool.Options{ .allocator = allocator, .n_jobs = @intCast(cpu_count) });
     defer pool.deinit();
     lastX = @floatFromInt(width / 2);
@@ -128,38 +130,42 @@ pub fn main() !void {
     //var ToMesh = std.PriorityQueue(*Chunk).init(allocator);
     //var ToGen = std.PriorityQueue().init(allocator);
     var inputtimer = try std.time.Timer.start();
-    var gentimer = try std.time.Timer.start();
 
     //const gen_distance = [3]u32{ 5, 5, 5 };
     //const load_distance = [3]u32{ 5, 5, 5 };
     //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
-        .ChunksMutex = undefined,
-        .ChunkStatesMutex = undefined,
+        .ChunksMutex = .{},
+        .ChunkStatesMutex = .{},
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
         .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
         .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator),
         .ToLoad = null,
-        .ToLoadMutex = undefined,
+        .ToLoadMutex = .{},
         .ToLoadPos = null,
+        .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
+        .MeshesToLoadMutex = .{},
+        .ToGenMutex = .{},
         //.ToMesh = std.TailQueue(Chunk).Node,
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
-            .frequency = 0.0004,
+            .frequency = 0.0002,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
             .seed = 0,
-            .noise_type = .perlin,
+            .noise_type = .simplex,
             .fractal_type = .none,
             .frequency = 0.01,
+        
         },
-        .min = -255,
+        .min = -256,
         .max = 1024,
-        .caveness = 150,
+        // 0 is most cavey 255 is least cavey
+        .caveness = 190,
     };
     MainWorld.ToLoadMutex.lock();
     MainWorld.ToGen.context.world = &MainWorld;
@@ -185,26 +191,20 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try pool.spawn(World.GenChunk, .{ &MainWorld, 0.01 * std.time.ns_per_ms, 1000, player, allocator });
+    _ = try std.Thread.spawn(.{},World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
+    for(0..cpu_count)|_|{_ = try std.Thread.spawn(.{},World.GenChunk, .{ &MainWorld, player, allocator });}
 
-    _ = try pool.spawn(World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms });
-    //_ = try MainWorld.ChunkMeshes.resize(MainWorld.ChunkMeshes.capacity + player.MeshDistance[0] * player.MeshDistance[1] + player.MeshDistance[2]);
     while (!window.shouldClose()) {
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        if (gentimer.read() > std.time.ns_per_ms * 2) {
-            if (MainWorld.ToGen.count() > 0) {
-                //std.debug.print("gen\n", .{});
-                const LoadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
-                defer LoadMeshes.End();
-                _ = try MainWorld.LoadMeshes(ebo, facebuffer);
-            } else {
-                //std.debug.print("0", .{});
-            }
-            gentimer.reset();
+        {
+            //std.debug.print("gen\n", .{});
+            const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
+            defer loadmeshestop.End();
+            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator);
         }
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.5, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
@@ -224,11 +224,18 @@ pub fn main() !void {
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
         }
         drawtime.End();
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
         prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
+        prossesinput.End();
+        const swapandpoll = ztracy.ZoneNC(@src(), "swapandpoll", 0x00_ff_00_00);
         window.swapBuffers();
         glfw.pollEvents();
-        std.debug.print("{d}\r", .{player.pos});
+        swapandpoll.End();
+        const print = ztracy.ZoneNC(@src(), "print", 0x00_ff_00_00);
+        //std.debug.print("{d}\r", .{player.pos});
+        print.End();
     }
+    pool.deinit();
 }
 
 fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {
@@ -278,11 +285,11 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
     if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
-        player.speed += @splat(1000.0);
+        player.speed *= @splat(10.0);
         fast = true;
     }
     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
-        player.speed -= @splat(1000.0);
+        player.speed /= @splat(10.0);
         fast = false;
     }
 

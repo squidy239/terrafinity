@@ -80,7 +80,7 @@ pub fn main() !void {
         const chx = @as(i32, @intFromFloat(player.pos[0] / 32.0));
         const chy = @as(i32, @intFromFloat(player.pos[1] / 32.0));
         const chz = @as(i32, @intFromFloat(player.pos[2] / 32.0));
-        const render_distance = [_]i32{ 40, 20, 40 };
+        const render_distance = [_]i32{ 10, 5, 10 };
         var x: i32 = -render_distance[0];
         var y: i32 = -render_distance[1];
         var z: i32 = -render_distance[2];
