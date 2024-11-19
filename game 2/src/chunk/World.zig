@@ -6,6 +6,7 @@ const Generator = @import("./Chunk.zig").Generator;
 const Render = @import("./Chunk.zig").Render;
 const ztracy = @import("ztracy");
 const Noise = @import("./fastnoise.zig");
+const PtrOrState = @import("./Chunk.zig").PtrOrState;
 const gl = @import("gl");
 const Entitys = @import("../entities/Entitys.zig");
 pub const pw = struct { player: *Entitys.Player, world: *World };
@@ -39,7 +40,8 @@ pub const World = struct {
     ToGenMutex: std.Thread.Mutex,
     MeshesToLoad: std.DoublyLinkedList(ChunkMesh),
     MeshesToLoadMutex: std.Thread.Mutex,
-    //ToMesh: std.DoublyLinkedList(*Chunk),
+    ToMesh: std.DoublyLinkedList(*Chunk),
+    ToMeshMutex: std.Thread.Mutex,
     ChunksMutex: std.Thread.Mutex,
     ChunkStatesMutex: std.Thread.Mutex,
     TerrainNoise: Noise.Noise(f32),
@@ -49,7 +51,6 @@ pub const World = struct {
     max: i32,
     pub fn GenChunk(self: *@This(), player: Entitys.Player, allocator: std.mem.Allocator) !void {
         while (true) {
-            
             const GenChunktime = ztracy.ZoneNC(@src(), "GenChunk", 0x9692de);
             defer GenChunktime.End();
             self.ToGenMutex.lock();
@@ -60,30 +61,39 @@ pub const World = struct {
             };
 
             self.ToGenMutex.unlock();
+
+            //var self.GetNeighbors(pos: [3]i32)
+
             //seed 0
-            var chunk:Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max, self.caveness) orelse {
+            var chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max, self.caveness) orelse {
                 self.ChunkStatesMutex.lock();
-                _ = try self.ChunkStates.put(chunkpos, ChunkState.NotImportant);
+                _ = try self.ChunkStates.put(chunkpos, ChunkState.AllAir);
                 self.ChunkStatesMutex.unlock();
                 continue;
             };
             //std.debug.print("l{any}", .{chunk.pos});
             _ = player;
             self.ChunksMutex.lock();
-            //_ = try self.Chunks.put(chunkpos, chunk);
+            _ = try self.Chunks.put(chunkpos, chunk);
             self.ChunksMutex.unlock();
 
-            self.ChunkStatesMutex.lock();
-            _ = try self.ChunkStates.put(chunkpos, ChunkState.Mesh);
-            self.ChunkStatesMutex.unlock();
             const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
             //std.debug.print("{any}\n", .{(&chunk).pos});
             const addchunk = &chunk;
             const mesh = try Render.MeshChunk_Normal(addchunk, allocator, GetNeighbors(self, chunkpos));
-            
+
             meshchunk.End();
 
-            if (mesh.len == 0) {allocator.free(mesh);continue;}
+            if (mesh.len == 0) {
+                allocator.free(mesh);
+                self.ChunkStatesMutex.lock();
+                _ = try self.ChunkStates.put(chunkpos, ChunkState.InMemoryNoMesh);
+                self.ChunkStatesMutex.unlock();
+                continue;
+            }
+            self.ChunkStatesMutex.lock();
+            _ = try self.ChunkStates.put(chunkpos, ChunkState.InMemoryAndMesh);
+            self.ChunkStatesMutex.unlock();
             self.MeshesToLoadMutex.lock();
             var node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
             node.data = ChunkMesh{ .faces = mesh, .position = chunkpos };
@@ -96,15 +106,17 @@ pub const World = struct {
 
     //}
 
-    fn GetNeighbors(self: *@This(), pos: [3]i32) [6]?*Chunk {
-        var chunks: [6]?*Chunk = undefined;
+    fn GetNeighbors(self: *@This(), pos: [3]i32) [6]PtrOrState {
+        var chunks: [6]PtrOrState = undefined;
         self.ChunksMutex.lock();
-        chunks[0] = self.Chunks.getPtr([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse null;
-        chunks[1] = self.Chunks.getPtr([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse null;
-        chunks[2] = self.Chunks.getPtr([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse null;
-        chunks[3] = self.Chunks.getPtr([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse null;
-        chunks[4] = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse null;
-        chunks[5] = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse null;
+        const ptr = self.Chunks.getPtr([3]i32{ pos[0] + 1, pos[1], pos[2] });
+        if (ptr == null)
+        chunks[0] = PtrOrState{.ChunkPtr =  orelse {chunks[0] = PtrOrState{.State  =(self.ChunkStates.get([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse ChunkState.NotGenerated)};
+        chunks[1] = self.Chunks.getPtr([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse self.ChunkStates.get([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse ChunkState.NotGenerated;
+        chunks[2] = self.Chunks.getPtr([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse self.ChunkStates.get([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse ChunkState.NotGenerated;
+        chunks[3] = self.Chunks.getPtr([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse self.ChunkStates.get([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse ChunkState.NotGenerated;
+        chunks[4] = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse ChunkState.NotGenerated;
+        chunks[5] = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse ChunkState.NotGenerated;
         self.ChunksMutex.unlock();
         return chunks;
     }
@@ -125,7 +137,10 @@ pub const World = struct {
             defer loadmesh.End();
             //std.debug.print("\n||{}\n", .{i});
             self.MeshesToLoadMutex.lock();
-            const mesh = self.MeshesToLoad.popFirst() orelse {self.MeshesToLoadMutex.unlock();return;};
+            const mesh = self.MeshesToLoad.popFirst() orelse {
+                self.MeshesToLoadMutex.unlock();
+                return;
+            };
             self.MeshesToLoadMutex.unlock();
             const vbo = Render.CreateOrUpdateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, null, gl.STATIC_DRAW);
             allocator.destroy(mesh);
@@ -137,7 +152,7 @@ pub const World = struct {
     pub fn AddToGen(self: *@This(), player: *Entitys.Player, sleeptime: u64) !void {
         while (true) {
             std.time.sleep(sleeptime);
-            
+
             const Addtogen = ztracy.ZoneNC(@src(), "Addtogen", 0x9692de);
             defer Addtogen.End();
 
@@ -154,9 +169,9 @@ pub const World = struct {
 
                         z += 1;
                         self.ToGenMutex.lock();
-            self.ChunkStatesMutex.lock();
-            defer self.ToGenMutex.unlock();
-            defer self.ChunkStatesMutex.unlock();
+                        self.ChunkStatesMutex.lock();
+                        defer self.ToGenMutex.unlock();
+                        defer self.ChunkStatesMutex.unlock();
                         _ = self.ChunkStates.get(pos) orelse {
                             _ = try self.ToGen.add(pos);
                             _ = try self.ChunkStates.put(pos, ChunkState.Generating);

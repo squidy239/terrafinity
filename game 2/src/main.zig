@@ -5,7 +5,7 @@ const zstbi = @import("zstbi");
 const glfw = @import("glfw");
 const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
-var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true}){});
+var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
@@ -145,7 +145,8 @@ pub fn main() !void {
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
-        //.ToMesh = std.TailQueue(Chunk).Node,
+        .ToMesh = std.DoublyLinkedList(*Chunk){},
+        .ToMeshMutex = .{},
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
@@ -157,7 +158,6 @@ pub fn main() !void {
             .noise_type = .simplex,
             .fractal_type = .none,
             .frequency = 0.01,
-        
         },
         .min = -256,
         .max = 1024,
@@ -186,8 +186,10 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{},World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for(0..cpu_count-3)|_|{_ = try std.Thread.spawn(.{},World.GenChunk, .{ &MainWorld, player, allocator });}
+    _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
+    for (0..cpu_count - 3) |_| {
+        _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
+    }
 
     while (!window.shouldClose()) {
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);

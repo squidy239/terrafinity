@@ -20,11 +20,21 @@ test "Gen+Mesh" {
 // might have more render distances for entities
 
 pub const ChunkState = enum(u8) {
-    Generating = 0,
-    InMemory = 1,
-    NotImportant = 2,
-    Mesh = 3,
+    NotGenerated = 0,
+    AllAir = 1,
+    Generating = 2,
+    InMemoryNoMesh = 3,
+    MeshOnly = 4,
+    WaitingForNeighbors = 5,
+    InMemoryAndMesh = 6,
+    Unknown = 7,
 };
+
+pub const PtrOrState = union {
+    ChunkPtr: *Chunk,
+    State: ChunkState,
+};
+
 pub const MeshBufferIDs = struct {
     vbo: c_uint,
     vao: c_uint,
@@ -37,7 +47,7 @@ pub const Chunk = struct {
     pos: [3]i32,
     blocks: [ChunkSize][ChunkSize][ChunkSize]Blocks,
     blockdata: ?*std.AutoHashMap([3]u5, []u32),
-    neighbors: [6]?*Chunk,
+    neighbors: [6]PtrOrState,
 };
 
 pub const Render = struct {
@@ -98,7 +108,7 @@ pub const Render = struct {
         }
         //std.debug.print("{d}", .{mesh.items});
         //return error.w;
-        return try mesh.toOwnedSlice();
+        return mesh.toOwnedSlice();
     }
 
     pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
@@ -134,14 +144,13 @@ pub const Render = struct {
         return MeshIDs orelse NewMeshIDs;
     }
 };
-
 pub const Generator = struct {
-    pub fn InitChunkToBlock(block: Blocks, pos: [3]i32, neighbors: ?[6]?*Chunk) Chunk {
+    pub fn InitChunkToBlock(block: Blocks, pos: [3]i32, neighbors: ?[6]PtrOrState) Chunk {
         var ch = Chunk{
             .pos = pos,
             .blockdata = null,
             .blocks = undefined,
-            .neighbors = neighbors orelse [6]?*Chunk{ null, null, null, null, null, null },
+            .neighbors = neighbors orelse [6]PtrOrState{ PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown } },
         };
         //this is annoying but zig dosent compile for relesefast when i directly initalize the array
         @memset(&ch.blocks, [1][ChunkSize]Blocks{[1]Blocks{block} ** ChunkSize} ** ChunkSize);
