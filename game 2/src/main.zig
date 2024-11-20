@@ -8,6 +8,7 @@ var procs: gl.ProcTable = undefined;
 var gpa = (std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){});
 const allocator = gpa.allocator();
 var width: u32 = 800;
+const ConcurrentHashMap = @import("./libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 var height: u32 = 600;
 const Entitys = @import("./entities/Entitys.zig");
 const Textures = @import("./chunk/Blocks.zig").Textures;
@@ -43,18 +44,14 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20 },
-    .MeshDistance = [3]u32{ 20, 10, 20 },
+    .GenDistance = [3]u32{ 40, 10, 40 },
+    .LoadDistance = [3]u32{ 40, 10, 40 },
+    .MeshDistance = [3]u32{ 40, 10, 40 },
 };
 
 var fullscreen: bool = false;
 pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
-    var pool: std.Thread.Pool = undefined;
-    //TODO fix pool size breaks at 1
-    _ = try pool.init(std.Thread.Pool.Options{ .allocator = allocator, .n_jobs = @intCast(cpu_count) });
-    defer pool.deinit();
     lastX = @floatFromInt(width / 2);
     lastY = @floatFromInt(height / 2);
     if (!glfw.init(.{})) {
@@ -135,13 +132,11 @@ pub fn main() !void {
     //const load_distance = [3]u32{ 5, 5, 5 };
     //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
-        .ChunksMutex = .{},
-        .ChunkStatesMutex = .{},
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = std.AutoHashMap([3]i32, Chunk).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,16).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
-        .ChunkStates = std.AutoHashMap([3]i32, ChunkStates).init(allocator),
+        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates,std.hash_map.AutoContext([3]i32),80,16).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -187,7 +182,7 @@ pub fn main() !void {
     atlas.deinit();
 
     _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for (0..cpu_count - 3) |_| {
+    for (0..cpu_count) |_| {
         _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
     }
 
@@ -201,7 +196,7 @@ pub fn main() !void {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
-            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator);
+            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator,20*std.time.ns_per_ms);
         }
         const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.5, 10000.0);
         const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
@@ -232,7 +227,6 @@ pub fn main() !void {
         //std.debug.print("{d}\r", .{player.pos});
         print.End();
     }
-    pool.deinit();
 }
 
 fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {

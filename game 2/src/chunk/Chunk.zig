@@ -2,6 +2,7 @@ const Blocks = @import("Blocks.zig").Blocks;
 const std = @import("std");
 const Noise = @import("./fastnoise.zig");
 const gl = @import("gl");
+const World = @import("./World.zig");
 const ztracy = @import("ztracy");
 
 const zm = @import("zm");
@@ -30,8 +31,8 @@ pub const ChunkState = enum(u8) {
     Unknown = 7,
 };
 
-pub const PtrOrState = union {
-    ChunkPtr: *Chunk,
+pub const PtrState = struct {
+    ChunkPtr: ?*Chunk,
     State: ChunkState,
 };
 
@@ -47,7 +48,8 @@ pub const Chunk = struct {
     pos: [3]i32,
     blocks: [ChunkSize][ChunkSize][ChunkSize]Blocks,
     blockdata: ?*std.AutoHashMap([3]u5, []u32),
-    neighbors: [6]PtrOrState,
+    neighbors: [6]PtrState,
+    mutex: std.Thread.Mutex,
 };
 
 pub const Render = struct {
@@ -69,45 +71,55 @@ pub const Render = struct {
         EncodedBlock[1] |= @as(u32, @intCast(@intFromEnum(blocktype))) << (@bitSizeOf(u32) - 20);
         return EncodedBlock;
     }
-    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, borderingchunks: [6]?*Chunk) ![]u32 {
+
+    //nehbors +x -x +y -y +z -z
+    //        0   1  2  3  4  5
+    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?Chunk) ![]u32 {
         var mesh = std.ArrayList(u32).init(allocator);
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {
-
-                    // 2 is top or bottom
-                    //4 is side
                     if (chunk.blocks[x][y][z] != Blocks.Air) {
-                        if (x == ChunkSize - 1) {} else if (chunk.blocks[x + 1][y][z] == Blocks.Air) {
+                        if (x == ChunkSize - 1 and neighbors[0] != null and neighbors[0].?.blocks[0][y][z] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (x != ChunkSize - 1 and chunk.blocks[x + 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (x == 0) {} else if (chunk.blocks[x - 1][y][z] == Blocks.Air) {
+                        if (x == 0 and neighbors[1] != null and neighbors[1].?.blocks[ChunkSize - 1][y][z] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (x != 0 and chunk.blocks[x - 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (y == ChunkSize - 1 and borderingchunks[2] != null and borderingchunks[2].?.blocks[x][0][z] == Blocks.Air) {
+                        if (y == ChunkSize - 1 and neighbors[2] != null and neighbors[2].?.blocks[x][0][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (y != ChunkSize - 1 and chunk.blocks[x][y + 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (y == 0) {} else if (chunk.blocks[x][y - 1][z] == Blocks.Air) {
+                        if (y == 0 and neighbors[3] != null and neighbors[3].?.blocks[x][ChunkSize - 1][z] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (y != 0 and chunk.blocks[x][y - 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
-                        if (z == ChunkSize - 1) {} else if (chunk.blocks[x][y][z + 1] == Blocks.Air) {
+
+                        if (z == ChunkSize - 1 and neighbors[4] != null and neighbors[4].?.blocks[x][y][0] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (z != ChunkSize - 1 and chunk.blocks[x][y][z + 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
-                        if (z == 0) {} else if (chunk.blocks[x][y][z - 1] == Blocks.Air) {
+
+                        if (z == 0 and neighbors[5] != null and neighbors[5].?.blocks[x][y][ChunkSize - 1] == Blocks.Air) {
+                            _ = try mesh.appendSlice(&EncodeFace(4, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                        } else if (z != 0 and chunk.blocks[x][y][z - 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(4, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
                     }
                 }
             }
         }
-        //std.debug.print("{d}", .{mesh.items});
-        //return error.w;
         return mesh.toOwnedSlice();
     }
 
@@ -145,12 +157,20 @@ pub const Render = struct {
     }
 };
 pub const Generator = struct {
-    pub fn InitChunkToBlock(block: Blocks, pos: [3]i32, neighbors: ?[6]PtrOrState) Chunk {
+    pub fn InitChunkToBlock(block: Blocks, pos: [3]i32, neighbors: ?[6]PtrState) Chunk {
         var ch = Chunk{
             .pos = pos,
             .blockdata = null,
             .blocks = undefined,
-            .neighbors = neighbors orelse [6]PtrOrState{ PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown }, PtrOrState{ .State = ChunkState.Unknown } },
+            .mutex = .{},
+            .neighbors = neighbors orelse [6]PtrState{
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+                PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
+            },
         };
         //this is annoying but zig dosent compile for relesefast when i directly initalize the array
         @memset(&ch.blocks, [1][ChunkSize]Blocks{[1]Blocks{block} ** ChunkSize} ** ChunkSize);

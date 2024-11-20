@@ -1,0 +1,91 @@
+const std = @import("std");
+
+pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
+    return struct {
+        ctx: Context,
+        buckets: [bucketamount]Bucket(K, V, Context, maxloadpercentage),
+
+        const Self = @This();
+
+        pub fn get(self: *Self, key: K) ?V {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].get(key);
+        }
+
+        pub fn put(self: *Self, key: K, value: V) !void {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            try self.buckets[bucket_index].put(key, value);
+        }
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            var bkts: [bucketamount]Bucket(K, V, Context, maxloadpercentage) = undefined;
+            for (0..bucketamount) |i| {
+                bkts[i] = Bucket(K, V, Context, maxloadpercentage).init(allocator);
+            }
+            return .{
+                .ctx = Context{},
+                .buckets = bkts,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (&self.buckets) |*b| {
+                b.deinit();
+            }
+        }
+    };
+}
+
+fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64) type {
+    return struct {
+        lock: std.Thread.RwLock,
+        hash_map: std.HashMap(K, V, Context, maxloadpercentage),
+
+        const Self = @This();
+
+        pub fn get(self: *Self, key: K) ?V {
+            self.lock.lockShared();
+            defer self.lock.unlockShared();
+            return self.hash_map.get(key);
+        }
+
+        pub fn put(self: *Self, key: K, value: V) !void {
+            self.lock.lock();
+            defer self.lock.unlock();
+            try self.hash_map.put(key, value);
+        }
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .lock = .{},
+                .hash_map = std.HashMap(K, V, Context, maxloadpercentage).init(allocator),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.hash_map.deinit();
+        }
+    };
+}
+
+test "basic get and put" {
+    const allocator = std.testing.allocator;
+    var hm = ConcurrentHashMap(
+        i32,
+        i32,
+        std.hash_map.AutoContext(i32),
+        80,
+        4
+    ).init(allocator);
+    defer hm.deinit();
+
+    try hm.put(1, 32);
+    try hm.put(345, 775);
+
+    try std.testing.expectEqual(@as(?i32, 32), hm.get(1));
+    try std.testing.expect(hm.get(345) == 775);
+    try std.testing.expect(hm.get(45645) == null);
+
+}
