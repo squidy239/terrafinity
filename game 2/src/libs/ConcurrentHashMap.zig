@@ -17,6 +17,8 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
 
 
         pub fn getPtr(self: *Self, key: K) ?*V {
+            const hashgetptr = ztracy.ZoneNC(@src(), "hashgetptr", 0x9692d);
+            defer hashgetptr.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].getPtr(key);
@@ -57,19 +59,25 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
         const Self = @This();
 
         pub fn get(self: *Self, key: K) ?V {
+            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
+            bktlock.End();
             defer self.lock.unlockShared();
             return self.hash_map.get(key);
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {
+            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
+            bktlock.End();
             defer self.lock.unlockShared();
             return self.hash_map.getPtr(key);
         }
 
         pub fn put(self: *Self, key: K, value: V) !void {
+            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
+            bktlock.End();
             defer self.lock.unlock();
             try self.hash_map.put(key, value);
         }

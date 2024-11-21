@@ -74,6 +74,8 @@ pub const Render = struct {
     //nehbors +x -x +y -y +z -z
     //        0   1  2  3  4  5
     pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?Chunk) ![]u32 {
+        const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
+        defer meshchunkreal.End();
         var mesh = std.ArrayList(u32).init(allocator);
         defer mesh.deinit();
         for (0..ChunkSize) |x| {

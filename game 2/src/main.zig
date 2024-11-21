@@ -133,10 +133,10 @@ pub fn main() !void {
     //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,24).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,128).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
-        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates,std.hash_map.AutoContext([3]i32),80,24).init(allocator),
+        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates,std.hash_map.AutoContext([3]i32),80,128).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},

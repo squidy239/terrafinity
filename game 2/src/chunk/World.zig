@@ -34,8 +34,8 @@ pub const ChunkMesh = struct {
 };
 pub const World = struct {
     ChunkMeshes: std.ArrayList(RenderIDs),
-    Chunks: ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,24),
-    ChunkStates: ConcurrentHashMap([3]i32, ChunkState,std.hash_map.AutoContext([3]i32),80,24),
+    Chunks: ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,128),
+    ChunkStates: ConcurrentHashMap([3]i32, ChunkState,std.hash_map.AutoContext([3]i32),80,128),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
     ToGen: std.PriorityQueue([3]i32, pw, DistanceOrder),
     ToGenMutex: std.Thread.Mutex,
@@ -72,8 +72,9 @@ pub const World = struct {
 
             const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
             const gn = ztracy.ZoneNC(@src(), "getnehbors", 0x9692d);
-            const n = GetNeighborfull(self, chunkpos);
-            //const n = [6]?Chunk{null,null,null,null,null,null};
+            //const n = GetNeighborfull(self, chunkpos);
+            _ = GetNeighbors(self,chunkpos);
+            const n = [6]?Chunk{null,null,null,null,null,null};
             
             gn.End();
             const mesh = try Render.MeshChunk_Normal(@constCast(&chunk), allocator, n);
