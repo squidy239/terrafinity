@@ -1,5 +1,5 @@
 const std = @import("std");
-
+const ztracy = @import("ztracy");
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
         ctx: Context,
@@ -8,12 +8,23 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
         const Self = @This();
 
         pub fn get(self: *Self, key: K) ?V {
+            const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
+            defer hashget.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].get(key);
         }
 
+
+        pub fn getPtr(self: *Self, key: K) ?*V {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].getPtr(key);
+        }
+
         pub fn put(self: *Self, key: K, value: V) !void {
+            const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            defer hashput.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             try self.buckets[bucket_index].put(key, value);
@@ -49,6 +60,12 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             self.lock.lockShared();
             defer self.lock.unlockShared();
             return self.hash_map.get(key);
+        }
+
+        pub fn getPtr(self: *Self, key: K) ?*V {
+            self.lock.lockShared();
+            defer self.lock.unlockShared();
+            return self.hash_map.getPtr(key);
         }
 
         pub fn put(self: *Self, key: K, value: V) !void {

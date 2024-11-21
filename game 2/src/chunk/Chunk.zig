@@ -39,7 +39,6 @@ pub const PtrState = struct {
 pub const MeshBufferIDs = struct {
     vbo: c_uint,
     vao: c_uint,
-    vlen: c_uint,
     pos: [3]i32,
     count: u32,
 };
@@ -49,7 +48,7 @@ pub const Chunk = struct {
     blocks: [ChunkSize][ChunkSize][ChunkSize]Blocks,
     blockdata: ?*std.AutoHashMap([3]u5, []u32),
     neighbors: [6]PtrState,
-    mutex: std.Thread.Mutex,
+    lock: std.Thread.RwLock,
 };
 
 pub const Render = struct {
@@ -162,7 +161,7 @@ pub const Generator = struct {
             .pos = pos,
             .blockdata = null,
             .blocks = undefined,
-            .mutex = .{},
+            .lock = .{},
             .neighbors = neighbors orelse [6]PtrState{
                 PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },
                 PtrState{ .ChunkPtr = null, .State = ChunkState.Unknown },

@@ -44,9 +44,9 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 40, 10, 40 },
-    .LoadDistance = [3]u32{ 40, 10, 40 },
-    .MeshDistance = [3]u32{ 40, 10, 40 },
+    .GenDistance = [3]u32{ 20, 10, 20 },
+    .LoadDistance = [3]u32{ 20, 10, 20 },
+    .MeshDistance = [3]u32{ 20, 10, 20 },
 };
 
 var fullscreen: bool = false;
@@ -133,10 +133,10 @@ pub fn main() !void {
     //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,16).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,24).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(allocator, pw{ .player = &player, .world = undefined }),
-        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates,std.hash_map.AutoContext([3]i32),80,16).init(allocator),
+        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates,std.hash_map.AutoContext([3]i32),80,24).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -145,7 +145,7 @@ pub fn main() !void {
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
-            .frequency = 0.0002,
+            .frequency = 0.002,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
@@ -155,7 +155,7 @@ pub fn main() !void {
             .frequency = 0.01,
         },
         .min = -256,
-        .max = 1024,
+        .max = 512,
         // 0 is most cavey 255 is least cavey
         .caveness = 190,
     };
@@ -185,8 +185,9 @@ pub fn main() !void {
     for (0..cpu_count) |_| {
         _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
     }
-
+    const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     while (!window.shouldClose()) {
+        std.debug.print("mesh {d} b\nchdata = ~ {d} b\n{d} b\n{d} b\n", .{@sizeOf(ChunkMesh)*MainWorld.ChunkMeshes.capacity,@sizeOf(ChunkStates) * MainWorld.ChunkStates.buckets[2].hash_map.capacity()*24,0,0});
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
@@ -198,8 +199,7 @@ pub fn main() !void {
             defer loadmeshestop.End();
             _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator,20*std.time.ns_per_ms);
         }
-        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.5, 10000.0);
-        const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
+        const proj = zm.Mat4f.perspective(zm.toRadians(114.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.05, 10000.0);
         gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
         const view = zm.Mat4f.lookAt(player.pos, player.pos + player.cameraFront, player.cameraUp);
         const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
@@ -208,11 +208,13 @@ pub fn main() !void {
         //std.debug.print("{any}\n", .{player});
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
-        for (MainWorld.ChunkMeshes.items) |mesh| {
+        const it = MainWorld.ChunkMeshes.items;
+        for (it) |mesh| {
+            const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x9692d);
+            defer drawchunk.End();
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
-            //gl.BindBuffer(gl.ARRAY_BUFFER, mesh.vbo);
-            //gl.DrawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 40000);
+            //TODO occlusion queries and backface culling and frustrum cullling and early z-rejection
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
         }
         drawtime.End();

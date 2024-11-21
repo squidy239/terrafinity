@@ -34,13 +34,13 @@ pub const ChunkMesh = struct {
 };
 pub const World = struct {
     ChunkMeshes: std.ArrayList(RenderIDs),
-    Chunks: ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,16),
-    ChunkStates: ConcurrentHashMap([3]i32, ChunkState,std.hash_map.AutoContext([3]i32),80,16),
+    Chunks: ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,24),
+    ChunkStates: ConcurrentHashMap([3]i32, ChunkState,std.hash_map.AutoContext([3]i32),80,24),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
     ToGen: std.PriorityQueue([3]i32, pw, DistanceOrder),
     ToGenMutex: std.Thread.Mutex,
     MeshesToLoad: std.DoublyLinkedList(ChunkMesh),
-    MeshesToLoadMutex: std.Thread.RwLock,
+    MeshesToLoadMutex: std.Thread.Mutex,
     ToMesh: std.DoublyLinkedList(*Chunk),
     ToMeshMutex: std.Thread.Mutex,
     TerrainNoise: Noise.Noise(f32),
@@ -66,15 +66,15 @@ pub const World = struct {
                 _ = try self.ChunkStates.put(chunkpos, ChunkState.AllAir);
                 continue;
             };
-            //std.debug.print("l{any}", .{chunk.pos});
             _ = player;
+            //uses TONS of memory, TODO fix memory usage
             _ = try self.Chunks.put(chunkpos, chunk);
 
-            //std.debug.print("|{d}|", .{c});
             const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
-            //if(1 == 1)continue;
             const gn = ztracy.ZoneNC(@src(), "getnehbors", 0x9692d);
             const n = GetNeighborfull(self, chunkpos);
+            //const n = [6]?Chunk{null,null,null,null,null,null};
+            
             gn.End();
             const mesh = try Render.MeshChunk_Normal(@constCast(&chunk), allocator, n);
             meshchunk.End();
@@ -89,9 +89,9 @@ pub const World = struct {
             _ = try self.ChunkStates.put(chunkpos, ChunkState.InMemoryAndMesh);
             var node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
             node.data = ChunkMesh{ .faces = mesh, .position = chunkpos };
-            self.MeshesToLoadMutex.lockShared();
+            self.MeshesToLoadMutex.lock();
             self.MeshesToLoad.append((node));
-            self.MeshesToLoadMutex.unlockShared();
+            self.MeshesToLoadMutex.unlock();
         }
     }
 
