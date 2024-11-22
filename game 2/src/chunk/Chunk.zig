@@ -30,12 +30,7 @@ pub const ChunkState = enum(u8) {
     MeshOnly = 4,
     InMemoryAndMesh = 5,
     Unknown = 6,
-    WaitingForNeighbors1 = 7,
-    WaitingForNeighbors2 = 8,
-    WaitingForNeighbors3 = 9,
-    WaitingForNeighbors4 = 10,
-    WaitingForNeighbors5 = 11,
-    WaitingForNeighbors6 = 12,
+    WaitingForNeighbors = 7,
 };
 
 pub const PtrState = struct {
@@ -99,37 +94,37 @@ pub const Render = struct {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {
                     if (chunk.blocks[x][y][z] != Blocks.Air) {
-                        if (x == ChunkSize - 1 and neighbors[0] != null and neighbors[0].?.blocks[0][y][z] == Blocks.Air) {
+                        if ((x == ChunkSize - 1 and neighbors[0] != null and neighbors[0].?.blocks[0][y][z] == Blocks.Air) or (x == ChunkSize - 1 and neighbors[0] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (x != ChunkSize - 1 and chunk.blocks[x + 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (x == 0 and neighbors[1] != null and neighbors[1].?.blocks[ChunkSize - 1][y][z] == Blocks.Air) {
+                        if ((x == 0 and neighbors[1] != null and neighbors[1].?.blocks[ChunkSize - 1][y][z] == Blocks.Air) or (x == 0 and neighbors[1] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (x != 0 and chunk.blocks[x - 1][y][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (y == ChunkSize - 1 and neighbors[2] != null and neighbors[2].?.blocks[x][0][z] == Blocks.Air) {
+                        if ((y == ChunkSize - 1 and neighbors[2] != null and neighbors[2].?.blocks[x][0][z] == Blocks.Air) or (y == ChunkSize - 1 and neighbors[2] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (y != ChunkSize - 1 and chunk.blocks[x][y + 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (y == 0 and neighbors[3] != null and neighbors[3].?.blocks[x][ChunkSize - 1][z] == Blocks.Air) {
+                        if ((y == 0 and neighbors[3] != null and neighbors[3].?.blocks[x][ChunkSize - 1][z] == Blocks.Air) or (y == 0 and neighbors[3] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (y != 0 and chunk.blocks[x][y - 1][z] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (z == ChunkSize - 1 and neighbors[4] != null and neighbors[4].?.blocks[x][y][0] == Blocks.Air) {
+                        if ((z == ChunkSize - 1 and neighbors[4] != null and neighbors[4].?.blocks[x][y][0] == Blocks.Air) or z == ChunkSize - 1 and neighbors[4] == null) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (z != ChunkSize - 1 and chunk.blocks[x][y][z + 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if (z == 0 and neighbors[5] != null and neighbors[5].?.blocks[x][y][ChunkSize - 1] == Blocks.Air) {
+                        if ((z == 0 and neighbors[5] != null and neighbors[5].?.blocks[x][y][ChunkSize - 1] == Blocks.Air) or (z == 0 and neighbors[5] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(4, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (z != 0 and chunk.blocks[x][y][z - 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(4, chunk.blocks[x][y][z], [3]usize{ x, y, z }));

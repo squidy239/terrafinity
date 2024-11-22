@@ -136,10 +136,10 @@ pub fn main() !void {
     //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 16).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(c_allocator, pw{ .player = &player, .world = undefined }),
-        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates, std.hash_map.AutoContext([3]i32), 80, 16).init(allocator),
+        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -185,13 +185,14 @@ pub fn main() !void {
     atlas.deinit();
 
     _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for (0..cpu_count  ) |_| {
+    for (0..cpu_count) |_| {
         _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
         _ = try std.Thread.spawn(.{}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     var benchmarktimer = try std.time.Timer.start();
-    var benchmark = true;
+    var genbenchmark = true;
+    var meshbenchmark = true;
     while (!window.shouldClose()) {
         //std.debug.print("mesh {d} b\nchdata = ~ {d} b\n{d} b\n{d} b\n", .{@sizeOf(ChunkMesh)*MainWorld.ChunkMeshes.capacity,@sizeOf(ChunkStates) * MainWorld.ChunkStates.buckets[2].hash_map.capacity()*24,0,0});
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
@@ -215,9 +216,14 @@ pub fn main() !void {
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         const it = MainWorld.ChunkMeshes.items;
-        if (MainWorld.ToGen.count() == 0 and benchmark and benchmarktimer.read() > 1000000000) {
-            std.debug.print("finished gen, time:{d}\n", .{benchmarktimer.read()});
-            benchmark = false;
+        if (MainWorld.ToGen.count() == 0 and genbenchmark and benchmarktimer.read() > 1000000000) {
+            std.debug.print("finished gen, time:{d} ms\n", .{benchmarktimer.read()/std.time.ns_per_ms});
+            genbenchmark = false;
+            //return;
+        }
+        if (genbenchmark == false and MainWorld.ToMesh.len == 0 and meshbenchmark and benchmarktimer.read() > 1000000000) {
+            std.debug.print("finished mesh, time:{d} ms\n", .{benchmarktimer.read()/std.time.ns_per_ms});
+            meshbenchmark = false;
             //return;
         }
         for (it) |mesh| {
@@ -237,7 +243,7 @@ pub fn main() !void {
         glfw.pollEvents();
         swapandpoll.End();
         const print = ztracy.ZoneNC(@src(), "print", 0x00_ff_00_00);
-        //std.debug.print("{d}\r", .{player.pos});
+        std.debug.print("{d}\r", .{player.pos});
         print.End();
     }
 }
