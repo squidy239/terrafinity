@@ -22,13 +22,20 @@ test "Gen+Mesh" {
 
 pub const ChunkState = enum(u8) {
     NotGenerated = 0,
+    ToGenerate  = 13,
+    ReMesh = 24,
     AllAir = 1,
     Generating = 2,
     InMemoryNoMesh = 3,
     MeshOnly = 4,
-    WaitingForNeighbors = 5,
-    InMemoryAndMesh = 6,
-    Unknown = 7,
+    InMemoryAndMesh = 5,
+    Unknown = 6,
+    WaitingForNeighbors1 = 7,
+    WaitingForNeighbors2 = 8,
+    WaitingForNeighbors3 = 9,
+    WaitingForNeighbors4 = 10,
+    WaitingForNeighbors5 = 11,
+    WaitingForNeighbors6 = 12,
 };
 
 pub const PtrState = struct {
@@ -73,10 +80,20 @@ pub const Render = struct {
 
     //nehbors +x -x +y -y +z -z
     //        0   1  2  3  4  5
-    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?Chunk) ![]u32 {
+    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
+        for (0..6) |n| {
+            if (neighbors[n] != null) {
+                //neighbors[n].?.lock.lock();
+                //defer neighbors[n].?.lock.lock();
+            }
+        }
+
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
         defer meshchunkreal.End();
+        const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
         var mesh = std.ArrayList(u32).init(allocator);
+        _ = try mesh.ensureTotalCapacity(ChunkSize * ChunkSize * ChunkSize * 2);
+        initarraylist.End();
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {

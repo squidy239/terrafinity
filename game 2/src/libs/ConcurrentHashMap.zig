@@ -15,7 +15,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].get(key);
         }
 
-
         pub fn getPtr(self: *Self, key: K) ?*V {
             const hashgetptr = ztracy.ZoneNC(@src(), "hashgetptr", 0x9692d);
             defer hashgetptr.End();
@@ -97,13 +96,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
 
 test "basic get and put" {
     const allocator = std.testing.allocator;
-    var hm = ConcurrentHashMap(
-        i32,
-        i32,
-        std.hash_map.AutoContext(i32),
-        80,
-        4
-    ).init(allocator);
+    var hm = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init(allocator);
     defer hm.deinit();
 
     try hm.put(1, 32);
@@ -112,5 +105,4 @@ test "basic get and put" {
     try std.testing.expectEqual(@as(?i32, 32), hm.get(1));
     try std.testing.expect(hm.get(345) == 775);
     try std.testing.expect(hm.get(45645) == null);
-
 }

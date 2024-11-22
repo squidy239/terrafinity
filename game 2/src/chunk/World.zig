@@ -4,6 +4,7 @@ const Chunk = @import("./Chunk.zig").Chunk;
 const ChunkState = @import("./Chunk.zig").ChunkState;
 const Generator = @import("./Chunk.zig").Generator;
 const Render = @import("./Chunk.zig").Render;
+const ChunkSize = @import("./Chunk.zig").ChunkSize;
 const ztracy = @import("ztracy");
 const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const Noise = @import("./fastnoise.zig");
@@ -34,8 +35,8 @@ pub const ChunkMesh = struct {
 };
 pub const World = struct {
     ChunkMeshes: std.ArrayList(RenderIDs),
-    Chunks: ConcurrentHashMap([3]i32, Chunk,std.hash_map.AutoContext([3]i32),80,128),
-    ChunkStates: ConcurrentHashMap([3]i32, ChunkState,std.hash_map.AutoContext([3]i32),80,128),
+    Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 16),
+    ChunkStates: ConcurrentHashMap([3]i32, ChunkState, std.hash_map.AutoContext([3]i32), 80, 16),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
     ToGen: std.PriorityQueue([3]i32, pw, DistanceOrder),
     ToGenMutex: std.Thread.Mutex,
@@ -68,42 +69,147 @@ pub const World = struct {
             };
             _ = player;
             //uses TONS of memory, TODO fix memory usage
-            _ = try self.Chunks.put(chunkpos, chunk);
+            const ap = ztracy.ZoneNC(@src(), "allocanput", 0x9692d);
+            const chptr = try allocator.create(Chunk);
+            chptr.* = chunk;
+                        _ = try self.Chunks.put(chunkpos, chptr);
+            _ = try self.ChunkStates.put(chunkpos, ChunkState.Generating);
+            ap.End();
+            const WAITFORTOMESHMUTEX = ztracy.ZoneNC(@src(), "WAITFORTOMESHMUTEX", 0x9692d);
+            WAITFORTOMESHMUTEX.End();
+            const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
+            cn.data = chptr;
+            self.ToMeshMutex.lock();
+            self.ToMesh.append(cn);
+            self.ToMeshMutex.unlock();
+        }
+    }
 
+    pub fn MeshChunks(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator) !void {
+        top: while (true) {
             const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
-            const gn = ztracy.ZoneNC(@src(), "getnehbors", 0x9692d);
-            //const n = GetNeighborfull(self, chunkpos);
-            _ = GetNeighbors(self,chunkpos);
-            const n = [6]?Chunk{null,null,null,null,null,null};
-            
-            gn.End();
-            const mesh = try Render.MeshChunk_Normal(@constCast(&chunk), allocator, n);
-            meshchunk.End();
+            defer meshchunk.End();
+            const WAITFORTOMESHMUTEX = ztracy.ZoneNC(@src(), "WAITFORTOMESHMUTEX", 0x9692d);
+            self.ToMeshMutex.lock();
+            WAITFORTOMESHMUTEX.End();
+            const chnode = self.ToMesh.popFirst() orelse {
+                self.ToMeshMutex.unlock();
+                const sleeping = ztracy.ZoneNC(@src(), "sleeping", 0x9832fd2d);
+                std.time.sleep(sleeptime);
+                sleeping.End();
+                continue;
+            };
+            self.ToMeshMutex.unlock();
+            const chptr: *Chunk = chnode.data;
+            const chstate = self.ChunkStates.get(chptr.pos) orelse unreachable;
+            //if (chstate == ChunkState.WaitingForNeighbors1) std.debug.print("{any}", .{chptr.neighbors});
+            const neighbors = GetNeighbors(self, chptr.pos);
+            var neighborptrs: [6]?*Chunk = undefined;
+            var wfn: u3 = 0;
+
+            for (0..6) |i| {
+                if (neighbors[i].ChunkPtr != null) {
+                    neighborptrs[i] = neighbors[i].ChunkPtr;
+                } else if (neighbors[i].State == ChunkState.AllAir) {
+                    neighborptrs[i] = null;
+                }
+
+                //remove once  working
+                else {
+                    //std.debug.assert(chstate != ChunkState.ReMesh);
+                    if(chstate == ChunkState.ReMesh)_ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors1);
+
+                    std.debug.print("{any}\n", .{neighbors[i].State});
+                    wfn += 1;
+                }
+
+
+                //TODO fix chunk errors more pronounced at lower concurrency
+                if(chstate == ChunkState.Generating){
+                switch (neighbors[i].State) {
+                    ChunkState.WaitingForNeighbors1 => {
+                        std.time.sleep(100000);
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.ReMesh);
+                        //std.debug.print("{any}\n", .{GetNeighbors(self, neighbors[i].ChunkPtr.?.pos)[0].ChunkPtr});
+                        var Node = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
+                        Node.data = neighbors[i].ChunkPtr.?;
+
+                        self.ToMeshMutex.lock();
+                        self.ToMesh.append(Node);
+                        self.ToMeshMutex.unlock();
+                    },
+                    ChunkState.WaitingForNeighbors2 => {
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.WaitingForNeighbors1);
+                    },
+                    ChunkState.WaitingForNeighbors3 => {
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.WaitingForNeighbors2);
+                    },
+                    ChunkState.WaitingForNeighbors4 => {
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.WaitingForNeighbors3);
+                    },
+                    ChunkState.WaitingForNeighbors5 => {
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.WaitingForNeighbors4);
+                    },
+                    ChunkState.WaitingForNeighbors6 => {
+                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.WaitingForNeighbors5);
+                    },
+                    else => {},
+                }}
+
+            }
+            std.debug.print("{},{any}\n", .{wfn,chstate});
+            switch (wfn) {
+                0 => {},
+                1 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors1);
+                    continue :top;
+                },
+                2 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors2);
+                    continue :top;
+                },
+                3 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors3);
+                    continue :top;
+                },
+                4 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors4);
+                    continue :top;
+                },
+                5 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors5);
+                    continue :top;
+                },
+                6 => {
+                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors6);
+                    continue :top;
+                },
+                7=>{unreachable;}
+            }
+
+            const mesh = try Render.MeshChunk_Normal(chptr, allocator, neighborptrs);
 
             if (mesh.len == 0) {
-                _ = try self.ChunkStates.put(chunkpos, ChunkState.InMemoryNoMesh);
+                _ = try self.ChunkStates.put(chptr.pos, ChunkState.InMemoryNoMesh);
                 allocator.free(mesh);
                 continue;
             }
             const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
             defer putmesh.End();
-            _ = try self.ChunkStates.put(chunkpos, ChunkState.InMemoryAndMesh);
+            _ = try self.ChunkStates.put(chptr.pos, ChunkState.InMemoryAndMesh);
             var node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
-            node.data = ChunkMesh{ .faces = mesh, .position = chunkpos };
+            node.data = ChunkMesh{ .faces = mesh, .position = chptr.pos };
             self.MeshesToLoadMutex.lock();
             self.MeshesToLoad.append((node));
+
             self.MeshesToLoadMutex.unlock();
         }
     }
 
-    //pub fn MeshChunks(self: *@This(), sleeptime: u64, maxtime: u128, allocator: std.mem.Allocator) !void {
-
-    //}
-
     pub fn GetNeighbors(self: *@This(), pos: [3]i32) [6]PtrState {
         var chunks: [6]PtrState = undefined;
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0] + 1, pos[1], pos[2] });
+            const ptr = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
             if (ptr != null) {
                 chunks[0] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse unreachable) };
             } else {
@@ -112,7 +218,7 @@ pub const World = struct {
         }
 
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0] - 1, pos[1], pos[2] });
+            const ptr = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] });
             if (ptr != null) {
                 chunks[1] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse unreachable) };
             } else {
@@ -120,7 +226,7 @@ pub const World = struct {
             }
         }
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0], pos[1] + 1, pos[2] });
+            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] });
             if (ptr != null) {
                 chunks[2] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse unreachable) };
             } else {
@@ -128,7 +234,7 @@ pub const World = struct {
             }
         }
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0], pos[1] - 1, pos[2] });
+            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] });
             if (ptr != null) {
                 chunks[3] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse unreachable) };
             } else {
@@ -136,7 +242,7 @@ pub const World = struct {
             }
         }
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] + 1 });
+            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 });
             if (ptr != null) {
                 chunks[4] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse unreachable) };
             } else {
@@ -144,7 +250,7 @@ pub const World = struct {
             }
         }
         {
-            const ptr = self.Chunks.getPtr([3]i32{ pos[0], pos[1], pos[2] - 1 });
+            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 });
             if (ptr != null) {
                 chunks[5] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse unreachable) };
             } else {
@@ -170,7 +276,7 @@ pub const World = struct {
 
     //}
 
-    pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator,maxtime:u64) !void {
+    pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, maxtime: u64) !void {
         const loadmeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
         defer loadmeshes.End();
         var timer = try std.time.Timer.start();
@@ -217,7 +323,7 @@ pub const World = struct {
                         defer self.ToGenMutex.unlock();
                         _ = self.ChunkStates.get(pos) orelse {
                             _ = try self.ToGen.add(pos);
-                            _ = try self.ChunkStates.put(pos, ChunkState.Generating);
+                            _ = try self.ChunkStates.put(pos, ChunkState.ToGenerate);
                             continue;
                         };
                     }
