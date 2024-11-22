@@ -217,12 +217,12 @@ pub fn main() !void {
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         const it = MainWorld.ChunkMeshes.items;
         if (MainWorld.ToGen.count() == 0 and genbenchmark and benchmarktimer.read() > 1000000000) {
-            std.debug.print("finished gen, time:{d} ms\n", .{benchmarktimer.read()/std.time.ns_per_ms});
+            std.debug.print("finished gen, time:{d} ms\n", .{benchmarktimer.read() / std.time.ns_per_ms});
             genbenchmark = false;
             //return;
         }
         if (genbenchmark == false and MainWorld.ToMesh.len == 0 and meshbenchmark and benchmarktimer.read() > 1000000000) {
-            std.debug.print("finished mesh, time:{d} ms\n", .{benchmarktimer.read()/std.time.ns_per_ms});
+            std.debug.print("finished mesh, time:{d} ms\n", .{benchmarktimer.read() / std.time.ns_per_ms});
             meshbenchmark = false;
             //return;
         }

@@ -22,7 +22,7 @@ test "Gen+Mesh" {
 
 pub const ChunkState = enum(u8) {
     NotGenerated = 0,
-    ToGenerate  = 13,
+    ToGenerate = 13,
     ReMesh = 24,
     AllAir = 1,
     Generating = 2,
@@ -118,7 +118,7 @@ pub const Render = struct {
                             _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((z == ChunkSize - 1 and neighbors[4] != null and neighbors[4].?.blocks[x][y][0] == Blocks.Air) or z == ChunkSize - 1 and neighbors[4] == null) {
+                        if ((z == ChunkSize - 1 and neighbors[4] != null and neighbors[4].?.blocks[x][y][0] == Blocks.Air) or (z == ChunkSize - 1 and neighbors[4] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (z != ChunkSize - 1 and chunk.blocks[x][y][z + 1] == Blocks.Air) {
                             _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
