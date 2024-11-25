@@ -33,6 +33,14 @@ pub const ChunkState = enum(u8) {
     WaitingForNeighbors = 7,
 };
 
+pub const ChunkandMeta = struct {
+    chunkPtr : ?*Chunk,
+    neighborsmissing: u3,
+    state:ChunkState,
+    lock: std.Thread.RwLock,
+    chunkmeshesindex: usize,
+};
+
 pub const PtrState = struct {
     ChunkPtr: ?*Chunk,
     State: ChunkState,
@@ -78,16 +86,15 @@ pub const Render = struct {
     pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
         for (0..6) |n| {
             if (neighbors[n] != null) {
-                //neighbors[n].?.lock.lock();
-                //defer neighbors[n].?.lock.lock();
+                neighbors[n].?.lock.lockShared();
+                defer neighbors[n].?.lock.unlockShared();
             }
         }
 
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
         defer meshchunkreal.End();
         const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
-        var mesh = std.ArrayList(u32).init(allocator);
-        _ = try mesh.ensureTotalCapacity(ChunkSize * ChunkSize * ChunkSize * 2);
+        var mesh = try std.ArrayList(u32).initCapacity(allocator,ChunkSize * ChunkSize * ChunkSize * 2);
         initarraylist.End();
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
@@ -200,74 +207,68 @@ pub const Generator = struct {
     }
 
     pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: u8) ?Chunk {
-        const tpoos = Pos * @Vector(3, i32){ 32, 32, 32 };
-        var poos: [3]f32 = undefined;
-        poos[0] = @as(f32, @floatFromInt(tpoos[0]));
-        poos[1] = @as(f32, @floatFromInt(tpoos[1]));
-        poos[2] = @as(f32, @floatFromInt(tpoos[2]));
-        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
-        defer gen.End();
-        var IsImportent: bool = false;
-        const setair = ztracy.ZoneNC(@src(), "setair", 0x692de);
-        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-        setair.End();
-        var x: f32 = 0;
-        var y: f32 = 0;
-        var z: f32 = 0;
-        var xx: usize = 0;
-        var yy: usize = 0;
-        var zz: usize = 0;
+    const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
+    defer gen.End();
 
-        //Terrain
-        while (xx < ChunkSize) {
-            while (zz < ChunkSize) {
-                const tn = TerrainNoise.genNoise2DRange(x + poos[0], z + poos[2], i32, terrainmin, terrainmax);
-                var h: i32 = 0;
-                var Histopofchunk = false;
-                var c = false;
-                if (@divFloor(tn, 32) == Pos[1]) {
-                    h = @mod(tn, ChunkSize);
-                    c = true;
-                }
-                //
-                else if (@divFloor(tn, 32) > Pos[1]) {
-                    h = ChunkSize - 1;
-                    c = true;
-                    Histopofchunk = true;
-                }
-                if (c) {
-                    while (yy <= h) {
-                        const cn = CaveNoise.genNoise3DAsType(x + poos[0], y + poos[1], z + poos[2], u8);
-                        //const cn = 180;
-                        if (cn < caveness) {
-                            if (!Histopofchunk and yy == h) {
-                                chunk.blocks[xx][yy][zz] = Blocks.Grass;
-                            } else if (!Histopofchunk and yy > h - 5) {
-                                chunk.blocks[xx][yy][zz] = Blocks.Dirt;
-                            } else {
-                                chunk.blocks[xx][yy][zz] = Blocks.Stone;
-                            }
-                            IsImportent = true;
-                        }
-                        y += 1.0;
-                        yy += 1;
-                    }
-                }
+    // Pre-calculate chunk position offset
+    const chunk_offset = @Vector(3, f32){
+        @floatFromInt(Pos[0] * 32),
+        @floatFromInt(Pos[1] * 32),
+        @floatFromInt(Pos[2] * 32),
+    };
+    
+    // Initialize chunk with air blocks
+    var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+    var has_terrain = false;
 
-                z += 1.0;
-                zz += 1;
-                y = 0.0;
-                yy = 0;
-            }
-            z = 0.0;
-            zz = 0;
-            xx += 1;
-            x += 1.0;
-        }
-        if (IsImportent) {
-            return chunk;
-        } else {
-            return null;
+    // Pre-calculate terrain heights for the entire chunk
+    var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
+    for (0..ChunkSize) |xx| {
+        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+        for (0..ChunkSize) |zz| {
+            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+            terrain_heights[xx][zz] = TerrainNoise.genNoise2DRange(x, z, i32, terrainmin, terrainmax);
         }
     }
+
+    // Process terrain generation in a more cache-friendly way
+    for (0..ChunkSize) |xx| {
+        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+        for (0..ChunkSize) |zz| {
+            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+            const tn = terrain_heights[xx][zz];
+            const chunk_y = @divFloor(tn, 32);
+            
+            if (chunk_y < Pos[1]) continue;
+            
+            const is_top_chunk = chunk_y > Pos[1];
+            const height = if (is_top_chunk) 
+                ChunkSize - 1 
+            else 
+                @mod(tn, ChunkSize);
+
+            // Process vertical column
+            var yy: usize = 0;
+            while (yy <= height) : (yy += 1) {
+                const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
+                const noise = ztracy.ZoneNC(@src(), "3dnoise", 0x4aeb2a);
+                const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);
+                noise.End();
+                
+                if (cave_density < caveness) {
+                    const block = if (!is_top_chunk) blk: {
+                        if (yy == height) break :blk Blocks.Grass;
+                        if (yy > height - 5) break :blk Blocks.Dirt;
+                        break :blk Blocks.Stone;
+                    } else Blocks.Stone;
+                    
+                    chunk.blocks[xx][yy][zz] = block;
+                    has_terrain = true;
+                }
+            }
+        }
+    }
+
+    return if (has_terrain) chunk else null;
+}
 };

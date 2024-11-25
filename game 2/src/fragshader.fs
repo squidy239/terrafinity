@@ -37,11 +37,11 @@ void main()
     texcoords = texcoords * 2;
     vec4 texColor = texture(TextureAtlas, texcoords);
     FragColor = texColor;
-    float cdfs = sqrt(pow(coordss.x,2)+pow(coordss.y,2)+pow(coordss.z,2));
+    float cdfs = cos(pow(coordss.x,2)+pow(coordss.y,2)+pow(coordss.z,2));
     if(blocktype == 3)
         {FragColor = vec4(cdfs,cdfs,cdfs,1);}
     else if(blocktype == 1)
-                {FragColor = vec4(0,cdfs,cdfs-0.5,1);}
+                {FragColor = vec4(0,(cdfs),(cdfs)-0.5,1);}
     else if(blocktype == 2)
                 {FragColor = vec4(cdfs+0.2,cdfs-0.2,cdfs-0.5,1);}
 

@@ -21,6 +21,7 @@ const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
 const World = @import("./chunk/World.zig").World;
+const ChunkandMeta = @import("./chunk/Chunk.zig").ChunkandMeta;
 const pw = @import("./chunk/World.zig").pw;
 const ChunkMesh = @import("./chunk/World.zig").ChunkMesh;
 const Noise = @import("./chunk/fastnoise.zig");
@@ -53,6 +54,8 @@ var player: Entitys.Player = Entitys.Player{
 };
 
 var fullscreen: bool = false;
+//time:2500 ms 11/24/2024
+//
 pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
     lastX = @floatFromInt(width / 2);
@@ -110,6 +113,10 @@ pub fn main() !void {
     }
     gl.UseProgram(shaderprogram);
 
+
+    gl.DeleteShader(vertexshader);
+    gl.DeleteShader(fragshader);
+
     var ebo: c_uint = undefined;
     gl.GenBuffers(1, @ptrCast(&ebo));
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
@@ -122,18 +129,7 @@ pub fn main() !void {
 
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
-
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
-    gl.EnableVertexAttribArray(0);
-    //const startime = std.time.nanoTimestamp();
-    //var LoadedChunks = std.AutoHashMap([3]i32, Chunk).init(allocator);
-    //var ToMesh = std.PriorityQueue(*Chunk).init(allocator);
-    //var ToGen = std.PriorityQueue().init(allocator);
     var inputtimer = try std.time.Timer.start();
-
-    //const gen_distance = [3]u32{ 5, 5, 5 };
-    //const load_distance = [3]u32{ 5, 5, 5 };
-    //const mesh_distance = [3]u32{ 5, 5, 5 };
     var MainWorld = World{
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
@@ -148,14 +144,14 @@ pub fn main() !void {
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
-            .frequency = 0.002,
+            .frequency = 0.0005,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex,
             .fractal_type = .none,
-            .frequency = 0.01,
+            .frequency = 0.005,
         },
         .min = -256,
         .max = 512,
@@ -185,7 +181,7 @@ pub fn main() !void {
     atlas.deinit();
 
     _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for (0..cpu_count) |_| {
+    for (0..cpu_count-3) |_| {
         _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
         _ = try std.Thread.spawn(.{}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }

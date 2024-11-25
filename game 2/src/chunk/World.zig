@@ -4,6 +4,7 @@ const Chunk = @import("./Chunk.zig").Chunk;
 const ChunkState = @import("./Chunk.zig").ChunkState;
 const Generator = @import("./Chunk.zig").Generator;
 const Render = @import("./Chunk.zig").Render;
+const ChunkandMeta = @import("./Chunk.zig").ChunkandMeta;
 const ChunkSize = @import("./Chunk.zig").ChunkSize;
 const ztracy = @import("ztracy");
 const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
@@ -113,6 +114,7 @@ pub const World = struct {
             };
             self.ToMeshMutex.unlock();
             const chptr: *Chunk = chnode.data;
+            allocator.destroy(chnode);
             const chstate = self.ChunkStates.get(chptr.pos) orelse unreachable;
             //if (chstate == ChunkState.WaitingForNeighbors1) std.debug.print("{any}", .{chptr.neighbors});
             const neighbors = GetNeighbors(self, chptr.pos);
@@ -163,6 +165,9 @@ pub const World = struct {
         const getneighbors = ztracy.ZoneNC(@src(), "getneighbors", 0xFFFF00);
         defer getneighbors.End();
         var chunks: [6]PtrState = undefined;
+        // BUG chunks are gotten before state TODO fix
+        //if chunk state changes after ptr is gotten state and ptr could mismaatch
+        //might need to change big parts of the system
         {
             const ptr = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
             if (ptr != null) {
@@ -226,10 +231,6 @@ pub const World = struct {
         return chunks;
     }
 
-    //TODO
-    // pub fn MeshChunksLoop(self:*@This(), sleeptime:u64,maxtime:u64,allocator:std.mem.Allocator)!void{
-
-    //}
 
     pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, maxtime: u64) !void {
         const loadmeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
