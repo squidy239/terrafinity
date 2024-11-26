@@ -38,7 +38,7 @@ pub const ChunkandMeta = struct {
     neighborsmissing: u3,
     state:ChunkState,
     lock: std.Thread.RwLock,
-    chunkmeshesindex: usize,
+    chunkmeshesindex: ?usize,
 };
 
 pub const PtrState = struct {

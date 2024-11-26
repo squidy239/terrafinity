@@ -132,10 +132,10 @@ pub fn main() !void {
     var inputtimer = try std.time.Timer.start();
     var MainWorld = World{
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, *ChunkandMeta, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(c_allocator, pw{ .player = &player, .world = undefined }),
-        .ChunkStates = ConcurrentHashMap([3]i32, ChunkStates, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        //.ChunkStates = ConcurrentHashMap([3]i32, ChunkStates, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -180,8 +180,8 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 40 * std.time.ns_per_ms });
-    for (0..cpu_count-3) |_| {
+    _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms ,allocator});
+    for (0..cpu_count) |_| {
         _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
         _ = try std.Thread.spawn(.{}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }

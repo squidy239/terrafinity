@@ -37,8 +37,7 @@ pub const ChunkMesh = struct {
 };
 pub const World = struct {
     ChunkMeshes: std.ArrayList(RenderIDs),
-    Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
-    ChunkStates: ConcurrentHashMap([3]i32, ChunkState, std.hash_map.AutoContext([3]i32), 80, 32),
+    Chunks: ConcurrentHashMap([3]i32, *ChunkandMeta, std.hash_map.AutoContext([3]i32), 80, 32),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
     ToGen: std.PriorityQueue([3]i32, pw, DistanceOrder),
     ToGenMutex: std.Thread.Mutex,
@@ -63,16 +62,16 @@ pub const World = struct {
             };
 
             self.ToGenMutex.unlock();
-
+            //need to fix mutexes with new system TODO
             //seed 0
             const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max, self.caveness) orelse {
-                _ = try self.ChunkStates.put(chunkpos, ChunkState.AllAir);
+                self.Chunks.get(chunkpos).?.state = ChunkState.AllAir;
                 const neighbors = GetNeighbors(self, chunkpos);
                 for (0..6) |i| {
-                    if (neighbors[i].State == ChunkState.WaitingForNeighbors) {
-                        _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.ReMesh);
+                    if (neighbors[i] != null and neighbors[i].?.state == ChunkState.WaitingForNeighbors) {
+                        neighbors[i].?.state = ChunkState.ReMesh;
                         const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
-                        cn.data = neighbors[i].ChunkPtr.?;
+                        cn.data = neighbors[i].?.chunkPtr.?;
                         self.ToMeshMutex.lock();
                         self.ToMesh.append(cn);
                         self.ToMeshMutex.unlock();
@@ -85,8 +84,9 @@ pub const World = struct {
             const ap = ztracy.ZoneNC(@src(), "allocanput", 0x9692d);
             const chptr = try allocator.create(Chunk);
             chptr.* = chunk;
-            _ = try self.Chunks.put(chunkpos, chptr);
-            _ = try self.ChunkStates.put(chunkpos, ChunkState.Generating);
+            const p = self.Chunks.get(chunkpos).?;
+            p.state = ChunkState.Generating;
+            p.chunkPtr = chptr;
             ap.End();
             const WAITFORTOMESHMUTEX = ztracy.ZoneNC(@src(), "WAITFORTOMESHMUTEX", 0x9692d);
             WAITFORTOMESHMUTEX.End();
@@ -115,45 +115,41 @@ pub const World = struct {
             self.ToMeshMutex.unlock();
             const chptr: *Chunk = chnode.data;
             allocator.destroy(chnode);
-            const chstate = self.ChunkStates.get(chptr.pos) orelse unreachable;
-            //if (chstate == ChunkState.WaitingForNeighbors1) std.debug.print("{any}", .{chptr.neighbors});
-            const neighbors = GetNeighbors(self, chptr.pos);
+            const chstate = self.Chunks.get(chptr.pos) orelse unreachable;
+            const neighbors:[6]?*ChunkandMeta = GetNeighbors(self, chptr.pos);
             var neighborptrs: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
             var wfn: u3 = 0;
             for (0..6) |i| {
-                if (neighbors[i].ChunkPtr != null) {
-                    neighborptrs[i] = neighbors[i].ChunkPtr;
-                } else if (neighbors[i].State != ChunkState.AllAir) {
+                
+                if (neighbors[i] != null and neighbors[i].?.chunkPtr != null) {
+                    neighborptrs[i] = neighbors[i].?.chunkPtr.?;
+                } else if (neighbors[i] == null or neighbors[i].?.state != ChunkState.AllAir) {
                     wfn += 1;
                 }
 
-                if (neighbors[i].State == ChunkState.WaitingForNeighbors and chstate == ChunkState.Generating) {
-                    _ = try self.ChunkStates.put(neighbors[i].ChunkPtr.?.pos, ChunkState.ReMesh);
-                    const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
-                    cn.data = neighbors[i].ChunkPtr.?;
-                    self.ToMeshMutex.lock();
-                    self.ToMesh.append(cn);
-                    self.ToMeshMutex.unlock();
-                }
-            }
-            if (wfn > 0) {
-                if (chstate != ChunkState.WaitingForNeighbors) {
-                    _ = try self.ChunkStates.put(chptr.pos, ChunkState.WaitingForNeighbors);
-                }
+                if (neighbors[i] != null and neighbors[i].?.state == ChunkState.WaitingForNeighbors and chstate.state == ChunkState.Generating) {
+                        neighbors[i].?.state = ChunkState.ReMesh;
+                        const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
+                        cn.data = neighbors[i].?.chunkPtr.?;
+                        self.ToMeshMutex.lock();
+                        self.ToMesh.append(cn);
+                        self.ToMeshMutex.unlock();
+            }}
+            if (wfn > 0) {                
+                    chstate.state = ChunkState.WaitingForNeighbors;
                 continue :top;
             }
             std.debug.assert(wfn == 0);
-
             const mesh = try Render.MeshChunk_Normal(chptr, allocator, neighborptrs);
 
             if (mesh.len == 0) {
-                _ = try self.ChunkStates.put(chptr.pos, ChunkState.InMemoryNoMesh);
+                chstate.state = ChunkState.InMemoryNoMesh;
                 allocator.free(mesh);
                 continue :top;
             }
             const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
             defer putmesh.End();
-            _ = try self.ChunkStates.put(chptr.pos, ChunkState.InMemoryAndMesh);
+            chstate.state = ChunkState.InMemoryAndMesh;
             var node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
             node.data = ChunkMesh{ .faces = mesh, .position = chptr.pos };
             self.MeshesToLoadMutex.lock();
@@ -161,73 +157,20 @@ pub const World = struct {
             self.MeshesToLoadMutex.unlock();
         }
     }
-    pub fn GetNeighbors(self: *@This(), pos: [3]i32) [6]PtrState {
+    pub fn GetNeighbors(self: *@This(), pos: [3]i32) [6]?*ChunkandMeta {
         const getneighbors = ztracy.ZoneNC(@src(), "getneighbors", 0xFFFF00);
         defer getneighbors.End();
-        var chunks: [6]PtrState = undefined;
+        var chunks: [6]?*ChunkandMeta = undefined;
         // BUG chunks are gotten before state TODO fix
         //if chunk state changes after ptr is gotten state and ptr could mismaatch
         //might need to change big parts of the system
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
-            if (ptr != null) {
-                chunks[0] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse unreachable) };
-            } else {
-                chunks[0] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse ChunkState.NotGenerated) };
-            }
-        }
+            chunks[0] = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
+            chunks[1] = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] });
+            chunks[2] = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] });
+            chunks[3] = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] });
+            chunks[4] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 });
+            chunks[5] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 });
 
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] });
-            if (ptr != null) {
-                chunks[1] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse unreachable) };
-            } else {
-                chunks[1] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse ChunkState.NotGenerated) };
-            }
-        }
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] });
-            if (ptr != null) {
-                chunks[2] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse unreachable) };
-            } else {
-                chunks[2] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse ChunkState.NotGenerated) };
-            }
-        }
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] });
-            if (ptr != null) {
-                chunks[3] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse unreachable) };
-            } else {
-                chunks[3] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse ChunkState.NotGenerated) };
-            }
-        }
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 });
-            if (ptr != null) {
-                chunks[4] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse unreachable) };
-            } else {
-                chunks[4] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse ChunkState.NotGenerated) };
-            }
-        }
-        {
-            const ptr = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 });
-            if (ptr != null) {
-                chunks[5] = PtrState{ .ChunkPtr = ptr, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse unreachable) };
-            } else {
-                chunks[5] = PtrState{ .ChunkPtr = null, .State = (self.ChunkStates.get([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse ChunkState.NotGenerated) };
-            }
-        }
-        return chunks;
-    }
-
-    fn GetNeighborfull(self: *@This(), pos: [3]i32) [6]?Chunk {
-        var chunks: [6]?Chunk = undefined;
-        chunks[0] = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] }) orelse null;
-        chunks[1] = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] }) orelse null;
-        chunks[2] = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] }) orelse null;
-        chunks[3] = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] }) orelse null;
-        chunks[4] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 }) orelse null;
-        chunks[5] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 }) orelse null;
         return chunks;
     }
 
@@ -256,7 +199,7 @@ pub const World = struct {
         }
     }
 
-    pub fn AddToGen(self: *@This(), player: *Entitys.Player, sleeptime: u64) !void {
+    pub fn AddToGen(self: *@This(), player: *Entitys.Player, sleeptime: u64, allocator: std.mem.Allocator) !void {
         while (true) {
             std.time.sleep(sleeptime);
 
@@ -277,9 +220,14 @@ pub const World = struct {
                         z += 1;
                         self.ToGenMutex.lock();
                         defer self.ToGenMutex.unlock();
-                        _ = self.ChunkStates.get(pos) orelse {
+                        _ = self.Chunks.get(pos) orelse {
+                            const c = try allocator.create(ChunkandMeta);
+                            c.state = ChunkState.ToGenerate;
+                            c.chunkmeshesindex = null;
+                            c.neighborsmissing = 6;
+                            c.chunkPtr = null;
+                            _ = try self.Chunks.put(pos,c);
                             _ = try self.ToGen.add(pos);
-                            _ = try self.ChunkStates.put(pos, ChunkState.ToGenerate);
                             continue;
                         };
                     }
