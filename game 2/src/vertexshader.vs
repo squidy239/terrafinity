@@ -5,6 +5,7 @@ uniform mat4 view;
 uniform mat4 projection;
 uniform ivec3 chunkpos;
 uniform uint AtlasHeight;
+uniform int chunktime;
 out uint Atlasheight;
 out vec3 coordss;
 out uint side;
@@ -70,6 +71,7 @@ void main(){
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
+    pos.y -= (4000 - chunktime)/8;
     coordss = coords;
     gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);
     

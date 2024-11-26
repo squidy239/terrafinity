@@ -35,7 +35,7 @@ pub const ChunkState = enum(u8) {
 
 pub const ChunkandMeta = struct {
     chunkPtr : ?*Chunk,
-    neighborsmissing: u3,
+    neighborsmissing: ?u3,
     state:ChunkState,
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
@@ -47,6 +47,7 @@ pub const PtrState = struct {
 };
 
 pub const MeshBufferIDs = struct {
+    time:i64,
     vbo: c_uint,
     vao: c_uint,
     pos: [3]i32,
@@ -173,6 +174,7 @@ pub const Render = struct {
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
         //std.debug.print("mesh made:{d}faces\n", .{mesh.len});
         gl.BindVertexArray(0);
+        NewMeshIDs.time = std.time.milliTimestamp();
         return MeshIDs orelse NewMeshIDs;
     }
 };
@@ -251,10 +253,7 @@ pub const Generator = struct {
             var yy: usize = 0;
             while (yy <= height) : (yy += 1) {
                 const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
-                const noise = ztracy.ZoneNC(@src(), "3dnoise", 0x4aeb2a);
-                const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);
-                noise.End();
-                
+                const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);               
                 if (cave_density < caveness) {
                     const block = if (!is_top_chunk) blk: {
                         if (yy == height) break :blk Blocks.Grass;

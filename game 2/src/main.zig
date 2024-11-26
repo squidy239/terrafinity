@@ -143,8 +143,8 @@ pub fn main() !void {
         .ToMeshMutex = .{},
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
-            .noise_type = .simplex,
-            .frequency = 0.0005,
+            .noise_type = .perlin,
+            .frequency = 0.003,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
@@ -180,10 +180,11 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms ,allocator});
+    _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms ,allocator});
+    //higher cpu count than system somehow benifits this 
     for (0..cpu_count) |_| {
-        _ = try std.Thread.spawn(.{}, World.GenChunk, .{ &MainWorld, player, allocator });
-        _ = try std.Thread.spawn(.{}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
+        _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.GenChunk, .{ &MainWorld, player, allocator });
+        _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     var benchmarktimer = try std.time.Timer.start();
@@ -208,6 +209,7 @@ pub fn main() !void {
         const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
         gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
         const modellocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
+        const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
         //std.debug.print("{any}\n", .{player});
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
@@ -225,6 +227,9 @@ pub fn main() !void {
         for (it) |mesh| {
             const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x9692d);
             defer drawchunk.End();
+            var tr = std.time.milliTimestamp() - mesh.time;
+            if (tr > 4000) tr = 4000;
+            gl.Uniform1i(tlocation,@intCast(tr));
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
             //TODO occlusion queries and backface culling and frustrum cullling and early z-rejection

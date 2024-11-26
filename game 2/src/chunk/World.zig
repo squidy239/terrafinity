@@ -128,6 +128,7 @@ pub const World = struct {
                 }
 
                 if (neighbors[i] != null and neighbors[i].?.state == ChunkState.WaitingForNeighbors and chstate.state == ChunkState.Generating) {
+
                         neighbors[i].?.state = ChunkState.ReMesh;
                         const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
                         cn.data = neighbors[i].?.chunkPtr.?;
@@ -135,7 +136,8 @@ pub const World = struct {
                         self.ToMesh.append(cn);
                         self.ToMeshMutex.unlock();
             }}
-            if (wfn > 0) {                
+            if (wfn > 0) {             
+                    chstate.neighborsmissing = wfn;   
                     chstate.state = ChunkState.WaitingForNeighbors;
                 continue :top;
             }
@@ -192,6 +194,7 @@ pub const World = struct {
                 return;
             };
             self.MeshesToLoadMutex.unlock();
+            std.debug.assert(mesh.data.faces.len > 0);
             const vbo = Render.CreateOrUpdateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, null, gl.STATIC_DRAW);
             allocator.destroy(mesh);
             _ = try self.ChunkMeshes.append(vbo);
@@ -224,8 +227,9 @@ pub const World = struct {
                             const c = try allocator.create(ChunkandMeta);
                             c.state = ChunkState.ToGenerate;
                             c.chunkmeshesindex = null;
-                            c.neighborsmissing = 6;
+                            c.neighborsmissing = null;
                             c.chunkPtr = null;
+                            c.lock = .{};
                             _ = try self.Chunks.put(pos,c);
                             _ = try self.ToGen.add(pos);
                             continue;
