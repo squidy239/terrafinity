@@ -6,6 +6,7 @@ uniform mat4 projection;
 uniform ivec3 chunkpos;
 uniform uint AtlasHeight;
 uniform int chunktime;
+out vec3 blockpos;
 out uint Atlasheight;
 out vec3 coordss;
 out uint side;
@@ -64,14 +65,19 @@ vec3 rotateVertex(uint side, vec3 coords) {
     return coords;
 }
 
+float rand(vec2 co){
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
 void main(){
     vec3 pos = DecodePosition(data);
-    position = chunkpos;
+    position = pos+(chunkpos*32);
     Atlasheight = AtlasHeight;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
-    pos.y -= (4000 - chunktime)/8;
+    pos.y -= (4000 - chunktime)/10;
+    if(pos.y < 1000)
     coordss = coords;
     gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);
     

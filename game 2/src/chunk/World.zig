@@ -14,14 +14,18 @@ const gl = @import("gl");
 const Entitys = @import("../entities/Entitys.zig");
 pub const pw = struct { player: *Entitys.Player, world: *World };
 //time:2299371800 11/22/2024
+pub fn Distance(c1: [3]i32, c2: [3]i32) f32 {
+    const dx: f32 = @floatFromInt(c2[0] - c1[0]);
+    const dy: f32 = @floatFromInt(c2[1] - c1[1]);
+    const dz: f32 = @floatFromInt(c2[2] - c1[2]);
+    return @sqrt(dx * dx + dy * dy + dz * dz);
+}
 pub fn DistanceOrder(playerworld: pw, a: [3]i32, b: [3]i32) std.math.Order {
     // Convert coordinates to float32 and scale them
-    const aa = [3]f32{ @floatFromInt(a[0]), @floatFromInt(a[1]), @floatFromInt(a[2]) };
-    const bb = [3]f32{ @floatFromInt(b[0]), @floatFromInt(b[1]), @floatFromInt(b[2]) };
-    const player_location = [3]f32{ playerworld.player.pos[0] / 32, playerworld.player.pos[1] / 32, playerworld.player.pos[2] / 32 };
+    const pi = [3]i32{ @intFromFloat(playerworld.player.pos[0]), @intFromFloat(playerworld.player.pos[1]), @intFromFloat(playerworld.player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
 
-    const d1 = @sqrt(std.math.pow(f32, player_location[0] - aa[0], 2.0) + std.math.pow(f32, player_location[1] - aa[1], 2.0) + std.math.pow(f32, player_location[2] - aa[2], 2.0));
-    const d2 = @sqrt(std.math.pow(f32, player_location[0] - bb[0], 2.0) + std.math.pow(f32, player_location[1] - bb[1], 2.0) + std.math.pow(f32, player_location[2] - bb[2], 2.0));
+    const d1 = Distance(pi, a);
+    const d2 = Distance(pi, b);
 
     if (d1 < d2) {
         return std.math.Order.lt;
@@ -66,7 +70,7 @@ pub const World = struct {
             //seed 0
             const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max, self.caveness) orelse {
                 self.Chunks.get(chunkpos).?.state = ChunkState.AllAir;
-                const neighbors = GetNeighbors(self, chunkpos);
+                const neighbors = GetAndLockNeighbors(self, chunkpos);
                 for (0..6) |i| {
                     if (neighbors[i] != null and neighbors[i].?.state == ChunkState.WaitingForNeighbors) {
                         neighbors[i].?.state = ChunkState.ReMesh;
@@ -77,6 +81,9 @@ pub const World = struct {
                         self.ToMeshMutex.unlock();
                     }
                 }
+                for (neighbors) |n| if (n != null) {
+                    n.?.lock.unlockShared();
+                };
                 continue;
             };
             _ = player;
@@ -114,13 +121,20 @@ pub const World = struct {
             };
             self.ToMeshMutex.unlock();
             const chptr: *Chunk = chnode.data;
+            chptr.lock.lockShared();
+            defer chptr.lock.unlockShared();
             allocator.destroy(chnode);
             const chstate = self.Chunks.get(chptr.pos) orelse unreachable;
-            const neighbors:[6]?*ChunkandMeta = GetNeighbors(self, chptr.pos);
+            std.debug.assert(chstate.state != ChunkState.InMemoryMeshUnloaded);
+            const neighbors: [6]?*ChunkandMeta = GetAndLockNeighbors(self, chptr.pos);
+            defer {
+                for (neighbors) |n| {
+                    if (n != null) n.?.lock.unlockShared();
+                }
+            }
             var neighborptrs: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
             var wfn: u3 = 0;
             for (0..6) |i| {
-                
                 if (neighbors[i] != null and neighbors[i].?.chunkPtr != null) {
                     neighborptrs[i] = neighbors[i].?.chunkPtr.?;
                 } else if (neighbors[i] == null or neighbors[i].?.state != ChunkState.AllAir) {
@@ -128,27 +142,29 @@ pub const World = struct {
                 }
 
                 if (neighbors[i] != null and neighbors[i].?.state == ChunkState.WaitingForNeighbors and chstate.state == ChunkState.Generating) {
+                    neighbors[i].?.state = ChunkState.ReMesh;
+                    const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
+                    cn.data = neighbors[i].?.chunkPtr.?;
+                    self.ToMeshMutex.lock();
+                    self.ToMesh.append(cn);
+                    self.ToMeshMutex.unlock();
+                }
+            }
+            if (wfn > 0) {
+                chstate.state = ChunkState.WaitingForNeighbors;
 
-                        neighbors[i].?.state = ChunkState.ReMesh;
-                        const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
-                        cn.data = neighbors[i].?.chunkPtr.?;
-                        self.ToMeshMutex.lock();
-                        self.ToMesh.append(cn);
-                        self.ToMeshMutex.unlock();
-            }}
-            if (wfn > 0) {             
-                    chstate.neighborsmissing = wfn;   
-                    chstate.state = ChunkState.WaitingForNeighbors;
                 continue :top;
             }
             std.debug.assert(wfn == 0);
+            std.debug.assert(chstate.state != ChunkState.InMemoryAndMesh and chstate.state != ChunkState.InMemoryNoMesh);
             const mesh = try Render.MeshChunk_Normal(chptr, allocator, neighborptrs);
 
             if (mesh.len == 0) {
-                chstate.state = ChunkState.InMemoryNoMesh;
                 allocator.free(mesh);
+                chstate.state = ChunkState.InMemoryNoMesh;
                 continue :top;
             }
+
             const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
             defer putmesh.End();
             chstate.state = ChunkState.InMemoryAndMesh;
@@ -159,23 +175,28 @@ pub const World = struct {
             self.MeshesToLoadMutex.unlock();
         }
     }
-    pub fn GetNeighbors(self: *@This(), pos: [3]i32) [6]?*ChunkandMeta {
+    pub fn GetAndLockNeighbors(self: *@This(), pos: [3]i32) [6]?*ChunkandMeta {
         const getneighbors = ztracy.ZoneNC(@src(), "getneighbors", 0xFFFF00);
         defer getneighbors.End();
         var chunks: [6]?*ChunkandMeta = undefined;
         // BUG chunks are gotten before state TODO fix
         //if chunk state changes after ptr is gotten state and ptr could mismaatch
         //might need to change big parts of the system
-            chunks[0] = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
-            chunks[1] = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] });
-            chunks[2] = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] });
-            chunks[3] = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] });
-            chunks[4] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 });
-            chunks[5] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 });
+        chunks[0] = self.Chunks.get([3]i32{ pos[0] + 1, pos[1], pos[2] });
+        if (chunks[0] != null) chunks[0].?.lock.lockShared();
+        chunks[1] = self.Chunks.get([3]i32{ pos[0] - 1, pos[1], pos[2] });
+        if (chunks[1] != null) chunks[1].?.lock.lockShared();
+        chunks[2] = self.Chunks.get([3]i32{ pos[0], pos[1] + 1, pos[2] });
+        if (chunks[2] != null) chunks[2].?.lock.lockShared();
+        chunks[3] = self.Chunks.get([3]i32{ pos[0], pos[1] - 1, pos[2] });
+        if (chunks[3] != null) chunks[3].?.lock.lockShared();
+        chunks[4] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] + 1 });
+        if (chunks[4] != null) chunks[4].?.lock.lockShared();
+        chunks[5] = self.Chunks.get([3]i32{ pos[0], pos[1], pos[2] - 1 });
+        if (chunks[5] != null) chunks[5].?.lock.lockShared();
 
         return chunks;
     }
-
 
     pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, maxtime: u64) !void {
         const loadmeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
@@ -194,7 +215,6 @@ pub const World = struct {
                 return;
             };
             self.MeshesToLoadMutex.unlock();
-            std.debug.assert(mesh.data.faces.len > 0);
             const vbo = Render.CreateOrUpdateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, null, gl.STATIC_DRAW);
             allocator.destroy(mesh);
             _ = try self.ChunkMeshes.append(vbo);
@@ -223,23 +243,81 @@ pub const World = struct {
                         z += 1;
                         self.ToGenMutex.lock();
                         defer self.ToGenMutex.unlock();
-                        _ = self.Chunks.get(pos) orelse {
+                        const cg = self.Chunks.get(pos);
+                        
+                        if (cg == null) {
                             const c = try allocator.create(ChunkandMeta);
                             c.state = ChunkState.ToGenerate;
                             c.chunkmeshesindex = null;
                             c.neighborsmissing = null;
-                            c.chunkPtr = null;
                             c.lock = .{};
-                            _ = try self.Chunks.put(pos,c);
+                            c.chunkPtr = null;
+                            c.pos = pos;
+                            _ = try self.Chunks.put(pos, c);
                             _ = try self.ToGen.add(pos);
                             continue;
-                        };
+                        }
+                        else if(cg.?.state == ChunkState.InMemoryMeshUnloaded){
+                            cg.?.lock.lock();
+                            cg.?.state = ChunkState.ReMesh;
+                            cg.?.lock.unlock();
+
+                            const cn = try allocator.create(std.DoublyLinkedList(*Chunk).Node);
+                            cn.data = cg.?.chunkPtr.?;
+                            self.ToMeshMutex.lock();
+                            self.ToMesh.append(cn);
+                            self.ToMeshMutex.unlock();
+                        }
                     }
                     y += 1;
                     z = -@as(i32, @intCast(player.GenDistance[2]));
                 }
                 x += 1;
                 y = -@as(i32, @intCast(player.GenDistance[1]));
+            }
+        }
+    }
+
+    pub fn AddToUnload(self: *@This(), player: *Entitys.Player, sleeptime: u64, allocator: std.mem.Allocator) !void {
+        while (true) {
+            std.time.sleep(sleeptime);
+            const addToUnload = ztracy.ZoneNC(@src(), "AddToUnload", 0x9692de);
+            defer addToUnload.End();
+            const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
+            const bktamount = self.Chunks.buckets.len;
+            for (0..bktamount) |b| {
+                std.debug.print("s", .{});
+                self.Chunks.buckets[b].lock.lockShared();
+                var it = self.Chunks.buckets[b].iteratorManualLock();
+                defer self.Chunks.buckets[b].lock.unlockShared();
+                while (true) {
+                    const ch = it.next() orelse {
+                        break;
+                    };
+
+                    if (@reduce(.Or, @abs(pi - ch.value_ptr.*.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
+                        ch.value_ptr.*.lock.lockShared();
+                        if ((ch.value_ptr.*.state == ChunkState.InMemoryAndMesh or ch.value_ptr.*.state == ChunkState.InMemoryNoMesh or ch.value_ptr.*.state == ChunkState.InMemoryMeshUnloaded)) {
+                            ch.value_ptr.*.lock.unlockShared();
+                            ch.value_ptr.*.lock.lock();
+                            ch.value_ptr.*.chunkPtr.?.lock.lock();
+                            //std.debug.print("\n\n u \n\n", .{});
+                            if (ch.value_ptr.*.state == ChunkState.InMemoryAndMesh) {
+                                ch.value_ptr.*.state = ChunkState.MeshOnly;
+                            } else if (ch.value_ptr.*.state == ChunkState.InMemoryNoMesh or ch.value_ptr.*.state == ChunkState.InMemoryMeshUnloaded ) {
+                                ch.value_ptr.*.state = ChunkState.Unknown;
+                            }
+                            const p = ch.value_ptr.*;
+                            allocator.destroy(ch.value_ptr.*.chunkPtr.?);
+                            self.Chunks.buckets[b].lock.unlockShared();
+                            _ = self.Chunks.remove(ch.value_ptr.*.pos);
+                            self.Chunks.buckets[b].lock.lockShared();
+                            allocator.destroy(p);
+
+                            // ch.value_ptr.*.lock.unlock();
+                        } else ch.value_ptr.*.lock.unlockShared();
+                    }
+                }
             }
         }
     }

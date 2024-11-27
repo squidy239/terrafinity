@@ -47,8 +47,8 @@ var player: Entitys.Player = Entitys.Player{
     .pitch = 0,
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
-    .pos = @Vector(3, f32){ 0.0, 0.0, -4.0 },
-    .GenDistance = [3]u32{ 20, 10, 20 },
+    .pos = @Vector(3, f32){ 0.0, 30.0, 0.0 },
+    .GenDistance = [3]u32{ 20, 10, 20},
     .LoadDistance = [3]u32{ 20, 10, 20 },
     .MeshDistance = [3]u32{ 20, 10, 20 },
 };
@@ -113,7 +113,6 @@ pub fn main() !void {
     }
     gl.UseProgram(shaderprogram);
 
-
     gl.DeleteShader(vertexshader);
     gl.DeleteShader(fragshader);
 
@@ -135,7 +134,6 @@ pub fn main() !void {
         .Chunks = ConcurrentHashMap([3]i32, *ChunkandMeta, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .ToGen = std.PriorityQueue([3]i32, pw, DistanceOrder).init(c_allocator, pw{ .player = &player, .world = undefined }),
-        //.ChunkStates = ConcurrentHashMap([3]i32, ChunkStates, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
@@ -144,7 +142,7 @@ pub fn main() !void {
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .perlin,
-            .frequency = 0.003,
+            .frequency = 0.0008,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
@@ -153,8 +151,8 @@ pub fn main() !void {
             .fractal_type = .none,
             .frequency = 0.005,
         },
-        .min = -256,
-        .max = 512,
+        .min = -64,
+        .max = 256,
         // 0 is most cavey 255 is least cavey
         .caveness = 180,
     };
@@ -180,14 +178,16 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms ,allocator});
-    //higher cpu count than system somehow benifits this 
-    for (0..cpu_count) |_| {
-        _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.GenChunk, .{ &MainWorld, player, allocator });
-        _ = try std.Thread.spawn(.{.stack_size = 16 * 1024 * 8}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
+    //_ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.AddToUnload, .{ &MainWorld, &player, 1000 * std.time.ns_per_ms, allocator });
+    //higher cpu count than system somehow benifits this
+    for (0..cpu_count/3) |_| {
+        _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.GenChunk, .{ &MainWorld, player, allocator });
+        _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     var benchmarktimer = try std.time.Timer.start();
+    var unloadTimer = try std.time.Timer.start();
     var genbenchmark = true;
     var meshbenchmark = true;
     while (!window.shouldClose()) {
@@ -229,12 +229,13 @@ pub fn main() !void {
             defer drawchunk.End();
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 4000) tr = 4000;
-            gl.Uniform1i(tlocation,@intCast(tr));
+            gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
             //TODO occlusion queries and backface culling and frustrum cullling and early z-rejection
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
         }
+
         drawtime.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
         prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
@@ -243,9 +244,37 @@ pub fn main() !void {
         window.swapBuffers();
         glfw.pollEvents();
         swapandpoll.End();
-        const print = ztracy.ZoneNC(@src(), "print", 0x00_ff_00_00);
         std.debug.print("{d}\r", .{player.pos});
-        print.End();
+        const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);
+        unload.End();
+        if (unloadTimer.read() > 20 * std.time.ns_per_ms) {
+            unloadTimer.reset();
+            const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
+            //std.debug.print("\n\n{}\n\n", .{it.len});
+            std.debug.assert(it.len == MainWorld.ChunkMeshes.items.len);
+            var i = MainWorld.ChunkMeshes.items.len;
+            while (i > 0) {
+                i -= 1;
+                const mesh = MainWorld.ChunkMeshes.items[i];
+
+                if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
+                    const p = MainWorld.Chunks.get(mesh.pos).?; 
+                    p.lock.lock();
+                    if(p.state == ChunkStates.InMemoryAndMesh){ p.state = ChunkStates.InMemoryMeshUnloaded;}
+                    else if (p.state == ChunkStates.MeshOnly){
+                        std.debug.print("l", .{});
+                        std.debug.assert(p.chunkPtr == null);
+                        allocator.destroy(p);
+                    }
+                    else {std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});}
+                    p.lock.unlock();
+
+                    var l = MainWorld.ChunkMeshes.swapRemove(i);
+                    gl.DeleteBuffers(1,@ptrCast(&l.vbo));
+                    gl.DeleteVertexArrays(1,@ptrCast(&l.vao));
+                }
+            }
+        }
     }
 }
 
@@ -296,11 +325,11 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.pos[1] -= cameraSpeed[1];
     if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
-        player.speed *= @splat(10.0);
+        player.speed *= @splat(30.0);
         fast = true;
     }
     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
-        player.speed /= @splat(10.0);
+        player.speed /= @splat(30.0);
         fast = false;
     }
 

@@ -29,14 +29,16 @@ pub const ChunkState = enum(u8) {
     InMemoryNoMesh = 3,
     MeshOnly = 4,
     InMemoryAndMesh = 5,
+    InMemoryMeshUnloaded = 8,
     Unknown = 6,
     WaitingForNeighbors = 7,
 };
 
 pub const ChunkandMeta = struct {
-    chunkPtr : ?*Chunk,
+    chunkPtr: ?*Chunk,
+    pos: [3]i32,
     neighborsmissing: ?u3,
-    state:ChunkState,
+    state: ChunkState,
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
 };
@@ -47,7 +49,7 @@ pub const PtrState = struct {
 };
 
 pub const MeshBufferIDs = struct {
-    time:i64,
+    time: i64,
     vbo: c_uint,
     vao: c_uint,
     pos: [3]i32,
@@ -95,7 +97,7 @@ pub const Render = struct {
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
         defer meshchunkreal.End();
         const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
-        var mesh = try std.ArrayList(u32).initCapacity(allocator,ChunkSize * ChunkSize * ChunkSize * 2);
+        var mesh = try std.ArrayList(u32).initCapacity(allocator, ChunkSize * ChunkSize * ChunkSize * 2);
         initarraylist.End();
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
@@ -209,65 +211,65 @@ pub const Generator = struct {
     }
 
     pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: u8) ?Chunk {
-    const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
-    defer gen.End();
+        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
+        defer gen.End();
 
-    // Pre-calculate chunk position offset
-    const chunk_offset = @Vector(3, f32){
-        @floatFromInt(Pos[0] * 32),
-        @floatFromInt(Pos[1] * 32),
-        @floatFromInt(Pos[2] * 32),
-    };
-    
-    // Initialize chunk with air blocks
-    var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-    var has_terrain = false;
+        // Pre-calculate chunk position offset
+        const chunk_offset = @Vector(3, f32){
+            @floatFromInt(Pos[0] * 32),
+            @floatFromInt(Pos[1] * 32),
+            @floatFromInt(Pos[2] * 32),
+        };
 
-    // Pre-calculate terrain heights for the entire chunk
-    var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
-    for (0..ChunkSize) |xx| {
-        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
-        for (0..ChunkSize) |zz| {
-            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-            terrain_heights[xx][zz] = TerrainNoise.genNoise2DRange(x, z, i32, terrainmin, terrainmax);
+        // Initialize chunk with air blocks
+        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+        var has_terrain = false;
+
+        // Pre-calculate terrain heights for the entire chunk
+        var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
+        for (0..ChunkSize) |xx| {
+            const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+            for (0..ChunkSize) |zz| {
+                const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+                terrain_heights[xx][zz] = TerrainNoise.genNoise2DRange(x, z, i32, terrainmin, terrainmax);
+            }
         }
-    }
 
-    // Process terrain generation in a more cache-friendly way
-    for (0..ChunkSize) |xx| {
-        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
-        for (0..ChunkSize) |zz| {
-            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-            const tn = terrain_heights[xx][zz];
-            const chunk_y = @divFloor(tn, 32);
-            
-            if (chunk_y < Pos[1]) continue;
-            
-            const is_top_chunk = chunk_y > Pos[1];
-            const height = if (is_top_chunk) 
-                ChunkSize - 1 
-            else 
-                @mod(tn, ChunkSize);
+        // Process terrain generation in a more cache-friendly way
+        for (0..ChunkSize) |xx| {
+            const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+            for (0..ChunkSize) |zz| {
+                const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+                const tn = terrain_heights[xx][zz];
+                const chunk_y = @divFloor(tn, 32);
 
-            // Process vertical column
-            var yy: usize = 0;
-            while (yy <= height) : (yy += 1) {
-                const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
-                const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);               
-                if (cave_density < caveness) {
-                    const block = if (!is_top_chunk) blk: {
-                        if (yy == height) break :blk Blocks.Grass;
-                        if (yy > height - 5) break :blk Blocks.Dirt;
-                        break :blk Blocks.Stone;
-                    } else Blocks.Stone;
-                    
-                    chunk.blocks[xx][yy][zz] = block;
-                    has_terrain = true;
+                if (chunk_y < Pos[1]) continue;
+
+                const is_top_chunk = chunk_y > Pos[1];
+                const height = if (is_top_chunk)
+                    ChunkSize - 1
+                else
+                    @mod(tn, ChunkSize);
+
+                // Process vertical column
+                var yy: usize = 0;
+                while (yy <= height) : (yy += 1) {
+                    const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
+                    const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);
+                    if (cave_density < caveness) {
+                        const block = if (!is_top_chunk) blk: {
+                            if (yy == height) break :blk Blocks.Grass;
+                            if (yy > height - 5) break :blk Blocks.Dirt;
+                            break :blk Blocks.Stone;
+                        } else Blocks.Stone;
+
+                        chunk.blocks[xx][yy][zz] = block;
+                        has_terrain = true;
+                    }
                 }
             }
         }
-    }
 
-    return if (has_terrain) chunk else null;
-}
+        return if (has_terrain) chunk else null;
+    }
 };

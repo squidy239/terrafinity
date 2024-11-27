@@ -4,6 +4,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
     return struct {
         ctx: Context,
         buckets: [bucketamount]Bucket(K, V, Context, maxloadpercentage),
+        allocator: std.mem.Allocator,
 
         const Self = @This();
 
@@ -31,12 +32,21 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             try self.buckets[bucket_index].put(key, value);
         }
 
+        pub fn remove(self: *Self, key: K) bool {
+            const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            defer hashput.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].remove(key);
+        }
+
         pub fn init(allocator: std.mem.Allocator) Self {
             var bkts: [bucketamount]Bucket(K, V, Context, maxloadpercentage) = undefined;
             for (0..bucketamount) |i| {
                 bkts[i] = Bucket(K, V, Context, maxloadpercentage).init(allocator);
             }
             return .{
+                .allocator = allocator,
                 .ctx = Context{},
                 .buckets = bkts,
             };
@@ -73,12 +83,24 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             return self.hash_map.getPtr(key);
         }
 
+        pub fn iteratorManualLock(self: *Self) std.HashMap(K, V, Context, maxloadpercentage).Iterator {
+            return self.hash_map.iterator();
+        }
+
         pub fn put(self: *Self, key: K, value: V) !void {
             const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
             bktlock.End();
             defer self.lock.unlock();
             try self.hash_map.put(key, value);
+        }
+
+        pub fn remove(self: *Self, key: K) bool {
+            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lock();
+            bktlock.End();
+            defer self.lock.unlock();
+            return self.hash_map.remove(key);
         }
 
         pub fn init(allocator: std.mem.Allocator) Self {
