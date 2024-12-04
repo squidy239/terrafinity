@@ -41,6 +41,7 @@ pub const ChunkandMeta = struct {
     state: std.atomic.Value(ChunkState),
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
+    Unloading:bool,
 };
 
 pub const PtrState = struct {

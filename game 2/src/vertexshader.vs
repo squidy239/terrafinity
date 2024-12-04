@@ -76,7 +76,7 @@ void main(){
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
-    pos.y -= (1000 - chunktime)/10;
+    pos.y -= (1000 - chunktime)/10000000;
     if(pos.y < 1000)
     coordss = coords;
     gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);

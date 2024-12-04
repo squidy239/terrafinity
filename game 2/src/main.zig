@@ -180,14 +180,17 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
     _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80}, World.AddToUnload, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
-    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80 }, World.UnloadLoop, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80 }, World.UnloadLoop, .{ &MainWorld, 100 * std.time.ns_per_ms, allocator });
     //higher cpu count than system somehow benifits this
-    for (0..cpu_count/2) |_| {
+    for (0..@intFromFloat(@as(f32,@floatFromInt(cpu_count))/@as(f32,1.5))) |_| {
         _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.GenChunk, .{ &MainWorld, player, allocator });
+    }
+    for (0..cpu_count/4) |_| {
         _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
+
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     var benchmarktimer = try std.time.Timer.start();
     var unloadTimer = try std.time.Timer.start();
@@ -203,7 +206,7 @@ pub fn main() !void {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
-            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 20 * std.time.ns_per_ms);
+            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 2 * std.time.ns_per_ms);
         }
         const proj = zm.Mat4f.perspective(zm.toRadians(114.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.05, 10000.0);
         gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
@@ -242,14 +245,16 @@ pub fn main() !void {
         const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
         prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         prossesinput.End();
-        const swapandpoll = ztracy.ZoneNC(@src(), "swapandpoll", 0x00_ff_00_00);
+        const swap = ztracy.ZoneNC(@src(), "swap", 0x00_ff_00_00);
         window.swapBuffers();
+        swap.End();
+        const poll = ztracy.ZoneNC(@src(), "poll", 0x00_ff_00_00);
         glfw.pollEvents();
-        swapandpoll.End();
-        std.debug.print("{d}\r", .{player.pos});
+        poll.End();
+        //std.debug.print("{d}\r", .{player.pos});
         const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);
         unload.End();
-        if (unloadTimer.read() > 20 * std.time.ns_per_ms) {
+        if (unloadTimer.read() > 2 * std.time.ns_per_ms) {
             unloadTimer.reset();
             const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
             //std.debug.print("\n\n{}\n\n", .{it.len});
@@ -261,16 +266,19 @@ pub fn main() !void {
 
                 if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
                     const p = MainWorld.Chunks.get(mesh.pos).?;
-                    if (!p.lock.tryLock()){continue;}
-                    //p.lock.lock();
-                    if (p.state.load(.monotonic) == ChunkStates.InMemoryAndMesh) {
-                        p.state.store(ChunkStates.InMemoryMeshUnloaded, .monotonic);
+                    
+                    if (p.state.load(.seq_cst) == ChunkStates.InMemoryAndMesh) {
+                        p.lock.lock();
+                        p.state.store(ChunkStates.InMemoryMeshUnloaded, .seq_cst);
                         p.lock.unlock();
-                    } else if (p.state.load(.monotonic) == ChunkStates.MeshOnly) {
-                        std.debug.print("m", .{});
+                    } else if (p.state.load(.seq_cst) == ChunkStates.MeshOnly) {
+
                         std.debug.assert(p.chunkPtr == null);
+                        _ = MainWorld.Chunks.remove(p.pos);
+                        if (!p.lock.tryLock()){continue;}
                         allocator.destroy(p);
                     } else {
+                        p.lock.lock();
                         std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
                         p.lock.unlock();
                     }

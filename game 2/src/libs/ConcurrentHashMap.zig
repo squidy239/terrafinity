@@ -99,6 +99,9 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             //bktlock.End();
             defer self.lock.unlockShared();
             const ch:*ChunkandMeta = self.hash_map.get(key) orelse return null;
+           // std.debug.print("\n{*}", .{ch});
+           //if(ch.Unloading) return null;
+            std.debug.assert(@intFromPtr(ch) != 0xffffffffffffffff);
             ch.lock.lockShared();
             return ch;
 
