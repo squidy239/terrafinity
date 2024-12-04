@@ -1,5 +1,7 @@
 const std = @import("std");
-const ztracy = @import("ztracy");
+//const ztracy = @import("ztracy");
+const ChunkandMeta = @import("../chunk/Chunk.zig").ChunkandMeta;
+
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
         ctx: Context,
@@ -9,35 +11,51 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
         const Self = @This();
 
         pub fn get(self: *Self, key: K) ?V {
-            const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
-            defer hashget.End();
+            //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
+            //defer hashget.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].get(key);
         }
 
+        pub fn getandlockchunkshared(self: *Self, key: K) ?V {
+            //const hashget = ztracy.ZoneNC(@src(), "getandlockchunkshared", 0x9692d);
+            //defer hashget.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].getandlockchunkshared(key);
+        }
+
         pub fn getPtr(self: *Self, key: K) ?*V {
-            const hashgetptr = ztracy.ZoneNC(@src(), "hashgetptr", 0x9692d);
-            defer hashgetptr.End();
+            //const hashgetptr = ztracy.ZoneNC(@src(), "hashgetptr", 0x9692d);
+            //defer hashgetptr.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].getPtr(key);
         }
 
         pub fn put(self: *Self, key: K, value: V) !void {
-            const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
-            defer hashput.End();
+            //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            //defer hashput.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             try self.buckets[bucket_index].put(key, value);
         }
 
         pub fn remove(self: *Self, key: K) bool {
-            const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
-            defer hashput.End();
+            //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            //defer hashput.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].remove(key);
+        }
+
+        pub fn removemanuallock(self: *Self, key: K) bool {
+            //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            //defer hashput.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].removemanuallock(key);
         }
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -68,17 +86,29 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
         const Self = @This();
 
         pub fn get(self: *Self, key: K) ?V {
-            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
-            bktlock.End();
+            //bktlock.End();
             defer self.lock.unlockShared();
             return self.hash_map.get(key);
         }
 
-        pub fn getPtr(self: *Self, key: K) ?*V {
-            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+        pub fn getandlockchunkshared(self: *Self, key: K) ?V {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
-            bktlock.End();
+            //bktlock.End();
+            defer self.lock.unlockShared();
+            const ch:*ChunkandMeta = self.hash_map.get(key) orelse return null;
+            ch.lock.lockShared();
+            return ch;
+
+            
+        }
+
+        pub fn getPtr(self: *Self, key: K) ?*V {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lockShared();
+            //bktlock.End();
             defer self.lock.unlockShared();
             return self.hash_map.getPtr(key);
         }
@@ -88,18 +118,22 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
         }
 
         pub fn put(self: *Self, key: K, value: V) !void {
-            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
-            bktlock.End();
+            //bktlock.End();
             defer self.lock.unlock();
             try self.hash_map.put(key, value);
         }
 
         pub fn remove(self: *Self, key: K) bool {
-            const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
-            bktlock.End();
+            //bktlock.End();
             defer self.lock.unlock();
+            return self.hash_map.remove(key);
+        }
+
+        pub fn removemanuallock(self: *Self, key: K) bool {
             return self.hash_map.remove(key);
         }
 
@@ -123,8 +157,26 @@ test "basic get and put" {
 
     try hm.put(1, 32);
     try hm.put(345, 775);
-
+    
     try std.testing.expectEqual(@as(?i32, 32), hm.get(1));
     try std.testing.expect(hm.get(345) == 775);
+    try std.testing.expect(hm.get(45645) == null);
+}
+
+
+test "remove" {
+    const allocator = std.testing.allocator;
+    var hm = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init(allocator);
+    defer hm.deinit();
+
+    try hm.put(100, 320);
+    try hm.put(345, 775);
+    for (0..100)|i|{
+        try hm.put(@intCast(i)  , @intCast(i+1));
+    }
+    for(0..50)|i|{_ = hm.remove(@intCast(i));}
+    try std.testing.expectEqual(@as(?i32, 320), hm.get(100));
+    try std.testing.expect(hm.get(345) == 775);
+    try std.testing.expect(hm.get(75) == 76);
     try std.testing.expect(hm.get(45645) == null);
 }

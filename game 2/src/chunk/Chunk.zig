@@ -38,7 +38,7 @@ pub const ChunkandMeta = struct {
     chunkPtr: ?*Chunk,
     pos: [3]i32,
     neighborsmissing: ?u3,
-    state: ChunkState,
+    state: std.atomic.Value(ChunkState),
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
 };
@@ -91,7 +91,7 @@ pub const Render = struct {
             if (neighbors[n] != null) {
                 neighbors[n].?.lock.lockShared();
                 defer neighbors[n].?.lock.unlockShared();
-            }
+            } 
         }
 
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);

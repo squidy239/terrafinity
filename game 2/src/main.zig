@@ -48,7 +48,7 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 30.0, 0.0 },
-    .GenDistance = [3]u32{ 20, 10, 20},
+    .GenDistance = [3]u32{ 20, 10, 20 },
     .LoadDistance = [3]u32{ 20, 10, 20 },
     .MeshDistance = [3]u32{ 20, 10, 20 },
 };
@@ -137,7 +137,9 @@ pub fn main() !void {
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
         .MeshesToLoadMutex = .{},
         .ToGenMutex = .{},
-        .ToMesh = std.DoublyLinkedList(*Chunk){},
+        .ToMesh = std.DoublyLinkedList([3]i32){},
+        .ToUnloadMutex = .{},
+        .ToUnload = std.DoublyLinkedList([3]i32){},
         .ToMeshMutex = .{},
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
@@ -178,12 +180,13 @@ pub fn main() !void {
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
 
-    _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
-    //_ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.AddToUnload, .{ &MainWorld, &player, 1000 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80}, World.AddToUnload, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80 }, World.UnloadLoop, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     //higher cpu count than system somehow benifits this
-    for (0..cpu_count/3) |_| {
-        _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.GenChunk, .{ &MainWorld, player, allocator });
-        _ = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 8 }, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
+    for (0..cpu_count/2) |_| {
+        _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.GenChunk, .{ &MainWorld, player, allocator });
+        _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
     const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     var benchmarktimer = try std.time.Timer.start();
@@ -191,7 +194,6 @@ pub fn main() !void {
     var genbenchmark = true;
     var meshbenchmark = true;
     while (!window.shouldClose()) {
-        //std.debug.print("mesh {d} b\nchdata = ~ {d} b\n{d} b\n{d} b\n", .{@sizeOf(ChunkMesh)*MainWorld.ChunkMeshes.capacity,@sizeOf(ChunkStates) * MainWorld.ChunkStates.buckets[2].hash_map.capacity()*24,0,0});
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
@@ -228,7 +230,7 @@ pub fn main() !void {
             const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x9692d);
             defer drawchunk.End();
             var tr = std.time.milliTimestamp() - mesh.time;
-            if (tr > 4000) tr = 4000;
+            if (tr > 1000) tr = 1000;
             gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
@@ -258,20 +260,24 @@ pub fn main() !void {
                 const mesh = MainWorld.ChunkMeshes.items[i];
 
                 if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
-                    const p = MainWorld.Chunks.get(mesh.pos).?; 
-                    p.lock.lock();
-                    if(p.state == ChunkStates.InMemoryAndMesh){ p.state = ChunkStates.InMemoryMeshUnloaded;}
-                    else if (p.state == ChunkStates.MeshOnly){
-                        std.debug.print("l", .{});
+                    const p = MainWorld.Chunks.get(mesh.pos).?;
+                    if (!p.lock.tryLock()){continue;}
+                    //p.lock.lock();
+                    if (p.state.load(.monotonic) == ChunkStates.InMemoryAndMesh) {
+                        p.state.store(ChunkStates.InMemoryMeshUnloaded, .monotonic);
+                        p.lock.unlock();
+                    } else if (p.state.load(.monotonic) == ChunkStates.MeshOnly) {
+                        std.debug.print("m", .{});
                         std.debug.assert(p.chunkPtr == null);
                         allocator.destroy(p);
+                    } else {
+                        std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
+                        p.lock.unlock();
                     }
-                    else {std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});}
-                    p.lock.unlock();
 
                     var l = MainWorld.ChunkMeshes.swapRemove(i);
-                    gl.DeleteBuffers(1,@ptrCast(&l.vbo));
-                    gl.DeleteVertexArrays(1,@ptrCast(&l.vao));
+                    gl.DeleteBuffers(1, @ptrCast(&l.vbo));
+                    gl.DeleteVertexArrays(1, @ptrCast(&l.vao));
                 }
             }
         }
@@ -294,10 +300,10 @@ fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
     lastY = ypos;
     player.yaw -= @floatCast(xoffset);
     player.pitch -= @floatCast(yoffset);
-    if (player.pitch > 89.0)
-        player.pitch = 89.0;
-    if (player.pitch < -89.0)
-        player.pitch = -89.0;
+    if (player.pitch > 89.9)
+        player.pitch = 89.9;
+    if (player.pitch < -89.9)
+        player.pitch = -89.9;
     player.cameraFront[0] = @floatCast(@sin(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
     player.cameraFront[1] = @floatCast(@sin(zm.toRadians(player.pitch)));
     player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
