@@ -5,6 +5,8 @@ in flat vec3 position;
 in vec3 coordss;
 in flat uint blocktype;
 in flat uint side;
+in vec3 fragpos;
+in  vec3 sunpos;
 uniform sampler2D TextureAtlas;
 
 float rand(vec2 co){
@@ -14,29 +16,41 @@ float rand(vec2 co){
 void main()
 {   
     vec2 texcoords = vec2(0,0);
+    vec3 Normal;
     if(side == 0){
         texcoords = coordss.yz;
+                            Normal = vec3(-1.0,  0.0, 0.0);
+
+
     }
     else if (side == 1){
         texcoords = coordss.yz;
+                        Normal = vec3(1.0,  0.0, 0.0);
+
+
 
     }
     //-------------------------------------------
     else if (side == 2){
                 texcoords = coordss.xz;
+            Normal = vec3(0.0,  -1.0, 0.0);
 
     }
     else if (side == 3){
                 texcoords = coordss.xz;
+            Normal = vec3(0.0,  1.0, 0.0);
 
     }
     //-------------------------------
     else if (side == 4){
                 texcoords = coordss.xy;
+                            Normal = vec3(0.0,  0.0, -1.0);
 
     }
     else if (side == 5){
                 texcoords = coordss.xy;
+                            Normal = vec3(0.0,  0.0, 1.0);
+
 
     }
     texcoords = texcoords * 2;
@@ -51,4 +65,12 @@ void main()
     else if(blocktype == 2)
                 {FragColor = vec4(cdfs+0.2,cdfs-0.2,cdfs-0.5,1);}
 
+    
+    vec3 lightColor = vec3(1.0,1.0,1.0);
+    vec3 norm = normalize(Normal);
+    vec3 lightDir = normalize(sunpos - fragpos); 
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * lightColor;
+    vec3 result = (0.2 + diffuse) * FragColor.xyz;
+    FragColor = vec4(result, 1.0);
 }                  

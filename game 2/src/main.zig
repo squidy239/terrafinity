@@ -7,9 +7,11 @@ const ztracy = @import("ztracy");
 var procs: gl.ProcTable = undefined;
 var gpa = (std.heap.GeneralPurposeAllocator(.{
     .thread_safe = true,
+    .safety = false,
+    
 }){});
-const allocator = gpa.allocator();
 const c_allocator = std.heap.c_allocator;
+const allocator = gpa.allocator();
 var width: u32 = 800;
 const ConcurrentHashMap = @import("./libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 var height: u32 = 600;
@@ -19,10 +21,13 @@ const Chunk = @import("./chunk/Chunk.zig").Chunk;
 const ChunkStates = @import("./chunk/Chunk.zig").ChunkState;
 const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
+const Blocks = @import("./chunk/Blocks.zig").Blocks;
+
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
 const World = @import("./chunk/World.zig").World;
 const ChunkandMeta = @import("./chunk/Chunk.zig").ChunkandMeta;
 const pw = @import("./chunk/World.zig").pw;
+var Worldptr:*World = undefined;
 const ChunkMesh = @import("./chunk/World.zig").ChunkMesh;
 const Noise = @import("./chunk/fastnoise.zig");
 var fast = false;
@@ -49,7 +54,7 @@ var player: Entitys.Player = Entitys.Player{
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 30.0, 0.0 },
     .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20 },
+    .LoadDistance = [3]u32{ 20, 10, 20},
     .MeshDistance = [3]u32{ 20, 10, 20 },
 };
 
@@ -71,6 +76,7 @@ pub fn main() !void {
         .opengl_profile = .opengl_core_profile,
         .opengl_forward_compat = true,
         .samples = 4,
+        
     }) orelse {
         std.debug.panic("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
         return error.CreateWindowFailed;
@@ -144,7 +150,7 @@ pub fn main() !void {
         .TerrainNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .perlin,
-            .frequency = 0.0008,
+            .frequency = 0.00008,
             .fractal_type = .none,
         },
         .CaveNoise = Noise.Noise(f32){
@@ -153,16 +159,23 @@ pub fn main() !void {
             .fractal_type = .none,
             .frequency = 0.005,
         },
+        .TerrainNoise2 = Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .perlin,
+            .frequency = 0.002,
+            .fractal_type = .none,
+        },
         .min = -64,
-        .max = 256,
+        .max = 5024,
         // 0 is most cavey 255 is least cavey
-        .caveness = 180,
+        .caveness = 0.4,
     };
     MainWorld.ToGen.context.world = &MainWorld;
+    Worldptr = &MainWorld;
     gl.Enable(gl.DEPTH_TEST);
-    //gl.Enable(gl.CULL_FACE);
-    //gl.CullFace(gl.BACK);
-    //gl.FrontFace(gl.CW);
+    gl.Enable(gl.CULL_FACE);
+    gl.CullFace(gl.BACK);
+    gl.FrontFace(gl.CW);
 
     //load textures
     var atlas = try Textures.LoadAtlas("./Textures/BlockTextures.png", allocator);
@@ -170,8 +183,8 @@ pub fn main() !void {
     gl.GenTextures(1, @ptrCast(&BlockTextures));
 
     gl.BindTexture(gl.TEXTURE_2D, BlockTextures);
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    //gl.Enable(gl.BLEND);
+    //gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(atlas.width), @intCast(atlas.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(atlas.data));
@@ -181,13 +194,13 @@ pub fn main() !void {
     atlas.deinit();
 
     _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
-    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80}, World.AddToUnload, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
+    _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80 }, World.AddToUnload, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
     _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 80 }, World.UnloadLoop, .{ &MainWorld, 100 * std.time.ns_per_ms, allocator });
     //higher cpu count than system somehow benifits this
-    for (0..@intFromFloat(@as(f32,@floatFromInt(cpu_count))/@as(f32,1.5))) |_| {
+    for (0..@intFromFloat(@as(f32, @floatFromInt(cpu_count)) / @as(f32, 1.5))) |_| {
         _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.GenChunk, .{ &MainWorld, player, allocator });
     }
-    for (0..cpu_count/4) |_| {
+    for (0..cpu_count / 2) |_| {
         _ = try std.Thread.spawn(.{ .stack_size = 32 * 1024 * 8 }, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
     }
 
@@ -213,7 +226,7 @@ pub fn main() !void {
         const view = zm.Mat4f.lookAt(player.pos, player.pos + player.cameraFront, player.cameraUp);
         const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
         gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
-        const modellocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
+        const chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
         const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
         //std.debug.print("{any}\n", .{player});
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
@@ -235,7 +248,7 @@ pub fn main() !void {
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 1000) tr = 1000;
             gl.Uniform1i(tlocation, @intCast(tr));
-            gl.Uniform3i(modellocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
+            gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
             //TODO occlusion queries and backface culling and frustrum cullling and early z-rejection
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
@@ -243,7 +256,7 @@ pub fn main() !void {
 
         drawtime.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
-        prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
+        try prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         prossesinput.End();
         const swap = ztracy.ZoneNC(@src(), "swap", 0x00_ff_00_00);
         window.swapBuffers();
@@ -263,24 +276,23 @@ pub fn main() !void {
             while (i > 0) {
                 i -= 1;
                 const mesh = MainWorld.ChunkMeshes.items[i];
+                                    const p = MainWorld.Chunks.get(mesh.pos).?;
+         
+                if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance)))) or p.state.load(.seq_cst) == ChunkStates.ReMesh) {
 
-                if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
-                    const p = MainWorld.Chunks.get(mesh.pos).?;
-                    
                     if (p.state.load(.seq_cst) == ChunkStates.InMemoryAndMesh) {
                         p.lock.lock();
                         p.state.store(ChunkStates.InMemoryMeshUnloaded, .seq_cst);
                         p.lock.unlock();
                     } else if (p.state.load(.seq_cst) == ChunkStates.MeshOnly) {
-
                         std.debug.assert(p.chunkPtr == null);
                         _ = MainWorld.Chunks.remove(p.pos);
-                        if (!p.lock.tryLock()){continue;}
+                        if (!p.lock.tryLock()) {
+                            continue;
+                        }
                         allocator.destroy(p);
                     } else {
-                        p.lock.lock();
                         std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
-                        p.lock.unlock();
                     }
 
                     var l = MainWorld.ChunkMeshes.swapRemove(i);
@@ -323,7 +335,7 @@ fn i32Range(comptime a: i32, comptime b: i32) [b - a]i32 {
         return range;
     }
 }
-fn prossesInput(window: *glfw.Window, dt: f64) void {
+fn prossesInput(window: *glfw.Window, dt: f64) !void {
     const deltaTime: f32 = @floatCast(dt);
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
     if (window.getKey(glfw.Key.w) == glfw.Action.press)
@@ -345,6 +357,27 @@ fn prossesInput(window: *glfw.Window, dt: f64) void {
     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
         player.speed /= @splat(30.0);
         fast = false;
+    }
+    if (window.getKey(glfw.Key.b) == glfw.Action.press) {
+        const chpos = player.pos/@Vector(3, f32){32.0,32.0,32.0};
+        const intchpos = @Vector(3, i32){@as(i32,@intFromFloat(@round(chpos[0]))),@as(i32,@intFromFloat(@round(chpos[1]))),@as(i32,@intFromFloat(@round(chpos[2])))};
+        var ch = Worldptr.Chunks.get(intchpos);
+        if(ch != null and ch.?.chunkPtr != null){
+            ch.?.chunkPtr.?.lock.lock();
+            std.debug.print("\npos:{d}, fchpos:{d}, chpos:{d}\n", .{player.pos,chpos, intchpos});
+            ch.?.chunkPtr.?.* = Generator.InitChunkToBlock(Blocks.Air, intchpos, null);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){1,0,0}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){-1,0,0}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){0,1,0}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){0,-1,0}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){0,0,1}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){0,0,-1}, allocator);
+            _ = try World.RemeshChunk(Worldptr, intchpos+@Vector(3,i32){0,0,0}, allocator);
+
+
+            
+
+        }
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {

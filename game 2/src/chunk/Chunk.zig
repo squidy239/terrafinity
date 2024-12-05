@@ -7,15 +7,7 @@ const ztracy = @import("ztracy");
 
 const zm = @import("zm");
 pub const ChunkSize = 32;
-test "Gen+Mesh" {
-    const chunk = Chunk.Generator().GenChunk(3, [3]i32{ 0, -4, 0 });
-    const mesh = try Chunk.Render().MeshChunk_Normal(@constCast(&chunk), std.testing.allocator);
-    std.debug.print("{any}", .{mesh});
 
-    _ = try std.testing.expect(mesh.len > 0);
-    std.testing.allocator.free(mesh);
-    //std.debug.print("len:{d}, {any}", .{ mesh.len, chunk.blocks[0][0][0] });
-}
 //3 render distances, one chunks will be loaded in, one the meshes will still be loaded, and one chunks will generate in
 // if generation radis is bigger than loading radies than chunks will be compressed and written to the disk but the meshes will stay
 // might have more render distances for entities
@@ -41,7 +33,7 @@ pub const ChunkandMeta = struct {
     state: std.atomic.Value(ChunkState),
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
-    Unloading:bool,
+    Unloading: bool,
 };
 
 pub const PtrState = struct {
@@ -92,7 +84,7 @@ pub const Render = struct {
             if (neighbors[n] != null) {
                 neighbors[n].?.lock.lockShared();
                 defer neighbors[n].?.lock.unlockShared();
-            } 
+            }
         }
 
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
@@ -211,7 +203,7 @@ pub const Generator = struct {
         return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: u8) ?Chunk {
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32) ?Chunk {
         const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
         defer gen.End();
 
@@ -221,21 +213,32 @@ pub const Generator = struct {
             @floatFromInt(Pos[1] * 32),
             @floatFromInt(Pos[2] * 32),
         };
-
+        const init = ztracy.ZoneNC(@src(), "initchunk", 0x692de);
         // Initialize chunk with air blocks
         var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+        init.End();
         var has_terrain = false;
-
+        const terrain = ztracy.ZoneNC(@src(), "terrain", 0x692de);
         // Pre-calculate terrain heights for the entire chunk
         var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
         for (0..ChunkSize) |xx| {
             const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
             for (0..ChunkSize) |zz| {
                 const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-                terrain_heights[xx][zz] = TerrainNoise.genNoise2DRange(x, z, i32, terrainmin, terrainmax);
+                const firstnoise = TerrainNoise.genNoise2D(x, z);
+                const secondnoise = TerrainNoise2.genNoise2D(x, z);
+                const P = 2.0; //Higher for stronger bias.
+                const E = firstnoise * (if (secondnoise < 0.5)
+                   (std.math.pow(f32,secondnoise * 2, P) / 2)
+                else
+                    (1 - (std.math.pow(f32,(1 - secondnoise) * 2, P) / 2)));
+                terrain_heights[xx][zz] = @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin)))) + terrainmin;
             }
         }
+        terrain.End();
+        const caves = ztracy.ZoneNC(@src(), "caves", 0x692dd7e);
 
+        var rand_impl = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
         // Process terrain generation in a more cache-friendly way
         for (0..ChunkSize) |xx| {
             const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
@@ -256,11 +259,13 @@ pub const Generator = struct {
                 var yy: usize = 0;
                 while (yy <= height) : (yy += 1) {
                     const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
-                    const cave_density = CaveNoise.genNoise3DAsType(x, y, z, u8);
+                    const cave_density = CaveNoise.genNoise3D(x, y, z);
                     if (cave_density < caveness) {
                         const block = if (!is_top_chunk) blk: {
-                            if (yy == height) break :blk Blocks.Grass;
-                            if (yy > height - 5) break :blk Blocks.Dirt;
+                            var gm = (chunk.pos[1]*32)+@as(i32,@intCast(yy));
+                            if(gm <= 0)gm = 1;
+                            if (yy == height and (std.rand.uintAtMost(rand_impl.random(),u32,256) > gm)) break :blk Blocks.Grass;
+                            if (yy > height - 5 and (std.rand.uintAtMost(rand_impl.random(),u32,512) > gm)) break :blk Blocks.Dirt;
                             break :blk Blocks.Stone;
                         } else Blocks.Stone;
 
@@ -270,7 +275,34 @@ pub const Generator = struct {
                 }
             }
         }
+        caves.End();
 
         return if (has_terrain) chunk else null;
     }
+    
 };
+test "ChunkGen"{
+    var timer = try std.time.Timer.start();
+    const chunk = Generator.GenChunk([3]i32{0,-5,0}, Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .perlin,
+            .frequency = 0.00008,
+            .fractal_type = .none,
+        },
+        Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .simplex,
+            .fractal_type = .none,
+            .frequency = 0.005,
+        },
+        Noise.Noise(f32){
+            .seed = 0,
+            .noise_type = .perlin,
+            .frequency = 0.002,
+            .fractal_type = .none,
+        },
+        -64,
+        5024,180);
+        _ = chunk;
+        std.debug.print("\n\ntime: {} us", .{timer.read()/std.time.ns_per_us});
+}

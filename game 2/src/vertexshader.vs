@@ -3,6 +3,7 @@ layout (location = 1) in uvec2 data;
 layout (location = 0) in vec3 incoords;
 uniform mat4 view;
 uniform mat4 projection;
+
 uniform ivec3 chunkpos;
 uniform uint AtlasHeight;
 uniform int chunktime;
@@ -10,6 +11,8 @@ out vec3 blockpos;
 out uint Atlasheight;
 out vec3 coordss;
 out uint side;
+out vec3 fragpos;
+out vec3 sunpos;
 out vec3 position;
 out uint blocktype;
 
@@ -38,16 +41,16 @@ vec3 rotateVertex(uint side, vec3 coords) {
         coords = vec3(0.0, coords.y, coords.x);
     } 
     else if (side == 1) {       // +X face (right)
-        coords = vec3(0.0, coords.y, coords.x);
+        coords = vec3(0.0, coords.y, -coords.x-1);
     }
     else if (side == 2) {       // -Y face (bottom)
         coords = vec3(coords.x, 0.0, coords.y);
     }
     else if (side == 3) {       // +Y face (top)
-        coords = vec3(coords.x, 0.0, coords.y);
+        coords = vec3(coords.x, 0.0, -coords.y-1);
     }
     else if (side == 4) {       // -Z face (back)
-        coords = vec3(coords.x, coords.y, 0.0);
+        coords = vec3(coords.x, -coords.y-1, 0.0);
     }
     // +Z face (front) requires no rotation.
     
@@ -58,7 +61,7 @@ vec3 rotateVertex(uint side, vec3 coords) {
     if (side == 0) coords.x = -0.5;        // -X face
     else if (side == 1) coords.x = 0.5;    // +X face
     else if (side == 2) {coords.y = -0.5;}   // -Y face
-    //else if (side == 3) {coords.y = 0.5;}    // +Y face
+    else if (side == 3) {coords.y = 0.5;}    // +Y face
     else if (side == 4) coords.z = -0.5;   // -Z face
     else if (side == 5) coords.z = 0.5;    // +Z face
 
@@ -76,9 +79,11 @@ void main(){
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
-    pos.y -= (1000 - chunktime)/10000000;
+    pos.y -= (1000 - chunktime)/10;
     if(pos.y < 1000)
     coordss = coords;
+    fragpos =  vec3((pos+coords+(chunkpos*32), 1.0));
+    sunpos =  vec3(vec4(5000.0,5000.0,5000.0,1.0));
     gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);
     
  

@@ -98,14 +98,12 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             self.lock.lockShared();
             //bktlock.End();
             defer self.lock.unlockShared();
-            const ch:*ChunkandMeta = self.hash_map.get(key) orelse return null;
-           // std.debug.print("\n{*}", .{ch});
-           //if(ch.Unloading) return null;
+            const ch: *ChunkandMeta = self.hash_map.get(key) orelse return null;
+            // std.debug.print("\n{*}", .{ch});
+            //if(ch.Unloading) return null;
             std.debug.assert(@intFromPtr(ch) != 0xffffffffffffffff);
             ch.lock.lockShared();
             return ch;
-
-            
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {
@@ -160,12 +158,11 @@ test "basic get and put" {
 
     try hm.put(1, 32);
     try hm.put(345, 775);
-    
+
     try std.testing.expectEqual(@as(?i32, 32), hm.get(1));
     try std.testing.expect(hm.get(345) == 775);
     try std.testing.expect(hm.get(45645) == null);
 }
-
 
 test "remove" {
     const allocator = std.testing.allocator;
@@ -174,10 +171,12 @@ test "remove" {
 
     try hm.put(100, 320);
     try hm.put(345, 775);
-    for (0..100)|i|{
-        try hm.put(@intCast(i)  , @intCast(i+1));
+    for (0..100) |i| {
+        try hm.put(@intCast(i), @intCast(i + 1));
     }
-    for(0..50)|i|{_ = hm.remove(@intCast(i));}
+    for (0..50) |i| {
+        _ = hm.remove(@intCast(i));
+    }
     try std.testing.expectEqual(@as(?i32, 320), hm.get(100));
     try std.testing.expect(hm.get(345) == 775);
     try std.testing.expect(hm.get(75) == 76);

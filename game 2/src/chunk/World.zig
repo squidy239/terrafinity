@@ -6,6 +6,7 @@ const Generator = @import("./Chunk.zig").Generator;
 const Render = @import("./Chunk.zig").Render;
 const ChunkandMeta = @import("./Chunk.zig").ChunkandMeta;
 const ChunkSize = @import("./Chunk.zig").ChunkSize;
+const Blocks = @import("./Blocks.zig").Blocks;
 const ztracy = @import("ztracy");
 const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const Noise = @import("./fastnoise.zig");
@@ -52,8 +53,9 @@ pub const World = struct {
     ToUnload: std.DoublyLinkedList([3]i32),
     ToUnloadMutex: std.Thread.Mutex,
     TerrainNoise: Noise.Noise(f32),
+    TerrainNoise2: Noise.Noise(f32),
     CaveNoise: Noise.Noise(f32),
-    caveness: u8,
+    caveness: f32,
     min: i32,
     max: i32,
     pub fn GenChunk(self: *@This(), player: Entitys.Player, allocator: std.mem.Allocator) !void {
@@ -68,17 +70,18 @@ pub const World = struct {
             };
 
             self.ToGenMutex.unlock();
-            //need to fix mutexes with new system TODO
             //seed 0
-            const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.CaveNoise, self.min, self.max, self.caveness) orelse {
+            const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness) orelse {
                 self.Chunks.get(chunkpos).?.state.store(ChunkState.AllAir, .seq_cst);
                 const neighbors = GetAndLockNeighbors(self, chunkpos);
-                defer {for (neighbors) |n| if (n != null) {
-                    n.?.lock.unlockShared();
-                };}
+                defer {
+                    for (neighbors) |n| if (n != null) {
+                        n.?.lock.unlockShared();
+                    };
+                }
                 for (0..6) |i| {
                     if (neighbors[i] != null and neighbors[i].?.state.load(.seq_cst) == ChunkState.WaitingForNeighbors) {
-                        neighbors[i].?.state.store(ChunkState.ReMesh, .seq_cst) ;
+                        neighbors[i].?.state.store(ChunkState.ReMesh, .seq_cst);
                         const cn = try allocator.create(std.DoublyLinkedList([3]i32).Node);
                         cn.data = neighbors[i].?.pos;
                         self.ToMeshMutex.lock();
@@ -86,7 +89,7 @@ pub const World = struct {
                         self.ToMeshMutex.unlock();
                     }
                 }
-                
+
                 continue;
             };
             _ = player;
@@ -108,134 +111,129 @@ pub const World = struct {
         }
     }
 
-pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator) !void {
-    while (true) {
-        const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
-        defer meshchunk.End();
+    pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator) !void {
+        while (true) {
+            const meshchunk = ztracy.ZoneNC(@src(), "meshchunk", 0x9692d);
+            defer meshchunk.End();
 
-        // Retrieve next chunk to mesh
-        const chnode: *std.DoublyLinkedList([3]i32).Node = blk: {
-            self.ToMeshMutex.lock();
-            defer self.ToMeshMutex.unlock();
+            // Retrieve next chunk to mesh
+            const chnode: *std.DoublyLinkedList([3]i32).Node = blk: {
+                self.ToMeshMutex.lock();
+                defer self.ToMeshMutex.unlock();
 
-            break :blk self.ToMesh.popFirst() orelse {
-                // No chunks to mesh, sleep and continue
-                const sleeping = ztracy.ZoneNC(@src(), "sleeping", 0x9832fd2d);
-                std.time.sleep(sleeptime);
-                sleeping.End();
+                break :blk self.ToMesh.popFirst() orelse {
+                    // No chunks to mesh, sleep and continue
+                    const sleeping = ztracy.ZoneNC(@src(), "sleeping", 0x9832fd2d);
+                    std.time.sleep(sleeptime);
+                    sleeping.End();
+                    continue;
+                };
+            };
+            defer allocator.destroy(chnode);
+
+            const pos: [3]i32 = chnode.data;
+
+            // Retrieve and validate chunk state
+            const chstate = self.Chunks.get(pos) orelse {
+                std.debug.print("Warning: Chunk not found at position {any}\n", .{pos});
                 continue;
             };
-        };
-        defer allocator.destroy(chnode);
 
-        const pos: [3]i32 = chnode.data;
+            chstate.lock.lockShared();
+            defer chstate.lock.unlockShared();
 
-        // Retrieve and validate chunk state
-        const chstate = self.Chunks.get(pos) orelse {
-            std.debug.print("Warning: Chunk not found at position {any}\n", .{pos});
-            continue;
-        };
+            // Validate chunk state
+            const current_state = chstate.state.load(.seq_cst);
+            if (current_state != ChunkState.Generating and current_state != ChunkState.ReMesh) {
+                std.debug.print("Warning: Invalid chunk state {any} for position {any}\n", .{ current_state, pos });
+                continue;
+            }
 
-        chstate.lock.lockShared();
-        defer chstate.lock.unlockShared();
-
-        // Validate chunk state
-        const current_state = chstate.state.load(.seq_cst);
-        if (current_state != ChunkState.Generating and current_state != ChunkState.ReMesh) {
-            std.debug.print("Warning: Invalid chunk state {any} for position {any}\n", .{current_state, pos});
-            continue;
-        }
-
-        // Get neighbors with careful locking
-        var neighbors: [6]?*ChunkandMeta = undefined;
-        var neighbor_locks_acquired = [_]bool{false} ** 6;
-        defer {
-            // Ensure we unlock any locks we've acquired
-            for (0..6) |i| {
-                if (neighbor_locks_acquired[i] and neighbors[i] != null) {
-                    neighbors[i].?.lock.unlockShared();
+            // Get neighbors with careful locking
+            var neighbors: [6]?*ChunkandMeta = undefined;
+            var neighbor_locks_acquired = [_]bool{false} ** 6;
+            defer {
+                // Ensure we unlock any locks we've acquired
+                for (0..6) |i| {
+                    if (neighbor_locks_acquired[i] and neighbors[i] != null) {
+                        neighbors[i].?.lock.unlockShared();
+                    }
                 }
             }
-        }
 
-        // Attempt to get and lock neighbors
-        var waiting_for_neighbors: u3 = 0;
-        var neighborptrs: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
-        
-        neighbors = GetAndLockNeighbors(self, pos);
+            // Attempt to get and lock neighbors
+            var waiting_for_neighbors: u3 = 0;
+            var neighborptrs: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
 
-        // Process neighbors
-        for (0..6) |i| {
-            if (neighbors[i]) |neighbor| {
-                neighbor_locks_acquired[i] = true;
+            neighbors = GetAndLockNeighbors(self, pos);
 
-                if (neighbor.chunkPtr) |chunk_ptr| {
-                    neighborptrs[i] = chunk_ptr;
-                } else if (neighbor.state.load(.seq_cst) != ChunkState.AllAir) {
+            // Process neighbors
+            for (0..6) |i| {
+                if (neighbors[i]) |neighbor| {
+                    neighbor_locks_acquired[i] = true;
+
+                    if (neighbor.chunkPtr) |chunk_ptr| {
+                        neighborptrs[i] = chunk_ptr;
+                    } else if (neighbor.state.load(.seq_cst) != ChunkState.AllAir) {
+                        waiting_for_neighbors += 1;
+                    }
+
+                    // Handle neighbors waiting for mesh generation
+                    if (neighbor.state.load(.seq_cst) == ChunkState.WaitingForNeighbors and
+                        current_state == ChunkState.Generating)
+                    {
+                        // Carefully update neighbor state
+                        neighbor.state.store(ChunkState.ReMesh, .seq_cst);
+
+                        // Create and add to mesh queue
+                        const cn = try allocator.create(std.DoublyLinkedList([3]i32).Node);
+                        cn.data = neighbor.pos;
+
+                        self.ToMeshMutex.lock();
+                        defer self.ToMeshMutex.unlock();
+                        self.ToMesh.append(cn);
+                    }
+                } else {
                     waiting_for_neighbors += 1;
                 }
-
-                // Handle neighbors waiting for mesh generation
-                if (neighbor.state.load(.seq_cst) == ChunkState.WaitingForNeighbors and 
-                    current_state == ChunkState.Generating) 
-                {
-                    // Carefully update neighbor state
-                    neighbor.state.store(ChunkState.ReMesh, .seq_cst);
-                    
-                    // Create and add to mesh queue
-                    const cn = try allocator.create(std.DoublyLinkedList([3]i32).Node);
-                    cn.data = neighbor.pos;
-                    
-                    self.ToMeshMutex.lock();
-                    defer self.ToMeshMutex.unlock();
-                    self.ToMesh.append(cn);
-                }
-            } else {
-                waiting_for_neighbors += 1;
             }
-        }
 
-        // If waiting for neighbors, reschedule chunk
-        if (waiting_for_neighbors > 0) {
-            chstate.state.store(ChunkState.WaitingForNeighbors, .seq_cst);
-            continue;
-        }
+            // If waiting for neighbors, reschedule chunk
+            if (waiting_for_neighbors > 0) {
+                chstate.state.store(ChunkState.WaitingForNeighbors, .seq_cst);
+                continue;
+            }
 
-        // Generate mesh
-        const mesh = Render.MeshChunk_Normal(
-            chstate.chunkPtr orelse {
+            // Generate mesh
+            const mesh = Render.MeshChunk_Normal(chstate.chunkPtr orelse {
                 std.debug.print("Error: Chunk pointer is null at {any}\n", .{pos});
                 continue;
-            }, 
-            allocator, 
-            neighborptrs
-        ) catch |err| {
-            std.debug.print("Error meshing chunk: {}\n", .{err});
-            continue;
-        };
-        errdefer allocator.free(mesh);
+            }, allocator, neighborptrs) catch |err| {
+                std.debug.print("Error meshing chunk: {}\n", .{err});
+                continue;
+            };
+            errdefer allocator.free(mesh);
 
-        // Handle empty mesh
-        if (mesh.len == 0) {
-            chstate.state.store(ChunkState.InMemoryNoMesh, .seq_cst);
-            continue;
+            // Handle empty mesh
+            if (mesh.len == 0) {
+                chstate.state.store(ChunkState.InMemoryNoMesh, .seq_cst);
+                continue;
+            }
+
+            // Store mesh for loading
+            const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
+            defer putmesh.End();
+
+            chstate.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
+
+            const node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
+            node.data = ChunkMesh{ .faces = mesh, .position = pos };
+
+            self.MeshesToLoadMutex.lock();
+            defer self.MeshesToLoadMutex.unlock();
+            self.MeshesToLoad.append(node);
         }
-
-        // Store mesh for loading
-        const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
-        defer putmesh.End();
-
-        chstate.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
-        
-        const node = try allocator.create(std.DoublyLinkedList(ChunkMesh).Node);
-        node.data = ChunkMesh{ .faces = mesh, .position = pos };
-
-        self.MeshesToLoadMutex.lock();
-        defer self.MeshesToLoadMutex.unlock();
-        self.MeshesToLoad.append(node);
     }
-}
-
 
     pub fn MeshChunks(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator) !void {
         top: while (true) {
@@ -254,7 +252,10 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
             self.ToMeshMutex.unlock();
             const pos: [3]i32 = chnode.data;
             allocator.destroy(chnode);
-            const chstate = self.Chunks.get(pos) orelse {std.debug.print("warning", .{});continue;};
+            const chstate = self.Chunks.get(pos) orelse {
+                std.debug.print("warning", .{});
+                continue;
+            };
             chstate.lock.lockShared();
             defer chstate.lock.unlockShared();
             //std.debug.print("\n{any}", .{chstate.state.load(.seq_cst)});
@@ -317,11 +318,23 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
         }
     }
 
-
+    pub fn RemeshChunk(self: *@This(), pos: [3]i32, allocator: std.mem.Allocator)!bool{
+        var ch = self.Chunks.get(pos);
+        if(ch != null and ch.?.chunkPtr != null){
+            ch.?.state.store(ChunkState.ReMesh, .seq_cst);
+            const cn = try allocator.create(std.DoublyLinkedList([3]i32).Node);
+            cn.data = pos;
+            self.ToMeshMutex.lock();
+            self.ToMesh.append(cn);
+            self.ToMeshMutex.unlock();
+            return true;
+            }
+        return false;
+    }
     pub fn GetAndLockNeighbors(self: *@This(), pos: [3]i32) [6]?*ChunkandMeta {
         const getneighbors = ztracy.ZoneNC(@src(), "getneighbors", 0xFFFF00);
         defer getneighbors.End();
-        var chunks: [6]?*ChunkandMeta = [6]?*ChunkandMeta{null,null,null,null,null,null};
+        var chunks: [6]?*ChunkandMeta = [6]?*ChunkandMeta{ null, null, null, null, null, null };
         // BUG chunks are gotten before state TODO fix
         //if chunk state changes after ptr is gotten state and ptr could mismaatch
         //might need to change big parts of the system
@@ -336,7 +349,6 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
     }
 
     pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, maxtime: u64) !void {
-
         const loadmeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
         defer loadmeshes.End();
         var timer = try std.time.Timer.start();
@@ -355,7 +367,7 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
             defer allocator.destroy(mesh);
             self.MeshesToLoadMutex.unlock();
             const vbo = Render.CreateOrUpdateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, null, gl.STATIC_DRAW);
-            
+
             _ = try self.ChunkMeshes.append(vbo);
             i += 1;
         }
@@ -427,36 +439,34 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
                 self.Chunks.buckets[b].lock.lockShared();
                 var it = self.Chunks.buckets[b].hash_map.valueIterator();
                 defer self.Chunks.buckets[b].lock.unlockShared();
-                inner:while (true) {
+                inner: while (true) {
                     const ch = it.next() orelse {
-                        break:inner;
+                        break :inner;
                     };
                     if (!ch.*.Unloading and @reduce(.Or, @abs(pi - ch.*.pos) > @as(@Vector(3, u32), ((player.LoadDistance))))) {
-                            const unloadpos = try allocator.create(std.DoublyLinkedList([3]i32).Node);
-                            const hash_code = self.Chunks.ctx.hash(ch.*.pos);
-                            const bucket_index = @mod(hash_code, 32);
-                            unloadpos.data = ch.*.pos;
+                        const unloadpos = try allocator.create(std.DoublyLinkedList([3]i32).Node);
+                        const hash_code = self.Chunks.ctx.hash(ch.*.pos);
+                        const bucket_index = @mod(hash_code, 32);
+                        unloadpos.data = ch.*.pos;
 
-                            if(self.Chunks.buckets[b].hash_map.get(ch.*.pos) == null or bucket_index != b){
-                                std.debug.print("\n\nerr{any}, len:{}", .{ch.*.pos,self.ToUnload.len});
-                                ch.*.pos = ch.*.chunkPtr.?.pos;
-                                continue;
-                            }
-                            //maybie atomic later
-                            ch.*.Unloading = true;
-                            self.ToUnloadMutex.lock();
-                            self.ToUnload.append(unloadpos);
-                            self.ToUnloadMutex.unlock();
+                        if (self.Chunks.buckets[b].hash_map.get(ch.*.pos) == null or bucket_index != b) {
+                            std.debug.print("\n\nerr{any}, len:{}", .{ ch.*.pos, self.ToUnload.len });
+                            ch.*.pos = ch.*.chunkPtr.?.pos;
+                            continue;
+                        }
+                        //maybie atomic later
+                        ch.*.Unloading = true;
+                        self.ToUnloadMutex.lock();
+                        self.ToUnload.append(unloadpos);
+                        self.ToUnloadMutex.unlock();
                     }
-             
                 }
             }
         }
-
     }
 
-   pub fn UnloadLoop(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator)!void{
-        top:while (true) {
+    pub fn UnloadLoop(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator) !void {
+        top: while (true) {
             const Unload = ztracy.ZoneNC(@src(), "Unloadchunks", 0x9692de);
             defer Unload.End();
 
@@ -466,16 +476,19 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
                 const sleeping = ztracy.ZoneNC(@src(), "sleeping", 0x9832fd2d);
                 std.time.sleep(sleeptime);
                 sleeping.End();
-                continue:top;
+                continue :top;
             };
             defer allocator.destroy(chunktounload);
             self.ToUnloadMutex.unlock();
             //std.debug.print("\nu", .{});
-            UnloadChunk(self, self.Chunks.get(chunktounload.data) orelse {std.debug.print("\n\nerr unloading chunk {any}, len:{}\n\n", .{chunktounload.data,self.ToUnload.len});continue;}, allocator);
+            UnloadChunk(self, self.Chunks.get(chunktounload.data) orelse {
+                std.debug.print("\n\nerr unloading chunk {any}, len:{}\n\n", .{ chunktounload.data, self.ToUnload.len });
+                continue;
+            }, allocator);
         }
     }
 
-    pub fn UnloadChunk(self:*@This(),chunk:*ChunkandMeta, allocator : std.mem.Allocator)void{
+    pub fn UnloadChunk(self: *@This(), chunk: *ChunkandMeta, allocator: std.mem.Allocator) void {
         std.debug.assert(chunk.Unloading == true);
         const state = chunk.state.load(.seq_cst);
         switch (state) {
@@ -488,14 +501,12 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
                 c.lock.lock();
                 allocator.destroy(c);
             },
-            ChunkState.InMemoryMeshUnloaded,ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
-                
+            ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
                 _ = self.Chunks.remove(chunk.pos);
                 chunk.lock.lock();
                 chunk.chunkPtr.?.lock.lock();
                 allocator.destroy(chunk.chunkPtr.?);
                 allocator.destroy(chunk);
-                
             },
             ChunkState.AllAir => {
                 _ = self.Chunks.remove(chunk.pos);
@@ -507,4 +518,3 @@ pub fn MeshChunksai(self: *@This(), sleeptime: u64, allocator: std.mem.Allocator
         }
     }
 };
-       
