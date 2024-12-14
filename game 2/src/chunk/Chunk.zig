@@ -20,6 +20,7 @@ pub const ChunkState = enum(u8) {
     Generating = 2,
     InMemoryNoMesh = 3,
     MeshOnly = 4,
+    InMemoryMeshGenerating = 9,
     InMemoryAndMesh = 5,
     InMemoryMeshUnloaded = 8,
     Unknown = 6,
@@ -79,7 +80,7 @@ pub const Render = struct {
 
     //nehbors +x -x +y -y +z -z
     //        0   1  2  3  4  5
-    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
+    pub fn MeshChunk_Normal(chunk: *Chunk,allocator:std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
         for (0..6) |n| {
             if (neighbors[n] != null) {
                 neighbors[n].?.lock.lockShared();
@@ -91,12 +92,24 @@ pub const Render = struct {
         defer meshchunkreal.End();
         const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
         var mesh = try std.ArrayList(u32).initCapacity(allocator, ChunkSize * ChunkSize * ChunkSize * 2);
+        errdefer mesh.deinit();
         initarraylist.End();
         defer mesh.deinit();
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {
+                    
                     if (chunk.blocks[x][y][z] != Blocks.Air) {
+                        if(chunk.blocks[x][y][z] == Blocks.Leaves){
+                            _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try mesh.appendSlice(&EncodeFace(0, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try mesh.appendSlice(&EncodeFace(3, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try mesh.appendSlice(&EncodeFace(2, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try mesh.appendSlice(&EncodeFace(5, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try mesh.appendSlice(&EncodeFace(4, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
+                            continue;
+
+                        }
                         if ((x == ChunkSize - 1 and neighbors[0] != null and neighbors[0].?.blocks[0][y][z] == Blocks.Air) or (x == ChunkSize - 1 and neighbors[0] == null)) {
                             _ = try mesh.appendSlice(&EncodeFace(1, chunk.blocks[x][y][z], [3]usize{ x, y, z }));
                         } else if (x != ChunkSize - 1 and chunk.blocks[x + 1][y][z] == Blocks.Air) {
@@ -203,82 +216,173 @@ pub const Generator = struct {
         return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32) ?Chunk {
-        const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
-        defer gen.End();
+   fn generateTree(chunk: *Chunk, x: usize, z: usize, height: i32, rand: *std.rand.DefaultPrng) void {
+    // Determine tree type and size based on randomness
+    const tree_type = rand.random().intRangeAtMost(u8, 0, 1);
+    const tree_height = rand.random().intRangeAtMost(u8, 4, 16);
+    const trunk_height = tree_height - 2;
+    const canopy_width = tree_height / 2;
 
-        // Pre-calculate chunk position offset
-        const chunk_offset = @Vector(3, f32){
-            @floatFromInt(Pos[0] * 32),
-            @floatFromInt(Pos[1] * 32),
-            @floatFromInt(Pos[2] * 32),
-        };
-        const init = ztracy.ZoneNC(@src(), "initchunk", 0x692de);
-        // Initialize chunk with air blocks
-        var chunk = InitChunkToBlock(Blocks.Air, Pos, null);
-        init.End();
-        var has_terrain = false;
-        const terrain = ztracy.ZoneNC(@src(), "terrain", 0x692de);
-        // Pre-calculate terrain heights for the entire chunk
-        var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
-        for (0..ChunkSize) |xx| {
-            const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
-            for (0..ChunkSize) |zz| {
-                const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-                const firstnoise = TerrainNoise.genNoise2D(x, z);
-                const secondnoise = TerrainNoise2.genNoise2D(x, z);
-                const P = 2.0; //Higher for stronger bias.
-                const E = firstnoise * (if (secondnoise < 0.5)
-                   (std.math.pow(f32,secondnoise * 2, P) / 2)
-                else
-                    (1 - (std.math.pow(f32,(1 - secondnoise) * 2, P) / 2)));
-                terrain_heights[xx][zz] = @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin)))) + terrainmin;
-            }
+    // Find the top surface block
+    const surface_y = height;
+
+    // Generate trunk
+    var yy: usize = 0;
+    while (yy < trunk_height) : (yy += 1) {
+        if (surface_y + @as(i32,@intCast(yy)) < chunk.blocks[0].len) {
+            chunk.blocks[x][@as(usize,@intCast(surface_y)) + yy][z] = Blocks.Wood;//log
         }
-        terrain.End();
-        const caves = ztracy.ZoneNC(@src(), "caves", 0x692dd7e);
+    }
 
-        var rand_impl = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
-        // Process terrain generation in a more cache-friendly way
-        for (0..ChunkSize) |xx| {
-            const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
-            for (0..ChunkSize) |zz| {
-                const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-                const tn = terrain_heights[xx][zz];
-                const chunk_y = @divFloor(tn, 32);
+    // Generate canopy based on tree type
+    switch (tree_type) {
+        0 => { // Spherical canopy
+            var layer_width: i8 = @intCast(canopy_width);
+            while (layer_width >= 0) : (layer_width -= 1) {
+                const layer_y = @as(usize, @intCast(surface_y + trunk_height + layer_width));
+                
+                // Skip if out of chunk bounds
+                if (layer_y >= chunk.blocks[0].len) continue;
 
-                if (chunk_y < Pos[1]) continue;
-
-                const is_top_chunk = chunk_y > Pos[1];
-                const height = if (is_top_chunk)
-                    ChunkSize - 1
-                else
-                    @mod(tn, ChunkSize);
-
-                // Process vertical column
-                var yy: usize = 0;
-                while (yy <= height) : (yy += 1) {
-                    const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
-                    const cave_density = CaveNoise.genNoise3D(x, y, z);
-                    if (cave_density < caveness) {
-                        const block = if (!is_top_chunk) blk: {
-                            var gm = (chunk.pos[1]*32)+@as(i32,@intCast(yy));
-                            if(gm <= 0)gm = 1;
-                            if (yy == height and (std.rand.uintAtMost(rand_impl.random(),u32,256) > gm)) break :blk Blocks.Grass;
-                            if (yy > height - 5 and (std.rand.uintAtMost(rand_impl.random(),u32,512) > gm)) break :blk Blocks.Dirt;
-                            break :blk Blocks.Stone;
-                        } else Blocks.Stone;
-
-                        chunk.blocks[xx][yy][zz] = block;
-                        has_terrain = true;
+                // Generate circular layer of leaves
+                var dx: i8 = -layer_width;
+                while (dx <= layer_width) : (dx += 1) {
+                    var dz: i8 = -layer_width;
+                    while (dz <= layer_width) : (dz += 1) {
+                        // Use circular coverage
+                        if (dx * dx +| dz * dz <= layer_width * layer_width) {
+                            const leaf_x = @as(i32, @intCast(x)) + dx;
+                            const leaf_z = @as(i32, @intCast(z)) + dz;
+                            
+                            // Ensure we're within chunk bounds
+                            if (leaf_x < chunk.blocks.len and leaf_z < chunk.blocks[0][0].len and leaf_x > 0 and leaf_z > 0) {
+                                chunk.blocks[@intCast(leaf_x)][(layer_y)][@intCast(leaf_z)] = Blocks.Leaves;//leavs
+                            }
+                        }
                     }
                 }
             }
-        }
-        caves.End();
+        },
+        1 => { // Conical canopy
+            var layer: u8 = 0;
+            while (layer < canopy_width) : (layer += 1) {
+                const layer_y = surface_y + trunk_height + layer;
+                
+                // Skip if out of chunk bounds
+                if (layer_y >= chunk.blocks[0].len) continue;
 
-        return if (has_terrain) chunk else null;
+                // Triangular/conical shape
+                const current_width = canopy_width - layer;
+                
+                var dx: i8 = -@as(i8,@intCast(current_width));
+                while (dx <= current_width) : (dx += 1) {
+                    var dz: i8 = -@as(i8,@intCast(current_width));
+                    while (dz <= current_width) : (dz += 1) {
+                        const leaf_x = @as(i32, @intCast(x)) + dx;
+                        const leaf_z = @as(i32, @intCast(z)) + dz;
+                            
+                            // Ensure we're within chunk bounds
+                            if (leaf_x < chunk.blocks.len and leaf_z < chunk.blocks[0][0].len and leaf_x > 0 and leaf_z > 0) {
+                                chunk.blocks[@intCast(leaf_x)][@intCast(layer_y)][@intCast(leaf_z)] = Blocks.Leaves;//leavs
+                            }
+                    }
+                }
+            }
+        },
+        else => {},
     }
+}
+
+pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32) ?Chunk {
+    const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
+    defer gen.End();
+
+    // Pre-calculate chunk position offset
+    const chunk_offset = @Vector(3, f32){
+        @floatFromInt(Pos[0] * 32),
+        @floatFromInt(Pos[1] * 32),
+        @floatFromInt(Pos[2] * 32),
+    };
+    //const init = ztracy.ZoneNC(@src(), "initchunk", 0x692de);
+    // Initialize chunk with air blocks
+   
+    //init.End();
+    //
+    //
+    var chunk:Chunk = InitChunkToBlock(Blocks.Air, Pos, null);
+    //
+    //
+    var has_terrain = false;
+    const terrain = ztracy.ZoneNC(@src(), "terrain", 0x692de);
+    // Pre-calculate terrain heights for the entire chunk
+    var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
+    for (0..ChunkSize) |xx| {
+        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+        for (0..ChunkSize) |zz| {
+            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+            const firstnoise = TerrainNoise.genNoise2D(x, z);
+            const secondnoise = TerrainNoise2.genNoise2D(x, z);
+            const P = 2.0; //Higher for stronger bias.
+            const E = firstnoise * (if (secondnoise < 0.5)
+               (std.math.pow(f32,secondnoise * 2, P) / 2)
+            else
+                (1 - (std.math.pow(f32,(1 - secondnoise) * 2, P) / 2)));
+            terrain_heights[xx][zz] = @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin)))) + terrainmin;
+        }
+    }
+    terrain.End();
+    const caves = ztracy.ZoneNC(@src(), "caves", 0x692dd7e);
+
+    var rand_impl = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    
+    // Tree generation parameters
+    const tree_chance = 0.01; // 10% chance of tree generation
+    
+    // Process terrain generation in a more cache-friendly way
+    for (0..ChunkSize) |xx| {
+        const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
+        for (0..ChunkSize) |zz| {
+            const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
+            const tn = terrain_heights[xx][zz];
+            const chunk_y = @divFloor(tn, 32);
+
+            if (chunk_y < Pos[1]) continue;
+
+            const is_top_chunk = chunk_y > Pos[1];
+            const height = if (is_top_chunk)
+                ChunkSize - 1 else @mod(tn, ChunkSize);
+
+            // Process vertical column
+            var yy: usize = 0;
+            while (yy <= height) : (yy += 1) {
+                const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
+                const cave_density = CaveNoise.genNoise3D(x, y, z);
+                if (cave_density < caveness) {
+                    chunk.blocks[xx][yy][zz] = if (!is_top_chunk) blk: {
+                        var gm = (chunk.pos[1]*32)+@as(i32,@intCast(yy));
+                        if(gm <= 0)gm = 1;
+                        if (yy == height and (std.rand.uintAtMost(rand_impl.random(),u32,256) > gm)) break :blk Blocks.Grass;
+                        if (yy > height - 5 and (std.rand.uintAtMost(rand_impl.random(),u32,512) > gm)) break :blk Blocks.Dirt;
+                        break :blk Blocks.Stone;
+                    } else Blocks.Stone;
+
+                    has_terrain = true;
+                }
+            }
+
+            // Tree generation 
+            if (!is_top_chunk and 
+                chunk.blocks[xx][@intCast(height)][zz] == Blocks.Grass and 
+                rand_impl.random().float(f32) < tree_chance) 
+            {
+                generateTree(&chunk, xx, zz, height, &rand_impl);
+            }
+        }
+    }
+    caves.End();
+
+    return if (has_terrain) chunk else null;
+}
     
 };
 test "ChunkGen"{

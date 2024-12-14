@@ -1163,12 +1163,11 @@ pub fn Noise(comptime Float: type) type {
             j *%= prime_y;
             k *%= prime_z;
 
-            var l: usize = 0;
             var value: Float = 0;
             var a: Float = (0.6 - x0 * x0) - (y0 * y0 + z0 * z0);
             var seed_value = seed;
 
-            while (true) : (l += 1) {
+            inline for(0..2)|_|{
                 const xNSignf = @as(Float, @floatFromInt(xNSign));
                 const yNSignf = @as(Float, @floatFromInt(yNSign));
                 const zNSignf = @as(Float, @floatFromInt(zNSign));
@@ -1198,7 +1197,6 @@ pub fn Noise(comptime Float: type) type {
 
                 if (b > 0) value += (b * b) * (b * b) * gradCoord3D(seed_value, ii, jj, kk, x1, y1, z1);
 
-                if (l == 1) break;
 
                 ax0 = 0.5 - ax0;
                 ay0 = 0.5 - ay0;

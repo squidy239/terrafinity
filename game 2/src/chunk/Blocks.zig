@@ -4,7 +4,8 @@ const std = @import("std");
 pub const Blocks = enum(u20) {
     Air = 0,
     Grass = 1,
-
+    Leaves = 4,
+    Wood = 5,
     Dirt = 2,
     Stone = 3,
 };
