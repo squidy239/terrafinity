@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .enable_ztracy = options.enable_ztracy,
         .enable_fibers = options.enable_fibers,
         .on_demand = options.on_demand,
+        .optimize = optimize,
     });
     exe.root_module.addImport("ztracy", ztracy.module("root"));
 
@@ -55,7 +56,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe.root_module.addImport("glfw", glfw_dep.module("zig-glfw"));
+    exe.root_module.addImport("glfw", glfw_dep.module("mach-glfw"));
 
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,

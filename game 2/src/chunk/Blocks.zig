@@ -1,5 +1,6 @@
-const zstbi = @import("zstbi");
 const std = @import("std");
+
+const zstbi = @import("zstbi");
 
 pub const Blocks = enum(u20) {
     Air = 0,

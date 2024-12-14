@@ -129,7 +129,7 @@ pub const DomainWarpType = enum {
 pub fn Noise(comptime Float: type) type {
     // Compile-error if a non-float is specified
     switch (@typeInfo(Float)) {
-        .Float => |f| switch (f.bits) {
+        .float => |f| switch (f.bits) {
             32, 64 => {},
             else => @compileError("only 32 and 64 bit types supported"),
         },
@@ -1167,7 +1167,7 @@ pub fn Noise(comptime Float: type) type {
             var a: Float = (0.6 - x0 * x0) - (y0 * y0 + z0 * z0);
             var seed_value = seed;
 
-            inline for(0..2)|_|{
+            inline for (0..2) |_| {
                 const xNSignf = @as(Float, @floatFromInt(xNSign));
                 const yNSignf = @as(Float, @floatFromInt(yNSign));
                 const zNSignf = @as(Float, @floatFromInt(zNSign));
@@ -1196,7 +1196,6 @@ pub fn Noise(comptime Float: type) type {
                 }
 
                 if (b > 0) value += (b * b) * (b * b) * gradCoord3D(seed_value, ii, jj, kk, x1, y1, z1);
-
 
                 ax0 = 0.5 - ax0;
                 ay0 = 0.5 - ay0;

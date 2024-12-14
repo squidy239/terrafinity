@@ -1,6 +1,6 @@
 #version 450 core
-layout (location = 1) in uvec2 data;
-layout (location = 0) in vec3 incoords;
+layout(location = 1) in uvec2 data;
+layout(location = 0) in vec3 incoords;
 uniform mat4 view;
 uniform mat4 projection;
 
@@ -18,10 +18,10 @@ out uint blocktype;
 
 uvec3 DecodePosition(uvec2 encodedBlock) {
     return uvec3(
-        (encodedBlock[0] >> (32-5)) & 0x1F,
-        (encodedBlock[0] >> 32-10) & 0x1F,
-        (encodedBlock[0] >> 32-15) & 0x1F
-        
+        (encodedBlock[0] >> (32 - 5)) & 0x1F,
+        (encodedBlock[0] >> 32 - 10) & 0x1F,
+        (encodedBlock[0] >> 32 - 15) & 0x1F
+
     );
 }
 
@@ -37,54 +37,56 @@ vec3 rotateVertex(uint side, vec3 coords) {
     coords -= vec3(0.5);
 
     // Rotate based on the cube face (side)
-    if (side == 0) {            // -X face (left)
+    if (side == 0) { // -X face (left)
         coords = vec3(0.0, coords.y, coords.x);
-    } 
-    else if (side == 1) {       // +X face (right)
-        coords = vec3(0.0, coords.y, -coords.x-1);
     }
-    else if (side == 2) {       // -Y face (bottom)
+    else if (side == 1) { // +X face (right)
+        coords = vec3(0.0, coords.y, -coords.x - 1);
+    }
+    else if (side == 2) { // -Y face (bottom)
         coords = vec3(coords.x, 0.0, coords.y);
     }
-    else if (side == 3) {       // +Y face (top)
-        coords = vec3(coords.x, 0.0, -coords.y-1);
+    else if (side == 3) { // +Y face (top)
+        coords = vec3(coords.x, 0.0, -coords.y - 1);
     }
-    else if (side == 4) {       // -Z face (back)
-        coords = vec3(coords.x, -coords.y-1, 0.0);
+    else if (side == 4) { // -Z face (back)
+        coords = vec3(coords.x, -coords.y - 1, 0.0);
     }
     // +Z face (front) requires no rotation.
-    
+
     // Translate back to the correct cube face position
     coords += vec3(0.5);
 
     // Offset to position each face at the correct distance from the origin
-    if (side == 0) coords.x = -0.5;        // -X face
-    else if (side == 1) coords.x = 0.5;    // +X face
-    else if (side == 2) {coords.y = -0.5;}   // -Y face
-    else if (side == 3) {coords.y = 0.5;}    // +Y face
-    else if (side == 4) coords.z = -0.5;   // -Z face
-    else if (side == 5) coords.z = 0.5;    // +Z face
+    if (side == 0) coords.x = -0.5; // -X face
+    else if (side == 1) coords.x = 0.5; // +X face
+    else if (side == 2) {
+        coords.y = -0.5;
+    } // -Y face
+    else if (side == 3) {
+        coords.y = 0.5;
+    } // +Y face
+    else if (side == 4) coords.z = -0.5; // -Z face
+    else if (side == 5) coords.z = 0.5; // +Z face
 
     return coords;
 }
 
-float rand(vec2 co){
+float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-void main(){
+void main() {
     vec3 pos = DecodePosition(data);
-    position = pos+(chunkpos*32);
+    position = pos + (chunkpos * 32);
     Atlasheight = AtlasHeight;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
-    pos.y -= (1000 - chunktime)/100000;
-    if(pos.y < 1000)
-    coordss = coords;
-    fragpos =  vec3((pos+coords+(chunkpos*32), 1.0));
-    sunpos =  vec3(vec4(5000.0,5000.0,5000.0,1.0));
-    gl_Position = projection * view * vec4(pos+coords+(chunkpos*32), 1.0);
-    
- 
+    pos.y -= (1000 - chunktime) / 100000;
+    if (pos.y < 1000)
+        coordss = coords;
+    fragpos = vec3((pos + coords + (chunkpos * 32), 1.0));
+    sunpos = vec3(vec4(5000.0, 5000.0, 5000.0, 1.0));
+    gl_Position = projection * view * vec4(pos + coords + (chunkpos * 32), 1.0);
 }

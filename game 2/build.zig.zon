@@ -25,20 +25,15 @@
 
     .dependencies = .{
         .glfw = .{
-            .url = "git+https://github.com/griush/zig-glfw#4086ec77f2180e285a260412fb4f10605dbb1625",
-            .hash = "1220804380562d8b9b9996d6d8aded88ef887310053cd09d0015af7e65778d5b8d30",
+            .url = "git+https://github.com/slimsag/mach-glfw#daeb7b10187249aade7d92ccfef8dcf5a94f8148",
+            .hash = "12207f4bba892c44b3b1b92b13b7ce5df2b49da1e797ba3e02b38b08d1e78c5cec0d",
         },
-        //.zigglgen = .{
-        //    .url = "https://github.com/castholm/zigglgen/releases/download/v0.2.3/zigglgen.tar.gz",
-        //    .hash = "1220f4188a5e1bdbb15fd50e9ea322c0721384eeba9bc077e4179b0b0eeaa7fe4ad9",
-        //},
         .zstbi = .{
-            .url = "https://github.com/zig-gamedev/zstbi/archive/3809262fe582e5128f8ec95eb94235783e185a26.tar.gz",
-            .hash = "122009ea2ff8496071dbe447731a62e6c7c731b6aca5ac3a01992a8d3330d4482a88",
-        },
+            .url = "https://github.com/zig-gamedev/zstbi/archive/ec86094475a10ba07b141b12b7020f7b88b0e77b.tar.gz",
+            .hash = "122009ea2ff8496071dbe447731a62e6c7c731b6aca5ac3a01992a8d3330d4482a88",        },
         .zm = .{
-            .url = "git+https://github.com/griush/zm#24eb73d78b73322efbe84f0ccd5a23debc174920",
-            .hash = "1220fca42cac0931a1a6af2ca0159b53c1c865a3746c5326d1f59cd9f78c495517e2",
+            .url = "git+https://github.com/griush/zm#dbb86079993637e3b0ab12323e08461ea6325ca6",
+            .hash = "1220897b0db58d1867fef1672a72f886f27af6a22e561797c48c9f793b06961c60ab",
         },
         .ztracy = .{ .path = "../ztracy/" },
         .zigglgen = .{
