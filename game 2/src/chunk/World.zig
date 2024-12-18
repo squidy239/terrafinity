@@ -24,6 +24,13 @@ pub fn Distance(c1: [3]i32, c2: [3]i32) f32 {
     const dz: f32 = @floatFromInt(c2[2] - c1[2]);
     return @sqrt(dx * dx + dy * dy + dz * dz);
 }
+
+pub fn DistanceFloat(c1: [3]f32, c2: [3]f32) f32 {
+    const dx: f32 = (c2[0] - c1[0]);
+    const dy: f32 = (c2[1] - c1[1]);
+    const dz: f32 = (c2[2] - c1[2]);
+    return @sqrt(dx * dx + dy * dy + dz * dz);
+}
 pub fn DistanceOrder(player: Entitys.Player, a: [3]i32, b: [3]i32) std.math.Order {
     // Convert coordinates to float32 and scale them
     const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
@@ -42,6 +49,7 @@ pub fn DistanceOrder(player: Entitys.Player, a: [3]i32, b: [3]i32) std.math.Orde
 pub const ChunkMesh = struct {
     position: [3]i32,
     faces: []u32,
+    scale:f32,
 };
 pub const World = struct {
     pool: std.Thread.Pool,
@@ -58,12 +66,13 @@ pub const World = struct {
     caveness: f32,
     min: i32,
     max: i32,
-    pub fn GenChunk(self: *@This(), chunkpos: [3]i32, player: Entitys.Player, allocator: std.mem.Allocator) void {
+    pub fn GenChunk(self: *@This(), chunkpos: [3]i32, player: Entitys.Player,scale:f32, allocator: std.mem.Allocator) void {
         const GenChunktime = ztracy.ZoneNC(@src(), "GenChunk", 0x9692de);
         defer GenChunktime.End();
         _ = player;
         //seed 0
-        const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness) orelse {
+        const caves = false;
+        const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness, scale  , caves) orelse {
             self.Chunks.get(chunkpos).?.state.store(ChunkState.AllAir, .seq_cst);
             const neighbors = GetAndLockNeighbors(self, chunkpos);
             defer {
@@ -129,9 +138,7 @@ pub const World = struct {
             }
 
             if (neighbors[i] != null and neighbors[i].?.state.load(.seq_cst) == ChunkState.WaitingForNeighbors and chstate.state.load(.seq_cst) == ChunkState.Generating) {
-                //neighbors[i].?.lock.lock();
                 neighbors[i].?.state.store(ChunkState.ReMesh, .seq_cst);
-                //neighbors[i].?.lock.unlock();
                 self.pool.spawn(MeshChunk, .{ self, neighbors[i].?.pos, allocator }) catch |err| {
                     std.debug.panic("\n{any}", .{err});
                 };
@@ -165,7 +172,7 @@ pub const World = struct {
         var node = allocator.create(std.DoublyLinkedList(ChunkMesh).Node) catch |err| {
             std.debug.panic("\n{any}", .{err});
         };
-        node.data = ChunkMesh{ .faces = mesh, .position = pos };
+        node.data = ChunkMesh{ .faces = mesh, .position = pos, .scale = chstate.scale};
         self.MeshesToLoadMutex.lock();
         self.MeshesToLoad.append((node));
         self.MeshesToLoadMutex.unlock();
@@ -215,7 +222,7 @@ pub const World = struct {
             };
             defer allocator.destroy(mesh);
             self.MeshesToLoadMutex.unlock();
-            const vbo = Render.CreateOrUpdateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, null, gl.STATIC_DRAW);
+            const vbo = Render.CreateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW);
 
             _ = try self.ChunkMeshes.append(vbo);
             i += 1;
@@ -257,6 +264,9 @@ pub const World = struct {
                             c.lock = .{};
                             c.Unloading = false;
                             c.chunkPtr = null;
+                            //scale
+                            c.scale = 1.0;
+                            //
                             std.debug.assert(pos[0] != -1431655766);
                             c.pos = pos;
                             _ = try self.Chunks.put(pos, c);
@@ -267,6 +277,12 @@ pub const World = struct {
                             cg.?.state.store(ChunkState.ReMesh, .seq_cst);
                             _ = try self.pool.spawn(MeshChunk, .{ self, cg.?.pos, allocator });
                         }
+                       // else if (1.0+DistanceFloat(@as(@Vector(3,f32),@floatFromInt(@as(@Vector(3, i32),pos))),player.pos/@Vector(3, f32){32.0,32.0,32.0}) != cg.?.scale and cg.?.state.load(.seq_cst) == ChunkState.InMemoryAndMesh){
+                        // _ = try SortToGen.add(cg.?.pos);
+                        //not done
+
+                    
+                       // }
                         // not working
                         else if (false and cg.?.state.load(.seq_cst) == ChunkState.MeshOnly) {
                             cg.?.state.store(ChunkState.InMemoryAndMesh, .seq_cst); //unsafe
@@ -286,9 +302,11 @@ pub const World = struct {
                     self,
                     pos,
                     player.*,
+                    self.Chunks.get(pos).?.scale,
                     allocator,
                 });
             }
+            //if(@reduce(.Or, @abs(pos - @as(@Vector(3, i32),@intFromFloat(player.pos/@Vector(3, f32){32.0,32.0,32.0}))) < @as(@Vector(3, u32), (@Vector(3, u32){2,2,2}))))1 else 2;
         }
     }
 

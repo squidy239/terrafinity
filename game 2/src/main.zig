@@ -28,7 +28,7 @@ var gpa = (std.heap.GeneralPurposeAllocator(.{
 
 }){});
 var c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
-const allocator = c_allocator.allocator();
+const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 var Worldptr: *World = undefined;
@@ -62,9 +62,9 @@ var player: Entitys.Player = Entitys.Player{
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
     .pos = @Vector(3, f32){ 0.0, 30.0, 0.0 },
-    .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20 },
-    .MeshDistance = [3]u32{ 20, 10, 20 },
+    .GenDistance = [3]u32{ 20, 20, 20 },
+    .LoadDistance = [3]u32{ 20, 20, 20 },
+    .MeshDistance = [3]u32{ 20000, 20000, 20000 },
 };
 
 var fullscreen: bool = false;
@@ -96,11 +96,10 @@ pub fn main() !void {
     }
 
     gl.makeProcTableCurrent(&procs);
-
     glfw.Window.setFramebufferSizeCallback(window, glfwSizeCallback);
     glfw.Window.setInputMode(window, glfw.Window.InputMode.cursor, glfw.Window.InputModeCursor.disabled);
     glfw.Window.setCursorPosCallback(window, MouseCallback);
-
+    glfw.swapInterval( 0 );
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -168,15 +167,16 @@ pub fn main() !void {
             .seed = 0,
             .noise_type = .perlin,
             .frequency = 0.002,
-            .fractal_type = .fbm,
+            .fractal_type = .ridged,
         },
+
         .min = 0,
         .max = 5024,
         // 0 is most cavey 1 is least cavey
         .caveness = 0.2,
     };
 
-    _ = try MainWorld.pool.init(.{ .n_jobs = @intCast(cpu_count - 1), .allocator = allocator });
+    _ = try MainWorld.pool.init(.{ .n_jobs = @intCast(cpu_count - 4), .allocator = allocator });
     defer MainWorld.pool.deinit();
 
     Worldptr = &MainWorld;
@@ -218,30 +218,34 @@ pub fn main() !void {
     var unloadTimer = try std.time.Timer.start();
     // var genbenchmark = true;
     // var meshbenchmark = true;
+    const chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
+    const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
+    const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
+    const scalelocation = gl.GetUniformLocation(shaderprogram, "scale");
     while (!window.shouldClose()) {
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 1.0, @floatFromInt(((player.GenDistance[0] - 2) * 32)));
+        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 1.0, 200000);
         gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
         const view = zm.Mat4f.lookAt(player.pos, player.pos + player.cameraFront, player.cameraUp);
-        const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
         gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
-        const chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
-        const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
+        
         //std.debug.print("{any}\n", .{player});
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         const it = MainWorld.ChunkMeshes.items;
 
         for (it) |mesh| {
+
             //gl.DepthMask(gl.FALSE);
             //const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x9692d);
             //defer drawchunk.End();
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 1000) tr = 1000;
+            gl.Uniform1f(scalelocation,mesh.scale);
             gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             gl.BindVertexArray(mesh.vao);
@@ -255,7 +259,7 @@ pub fn main() !void {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
-            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 20 * std.time.ns_per_ms);
+            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 4 * std.time.ns_per_ms);
         }
         //std.debug.print("{d}\r", .{player.pos});
         const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);

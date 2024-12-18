@@ -3,7 +3,7 @@ layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 view;
 uniform mat4 projection;
-
+uniform float scale;
 uniform ivec3 chunkpos;
 uniform uint AtlasHeight;
 uniform int chunktime;
@@ -13,6 +13,7 @@ out vec3 coordss;
 out uint side;
 out vec3 fragpos;
 out vec3 sunpos;
+out float sscale;
 out vec3 position;
 out uint blocktype;
 
@@ -78,15 +79,17 @@ float rand(vec2 co) {
 
 void main() {
     vec3 pos = DecodePosition(data);
+    sscale = scale;
     position = pos + (chunkpos * 32);
     Atlasheight = AtlasHeight;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
-    pos.y -= (1000 - chunktime) / 100000;
+    pos.y -= (1000 - chunktime) / 10;
     if (pos.y < 1000)
         coordss = coords;
     fragpos = vec3((pos + coords + (chunkpos * 32), 1.0));
     sunpos = vec3(vec4(5000.0, 5000.0, 5000.0, 1.0));
-    gl_Position = projection * view * vec4(pos + coords + (chunkpos * 32), 1.0);
+
+    gl_Position = projection * view * vec4(((pos + coords) + ((chunkpos) * 32 ))*scale, 1.0);
 }

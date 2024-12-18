@@ -37,6 +37,7 @@ pub const ChunkandMeta = struct {
     lock: std.Thread.RwLock,
     chunkmeshesindex: ?usize,
     Unloading: bool,
+    scale:f32,
 };
 
 pub const PtrState = struct {
@@ -50,6 +51,7 @@ pub const MeshBufferIDs = struct {
     vao: c_uint,
     pos: [3]i32,
     count: u32,
+    scale:f32,
 };
 
 pub const Chunk = struct {
@@ -152,24 +154,18 @@ pub const Render = struct {
         return mesh.toOwnedSlice();
     }
 
-    pub fn CreateOrUpdateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, MeshIDs: ?MeshBufferIDs, usage: comptime_int) MeshBufferIDs {
+    pub fn CreateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint,scale:f32, usage: comptime_int) MeshBufferIDs {
         const createvbo = ztracy.ZoneNC(@src(), "createvbo", 0x00_ff_00_00);
         defer createvbo.End();
         var NewMeshIDs: MeshBufferIDs = undefined;
         std.debug.assert(mesh.len > 0);
-        if (MeshIDs != null) {
-            gl.BindVertexArray(MeshIDs.?.vao);
-            gl.BindBuffer(gl.ARRAY_BUFFER, MeshIDs.?.vbo);
-        } else {
-            gl.GenVertexArrays(1, @ptrCast(&NewMeshIDs.vao));
-            gl.GenBuffers(1, @ptrCast(&NewMeshIDs.vbo));
-
-            gl.BindVertexArray(NewMeshIDs.vao);
-            gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo);
-        }
-
+        gl.GenVertexArrays(1, @ptrCast(&NewMeshIDs.vao));
+        gl.GenBuffers(1, @ptrCast(&NewMeshIDs.vbo));
+        gl.BindVertexArray(NewMeshIDs.vao);
+        gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo);
         gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * mesh.len), mesh.ptr, usage);
         NewMeshIDs.pos = pos;
+        NewMeshIDs.scale = scale;
         NewMeshIDs.count = @intCast(mesh.len);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
         gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
@@ -183,7 +179,7 @@ pub const Render = struct {
         //std.debug.print("mesh made:{d}faces\n", .{mesh.len});
         gl.BindVertexArray(0);
         NewMeshIDs.time = std.time.milliTimestamp();
-        return MeshIDs orelse NewMeshIDs;
+        return NewMeshIDs;
     }
 };
 pub const Generator = struct {
@@ -216,11 +212,12 @@ pub const Generator = struct {
         return @divFloor(p1 + p2 + p3 + p4 + p5, 5);
     }
 
-    fn generateTree(chunk: *Chunk, x: usize, z: usize, height: i32, rand: *std.Random.DefaultPrng) void {
+    fn generateTree(chunk: *Chunk, x: usize, z: usize, height: i32,scale:f32, rand: *std.Random.DefaultPrng) void {
         // Determine tree type and size based on randomness
-        const tree_type = rand.random().intRangeAtMost(u8, 0, 1);
-        const tree_height = rand.random().intRangeAtMost(u8, 4, 16);
-        const trunk_height = tree_height - 2;
+        if(scale > 16.0)return;
+        const tree_type = @as(u8,@intFromFloat(@as(f32,@floatFromInt(rand.random().intRangeAtMost(u8, 0, 1)))/scale));
+        const tree_height = @as(u8,@intFromFloat(@as(f32,@floatFromInt(rand.random().intRangeAtMost(u8, 4, 16)))/scale));
+        const trunk_height = tree_height - @as(u8,@intFromFloat(2.0/scale));
         const canopy_width = tree_height / 2;
 
         // Find the top surface block
@@ -250,7 +247,7 @@ pub const Generator = struct {
                         var dz: i8 = -layer_width;
                         while (dz <= layer_width) : (dz += 1) {
                             // Use circular coverage
-                            if (dx * dx +| dz * dz <= layer_width * layer_width) {
+                            if (dx *| dx +| dz * dz <= layer_width * layer_width) {
                                 const leaf_x = @as(i32, @intCast(x)) + dx;
                                 const leaf_z = @as(i32, @intCast(z)) + dz;
 
@@ -294,13 +291,13 @@ pub const Generator = struct {
         
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32) ?Chunk {
+    pub fn GenChunk(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32, scale:f32, caves:bool) ?Chunk {
         const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
         defer gen.End();
 
         // Pre-calculate chunk position offset
         const chunk_offset = @Vector(3, f32){
-            @floatFromInt(Pos[0] * 32),
+            @floatFromInt(Pos[0] * 32 ),
             @floatFromInt(Pos[1] * 32),
             @floatFromInt(Pos[2] * 32),
         };
@@ -321,23 +318,26 @@ pub const Generator = struct {
             const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
             for (0..ChunkSize) |zz| {
                 const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-                const firstnoise = TerrainNoise.genNoise2D(x, z);
-                const secondnoise = TerrainNoise2.genNoise2D(x, z);
+                const firstnoise = TerrainNoise.genNoise2D(x*scale, z*scale);
+                var secondnoise = TerrainNoise2.genNoise2D(x*scale, z*scale);
+                if(secondnoise < 0.0) secondnoise = 0.0;
                 const P = 2.0; //Higher for stronger bias.
                 const E = firstnoise * (if (secondnoise < 0.5)
                     (std.math.pow(f32, secondnoise * 2, P) / 2)
                 else
                     (1 - (std.math.pow(f32, (1 - secondnoise) * 2, P) / 2)));
-                terrain_heights[xx][zz] = @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin)))) + terrainmin;
+                
+                terrain_heights[xx][zz] =  @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin))/scale));
+                //std.debug.assert( ( terrain_heights[xx][zz] <= terrainmax));
             }
         }
         terrain.End();
-        const caves = ztracy.ZoneNC(@src(), "caves", 0x692dd7e);
+        const cavess = ztracy.ZoneNC(@src(), "caves", 0x692dd7e);
 
         var rand_impl = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
 
         // Tree generation parameters
-        const tree_chance = 0.01; // 10% chance of tree generation
+        const tree_chance = 0.01 * scale; // 10% chance of tree generation
 
         // Process terrain generation in a more cache-friendly way
         for (0..ChunkSize) |xx| {
@@ -345,8 +345,8 @@ pub const Generator = struct {
             for (0..ChunkSize) |zz| {
                 const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
                 const tn = terrain_heights[xx][zz];
-                const chunk_y = @divFloor(tn, 32);
-
+                const chunk_y = @divFloor(tn, ChunkSize);
+ 
                 if (chunk_y < Pos[1]) continue;
 
                 const is_top_chunk = chunk_y > Pos[1];
@@ -359,10 +359,10 @@ pub const Generator = struct {
                 var yy: usize = 0;
                 while (yy <= height) : (yy += 1) {
                     const y = @as(f32, @floatFromInt(yy)) + chunk_offset[1];
-                    const cave_density = CaveNoise.genNoise3D(x, y, z);
+                    const cave_density = if(caves)CaveNoise.genNoise3D(x*scale, y*scale, z*scale) else 0.0;
                     if (cave_density < caveness) {
                         chunk.blocks[xx][yy][zz] = if (!is_top_chunk) blk: {
-                            var gm = (chunk.pos[1] * 32) + @as(i32, @intCast(yy));
+                            var gm = @as(i32,@intFromFloat(@as(f32,@floatFromInt(chunk.pos[1] * ChunkSize))*scale)) + @as(i32, @intCast(yy));
                             if (gm <= 0) gm = 1;
                             if (yy == height and (std.Random.uintAtMost(rand_impl.random(), u32, 256) > gm)) break :blk Blocks.Grass;
                             if (yy > height - 5 and (std.Random.uintAtMost(rand_impl.random(), u32, 512) > gm)) break :blk Blocks.Dirt;
@@ -378,11 +378,11 @@ pub const Generator = struct {
                     chunk.blocks[xx][@intCast(height)][zz] == Blocks.Grass and
                     rand_impl.random().float(f32) < tree_chance)
                 {
-                    generateTree(&chunk, xx, zz, height, &rand_impl);
+                    generateTree(&chunk, xx, zz, @as(i32,@intFromFloat(@as(f32,@floatFromInt(height))/scale)),scale, &rand_impl);
                 }
             }
         }
-        caves.End();
+        cavess.End();
 
         return if (has_terrain) chunk else null;
     }
