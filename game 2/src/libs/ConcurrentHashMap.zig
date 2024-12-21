@@ -1,6 +1,6 @@
 const std = @import("std");
 //const ztracy = @import("ztracy");
-const ChunkandMeta = @import("../chunk/Chunk.zig").ChunkandMeta;
+const Chunk = @import("../chunk/Chunk.zig").Chunk;
 
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
@@ -98,10 +98,9 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             self.lock.lockShared();
             //bktlock.End();
             defer self.lock.unlockShared();
-            const ch: *ChunkandMeta = self.hash_map.get(key) orelse return null;
+            const ch: *Chunk = self.hash_map.get(key) orelse return null;
             // std.debug.print("\n{*}", .{ch});
             //if(ch.Unloading) return null;
-            std.debug.assert(@intFromPtr(ch) != 0xffffffffffffffff);
             ch.lock.lockShared();
             return ch;
         }

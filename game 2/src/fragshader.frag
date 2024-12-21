@@ -5,9 +5,9 @@ in flat vec3 position;
 in vec3 coordss;
 in flat uint blocktype;
 in flat uint side;
-in float sscale;
+in flat float sscale;
 in vec3 fragpos;
-in vec3 sunpos;
+in flat vec3 sunpos;
 uniform sampler2D TextureAtlas;
 
 float rand(vec2 co) {
@@ -53,12 +53,18 @@ void main()
     //if(texcoords.x > 1 || texcoords.x < -1 || texcoords.y > 1 || texcoords.y < -1  )discard;
     if (blocktype == 3)
     {
+        if(position.y < 1000){
         float v = abs((rand(vec2(round(coordss.x * 16) / 16 / round(coordss.y * 16) / 16, round(coordss.z * 16) / 16))));
-        FragColor = vec4((cdfs - 0.0001 * sscale * position.y) - v, (cdfs + 0.0001 * sscale *position.y) - v, (cdfs + 0.0001 * sscale * position.y) - v, 1);
+        FragColor = vec4((cdfs - 0.0001 * sscale * abs(position.y)) - v, (cdfs + 0.0001 * sscale *abs(position.y)) - v, (cdfs + 0.0001 * sscale * abs(position.y)) - v, 1);}
+        else{
+        FragColor = vec4(0.9,0.9,0.9,1.0);
+        }
     }
     else if (blocktype == 1)
-    {
-        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + position.y + 0.1) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, position.x * position.z / round(coordss.z * 16) / 16) / 16))) + 0.2, ((rand(vec2(round(coordss.x * 4) / 4 + position.y / round(coordss.y * 4) / 4, position.x * position.z / round(coordss.z * 4) / 4) / 16))) - 0.4, 1);
+    {   
+        if(gl_FragCoord.z < 0.999999){
+        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + abs(position.y) + 0.1) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, ((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4, 1);
+        }else FragColor = vec4(0.0,0.7,0.2,1.0);
     }
     else if (blocktype == 2)
     {
@@ -69,9 +75,12 @@ void main()
         FragColor = vec4(cdfs + 0.4, cdfs - 0.2, cdfs - 0.5, 1);
     }
     else if (blocktype == 4)
-    {
-        if (rand(vec2(round(coordss.x * 4) / 4 + position.y / round(coordss.y * 4) / 4, position.x * position.z / round(coordss.z * 4) / 4) / 16) > 0.5) discard;
-        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 16 + position.y + 0.1) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, position.x * position.z / round(coordss.z * 16) / 16) / 16))) + 0.2, ((rand(vec2(round(coordss.x * 4) / 4 + position.y / round(coordss.y * 4) / 4, position.x * position.z / round(coordss.z * 4) / 4) / 16))) - 0.4, 1);
+    {   
+    if(gl_FragCoord.z < 0.99999){
+        if (rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16) > 0.5) discard;
+        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 16 + abs(position.y) + 0.1) / (round((coordss.y + 0.1) * 8) / 8) + 0.2,abs( position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, ((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4, 1);
+    }
+    else FragColor = vec4(0.0,0.8,0.5,1.0);
     }
 
     vec3 lightColor = vec3(1.0, 1.0, 1.0);

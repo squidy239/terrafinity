@@ -2,16 +2,18 @@ const std = @import("std");
 
 const gl = @import("gl");
 const ztracy = @import("ztracy");
-
+const cache = @import("cache");
 const Entitys = @import("../entities/Entitys.zig");
 const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
+
 const Blocks = @import("./Blocks.zig").Blocks;
 const RenderIDs = @import("./Chunk.zig").MeshBufferIDs;
 const Chunk = @import("./Chunk.zig").Chunk;
 const ChunkState = @import("./Chunk.zig").ChunkState;
+const CompressionType = @import("./Chunk.zig").CompressionType;
+
 const Generator = @import("./Chunk.zig").Generator;
 const Render = @import("./Chunk.zig").Render;
-const ChunkandMeta = @import("./Chunk.zig").ChunkandMeta;
 const ChunkSize = @import("./Chunk.zig").ChunkSize;
 const PtrState = @import("./Chunk.zig").PtrState;
 const Noise = @import("./fastnoise.zig");
@@ -49,15 +51,18 @@ pub fn DistanceOrder(player: Entitys.Player, a: [3]i32, b: [3]i32) std.math.Orde
 pub const ChunkMesh = struct {
     position: [3]i32,
     faces: []u32,
-    scale:f32,
+    scale: f32,
 };
 pub const World = struct {
+    running: std.atomic.Value(bool),
     pool: std.Thread.Pool,
     ChunkMeshes: std.ArrayList(RenderIDs),
-    Chunks: ConcurrentHashMap([3]i32, *ChunkandMeta, std.hash_map.AutoContext([3]i32), 80, 32),
+    TerrainHeightCache: cache.Cache([32][32]i32),
+    Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
     MeshesToLoad: std.DoublyLinkedList(ChunkMesh),
     MeshesToLoadMutex: std.Thread.Mutex,
+    TerrainHeightCacheMutex: std.Thread.Mutex,
     ToUnload: std.DoublyLinkedList([3]i32),
     ToUnloadMutex: std.Thread.Mutex,
     TerrainNoise: Noise.Noise(f32),
@@ -66,14 +71,17 @@ pub const World = struct {
     caveness: f32,
     min: i32,
     max: i32,
-    pub fn GenChunk(self: *@This(), chunkpos: [3]i32, player: Entitys.Player,scale:f32, allocator: std.mem.Allocator) void {
+    pub fn GenChunk(self: *@This(), chunkpos: [3]i32, player: Entitys.Player, scale: f32, allocator: std.mem.Allocator) void {
         const GenChunktime = ztracy.ZoneNC(@src(), "GenChunk", 0x9692de);
         defer GenChunktime.End();
         _ = player;
         //seed 0
         const caves = false;
-        const chunk: Chunk = Generator.GenChunk(chunkpos, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness, scale  , caves) orelse {
-            self.Chunks.get(chunkpos).?.state.store(ChunkState.AllAir, .seq_cst);
+        const p = self.Chunks.get(chunkpos).?;
+
+        p.EncodeAndPutBlocks(Generator.GenChunk(chunkpos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness, scale, caves) orelse {
+            p.state.store(ChunkState.AllAir, .seq_cst);
+            std.debug.assert(p.ChunkData == null);
             const neighbors = GetAndLockNeighbors(self, chunkpos);
             defer {
                 for (neighbors) |n| if (n != null) {
@@ -90,24 +98,10 @@ pub const World = struct {
             }
 
             return;
-        };
-        //uses TONS of memory, TODO fix memory usage
-        const ap = ztracy.ZoneNC(@src(), "allocanput", 0x9692d);
-        defer ap.End();
-        const chptr = allocator.create(Chunk) catch |err| {
-            std.debug.panic("\n{any}", .{err});
-        };
-        chptr.* = chunk;
-        const p = self.Chunks.get(chunkpos).?;
-        if (p.state.load(.seq_cst) == ChunkState.ToGenerate or p.state.load(.seq_cst) == ChunkState.InMemoryMeshUnloaded) {
-            p.state.store(ChunkState.Generating, .seq_cst);
-            p.chunkPtr = chptr;
-            _ = self.pool.spawn(MeshChunk, .{ self, chptr.pos, allocator }) catch |err| {
-                std.debug.panic("\n{any}", .{err});
-            };
-        } else {
-            std.debug.panic("sssERROR\n{any}\n", .{p.state.load(.seq_cst)});
-        }
+        }, .None,allocator) catch |err| std.debug.panic("\n{any}", .{err});
+        std.debug.assert(p.state.load(.seq_cst) == ChunkState.ToGenerate or p.state.load(.seq_cst) == ChunkState.InMemoryMeshUnloaded);
+        p.state.store(ChunkState.Generating, .seq_cst);
+        _ = self.pool.spawn(MeshChunk, .{ self, chunkpos, allocator }) catch |err| std.debug.panic("\n{any}", .{err});
     }
 
     pub fn MeshChunk(self: *@This(), pos: [3]i32, allocator: std.mem.Allocator) void {
@@ -117,22 +111,26 @@ pub const World = struct {
             std.debug.print("warning", .{});
             return;
         };
+
         chstate.lock.lockShared();
         defer chstate.lock.unlockShared();
         //std.debug.print("\n{any}", .{chstate.state.load(.seq_cst)});
         std.debug.assert(chstate.state.load(.seq_cst) == ChunkState.Generating or chstate.state.load(.seq_cst) == ChunkState.ReMesh);
-        const neighbors: [6]?*ChunkandMeta = GetAndLockNeighbors(self, pos);
+        const neighbors: [6]?*Chunk = GetAndLockNeighbors(self, pos);
         //const neighbors = [6]?*ChunkandMeta{null,null,null,null,null,null};
         defer {
             for (neighbors) |n| {
-                if (n != null) n.?.lock.unlockShared();
+                (n orelse {
+                    continue;
+                }).lock.unlockShared();
             }
         }
         var neighborptrs: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
         var wfn: u3 = 0;
+        const prossesnehbors = ztracy.ZoneNC(@src(), "prossesnehbors", 0x9692d);
         for (0..6) |i| {
-            if (neighbors[i] != null and neighbors[i].?.chunkPtr != null) {
-                neighborptrs[i] = neighbors[i].?.chunkPtr.?;
+            if (neighbors[i] != null and neighbors[i].?.ChunkData != null) {
+                neighborptrs[i] = neighbors[i];
             } else if (neighbors[i] == null or neighbors[i].?.state.load(.seq_cst) != ChunkState.AllAir) {
                 wfn += 1;
             }
@@ -147,12 +145,14 @@ pub const World = struct {
         if (wfn > 0) {
             //std.debug.print("\nl{any}", .{chstate.lock.impl});
             chstate.state.store(ChunkState.WaitingForNeighbors, .seq_cst);
-
+            prossesnehbors.End();
             return;
         }
         std.debug.assert(wfn == 0);
         std.debug.assert(chstate.state.load(.seq_cst) == ChunkState.Generating or chstate.state.load(.seq_cst) == ChunkState.ReMesh);
-        const mesh = Render.MeshChunk_Normal(chstate.chunkPtr.?, allocator, neighborptrs) catch |err| {
+        prossesnehbors.End();
+
+        const mesh = Render.MeshChunk_Normal(chstate, allocator, neighborptrs) catch |err| {
             std.debug.panic("\n{any}", .{err});
         };
 
@@ -172,7 +172,7 @@ pub const World = struct {
         var node = allocator.create(std.DoublyLinkedList(ChunkMesh).Node) catch |err| {
             std.debug.panic("\n{any}", .{err});
         };
-        node.data = ChunkMesh{ .faces = mesh, .position = pos, .scale = chstate.scale};
+        node.data = ChunkMesh{ .faces = mesh, .position = pos, .scale = chstate.scale };
         self.MeshesToLoadMutex.lock();
         self.MeshesToLoad.append((node));
         self.MeshesToLoadMutex.unlock();
@@ -187,10 +187,10 @@ pub const World = struct {
         }
         return false;
     }
-    pub fn GetAndLockNeighbors(self: *@This(), pos: [3]i32) [6]?*ChunkandMeta {
+    pub fn GetAndLockNeighbors(self: *@This(), pos: [3]i32) [6]?*Chunk {
         const getneighbors = ztracy.ZoneNC(@src(), "getneighbors", 0xFFFF00);
         defer getneighbors.End();
-        var chunks: [6]?*ChunkandMeta = [6]?*ChunkandMeta{ null, null, null, null, null, null };
+        var chunks: [6]?*Chunk = [6]?*Chunk{ null, null, null, null, null, null };
         // BUG chunks are gotten before state TODO fix
         //if chunk state changes after ptr is gotten state and ptr could mismaatch
         //might need to change big parts of the system
@@ -220,7 +220,8 @@ pub const World = struct {
                 self.MeshesToLoadMutex.unlock();
                 return;
             };
-            defer allocator.destroy(mesh);
+            defer {allocator.free(mesh.data.faces);allocator.destroy(mesh);}
+     
             self.MeshesToLoadMutex.unlock();
             const vbo = Render.CreateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW);
 
@@ -239,8 +240,9 @@ pub const World = struct {
 
         defer SortToGen.deinit();
         while (true) {
+            
             std.time.sleep(sleeptime);
-
+            if(!self.running.load(.monotonic))return;
             const Addtogen = ztracy.ZoneNC(@src(), "Addtogen", 0x9692de);
             defer Addtogen.End();
             const p = @Vector(3, i32){ @as(i32, @intFromFloat(player.pos[0] / 32.0)), @as(i32, @intFromFloat(player.pos[1] / 32.0)), @as(i32, @intFromFloat(player.pos[2] / 32.0)) };
@@ -257,15 +259,16 @@ pub const World = struct {
                         const cg = self.Chunks.get(pos);
 
                         if (cg == null) {
-                            const c = try allocator.create(ChunkandMeta);
+                            const c = try allocator.create(Chunk);
                             c.state.store(ChunkState.ToGenerate, .seq_cst);
-                            c.chunkmeshesindex = null;
                             c.neighborsmissing = null;
                             c.lock = .{};
                             c.Unloading = false;
-                            c.chunkPtr = null;
+                            c.ChunkData = null;
+                            c.CompressionType = CompressionType.None;
+
                             //scale
-                            c.scale = 1.0;
+                            c.scale = 1;
                             //
                             std.debug.assert(pos[0] != -1431655766);
                             c.pos = pos;
@@ -277,12 +280,11 @@ pub const World = struct {
                             cg.?.state.store(ChunkState.ReMesh, .seq_cst);
                             _ = try self.pool.spawn(MeshChunk, .{ self, cg.?.pos, allocator });
                         }
-                       // else if (1.0+DistanceFloat(@as(@Vector(3,f32),@floatFromInt(@as(@Vector(3, i32),pos))),player.pos/@Vector(3, f32){32.0,32.0,32.0}) != cg.?.scale and cg.?.state.load(.seq_cst) == ChunkState.InMemoryAndMesh){
+                        // else if (1.0+DistanceFloat(@as(@Vector(3,f32),@floatFromInt(@as(@Vector(3, i32),pos))),player.pos/@Vector(3, f32){32.0,32.0,32.0}) != cg.?.scale and cg.?.state.load(.seq_cst) == ChunkState.InMemoryAndMesh){
                         // _ = try SortToGen.add(cg.?.pos);
                         //not done
 
-                    
-                       // }
+                        // }
                         // not working
                         else if (false and cg.?.state.load(.seq_cst) == ChunkState.MeshOnly) {
                             cg.?.state.store(ChunkState.InMemoryAndMesh, .seq_cst); //unsafe
@@ -313,9 +315,12 @@ pub const World = struct {
     pub fn AddToUnload(self: *@This(), player: *Entitys.Player, sleeptime: u64, allocator: std.mem.Allocator) !void {
         while (true) {
             std.time.sleep(sleeptime);
+            if(!self.running.load(.monotonic))return;
+            var count:u32 = 0;
+            var unloadedcount:u32 = 0;
             const addToUnload = ztracy.ZoneNC(@src(), "AddToUnload", 0x9692de);
             defer addToUnload.End();
-            const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
+            const pi:@Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 });
             const bktamount = self.Chunks.buckets.len;
             for (0..bktamount) |b| {
                 self.Chunks.buckets[b].lock.lockShared();
@@ -325,15 +330,16 @@ pub const World = struct {
                     const ch = it.next() orelse {
                         break :inner;
                     };
+                    count+=1;
                     if (!ch.*.Unloading and @reduce(.Or, @abs(pi - ch.*.pos) > @as(@Vector(3, u32), ((player.LoadDistance))))) {
                         const unloadpos = try allocator.create(std.DoublyLinkedList([3]i32).Node);
                         const hash_code = self.Chunks.ctx.hash(ch.*.pos);
                         const bucket_index = @mod(hash_code, 32);
                         unloadpos.data = ch.*.pos;
-
+                        unloadedcount+=1;
                         if (self.Chunks.buckets[b].hash_map.get(ch.*.pos) == null or bucket_index != b) {
                             std.debug.print("\n\nerr{any}, len:{}", .{ ch.*.pos, self.ToUnload.len });
-                            ch.*.pos = ch.*.chunkPtr.?.pos;
+            
                             continue;
                         }
                         //maybie atomic later
@@ -344,6 +350,7 @@ pub const World = struct {
                     }
                 }
             }
+            std.debug.print("count:{d}, unloaded:{d}\r", .{count,unloadedcount});
         }
     }
 
@@ -351,7 +358,7 @@ pub const World = struct {
         top: while (true) {
             const Unload = ztracy.ZoneNC(@src(), "Unloadchunks", 0x9692de);
             defer Unload.End();
-
+            if(!self.running.load(.monotonic))return;
             self.ToUnloadMutex.lock();
             const chunktounload = self.ToUnload.popFirst() orelse {
                 self.ToUnloadMutex.unlock();
@@ -370,7 +377,8 @@ pub const World = struct {
         }
     }
 
-    pub fn UnloadChunk(self: *@This(), chunk: *ChunkandMeta, allocator: std.mem.Allocator) void {
+    pub fn UnloadChunk(self: *@This(), chunk: *Chunk, allocator: std.mem.Allocator) void {
+        //TODO atomic refrance counting
         std.debug.assert(chunk.Unloading == true);
         const state = chunk.state.load(.seq_cst);
         switch (state) {
@@ -378,26 +386,59 @@ pub const World = struct {
             ChunkState.InMemoryAndMesh => {
                 chunk.lock.lock();
                 chunk.state.store(ChunkState.MeshOnly, .seq_cst);
-                const c = chunk.chunkPtr.?;
-                chunk.chunkPtr = null;
+                allocator.free(chunk.ChunkData.?);
+                chunk.ChunkData = null;
                 chunk.lock.unlock();
-                c.lock.lock();
-                allocator.destroy(c);
             },
-            ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
+            
+            ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh,ChunkState.WaitingForNeighbors  => {
                 _ = self.Chunks.remove(chunk.pos);
                 chunk.lock.lock();
-                chunk.chunkPtr.?.lock.lock();
-                allocator.destroy(chunk.chunkPtr.?);
+                allocator.free(chunk.ChunkData.?);
                 allocator.destroy(chunk);
             },
             ChunkState.AllAir => {
+                std.debug.assert(chunk.ChunkData == null);
                 _ = self.Chunks.remove(chunk.pos);
-                std.debug.assert(chunk.chunkPtr == null);
                 chunk.lock.lock();
                 allocator.destroy(chunk);
             },
             else => {},
         }
     }
+    
+    pub fn deinit(self:*@This(),allocator:std.mem.Allocator)void{
+        self.pool.deinit();
+        self.TerrainHeightCache.deinit();
+    
+        //self.Entitys.deinit();
+        while (self.MeshesToLoad.popFirst()) |m|{
+            allocator.free(m.data.faces);
+            allocator.destroy(m);
+        }
+        for (self.ChunkMeshes.items) |mesh| {
+            gl.DeleteBuffers(1, @constCast(@ptrCast(&mesh.vbo)));
+            gl.DeleteVertexArrays(1, @constCast(@ptrCast(&mesh.vao))); 
+        
+        }
+        self.ChunkMeshes.deinit();
+        const bktamount = self.Chunks.buckets.len;
+        for (0..bktamount) |b| {
+            self.Chunks.buckets[b].lock.lockShared();
+            var it = self.Chunks.buckets[b].hash_map.valueIterator();
+            defer self.Chunks.buckets[b].lock.unlockShared();
+            inner: while (true) {
+                const ch = it.next() orelse {
+                    
+                    break :inner;
+                };
+                if(ch.*.ChunkData != null)
+                    allocator.free(ch.*.ChunkData.?);
+                allocator.destroy(ch.*);
+                
+            }
+        }
+        self.Chunks.deinit();
+    }
+    
 };

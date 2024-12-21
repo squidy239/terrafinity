@@ -1,10 +1,12 @@
 const std = @import("std");
 
+const cache = @import("cache");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zm = @import("zm");
 const zstbi = @import("zstbi");
 const ztracy = @import("ztracy");
+
 const Textures = @import("./chunk/Blocks.zig").Textures;
 const Blocks = @import("./chunk/Blocks.zig").Blocks;
 const Chunk = @import("./chunk/Chunk.zig").Chunk;
@@ -12,7 +14,6 @@ const ChunkStates = @import("./chunk/Chunk.zig").ChunkState;
 const Generator = @import("./chunk/Chunk.zig").Generator;
 const Render = @import("./chunk/Chunk.zig").Render;
 const RenderIDs = @import("./chunk/Chunk.zig").MeshBufferIDs;
-const ChunkandMeta = @import("./chunk/Chunk.zig").ChunkandMeta;
 const Noise = @import("./chunk/fastnoise.zig");
 const World = @import("./chunk/World.zig").World;
 const pw = @import("./chunk/World.zig").pw;
@@ -28,7 +29,7 @@ var gpa = (std.heap.GeneralPurposeAllocator(.{
 
 }){});
 var c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
-const allocator = gpa.allocator();
+const allocator = c_allocator.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 var Worldptr: *World = undefined;
@@ -56,15 +57,15 @@ var lastY: f64 = undefined;
 
 var player: Entitys.Player = Entitys.Player{
     .yaw = 0,
-    .cameraFront = @Vector(3, f32){ 0.0, 0.0, 1.0 },
-    .cameraUp = @Vector(3, f32){ 0.0, 1.0, 0.0 },
+    .cameraFront = @Vector(3, f64){ 0.0, 0.0, 1.0 },
+    .cameraUp = @Vector(3, f64){ 0.0, 1.0, 0.0 },
     .pitch = 0,
     .roll = 0,
     .speed = @Vector(3, f32){ 10.0, 10.0, 10.0 },
-    .pos = @Vector(3, f32){ 0.0, 30.0, 0.0 },
-    .GenDistance = [3]u32{ 20, 20, 20 },
-    .LoadDistance = [3]u32{ 20, 20, 20 },
-    .MeshDistance = [3]u32{ 20000, 20000, 20000 },
+    .pos = @Vector(3, f64){ 0.0, 0.0, 0.0 },
+    .GenDistance = [3]u32{ 20, 10, 20 },
+    .LoadDistance = [3]u32{ 20, 10, 20},
+    .MeshDistance = [3]u32{ 20, 10, 20 },
 };
 
 var fullscreen: bool = false;
@@ -89,17 +90,17 @@ pub fn main() !void {
         std.debug.panic("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
         return error.CreateWindowFailed;
     };
-    defer window.destroy();
+    
     glfw.makeContextCurrent(window);
     if (!procs.init(glfw.getProcAddress)) {
         std.debug.panic("could not get glproc", .{});
     }
-
+    
     gl.makeProcTableCurrent(&procs);
     glfw.Window.setFramebufferSizeCallback(window, glfwSizeCallback);
     glfw.Window.setInputMode(window, glfw.Window.InputMode.cursor, glfw.Window.InputModeCursor.disabled);
     glfw.Window.setCursorPosCallback(window, MouseCallback);
-    glfw.swapInterval( 0 );
+    glfw.swapInterval(0);
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -138,16 +139,20 @@ pub fn main() !void {
     gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
     //gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * trivertices.len, &trivertices, gl.STATIC_DRAW);
-    
+
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     var inputtimer = try std.time.Timer.start();
     var MainWorld = World{
+        .running = std.atomic.Value(bool).init(true),
         .pool = undefined,
         .ChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *ChunkandMeta, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
+        //using seprate allocator
+        .TerrainHeightCache = try cache.Cache([32][32]i32).init(c_allocator.allocator(), .{ .segment_count = 1, .gets_per_promote = 1, .max_size = 100}),
+        .TerrainHeightCacheMutex = .{},
         .MeshesToLoadMutex = .{},
         .ToUnloadMutex = .{},
         .ToUnload = std.DoublyLinkedList([3]i32){},
@@ -166,8 +171,9 @@ pub fn main() !void {
         .TerrainNoise2 = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .perlin,
-            .frequency = 0.002,
+            .frequency = 0.0002,
             .fractal_type = .ridged,
+            .octaves = 10,
         },
 
         .min = 0,
@@ -175,10 +181,15 @@ pub fn main() !void {
         // 0 is most cavey 1 is least cavey
         .caveness = 0.2,
     };
-
-    _ = try MainWorld.pool.init(.{ .n_jobs = @intCast(cpu_count - 4), .allocator = allocator });
-    defer MainWorld.pool.deinit();
-
+    var g = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
+    //TODO put in threadpool
+    var u = try std.Thread.spawn(.{}, World.AddToUnload, .{ &MainWorld, &player, 1000 * std.time.ns_per_ms, allocator });
+    var ul = try std.Thread.spawn(.{}, World.UnloadLoop, .{ &MainWorld, 1000 * std.time.ns_per_ms, allocator });
+    //i am using a diffrent allocator for thread pool so it dosent get slowed down by other allocations, it makes a big diffrence
+    _ = try MainWorld.pool.init(.{ .n_jobs = @intCast(cpu_count - 1), .allocator = c_allocator.allocator() });
+  
+    
+    
     Worldptr = &MainWorld;
     gl.Enable(gl.DEPTH_TEST);
     gl.Enable(gl.CULL_FACE);
@@ -200,58 +211,59 @@ pub fn main() !void {
     const AtlasHeightLocation = gl.GetUniformLocation(shaderprogram, "AtlasHeight");
     gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     atlas.deinit();
-
-    _ = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
-    _ = try std.Thread.spawn(.{}, World.AddToUnload, .{ &MainWorld, &player, 100 * std.time.ns_per_ms, allocator });
-    _ = try std.Thread.spawn(.{}, World.UnloadLoop, .{ &MainWorld, 100 * std.time.ns_per_ms, allocator });
+    //clean up
+    defer {
+    MainWorld.running.store(false, .monotonic);
+    window.destroy();
+    ul.join();
+    g.join();
+    u.join();
+    MainWorld.deinit(allocator);
+     gl.DeleteTextures(1, @ptrCast(&BlockTextures));
+     gl.DeleteBuffers(1, @ptrCast(&ebo));
+     gl.DeleteBuffers(1, @ptrCast(&facebuffer));
+    gl.DeleteProgram(shaderprogram);
+    
+    // Clean up GLFW
+    glfw.terminate();
+    }
     //higher cpu count than system somehow benifits this
     std.debug.print("\ncpu_count: {}\n", .{cpu_count});
-    //for (0..cpu_count) |_| {
-    //    _ = try std.Thread.spawn(.{ }, World.GenChunk, .{ &MainWorld, player, allocator });
-    //}
-    //for (0..cpu_count / 4) |_| {
-    //    _ = try std.Thread.spawn(.{}, World.MeshChunks, .{ &MainWorld, 1 * std.time.ns_per_ms, allocator });
-    //}
 
-    const projectionlocation = gl.GetUniformLocation(shaderprogram, "projection");
     // var benchmarktimer = try std.time.Timer.start();
     var unloadTimer = try std.time.Timer.start();
     // var genbenchmark = true;
     // var meshbenchmark = true;
+    const projviewlocation = gl.GetUniformLocation(shaderprogram, "projview");
+    const relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos");
     const chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos");
     const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
-    const viewlocation = gl.GetUniformLocation(shaderprogram, "view");
     const scalelocation = gl.GetUniformLocation(shaderprogram, "scale");
+    var frame:u64 = 0;
     while (!window.shouldClose()) {
+        frame+|=1;
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        const proj = zm.Mat4f.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 1.0, 200000);
-        gl.UniformMatrix4fv(projectionlocation, 1, gl.TRUE, @ptrCast(&(proj)));
-        const view = zm.Mat4f.lookAt(player.pos, player.pos + player.cameraFront, player.cameraUp);
-        gl.UniformMatrix4fv(viewlocation, 1, gl.TRUE, @ptrCast(&(view)));
+        const projview = @as(@Vector(16, f32),@floatCast(zm.Mat4d.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 1.0, 200000).multiply( zm.Mat4d.lookAt(@Vector(3, f32){0,0,0}, @Vector(3, f32){0,0,0} + player.cameraFront, player.cameraUp)).data));
+        gl.UniformMatrix4fv(projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         
-        //std.debug.print("{any}\n", .{player});
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         const it = MainWorld.ChunkMeshes.items;
 
         for (it) |mesh| {
-
-            //gl.DepthMask(gl.FALSE);
-            //const drawchunk = ztracy.ZoneNC(@src(), "drawchunk", 0x9692d);
-            //defer drawchunk.End();
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 1000) tr = 1000;
-            gl.Uniform1f(scalelocation,mesh.scale);
+            gl.Uniform1f(scalelocation, mesh.scale);
             gl.Uniform1i(tlocation, @intCast(tr));
-            gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
+            gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1],mesh.pos[2]);
+            gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64,@floatFromInt(mesh.pos[0]))*mesh.scale*32.0)-player.pos[0]), @floatCast((@as(f64,@floatFromInt(mesh.pos[1]))*mesh.scale*32.0)-player.pos[1]), @floatCast((@as(f64,@floatFromInt(mesh.pos[2]))*mesh.scale*32.0)-player.pos[2]));
             gl.BindVertexArray(mesh.vao);
-            //TODO occlusion queries and frustrum cullling and early z-rejection
+            //TODO frustrum cullling and LODs
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
-            //gl.DrawArraysInstanced(gl.TRIANGLES, 0, 3, @intCast(mesh.count / 2));
         }
         std.debug.assert(it.len == MainWorld.ChunkMeshes.items.len);
         drawtime.End();
@@ -266,26 +278,23 @@ pub fn main() !void {
         unload.End();
         if (unloadTimer.read() > 2 * std.time.ns_per_ms) {
             unloadTimer.reset();
-            const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
+            const pi:@Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 });
             //std.debug.print("\n\n{}\n\n", .{it.len});
             var i = MainWorld.ChunkMeshes.items.len;
             while (i > 0) {
                 i -= 1;
                 const mesh = MainWorld.ChunkMeshes.items[i];
                 const p = MainWorld.Chunks.get(mesh.pos).?;
-
+                
                 if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance)))) or p.state.load(.seq_cst) == ChunkStates.ReMesh) {
                     if (p.state.load(.seq_cst) == ChunkStates.InMemoryAndMesh) {
                         p.lock.lock();
                         p.state.store(ChunkStates.InMemoryMeshUnloaded, .seq_cst);
                         p.lock.unlock();
                     } else if (p.state.load(.seq_cst) == ChunkStates.MeshOnly) {
-                        std.debug.assert(p.chunkPtr == null);
+                        
+                        std.debug.assert(p.ChunkData == null or p.Unloading == true);
                         _ = MainWorld.Chunks.remove(p.pos);
-                        if (!p.lock.tryLock()) {
-                            continue;
-                        }
-                        allocator.destroy(p);
                     } else {
                         std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
                     }
@@ -305,7 +314,7 @@ pub fn main() !void {
         const poll = ztracy.ZoneNC(@src(), "poll", 0x00_ff_00_00);
         glfw.pollEvents();
         poll.End();
-        std.debug.print("{d}\r", .{player.pos});
+        std.debug.print("pos:{d}, frame{d}\r", .{player.pos,frame});
     }
 }
 
@@ -364,23 +373,7 @@ fn prossesInput(window: *glfw.Window, dt: f64) !void {
         player.speed /= @splat(30.0);
         fast = false;
     }
-    if (window.getKey(glfw.Key.b) == glfw.Action.press) {
-        const chpos = player.pos / @Vector(3, f32){ 32.0, 32.0, 32.0 };
-        const intchpos = @Vector(3, i32){ @as(i32, @intFromFloat(@round(chpos[0]))), @as(i32, @intFromFloat(@round(chpos[1]))), @as(i32, @intFromFloat(@round(chpos[2]))) };
-        var ch = Worldptr.Chunks.get(intchpos);
-        std.debug.print("\n{any}", .{ch});
-        if (ch != null and ch.?.chunkPtr != null) {
-            ch.?.chunkPtr.?.lock.lock();
-            std.debug.print("\npos:{d}, fchpos:{d}, chpos:{d}\n", .{ player.pos, chpos, intchpos });
-            ch.?.chunkPtr.?.* = Generator.InitChunkToBlock(Blocks.Air, intchpos, null);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 1, 0, 0 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ -1, 0, 0 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 0, 1, 0 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 0, -1, 0 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 0, 0, 1 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 0, 0, -1 }, allocator);
-            _ = try World.RemeshChunk(Worldptr, intchpos + @Vector(3, i32){ 0, 0, 0 }, allocator);
-        }
+    if (window.getKey(glfw.Key.b) == glfw.Action.press) { //breaking is broken
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
@@ -422,3 +415,18 @@ fn len(self: anytype) VecElement(@TypeOf(self)) {
 pub fn VecElement(T: type) type {
     return @typeInfo(T).vector.child;
 }
+pub fn lookAt(eye: @Vector(3, f64), target: @Vector(3, f64), up: @Vector(3, f64)) zm.Mat4f {
+    const f = zm.vec.normalize(target - eye);
+    const s = zm.vec.normalize(zm.vec.cross(f, up));
+    const u = zm.vec.normalize(zm.vec.cross(s, f));
+    
+    return zm.Mat4f {
+        .data = .{
+            @floatCast(s[0]),  @floatCast(s[1]),  @floatCast(s[2]),  @floatCast(-zm.vec.dot(s, eye)),
+            @floatCast(u[0]),  @floatCast(u[1]),  @floatCast(u[2]),  @floatCast(-zm.vec.dot(u, eye)),
+            @floatCast(-f[0]), @floatCast(-f[1]), @floatCast(-f[2]), @floatCast(zm.vec.dot(f, eye)),
+            0,     0,     0,     1,
+        },
+    };
+}
+

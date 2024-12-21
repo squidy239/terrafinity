@@ -58,6 +58,13 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("glfw", glfw_dep.module("mach-glfw"));
 
+    const cache = b.dependency("cache", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("cache", cache.module("cache"));
+
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
         .version = .@"4.6",
