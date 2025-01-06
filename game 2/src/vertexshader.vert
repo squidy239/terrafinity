@@ -3,6 +3,7 @@ layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
 uniform float scale;
+uniform mat4 sunrot;
 uniform vec3 relativechunkpos;
 uniform ivec3 chunkpos;
 uniform uint AtlasHeight;
@@ -89,6 +90,8 @@ void main() {
     if (pos.y < 1000)
         coordss = coords;
     fragpos = vec3((pos*scale) + (coords*scale) + (chunkpos*32*scale));
-    sunpos = vec3(16000, 16000.0, 16000.0);
+    sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0,1.0)).xyz;
+
     gl_Position = projview * vec4((coords*scale + ((pos*scale) + (relativechunkpos))),1);
+    
 }

@@ -621,7 +621,6 @@ pub fn Noise(comptime Float: type) type {
             var sum: Float = 0;
             var vec = Vec4{ x, y, state.calculateFractalBounding(), 0 };
             const mul = Vec4{ state.lacunarity, state.lacunarity, state.gain, 0 };
-
             for (0..state.octaves) |i| {
                 const noise = @abs(state.genNoiseSingle2D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1]));
                 sum += (noise * -2.0 + 1.0) * vec[2];

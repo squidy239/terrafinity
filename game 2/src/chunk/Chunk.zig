@@ -36,7 +36,6 @@ pub const CompressionType = enum(u8) {
 };
 
 pub const Chunk = struct {
-    //chunkPtr: ?*Chunk
     ChunkData: ?[]u8,
     CompressionType: CompressionType,
     pos: [3]i32,
@@ -44,6 +43,7 @@ pub const Chunk = struct {
     state: std.atomic.Value(ChunkState),
     lock: std.Thread.RwLock,
     Unloading: bool,
+    ref_count: std.atomic.Value(u32),
     scale: f32,
     pub fn EncodeAndPutBlocks(self: *@This(), blocks: [32][32][32]Blocks, commtype: CompressionType, allocator: std.mem.Allocator) !void {
         const encodeandputblocks = ztracy.ZoneNC(@src(), "encodeandputblocks", 1838292929);
@@ -59,23 +59,22 @@ pub const Chunk = struct {
                 @memcpy(p, &by);
                 self.CompressionType = commtype;
                 self.ChunkData = p;
-                
             },
             CompressionType.Flate => {
-                       var list = std.ArrayList(u8).init(allocator);
-                       defer list.deinit();
-                       
-                       var compressor = try std.compress.zlib.compressor(list.writer(), .{ .level = .fast });
-                       _ = try compressor.write(&std.mem.toBytes(blocks));
-                       _ = try compressor.finish();
-                       self.CompressionType = commtype;
-                       self.ChunkData = try list.toOwnedSlice();
+                var list = std.ArrayList(u8).init(allocator);
+                defer list.deinit();
+
+                var compressor = try std.compress.zlib.compressor(list.writer(), .{ .level = .fast });
+                _ = try compressor.write(&std.mem.toBytes(blocks));
+                _ = try compressor.finish();
+                self.CompressionType = commtype;
+                self.ChunkData = try list.toOwnedSlice();
             },
 
             //else => {@branchHint(.cold);std.debug.panic("\n\nInvalid CompressionType: {}\n", .{commtype});},
         }
     }
-    pub fn DecodeAndGetBlocks(self: *@This()) *align(1)[32][32][32]Blocks {
+    pub fn DecodeAndGetBlocks(self: *@This()) *align(1) [32][32][32]Blocks {
         const decodeandgetblocks = ztracy.ZoneNC(@src(), "decodeandgetblocks", 1838292929);
         defer decodeandgetblocks.End();
         self.lock.lockShared();
@@ -83,13 +82,46 @@ pub const Chunk = struct {
         switch (self.CompressionType) {
             CompressionType.None => return std.mem.bytesAsValue([32][32][32]Blocks, self.ChunkData.?),
             CompressionType.Flate => {
-                        std.debug.panic("Flate decoding not working", .{});
-                        //too slow bc of memcpy
-                    },
+                std.debug.panic("Flate decoding not working", .{});
+                //too slow bc of memcpy
+            },
             //else => {
             //    @branchHint(.cold);
-           //     std.debug.panic("\n\nInvalid CompressionType: {}\n", .{self.CompressionType});
-           // },
+            //     std.debug.panic("\n\nInvalid CompressionType: {}\n", .{self.CompressionType});
+            // },
+        }
+    }
+    pub fn addRef(self: *@This()) void {
+        _ = self.ref_count.fetchAdd(1, .seq_cst);
+    }
+
+    pub fn release(self: *@This()) void {
+        _ = self.ref_count.fetchSub(1, .seq_cst);
+    }
+    pub fn clean(self: *@This(), chunk: *Chunk, allocator: std.mem.Allocator) void {
+        const state = chunk.state.load(.seq_cst);
+
+        switch (state) {
+            ChunkState.InMemoryAndMesh => {
+                chunk.lock.lock();
+                defer chunk.lock.unlock();
+                chunk.state.store(ChunkState.MeshOnly, .seq_cst);
+                allocator.free(chunk.ChunkData.?);
+                chunk.ChunkData = null;
+            },
+
+            ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
+                _ = self.Chunks.remove(chunk.pos);
+                chunk.lock.lock();
+                allocator.free(chunk.ChunkData.?);
+                allocator.destroy(chunk);
+            },
+            ChunkState.AllAir => {
+                std.debug.assert(chunk.ChunkData == null);
+                _ = self.Chunks.remove(chunk.pos);
+                chunk.lock.lock();
+                allocator.destroy(chunk);
+            },
         }
     }
 };
@@ -133,7 +165,7 @@ pub const Render = struct {
         //std.compress.flate.decompress(std.io.bufferedReader(chunk.ChunkData),std.io.bufferedWriter(&blocks));
         const blocks = chunk.DecodeAndGetBlocks();
 
-        var neighborblocks: [6]*align(1)[32][32][32]Blocks = undefined;
+        var neighborblocks: [6]*align(1) [32][32][32]Blocks = undefined;
         for (0..6) |n| {
             if (neighbors[n] != null and neighbors[n].?.ChunkData != null) {
                 neighborblocks[n] = neighbors[n].?.DecodeAndGetBlocks();
@@ -142,9 +174,9 @@ pub const Render = struct {
         convertfrombytes.End();
 
         const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
-        var buffer: [ChunkSize * ChunkSize * ChunkSize * 2 * @sizeOf(u32)]u8 = undefined;
+        var buffer: [ChunkSize * ChunkSize * ChunkSize * 6 * @sizeOf(u32)]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
-        var mesh = try std.ArrayList(u32).initCapacity(fba.allocator(), ChunkSize * ChunkSize * ChunkSize * 2);
+        var mesh = try std.ArrayList(u32).initCapacity(fba.allocator(), ChunkSize * ChunkSize * ChunkSize * 6);
         defer mesh.deinit();
 
         initarraylist.End();
@@ -152,7 +184,8 @@ pub const Render = struct {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {
                     if (blocks[x][y][z] != Blocks.Air) {
-                        if (blocks[x][y][z] == Blocks.Leaves) {
+                        @branchHint(.likely);
+                        if (blocks[x][y][z] == Blocks.Leaves and false) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
                             _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
@@ -331,11 +364,11 @@ pub const Generator = struct {
         }
     }
 
-    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *cache.Cache([32][32]i32), TerrainHeightCacheMutex: *std.Thread.Mutex, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32, scale: f32, caves: bool) ?[32][32][32]Blocks {
+    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *cache.Cache([32][32]i32), TerrainHeightCacheMutex: *std.Thread.Mutex, TerrainNoise: Noise.Noise(f32), TerrainNoise2: Noise.Noise(f32), CaveNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, caveness: f32, scale: f32, caves: bool, trees: bool) ?[32][32][32]Blocks {
         const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
         defer gen.End();
         // Pre-calculate chunk position offset
-        
+
         const chunk_offset = @Vector(3, f32){
             @floatFromInt(Pos[0] *% 32),
             @floatFromInt(Pos[1] *% 32),
@@ -355,6 +388,7 @@ pub const Generator = struct {
         var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
         TerrainHeightCacheMutex.lock();
         if (TerrainHeightCache.get(&std.mem.toBytes([2]i32{ Pos[0], Pos[2] }))) |c| {
+            @branchHint(.likely);
             terrain_heights = c.value;
             c.release();
             TerrainHeightCacheMutex.unlock();
@@ -365,7 +399,7 @@ pub const Generator = struct {
                 const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
                 for (0..ChunkSize) |zz| {
                     const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-                
+
                     const firstnoise = TerrainNoise.genNoise2D(x * scale, z * scale);
                     var secondnoise = TerrainNoise2.genNoise2D(x * scale, z * scale);
                     if (secondnoise < 0.0) secondnoise = 0.0;
@@ -380,7 +414,7 @@ pub const Generator = struct {
                 }
             }
             TerrainHeightCacheMutex.lock();
-            _ = TerrainHeightCache.put(&std.mem.toBytes([2]i32{ Pos[0], Pos[2] }), terrain_heights, .{.ttl = 20}) catch |err| {
+            _ = TerrainHeightCache.put(&std.mem.toBytes([2]i32{ Pos[0], Pos[2] }), terrain_heights, .{ .ttl = 20 }) catch |err| {
                 std.debug.panic("{any}\n", .{err});
             };
             TerrainHeightCacheMutex.unlock();
@@ -429,11 +463,11 @@ pub const Generator = struct {
                 }
 
                 // Tree generation
-                if (!is_top_chunk and
+                if (trees and !is_top_chunk and
                     blocks[xx][@intCast(height)][zz] == Blocks.Grass and
                     rand_impl.random().float(f32) < tree_chance)
                 {
-                       //generateTree(&blocks, xx, zz, @as(i32,@intFromFloat(@as(f32,@floatFromInt(height))/scale)),scale, &rand_impl);
+                    generateTree(&blocks, xx, zz, @as(i32, @intFromFloat(@as(f32, @floatFromInt(height)) / scale)), scale, &rand_impl);
                 }
             }
         }
