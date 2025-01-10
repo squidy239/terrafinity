@@ -248,7 +248,7 @@ pub const World = struct {
             if (!self.running.load(.monotonic)) return;
             const Addtogen = ztracy.ZoneNC(@src(), "Addtogen", 0x9692de);
             defer Addtogen.End();
-            const p = @Vector(3, i32){ @as(i32, @intFromFloat(player.pos[0] / 32.0)), @as(i32, @intFromFloat(player.pos[1] / 32.0)), @as(i32, @intFromFloat(player.pos[2] / 32.0)) };
+            const p = @Vector(3, i32){ @as(i32, @intFromFloat(player.pos[0] / 32.0)), @as(i32, @intFromFloat(player.pos[1] / 32.0)), @as(i32, @intFromFloat((player.pos[2]) / 32.0)) };
             var x = -@as(i32, @intCast(player.GenDistance[0]));
             var y = -@as(i32, @intCast(player.GenDistance[1]));
             var z = -@as(i32, @intCast(player.GenDistance[2]));
@@ -418,13 +418,10 @@ pub const World = struct {
         self.ChunkMeshes.deinit();
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
-            std.debug.print("aaaa", .{});
             self.Chunks.buckets[b].lock.lock();
             defer self.Chunks.buckets[b].lock.unlock();
             var it = self.Chunks.buckets[b].hash_map.valueIterator();
             inner: while (true) {
-                std.debug.print("d", .{});
-
                 const ch = (it.next() orelse {
                     break :inner;
                 });

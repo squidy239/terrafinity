@@ -30,7 +30,9 @@ var gpa = (std.heap.GeneralPurposeAllocator(.{
 
 }){});
 var c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
-const allocator = c_allocator.allocator();
+var main_c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
+
+const allocator = main_c_allocator.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 var Worldptr: *World = undefined;
@@ -47,27 +49,34 @@ const indices = [_]u32{
     0, 2, 3,
 };
 
-const trivertices = [_]f32{
-    -2.0, -2.0, 0.0, // bottom left corner
-    -0.0, 2.0,  0.0, // top left corner
-    2.0,  -2.0, 0.0,
-}; // bottom right corner
 
 var lastX: f64 = undefined;
 var lastY: f64 = undefined;
 
+//change gamemode here
+const GameMode = Entitys.GameMode.Survival;
+//
+
 var player: Entitys.Player = Entitys.Player{
     .yaw = 0,
-    .cameraFront = @Vector(3, f64){ 0.0, 0.0, 1.0 },
+    .gameMode = GameMode,
+    .cameraFront = @Vector(3, f64){ 0.0, 0.0, 0.0 },
     .cameraUp = @Vector(3, f64){ 0.0, 1.0, 0.0 },
     .pitch = 0,
     .roll = 0,
+    .hitboxmin = @Vector(3, f64){ 0.3, 2.0, 0.3 },
+    .hitboxmax = @Vector(3, f64){ 0.3, 0.3, 0.3 },
     .Movement = @Vector(3, f64){ 0.0, 0.0, 0.0 },
-    .speed = @Vector(3, f32){ 10.0, 40.0, 10.0 },
-    .pos = @Vector(3, f64){ 1000000000.0, 10.0, 0.0 },
+    .speed = switch (GameMode) {
+        Entitys.GameMode.Spectator => @Vector(3, f32){ 200.0, 200.0, 200.0 },
+        Entitys.GameMode.Creative => @Vector(3, f32){ 20.0, 20.0, 20.0 },
+        Entitys.GameMode.Survival => @Vector(3, f32){ 20.0, 5.0, 20.0 },
+    },
+    .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
+    .OnGround = false,
     .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20 },
-    .MeshDistance = [3]u32{ 30, 20, 30 },
+    .LoadDistance = [3]u32{ 20, 10, 20},
+    .MeshDistance = [3]u32{ 20, 10, 20 },
     .lock = .{},
 };
 
@@ -78,17 +87,22 @@ pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
     lastX = @floatFromInt(width / 2);
     lastY = @floatFromInt(height / 2);
-    if (!glfw.init(.{})) {
+    const pt = if(glfw.platformSupported(.wayland))glfw.PlatformType.wayland else glfw.PlatformType.any;
+    if (!glfw.init(.{.platform = pt})) {
         std.debug.panic("failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
         return error.GLFWInitFailed;
     }
-
+    
     var window = glfw.Window.create(width, height, "voxelgame", null, null, .{
         .context_version_major = 4,
         .context_version_minor = 6,
         .opengl_profile = .opengl_core_profile,
         .opengl_forward_compat = true,
         .samples = 4,
+        //.transparent_framebuffer = true,
+        //.decorated = false,
+        
+        
     }) orelse {
         std.debug.panic("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
         return error.CreateWindowFailed;
@@ -132,6 +146,8 @@ pub fn main() !void {
     gl.DeleteShader(vertexshader);
     gl.DeleteShader(fragshader);
 
+    //shader herema
+
     var ebo: c_uint = undefined;
     gl.GenBuffers(1, @ptrCast(&ebo));
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
@@ -169,8 +185,8 @@ pub fn main() !void {
         .CaveNoise = Noise.Noise(f32){
             .seed = 0,
             .noise_type = .simplex_smooth,
-            .fractal_type = .ping_pong,
-            .frequency = 0.0009,
+            .fractal_type = .none,
+            .frequency = 0.009,
             .octaves = 1,
         },
         .TerrainNoise2 = Noise.Noise(f32){
@@ -186,8 +202,12 @@ pub fn main() !void {
         // 0 is most cavey 1 is least cavey
         .caveness = 0.4,
     };
+
+    var physicsTimer = try std.time.Timer.start();
+
     var g = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
     //TODO put in threadpool
+    var ph = try std.Thread.spawn(.{}, Physics.PlayerPhysicsLoop, .{ &player, &physicsTimer, &MainWorld });
     var u = try std.Thread.spawn(.{}, World.AddToUnload, .{ &MainWorld, &player, 1000 * std.time.ns_per_ms, allocator });
     var ul = try std.Thread.spawn(.{}, World.UnloadLoop, .{ &MainWorld, 1000 * std.time.ns_per_ms, allocator });
     //i am using a diffrent allocator for thread pool so it dosent get slowed down by other allocations, it makes a big diffrence
@@ -200,20 +220,20 @@ pub fn main() !void {
     gl.FrontFace(gl.CW);
     gl.DepthFunc(gl.LESS);
     //load textures
-    var atlas = try Textures.LoadAtlas("./Textures/BlockTextures.png", allocator);
-    var BlockTextures: c_uint = undefined;
-    gl.GenTextures(1, @ptrCast(&BlockTextures));
+    //var atlas = try Textures.LoadAtlas("./Textures/BlockTextures.png", allocator);
+    //var BlockTextures: c_uint = undefined;
+    //gl.GenTextures(1, @ptrCast(&BlockTextures));
 
-    gl.BindTexture(gl.TEXTURE_2D, BlockTextures);
+    //gl.BindTexture(gl.TEXTURE_2D, BlockTextures);
     //gl.Enable(gl.BLEND);
     //gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(atlas.width), @intCast(atlas.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(atlas.data));
-    gl.GenerateMipmap(gl.TEXTURE_2D);
-    const AtlasHeightLocation = gl.GetUniformLocation(shaderprogram, "AtlasHeight");
-    gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
-    atlas.deinit();
+    //gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    //gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    //gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(atlas.width), @intCast(atlas.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(atlas.data));
+   // gl.GenerateMipmap(gl.TEXTURE_2D);
+    //const AtlasHeightLocation = gl.GetUniformLocation(shaderprogram, "AtlasHeight");
+    //gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
+    //atlas.deinit();
     //clean up
     defer {
         MainWorld.running.store(false, .monotonic);
@@ -221,8 +241,9 @@ pub fn main() !void {
         ul.join();
         g.join();
         u.join();
+        ph.join();
         MainWorld.deinit(allocator);
-        gl.DeleteTextures(1, @ptrCast(&BlockTextures));
+        //gl.DeleteTextures(1, @ptrCast(&BlockTextures));
         gl.DeleteBuffers(1, @ptrCast(&ebo));
         gl.DeleteBuffers(1, @ptrCast(&facebuffer));
         gl.DeleteProgram(shaderprogram);
@@ -233,9 +254,8 @@ pub fn main() !void {
     //higher cpu count than system somehow benifits this
     std.debug.print("\ncpu_count: {}\n", .{cpu_count});
 
-    // var benchmarktimer = try std.time.Timer.start();
+     var starttimer = try std.time.Timer.start();
     var unloadTimer = try std.time.Timer.start();
-    var physicsTimer = try std.time.Timer.start();
 
     // var genbenchmark = true;
     // var meshbenchmark = true;
@@ -248,13 +268,13 @@ pub fn main() !void {
     var frame: u64 = 0;
     while (!window.shouldClose()) {
         frame +|= 1;
-        Physics.PlayerPhysics(&player, physicsTimer.lap(), &MainWorld);
+        //_ = try MainWorld.pool.spawn(Physics.PlayerPhysics, .{&player, &physicsTimer, &MainWorld});
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
         defer tracy_zone.End();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.01, 200000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 2000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
         gl.UniformMatrix4fv(projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, zm.toRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         gl.UniformMatrix4fv(sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -262,37 +282,46 @@ pub fn main() !void {
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         const drawtime = ztracy.ZoneNC(@src(), "Drawtime", 0xf5bf42);
         const it = MainWorld.ChunkMeshes.items;
-
+        player.lock.lockShared();
+        const ploc = player.pos;
+        player.lock.unlockShared();
         for (it) |mesh| {
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 1000) {
-                @branchHint(.unlikely);
+                @branchHint(.likely);
                 tr = 1000;
             }
             gl.Uniform1f(scalelocation, mesh.scale);
             gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             //                                                                                                                                                                                                     //player height
-            gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - player.pos[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - player.pos[1]-1.5), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - player.pos[2]));
+            gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
             gl.BindVertexArray(mesh.vao);
             //TODO frustrum cullling and LODs
             gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
         }
         std.debug.assert(it.len == MainWorld.ChunkMeshes.items.len);
         drawtime.End();
+        
+                
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
+        glfw.pollEvents();
+        try prossesInput(window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
+        prossesinput.End();
+       
+        
         {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
             _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 4 * std.time.ns_per_ms);
         }
-        //std.debug.print("{d}\r", .{player.pos});
+        
         const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);
-        unload.End();
         if (unloadTimer.read() > 2 * std.time.ns_per_ms) {
             unloadTimer.reset();
+            //TODO move to other file
             const pi: @Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 });
-            //std.debug.print("\n\n{}\n\n", .{it.len});
             var i = MainWorld.ChunkMeshes.items.len;
             while (i > 0) {
                 i -= 1;
@@ -317,21 +346,18 @@ pub fn main() !void {
                 }
             }
         }
-        const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
-        try prossesInput(&window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
-        prossesinput.End();
+        unload.End();
+        std.debug.print("mov:{d}, avg fps:{d}\t\t\t\t\r", .{ player.Movement, @divFloor(frame+1,@divFloor(starttimer.read(),std.time.ns_per_s)+1)});
+        
+        const poll = ztracy.ZoneNC(@src(), "finish", 0x00_ff_00_00);
+        gl.Finish();
+        poll.End();
         const swap = ztracy.ZoneNC(@src(), "swap", 0x00_ff_00_00);
         window.swapBuffers();
         swap.End();
-        const poll = ztracy.ZoneNC(@src(), "poll", 0x00_ff_00_00);
-        glfw.pollEvents();
-        poll.End();
-        Physics.PlayerPhysics(&player, physicsTimer.lap(), &MainWorld);
-
-        std.debug.print("pos:{d}, frame{d}\r", .{ player.pos, frame });
+        
     }
 }
-
 
 fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {
     width = w;
@@ -341,7 +367,8 @@ fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {
 }
 
 fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
-    _ = window;
+    if(glfw.Window.getInputModeCursor(window) == glfw.Window.InputModeCursor.disabled){
+    @branchHint(.likely);
     const sensitivity = 0.1;
     const yoffset = (ypos - lastY) * sensitivity;
     const xoffset = (xpos - lastX) * sensitivity;
@@ -356,39 +383,79 @@ fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
     player.cameraFront[0] = @floatCast(@sin(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
     player.cameraFront[1] = @floatCast(@sin(zm.toRadians(player.pitch)));
     player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
-}
-fn i32Range(comptime a: i32, comptime b: i32) [b - a]i32 {
-    comptime {
-        var range = std.mem.zeroes([b - a]i32);
-        for (range[0..], 0..) |*v, i| v.* = a + @as(i32, i);
-        return range;
+    }
+    if(window.getMouseButton(.left) == glfw.Action.press){
+        if(glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled)
+            glfw.Window.setInputModeCursor(window, .disabled);
     }
 }
 
-fn prossesInput(window: *glfw.Window, dt: f64) !void {
+fn prossesInput(window: glfw.Window, dt: f64) !void {
+    player.lock.lock();
+    defer player.lock.unlock();
     const deltaTime: f32 = @floatCast(dt);
+    var cf = player.cameraFront;
+    if (player.gameMode != Entitys.GameMode.Spectator) cf[1] = 0;
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
-    if (window.getKey(glfw.Key.w) == glfw.Action.press)
-        player.Movement += (cameraSpeed * player.cameraFront);
+    if (window.getKey(glfw.Key.w) == glfw.Action.press) {
+        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
+        player.Movement += (cameraSpeed * cf);}else if(player.gameMode == Entitys.GameMode.Survival){
+           player.Movement += (cameraSpeed * cf * @Vector(3, f64){0.1,0.1,0.1}); 
+        }
+    }
     if (window.getKey(glfw.Key.s) == glfw.Action.press)
-        player.Movement -= (cameraSpeed * player.cameraFront);
+    {
+        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
+        player.Movement -= (cameraSpeed * cf);}else if(player.gameMode == Entitys.GameMode.Survival){
+           player.Movement -= (cameraSpeed * cf * @Vector(3, f64){0.1,0.1,0.1}); 
+        }
+    }
+    
     if (window.getKey(glfw.Key.a) == glfw.Action.press)
-        player.Movement -= normalize(cross(player.cameraFront, player.cameraUp)) * cameraSpeed;
-    if (window.getKey(glfw.Key.d) == glfw.Action.press)
-        player.Movement += normalize(cross(player.cameraFront, player.cameraUp)) * cameraSpeed;
-    if (window.getKey(glfw.Key.space) == glfw.Action.press)
-        player.Movement[1] += cameraSpeed[1];
+    {
+        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
+        player.Movement -= zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;}else if(player.gameMode == Entitys.GameMode.Survival){
+           player.Movement -= (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){0.1,0.1,0.1}); 
+        }
+    }
+    
+    if (window.getKey(glfw.Key.d) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround))
+    {
+        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
+        player.Movement += zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;}else if(player.gameMode == Entitys.GameMode.Survival){
+           player.Movement += (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){0.1,0.1,0.1}); 
+        }
+    }
+        
+        
+    if (window.getKey(glfw.Key.space) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)){
+        if(player.gameMode == Entitys.GameMode.Survival){
+            player.Movement[1] += player.speed[1];
+        }
+        else
+            player.Movement[1] += cameraSpeed[1];}
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.Movement[1] -= cameraSpeed[1];
     if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
-        player.speed *= @splat(30.0);
+        if (player.gameMode != Entitys.GameMode.Survival) {
+            player.speed *= @splat(30.0);
+        } else {
+            player.speed *= @Vector(3, f32){ 2.0, 1.0, 2.0 };
+        }
         fast = true;
     }
     if (window.getKey(glfw.Key.left_control) == glfw.Action.release and fast) {
-        player.speed /= @splat(30.0);
+        if (player.gameMode != Entitys.GameMode.Survival) {
+            player.speed /= @splat(30.0);
+        } else {
+            player.speed /= @Vector(3, f32){ 2.0, 1.0, 2.0 };
+        }
         fast = false;
     }
-    if (window.getKey(glfw.Key.b) == glfw.Action.press) { //breaking is broken
+    if (window.getKey(glfw.Key.escape) == glfw.Action.press or window.getKey(glfw.Key.left_super) == glfw.Action.press) { 
+        if(glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.normal)
+            glfw.Window.setInputModeCursor(window, .normal);
+            
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
@@ -408,39 +475,5 @@ fn prossesInput(window: *glfw.Window, dt: f64) !void {
         }
     }
 }
-fn normalize(self: anytype) @TypeOf(self) {
-    return self / @as(@TypeOf(self), @splat(len(self)));
-}
-fn cross(self: anytype, other: @TypeOf(self)) @TypeOf(self) {
-    if (dimensions(@TypeOf(self)) != 3) @compileError("cross is only defined for vectors of length 3.");
-    return @TypeOf(self){
-        self[1] * other[2] - self[2] * other[1],
-        self[2] * other[0] - self[0] * other[2],
-        self[0] * other[1] - self[1] * other[0],
-    };
-}
 
-fn dimensions(T: type) comptime_int {
-    return @typeInfo(T).vector.len;
-}
 
-fn len(self: anytype) VecElement(@TypeOf(self)) {
-    return @sqrt(@reduce(.Add, self * self));
-}
-pub fn VecElement(T: type) type {
-    return @typeInfo(T).vector.child;
-}
-pub fn lookAt(eye: @Vector(3, f64), target: @Vector(3, f64), up: @Vector(3, f64)) zm.Mat4f {
-    const f = zm.vec.normalize(target - eye);
-    const s = zm.vec.normalize(zm.vec.cross(f, up));
-    const u = zm.vec.normalize(zm.vec.cross(s, f));
-
-    return zm.Mat4f{
-        .data = .{
-            @floatCast(s[0]),  @floatCast(s[1]),  @floatCast(s[2]),  @floatCast(-zm.vec.dot(s, eye)),
-            @floatCast(u[0]),  @floatCast(u[1]),  @floatCast(u[2]),  @floatCast(-zm.vec.dot(u, eye)),
-            @floatCast(-f[0]), @floatCast(-f[1]), @floatCast(-f[2]), @floatCast(zm.vec.dot(f, eye)),
-            0,                 0,                 0,                 1,
-        },
-    };
-}

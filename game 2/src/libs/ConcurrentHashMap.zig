@@ -21,6 +21,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
         pub fn getandlockchunkshared(self: *Self, key: K) ?V {
             //const hashget = ztracy.ZoneNC(@src(), "getandlockchunkshared", 0x9692d);
             //defer hashget.End();
+            
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].getandlockchunkshared(key);

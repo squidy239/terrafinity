@@ -1,14 +1,15 @@
-#version 450 core
-out vec4 FragColor;
-uniform uint Atlasheight;
-in flat vec3 position;
+#version 410 core
+
 in vec3 coordss;
-in flat uint blocktype;
-in flat uint side;
-in flat float sscale;
 in vec3 fragpos;
-in flat vec3 sunpos;
+flat in vec3 sunpos;
+flat in vec3 position;
+flat in uint blocktype;
+flat in uint side;
+flat in float sscale;
 uniform sampler2D TextureAtlas;
+uniform uint AtlasHeight;
+out vec4 FragColor;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -16,6 +17,7 @@ float rand(vec2 co) {
 
 void main()
 {
+    
     vec2 texcoords = vec2(0, 0);
     vec3 Normal;
     if (side == 0) {
