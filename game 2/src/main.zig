@@ -49,13 +49,13 @@ const indices = [_]u32{
     0, 2, 3,
 };
 
-
 var lastX: f64 = undefined;
 var lastY: f64 = undefined;
 
 //change gamemode here
-const GameMode = Entitys.GameMode.Survival;
+const GameMode = Entitys.GameMode.Spectator;
 //
+
 
 var player: Entitys.Player = Entitys.Player{
     .yaw = 0,
@@ -75,7 +75,7 @@ var player: Entitys.Player = Entitys.Player{
     .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
     .OnGround = false,
     .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20},
+    .LoadDistance = [3]u32{ 20, 10, 20 },
     .MeshDistance = [3]u32{ 20, 10, 20 },
     .lock = .{},
 };
@@ -87,12 +87,12 @@ pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
     lastX = @floatFromInt(width / 2);
     lastY = @floatFromInt(height / 2);
-    const pt = if(glfw.platformSupported(.wayland))glfw.PlatformType.wayland else glfw.PlatformType.any;
-    if (!glfw.init(.{.platform = pt})) {
+    const pt = if (glfw.platformSupported(.wayland)) glfw.PlatformType.wayland else glfw.PlatformType.any;
+    if (!glfw.init(.{ .platform = pt })) {
         std.debug.panic("failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
         return error.GLFWInitFailed;
     }
-    
+
     var window = glfw.Window.create(width, height, "voxelgame", null, null, .{
         .context_version_major = 4,
         .context_version_minor = 6,
@@ -101,8 +101,7 @@ pub fn main() !void {
         .samples = 4,
         //.transparent_framebuffer = true,
         //.decorated = false,
-        
-        
+
     }) orelse {
         std.debug.panic("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
         return error.CreateWindowFailed;
@@ -225,36 +224,39 @@ pub fn main() !void {
     //gl.GenTextures(1, @ptrCast(&BlockTextures));
 
     //gl.BindTexture(gl.TEXTURE_2D, BlockTextures);
-    //gl.Enable(gl.BLEND);
-    //gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.Enable(gl.BLEND);
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     //gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     //gl.TextureParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     //gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(atlas.width), @intCast(atlas.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(atlas.data));
-   // gl.GenerateMipmap(gl.TEXTURE_2D);
+    // gl.GenerateMipmap(gl.TEXTURE_2D);
     //const AtlasHeightLocation = gl.GetUniformLocation(shaderprogram, "AtlasHeight");
     //gl.Uniform1ui(AtlasHeightLocation, @intCast(atlas.height));
     //atlas.deinit();
     //clean up
     defer {
-        MainWorld.running.store(false, .monotonic);
+        MainWorld.running.store(false, .seq_cst);
         window.destroy();
+        gl.DeleteBuffers(1, @ptrCast(&ebo));
+        gl.DeleteBuffers(1, @ptrCast(&facebuffer));
+        gl.DeleteProgram(shaderprogram);
+        for (MainWorld.ChunkMeshes.items) |mesh| {
+            gl.DeleteBuffers(1, @constCast(@ptrCast(&mesh.vbo)));
+            gl.DeleteVertexArrays(1, @constCast(@ptrCast(&mesh.vao)));
+        }
+        glfw.terminate();
         ul.join();
         g.join();
         u.join();
         ph.join();
-        MainWorld.deinit(allocator);
         //gl.DeleteTextures(1, @ptrCast(&BlockTextures));
-        gl.DeleteBuffers(1, @ptrCast(&ebo));
-        gl.DeleteBuffers(1, @ptrCast(&facebuffer));
-        gl.DeleteProgram(shaderprogram);
-
         // Clean up GLFW
-        glfw.terminate();
+        MainWorld.deinit(allocator);
     }
     //higher cpu count than system somehow benifits this
     std.debug.print("\ncpu_count: {}\n", .{cpu_count});
 
-     var starttimer = try std.time.Timer.start();
+    var starttimer = try std.time.Timer.start();
     var unloadTimer = try std.time.Timer.start();
 
     // var genbenchmark = true;
@@ -285,7 +287,9 @@ pub fn main() !void {
         player.lock.lockShared();
         const ploc = player.pos;
         player.lock.unlockShared();
+        var drawnchunks:u64 = 0;
         for (it) |mesh| {
+            drawnchunks += 1;
             var tr = std.time.milliTimestamp() - mesh.time;
             if (tr > 1000) {
                 @branchHint(.likely);
@@ -302,61 +306,35 @@ pub fn main() !void {
         }
         std.debug.assert(it.len == MainWorld.ChunkMeshes.items.len);
         drawtime.End();
-        
-                
+
         const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
         glfw.pollEvents();
         try prossesInput(window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         prossesinput.End();
-       
-        
+
         {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
             _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 4 * std.time.ns_per_ms);
         }
-        
-        const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);
+
         if (unloadTimer.read() > 2 * std.time.ns_per_ms) {
+            const unload = ztracy.ZoneNC(@src(), "unload", 0x00_ff_00_00);
+            defer unload.End();
             unloadTimer.reset();
-            //TODO move to other file
-            const pi: @Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 });
-            var i = MainWorld.ChunkMeshes.items.len;
-            while (i > 0) {
-                i -= 1;
-                const mesh = MainWorld.ChunkMeshes.items[i];
-                const p = MainWorld.Chunks.get(mesh.pos).?;
-
-                if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance)))) or p.state.load(.seq_cst) == ChunkStates.ReMesh) {
-                    if (p.state.load(.seq_cst) == ChunkStates.InMemoryAndMesh) {
-                        p.lock.lock();
-                        p.state.store(ChunkStates.InMemoryMeshUnloaded, .seq_cst);
-                        p.lock.unlock();
-                    } else if (p.state.load(.seq_cst) == ChunkStates.MeshOnly) {
-                        std.debug.assert(p.ChunkData == null or p.Unloading == true);
-                        _ = MainWorld.Chunks.remove(p.pos);
-                    } else {
-                        std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
-                    }
-
-                    var l = MainWorld.ChunkMeshes.swapRemove(i);
-                    gl.DeleteBuffers(1, @ptrCast(&l.vbo));
-                    gl.DeleteVertexArrays(1, @ptrCast(&l.vao));
-                }
-            }
+            World.UnloadMeshes(&player, &MainWorld);
         }
-        unload.End();
-        std.debug.print("mov:{d}, avg fps:{d}\t\t\t\t\r", .{ player.Movement, @divFloor(frame+1,@divFloor(starttimer.read(),std.time.ns_per_s)+1)});
-        
+        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}                  \r", .{drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) });
+
         const poll = ztracy.ZoneNC(@src(), "finish", 0x00_ff_00_00);
         gl.Finish();
         poll.End();
         const swap = ztracy.ZoneNC(@src(), "swap", 0x00_ff_00_00);
         window.swapBuffers();
         swap.End();
-        
     }
+    std.debug.print("\n\nclosing", .{});
 }
 
 fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {
@@ -367,25 +345,25 @@ fn glfwSizeCallback(window: glfw.Window, w: u32, h: u32) void {
 }
 
 fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
-    if(glfw.Window.getInputModeCursor(window) == glfw.Window.InputModeCursor.disabled){
-    @branchHint(.likely);
-    const sensitivity = 0.1;
-    const yoffset = (ypos - lastY) * sensitivity;
-    const xoffset = (xpos - lastX) * sensitivity;
-    lastX = xpos;
-    lastY = ypos;
-    player.yaw -= @floatCast(xoffset);
-    player.pitch -= @floatCast(yoffset);
-    if (player.pitch > 89.9)
-        player.pitch = 89.9;
-    if (player.pitch < -89.9)
-        player.pitch = -89.9;
-    player.cameraFront[0] = @floatCast(@sin(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
-    player.cameraFront[1] = @floatCast(@sin(zm.toRadians(player.pitch)));
-    player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
+    if (glfw.Window.getInputModeCursor(window) == glfw.Window.InputModeCursor.disabled) {
+        @branchHint(.likely);
+        const sensitivity = 0.1;
+        const yoffset = (ypos - lastY) * sensitivity;
+        const xoffset = (xpos - lastX) * sensitivity;
+        lastX = xpos;
+        lastY = ypos;
+        player.yaw -= @floatCast(xoffset);
+        player.pitch -= @floatCast(yoffset);
+        if (player.pitch > 89.9)
+            player.pitch = 89.9;
+        if (player.pitch < -89.9)
+            player.pitch = -89.9;
+        player.cameraFront[0] = @floatCast(@sin(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
+        player.cameraFront[1] = @floatCast(@sin(zm.toRadians(player.pitch)));
+        player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
     }
-    if(window.getMouseButton(.left) == glfw.Action.press){
-        if(glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled)
+    if (window.getMouseButton(.left) == glfw.Action.press) {
+        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled)
             glfw.Window.setInputModeCursor(window, .disabled);
     }
 }
@@ -398,42 +376,41 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     if (player.gameMode != Entitys.GameMode.Spectator) cf[1] = 0;
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
     if (window.getKey(glfw.Key.w) == glfw.Action.press) {
-        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
-        player.Movement += (cameraSpeed * cf);}else if(player.gameMode == Entitys.GameMode.Survival){
-           player.Movement += (cameraSpeed * cf * @Vector(3, f64){0.1,0.1,0.1}); 
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+            player.Movement += (cameraSpeed * cf);
+        } else if (player.gameMode == Entitys.GameMode.Survival) {
+            player.Movement += (cameraSpeed * cf * @Vector(3, f64){ 0.01, 0.01, 0.01 });
         }
     }
-    if (window.getKey(glfw.Key.s) == glfw.Action.press)
-    {
-        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
-        player.Movement -= (cameraSpeed * cf);}else if(player.gameMode == Entitys.GameMode.Survival){
-           player.Movement -= (cameraSpeed * cf * @Vector(3, f64){0.1,0.1,0.1}); 
+    if (window.getKey(glfw.Key.s) == glfw.Action.press) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+            player.Movement -= (cameraSpeed * cf);
+        } else if (player.gameMode == Entitys.GameMode.Survival) {
+            player.Movement -= (cameraSpeed * cf * @Vector(3, f64){ 0.01, 0.01, 0.01 });
         }
     }
-    
-    if (window.getKey(glfw.Key.a) == glfw.Action.press)
-    {
-        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
-        player.Movement -= zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;}else if(player.gameMode == Entitys.GameMode.Survival){
-           player.Movement -= (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){0.1,0.1,0.1}); 
+
+    if (window.getKey(glfw.Key.a) == glfw.Action.press) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+            player.Movement -= zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;
+        } else if (player.gameMode == Entitys.GameMode.Survival) {
+            player.Movement -= (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.01, 0.01, 0.01 });
         }
     }
-    
-    if (window.getKey(glfw.Key.d) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround))
-    {
-        if(player.gameMode != Entitys.GameMode.Survival or player.OnGround){
-        player.Movement += zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;}else if(player.gameMode == Entitys.GameMode.Survival){
-           player.Movement += (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){0.1,0.1,0.1}); 
+
+    if (window.getKey(glfw.Key.d) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+            player.Movement += zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;
+        } else if (player.gameMode == Entitys.GameMode.Survival) {
+            player.Movement += (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.01, 0.01, 0.01 });
         }
     }
-        
-        
-    if (window.getKey(glfw.Key.space) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)){
-        if(player.gameMode == Entitys.GameMode.Survival){
+
+    if (window.getKey(glfw.Key.space) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)) {
+        if (player.gameMode == Entitys.GameMode.Survival) {
             player.Movement[1] += player.speed[1];
-        }
-        else
-            player.Movement[1] += cameraSpeed[1];}
+        } else player.Movement[1] += cameraSpeed[1];
+    }
     if (window.getKey(glfw.Key.left_shift) == glfw.Action.press or window.getKey(glfw.Key.right_shift) == glfw.Action.press)
         player.Movement[1] -= cameraSpeed[1];
     if (window.getKey(glfw.Key.left_control) == glfw.Action.press and !fast) {
@@ -452,10 +429,9 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
         }
         fast = false;
     }
-    if (window.getKey(glfw.Key.escape) == glfw.Action.press or window.getKey(glfw.Key.left_super) == glfw.Action.press) { 
-        if(glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.normal)
+    if (window.getKey(glfw.Key.escape) == glfw.Action.press or window.getKey(glfw.Key.left_super) == glfw.Action.press) {
+        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.normal)
             glfw.Window.setInputModeCursor(window, .normal);
-            
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
@@ -468,12 +444,10 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
             window.setMonitor(glfw.Monitor.getPrimary(), 0, 0, w, h, null);
             fullscreen = true;
         } else {
-            window.setMonitor(null, 0, 0, 800, 600, null);
+            window.setMonitor(null, 100, 100, 800, 600, null);
             width = 800;
             height = 600;
             fullscreen = false;
         }
     }
 }
-
-

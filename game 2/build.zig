@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
         .name = "voxelgame",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        
+
         .optimize = optimize,
     });
     const zstbi = b.dependency("zstbi", .{
@@ -70,7 +70,6 @@ pub fn build(b: *std.Build) void {
         .api = .gl,
         .version = .@"4.6",
         .profile = .core,
-        
     });
     exe.root_module.addImport("gl", gl_bindings);
 

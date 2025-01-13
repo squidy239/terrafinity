@@ -27,6 +27,7 @@ pub const ChunkState = enum(u8) {
     InMemoryAndMesh = 5,
     InMemoryMeshUnloaded = 8,
     Unknown = 6,
+    GeneratingAndMesh = 10,
     WaitingForNeighbors = 7,
 };
 
@@ -45,11 +46,13 @@ pub const Chunk = struct {
     Unloading: bool,
     ref_count: std.atomic.Value(u32),
     scale: f32,
-    pub fn EncodeAndPutBlocks(self: *@This(), blocks: [32][32][32]Blocks, commtype: CompressionType, allocator: std.mem.Allocator) !void {
+    pub fn EncodeAndPutBlocks(self: *@This(), blocks: [32][32][32]Blocks, commtype: CompressionType, allocator: std.mem.Allocator,lock:bool) !void {
         const encodeandputblocks = ztracy.ZoneNC(@src(), "encodeandputblocks", 1838292929);
         defer encodeandputblocks.End();
+        if(lock){
         self.lock.lock();
         defer self.lock.unlock();
+        }
         switch (commtype) {
             CompressionType.None => {
                 const by = std.mem.toBytes(blocks);
@@ -154,7 +157,17 @@ pub const Render = struct {
         EncodedBlock[1] |= @as(u32, @intCast(@intFromEnum(blocktype))) << (@bitSizeOf(u32) - 20);
         return EncodedBlock;
     }
-
+    
+     inline fn IsTransparent(block:Blocks,block2:Blocks)bool{
+        return switch (block) {
+            Blocks.Air,Blocks.Water,Blocks.Leaves => !(block == block2),
+            else => false
+        };
+    }
+    
+     fn IsAir(block:Blocks)bool{
+        return block == Blocks.Air;
+    }
     //nehbors +x -x +y -y +z -z
     //        0   1  2  3  4  5
     pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
@@ -185,7 +198,7 @@ pub const Render = struct {
                 for (0..ChunkSize) |z| {
                     if (blocks[x][y][z] != Blocks.Air) {
                         @branchHint(.likely);
-                        if (blocks[x][y][z] == Blocks.Leaves and false) {
+                        if (false and blocks[x][y][z] == Blocks.Leaves) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
                             _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
@@ -195,45 +208,45 @@ pub const Render = struct {
                             _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
                             continue;
                         }
-                        if ((x == ChunkSize - 1 and neighbors[0] != null and neighborblocks[0][0][y][z] == Blocks.Air) or (x == ChunkSize - 1 and neighbors[0] == null)) {
+                        if ((x == ChunkSize - 1 and neighbors[0] != null and IsTransparent(neighborblocks[0][0][y][z],blocks[x][y][z])) or (x == ChunkSize - 1 and neighbors[0] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (x != ChunkSize - 1 and blocks[x + 1][y][z] == Blocks.Air) {
+                        } else if (x != ChunkSize - 1 and IsTransparent(blocks[x + 1][y][z],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((x == 0 and neighbors[1] != null and neighborblocks[1][ChunkSize - 1][y][z] == Blocks.Air) or (x == 0 and neighbors[1] == null)) {
+                        if ((x == 0 and neighbors[1] != null and IsTransparent(neighborblocks[1][ChunkSize - 1][y][z],blocks[x][y][z])) or (x == 0 and neighbors[1] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (x != 0 and blocks[x - 1][y][z] == Blocks.Air) {
+                        } else if (x != 0 and IsTransparent(blocks[x - 1][y][z],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((y == ChunkSize - 1 and neighbors[2] != null and neighborblocks[2][x][0][z] == Blocks.Air) or (y == ChunkSize - 1 and neighbors[2] == null)) {
+                        if ((y == ChunkSize - 1 and neighbors[2] != null and IsTransparent(neighborblocks[2][x][0][z],blocks[x][y][z])) or (y == ChunkSize - 1 and neighbors[2] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(3, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (y != ChunkSize - 1 and blocks[x][y + 1][z] == Blocks.Air) {
+                        } else if (y != ChunkSize - 1 and IsTransparent(blocks[x][y + 1][z],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(3, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((y == 0 and neighbors[3] != null and neighborblocks[3][x][ChunkSize - 1][z] == Blocks.Air) or (y == 0 and neighbors[3] == null)) {
+                        if ((y == 0 and neighbors[3] != null and IsTransparent(neighborblocks[3][x][ChunkSize - 1][z],blocks[x][y][z])) or (y == 0 and neighbors[3] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(2, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (y != 0 and blocks[x][y - 1][z] == Blocks.Air) {
+                        } else if (y != 0 and IsTransparent(blocks[x][y - 1][z],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(2, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((z == ChunkSize - 1 and neighbors[4] != null and neighborblocks[4][x][y][0] == Blocks.Air) or (z == ChunkSize - 1 and neighbors[4] == null)) {
+                        if ((z == ChunkSize - 1 and neighbors[4] != null and IsTransparent(neighborblocks[4][x][y][0],blocks[x][y][z])) or (z == ChunkSize - 1 and neighbors[4] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(5, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (z != ChunkSize - 1 and blocks[x][y][z + 1] == Blocks.Air) {
+                        } else if (z != ChunkSize - 1 and IsTransparent(blocks[x][y][z + 1],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(5, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
 
-                        if ((z == 0 and neighbors[5] != null and neighborblocks[5][x][y][ChunkSize - 1] == Blocks.Air) or (z == 0 and neighbors[5] == null)) {
+                        if ((z == 0 and neighbors[5] != null and IsTransparent(neighborblocks[5][x][y][ChunkSize - 1],blocks[x][y][z])) or (z == 0 and neighbors[5] == null)) {
                             @branchHint(.unlikely);
                             _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (z != 0 and blocks[x][y][z - 1] == Blocks.Air) {
+                        } else if (z != 0 and IsTransparent(blocks[x][y][z - 1],blocks[x][y][z])) {
                             _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
                         }
                     }
@@ -380,9 +393,10 @@ pub const Generator = struct {
         //init.End();
         //
         //
-        var blocks: [32][32][32]Blocks = @splat(@splat(@splat(Blocks.Air)));
+        var blocks: [32][32][32]Blocks = undefined;
+        @memset(&blocks, @splat(@splat(if(chunk_offset[1] < 0) Blocks.Water else Blocks.Air)));
         //
-        var has_terrain = false;
+        var has_terrain = chunk_offset[1] < 0;
         const terrain = ztracy.ZoneNC(@src(), "terrain", 0x692de);
         // Pre-calculate terrain heights for the entire chunk
         var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
@@ -463,9 +477,10 @@ pub const Generator = struct {
                 }
 
                 // Tree generation
-                if (trees and !is_top_chunk and
+                if (trees and Pos[1] >= 0 and !is_top_chunk and
                     blocks[xx][@intCast(height)][zz] == Blocks.Grass and
                     rand_impl.random().float(f32) < tree_chance)
+                
                 {
                     generateTree(&blocks, xx, zz, @as(i32, @intFromFloat(@as(f32, @floatFromInt(height)) / scale)), scale, &rand_impl);
                 }

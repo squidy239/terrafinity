@@ -9,6 +9,7 @@ pub const Blocks = enum(u20) {
     Wood = 5,
     Dirt = 2,
     Stone = 3,
+    Water = 6,
 };
 
 pub const Textures = struct {

@@ -73,6 +73,10 @@ void main()
     {
         FragColor = vec4(cdfs + 0.4, cdfs - 0.2, cdfs - 0.5, 1);
     }
+    else if (blocktype == 6)
+    {
+        FragColor = vec4(cdfs, cdfs + 0.2, cdfs + 0.5, 0.5);
+    }
     else if (blocktype == 4)
     {   
     if(gl_FragCoord.z < 0.99999){
@@ -89,5 +93,5 @@ void main()
     vec3 diffuse = diff * lightColor;
     vec3 result = (0.2 + diffuse) * FragColor.xyz;
     //result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 256));
-    FragColor = vec4(result, 1.0);
+    FragColor = vec4(result, FragColor[3]);
 }
