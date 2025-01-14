@@ -59,6 +59,7 @@ const GameMode = Entitys.GameMode.Survival;
 var player: Entitys.Player = Entitys.Player{
     .yaw = 0,
     .gameMode = GameMode,
+    .inWater = false,
     .cameraFront = @Vector(3, f64){ 0.0, 0.0, 0.0 },
     .cameraUp = @Vector(3, f64){ 0.0, 1.0, 0.0 },
     .pitch = 0,
@@ -69,7 +70,7 @@ var player: Entitys.Player = Entitys.Player{
     .speed = switch (GameMode) {
         Entitys.GameMode.Spectator => @Vector(3, f32){ 200.0, 200.0, 200.0 },
         Entitys.GameMode.Creative => @Vector(3, f32){ 20.0, 20.0, 20.0 },
-        Entitys.GameMode.Survival => @Vector(3, f32){ 20.0, 5.0, 20.0 },
+        Entitys.GameMode.Survival => @Vector(3, f32){ 15.0, 5.0, 15.0 },
     },
     .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
     .OnGround = false,
@@ -246,9 +247,12 @@ pub fn main() !void {
         }
         glfw.terminate();
         ul.join();
+        std.debug.print("ooo", .{});
         g.join();
         u.join();
+        std.debug.print("\nggg", .{});
         ph.join();
+        std.debug.print("\nph", .{});
         //gl.DeleteTextures(1, @ptrCast(&BlockTextures));
         // Clean up GLFW
         MainWorld.deinit(allocator);
@@ -267,6 +271,8 @@ pub fn main() !void {
     const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
     const sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot");
     const scalelocation = gl.GetUniformLocation(shaderprogram, "scale");
+    const underwaterlocation = gl.GetUniformLocation(shaderprogram, "HeadUnderwater");
+
     var frame: u64 = 0;
     while (!window.shouldClose()) {
         //need to submit draw calls quicker and batch chunk loading
@@ -277,7 +283,7 @@ pub fn main() !void {
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(45.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 2000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 2000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
         gl.UniformMatrix4fv(projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, zm.toRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         gl.UniformMatrix4fv(sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -304,6 +310,7 @@ pub fn main() !void {
             gl.Uniform1f(scalelocation, mesh.scale);
             gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
+            gl.Uniform1i(underwaterlocation, 0);//bool
             //                                                                                                                                                                                                     //player height
             gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
             //TODO frustrum cullling and LODs
@@ -330,7 +337,7 @@ pub fn main() !void {
             unloadTimer.reset();
             World.UnloadMeshes(&player, &MainWorld);
         }
-        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}                  \r", .{ drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) });
+        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}, onGround:{}              \r", .{ drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) ,player.OnGround});
 
         const poll = ztracy.ZoneNC(@src(), "finish", 0x00_ff_00_00);
         gl.Finish();
@@ -381,38 +388,38 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     if (player.gameMode != Entitys.GameMode.Spectator) cf[1] = 0;
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
     if (window.getKey(glfw.Key.w) == glfw.Action.press) {
-        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
             player.Movement += (cameraSpeed * cf);
         } else if (player.gameMode == Entitys.GameMode.Survival) {
-            player.Movement += (cameraSpeed * cf * @Vector(3, f64){ 0.01, 0.01, 0.01 });
+            player.Movement += (cameraSpeed * cf * @Vector(3, f64){ 0.1, 0.1, 0.1 });
         }
     }
     if (window.getKey(glfw.Key.s) == glfw.Action.press) {
-        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
             player.Movement -= (cameraSpeed * cf);
         } else if (player.gameMode == Entitys.GameMode.Survival) {
-            player.Movement -= (cameraSpeed * cf * @Vector(3, f64){ 0.01, 0.01, 0.01 });
+            player.Movement -= (cameraSpeed * cf * @Vector(3, f64){ 0.1, 0.1, 0.1 });
         }
     }
 
     if (window.getKey(glfw.Key.a) == glfw.Action.press) {
-        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
             player.Movement -= zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;
         } else if (player.gameMode == Entitys.GameMode.Survival) {
-            player.Movement -= (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.01, 0.01, 0.01 });
+            player.Movement -= (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.1, 0.1, 0.1 });
         }
     }
 
-    if (window.getKey(glfw.Key.d) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)) {
-        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround) {
+    if (window.getKey(glfw.Key.d) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater)) {
+        if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
             player.Movement += zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed;
         } else if (player.gameMode == Entitys.GameMode.Survival) {
-            player.Movement += (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.01, 0.01, 0.01 });
+            player.Movement += (zm.vec.normalize(zm.vec.cross(cf, player.cameraUp)) * cameraSpeed * @Vector(3, f64){ 0.1, 0.1, 0.1 });
         }
     }
 
-    if (window.getKey(glfw.Key.space) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround)) {
-        if (player.gameMode == Entitys.GameMode.Survival) {
+    if (window.getKey(glfw.Key.space) == glfw.Action.press and (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater)) {
+        if (player.gameMode == Entitys.GameMode.Survival and (!player.inWater or player.OnGround)) {
             player.Movement[1] += player.speed[1];
         } else player.Movement[1] += cameraSpeed[1];
     }

@@ -525,13 +525,13 @@ pub const Generator = struct {
                         blocks[xx][yy][zz] = if (!is_top_chunk) blk: {
                             var gm = @as(i32, @intFromFloat(@as(f32, @floatFromInt(Pos[1] * ChunkSize)) * scale)) + @as(i32, @intCast(yy));
                             if (gm <= 0) gm = 1;
-                            if (yy == height and (std.Random.uintAtMost(rand_impl.random(), u32, 256) > gm)) break :blk Blocks.Grass;
-                            if (yy > height - 5 and (std.Random.uintAtMost(rand_impl.random(), u32, 512) > gm)) break :blk Blocks.Dirt;
+                            if (yy == height and (std.Random.uintAtMost(rand_impl.random(), u32, 256) > gm) and Pos[1] >= 0) {break :blk Blocks.Grass;}
+                            else if (yy > height - 5 and (std.Random.uintAtMost(rand_impl.random(), u32, 512) > gm)) break :blk Blocks.Dirt;
                             break :blk Blocks.Stone;
                         } else Blocks.Stone;
 
                         has_terrain = true;
-                    }
+                    }else blocks[xx][yy][zz] = Blocks.Air;
                 }
 
                 // Tree generation

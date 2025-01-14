@@ -9,6 +9,8 @@ flat in uint side;
 flat in float sscale;
 uniform sampler2D TextureAtlas;
 uniform uint AtlasHeight;
+uniform bool HeadUnderwater;
+
 out vec4 FragColor;
 
 float rand(vec2 co) {
@@ -62,7 +64,7 @@ void main()
     else if (blocktype == 1)
     {   
         if(gl_FragCoord.z < 0.999999){
-        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + abs(position.y) + 0.1) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, ((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4, 1);
+        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + abs(position.y) + 1.0) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, abs(((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4), 1);
         }else FragColor = vec4(0.0,0.7,0.2,1.0);
     }
     else if (blocktype == 2)
@@ -92,6 +94,7 @@ void main()
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
     vec3 result = (0.2 + diffuse) * FragColor.xyz;
-    //result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 256));
+    result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 1024));
+    if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
     FragColor = vec4(result, FragColor[3]);
 }

@@ -204,7 +204,7 @@ pub const World = struct {
                     std.debug.assert(p.ChunkData == null or p.Unloading == true);
                     _ = world.Chunks.remove(p.pos);
                 } else {
-                    std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly\n", .{p.state});
+                    std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly, pos:{d}\n", .{p.state,p.pos});
                 }
 
                 var l = world.ChunkMeshes.swapRemove(i);
@@ -364,6 +364,7 @@ pub const World = struct {
             const pi: @Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 });
             const bktamount = self.Chunks.buckets.len;
             for (0..bktamount) |b| {
+                if (!self.running.load(.monotonic)) return;
                 self.Chunks.buckets[b].lock.lockShared();
                 var it = self.Chunks.buckets[b].hash_map.valueIterator();
                 defer self.Chunks.buckets[b].lock.unlockShared();
@@ -450,14 +451,14 @@ pub const World = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.pool.deinit();
         self.TerrainHeightCache.deinit();
-
+        std.debug.print("deinit\n", .{});
         //self.Entitys.deinit();
         while (self.MeshesToLoad.popFirst()) |m| {
             o: {
                 allocator.free(m.data.faces orelse break :o);
             }
-            o: {
-                allocator.free(m.data.faces orelse break :o);
+            t: {
+                allocator.free(m.data.transparentfaces orelse break :t);
             }
             allocator.destroy(m);
         }
@@ -477,6 +478,7 @@ pub const World = struct {
                 allocator.destroy(ch.*);
             }
         }
+        
         self.Chunks.deinit();
     }
 };
