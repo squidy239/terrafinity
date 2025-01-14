@@ -50,13 +50,15 @@ pub fn DistanceOrder(player: Entitys.Player, a: [3]i32, b: [3]i32) std.math.Orde
 }
 pub const ChunkMesh = struct {
     position: [3]i32,
-    faces: []u32,
+    faces: ?[]u32,
+    transparentfaces: ?[]u32,
     scale: f32,
 };
 pub const World = struct {
     running: std.atomic.Value(bool),
     pool: std.Thread.Pool,
     ChunkMeshes: std.ArrayList(RenderIDs),
+    TransparentChunkMeshes: std.ArrayList(RenderIDs),
     TerrainHeightCache: cache.Cache([32][32]i32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Entitys: std.AutoHashMap(Entitys.EntityUUID, type),
@@ -77,7 +79,7 @@ pub const World = struct {
         _ = player;
         //seed 0
         const p = self.Chunks.get(chunkpos).?;
-        
+
         //p.lock.lock();
         p.EncodeAndPutBlocks(Generator.GenChunk(chunkpos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness, scale, false, true) orelse {
             p.state.store(ChunkState.AllAir, .seq_cst);
@@ -98,12 +100,12 @@ pub const World = struct {
             }
 
             return;
-                        //true means lock
-        }, .None, allocator,true) catch |err| std.debug.panic("\n{any}", .{err});
+            //true means lock
+        }, .None, allocator, true) catch |err| std.debug.panic("\n{any}", .{err});
         //p.lock.unlock();
         const ch = p.state.load(.seq_cst);
         std.debug.assert(ch == ChunkState.ToGenerate or ch == ChunkState.InMemoryMeshUnloaded or ch == ChunkState.GeneratingAndMesh);
-        if(p.state.load(.seq_cst) != ChunkState.GeneratingAndMesh){
+        if (p.state.load(.seq_cst) != ChunkState.GeneratingAndMesh) {
             @branchHint(.unlikely);
             p.state.store(ChunkState.Generating, .seq_cst);
         }
@@ -167,9 +169,8 @@ pub const World = struct {
             std.debug.panic("\n{any}", .{err});
         };
 
-        if (mesh.len == 0) {
+        if (mesh[0] == null and mesh[1] == null) {
             chstate.state.store(ChunkState.InMemoryNoMesh, .seq_cst);
-            allocator.free(mesh);
             return;
         }
 
@@ -181,7 +182,8 @@ pub const World = struct {
         var node = allocator.create(std.DoublyLinkedList(ChunkMesh).Node) catch |err| {
             std.debug.panic("\n{any}", .{err});
         };
-        node.data = ChunkMesh{ .faces = mesh, .position = pos, .scale = chstate.scale };
+
+        node.data = ChunkMesh{ .faces = mesh[0], .transparentfaces = mesh[1], .position = pos, .scale = chstate.scale };
         self.MeshesToLoadMutex.lock();
         self.MeshesToLoad.append((node));
         self.MeshesToLoadMutex.unlock();
@@ -206,8 +208,15 @@ pub const World = struct {
                 }
 
                 var l = world.ChunkMeshes.swapRemove(i);
-                gl.DeleteBuffers(1, @ptrCast(&l.vbo));
-                gl.DeleteVertexArrays(1, @ptrCast(&l.vao));
+                o:{
+                gl.DeleteBuffers(1, (@ptrCast(&(l.vbo[0] orelse break:o))));
+                gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[0].?)));
+                }
+
+                t:{
+                gl.DeleteBuffers(1, @ptrCast(&(l.vbo[1] orelse break:t)));
+                gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[1].?)));
+                }
             }
         }
     }
@@ -253,12 +262,17 @@ pub const World = struct {
                 return;
             };
             defer {
-                allocator.free(mesh.data.faces);
+                o: {
+                    allocator.free(mesh.data.faces orelse break :o);
+                }
+                t: {
+                    allocator.free(mesh.data.transparentfaces orelse break :t);
+                }
                 allocator.destroy(mesh);
             }
 
             self.MeshesToLoadMutex.unlock();
-            const vbo = Render.CreateMeshVBO(mesh.data.faces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW);
+            const vbo = Render.CreateMeshVBOs(mesh.data.faces, mesh.data.transparentfaces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW);
 
             _ = try self.ChunkMeshes.append(vbo);
             i += 1;
@@ -439,7 +453,12 @@ pub const World = struct {
 
         //self.Entitys.deinit();
         while (self.MeshesToLoad.popFirst()) |m| {
-            allocator.free(m.data.faces);
+            o: {
+                allocator.free(m.data.faces orelse break :o);
+            }
+            o: {
+                allocator.free(m.data.faces orelse break :o);
+            }
             allocator.destroy(m);
         }
         self.ChunkMeshes.deinit();

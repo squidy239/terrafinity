@@ -46,12 +46,12 @@ pub const Chunk = struct {
     Unloading: bool,
     ref_count: std.atomic.Value(u32),
     scale: f32,
-    pub fn EncodeAndPutBlocks(self: *@This(), blocks: [32][32][32]Blocks, commtype: CompressionType, allocator: std.mem.Allocator,lock:bool) !void {
+    pub fn EncodeAndPutBlocks(self: *@This(), blocks: [32][32][32]Blocks, commtype: CompressionType, allocator: std.mem.Allocator, lock: bool) !void {
         const encodeandputblocks = ztracy.ZoneNC(@src(), "encodeandputblocks", 1838292929);
         defer encodeandputblocks.End();
-        if(lock){
-        self.lock.lock();
-        defer self.lock.unlock();
+        if (lock) {
+            self.lock.lock();
+            defer self.lock.unlock();
         }
         switch (commtype) {
             CompressionType.None => {
@@ -131,10 +131,10 @@ pub const Chunk = struct {
 
 pub const MeshBufferIDs = struct {
     time: i64,
-    vbo: c_uint,
-    vao: c_uint,
+    vbo: [2]?c_uint,
+    vao: [2]?c_uint,
     pos: [3]i32,
-    count: u32,
+    count: [2]u32,
     scale: f32,
 };
 
@@ -145,7 +145,7 @@ pub const Render = struct {
         0.5, 0.5,  0.0, // top right corner
         0.5, -0.5, 0.0,
     }; // bottom right corner
-    fn EncodeFace(side: u3, blocktype: Blocks, pos: [3]usize) [2]u32 {
+    fn EncodeAndPutFace(side: u3, blocktype: Blocks, pos: [3]usize, mesh:*std.ArrayList(u32), transparentmesh:*std.ArrayList(u32)) !void {
         var EncodedBlock = [2]u32{ 0, 0 };
         //bitpacking structure
         //pos|5 x 5 y 5 z| face|3| blocktype|20| 26 leftover bits
@@ -155,22 +155,37 @@ pub const Render = struct {
         //block type bits
         EncodedBlock[0] |= @as(u32, @intCast(side)) << (@bitSizeOf(u32) - 18);
         EncodedBlock[1] |= @as(u32, @intCast(@intFromEnum(blocktype))) << (@bitSizeOf(u32) - 20);
-        return EncodedBlock;
+        if(IsTransparentNoCompare(blocktype)){
+            @branchHint(.unlikely);
+            _ = try transparentmesh.append(EncodedBlock[0]);
+            _ = try transparentmesh.append(EncodedBlock[1]);
+        }else {
+            @branchHint(.likely);
+            _ = try mesh.append(EncodedBlock[0]);
+            _ = try mesh.append(EncodedBlock[1]);
+        }
     }
-    
-     inline fn IsTransparent(block:Blocks,block2:Blocks)bool{
+
+    inline fn IsTransparentNoCompare(block: Blocks) bool {
         return switch (block) {
-            Blocks.Air,Blocks.Water,Blocks.Leaves => !(block == block2),
-            else => false
+            Blocks.Air, Blocks.Water, Blocks.Leaves => true,
+            else => false,
         };
     }
-    
-     fn IsAir(block:Blocks)bool{
+
+    inline fn IsTransparent(block: Blocks, block2: Blocks) bool {
+        return switch (block) {
+            Blocks.Air, Blocks.Water, Blocks.Leaves => !(block == block2),
+            else => false,
+        };
+    }
+
+    fn IsAir(block: Blocks) bool {
         return block == Blocks.Air;
     }
     //nehbors +x -x +y -y +z -z
     //        0   1  2  3  4  5
-    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![]u32 {
+    pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![2]?[]u32 {
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);
         defer meshchunkreal.End();
         const convertfrombytes = ztracy.ZoneNC(@src(), "convertfrombytes", 2387947234);
@@ -187,10 +202,12 @@ pub const Render = struct {
         convertfrombytes.End();
 
         const initarraylist = ztracy.ZoneNC(@src(), "initarraylist", 0x965792d);
-        var buffer: [ChunkSize * ChunkSize * ChunkSize * 6 * @sizeOf(u32)]u8 = undefined;
+        var buffer: [ChunkSize * ChunkSize * ChunkSize * 6 * @sizeOf(u32) * 2]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
         var mesh = try std.ArrayList(u32).initCapacity(fba.allocator(), ChunkSize * ChunkSize * ChunkSize * 6);
+        var transparentmesh = try std.ArrayList(u32).initCapacity(fba.allocator(), ChunkSize * ChunkSize * ChunkSize * 6);
         defer mesh.deinit();
+        defer transparentmesh.deinit();
 
         initarraylist.End();
         for (0..ChunkSize) |x| {
@@ -200,85 +217,126 @@ pub const Render = struct {
                         @branchHint(.likely);
                         if (false and blocks[x][y][z] == Blocks.Leaves) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
-                            _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
-                            _ = try mesh.appendSlice(&EncodeFace(3, blocks[x][y][z], [3]usize{ x, y, z }));
-                            _ = try mesh.appendSlice(&EncodeFace(2, blocks[x][y][z], [3]usize{ x, y, z }));
-                            _ = try mesh.appendSlice(&EncodeFace(5, blocks[x][y][z], [3]usize{ x, y, z }));
-                            _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z},&mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                             continue;
                         }
-                        if ((x == ChunkSize - 1 and neighbors[0] != null and IsTransparent(neighborblocks[0][0][y][z],blocks[x][y][z])) or (x == ChunkSize - 1 and neighbors[0] == null)) {
+                        if ((x == ChunkSize - 1 and neighbors[0] != null and IsTransparent(neighborblocks[0][0][y][z], blocks[x][y][z])) or (x == ChunkSize - 1 and neighbors[0] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (x != ChunkSize - 1 and IsTransparent(blocks[x + 1][y][z],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(1, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (x != ChunkSize - 1 and IsTransparent(blocks[x + 1][y][z], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                         }
 
-                        if ((x == 0 and neighbors[1] != null and IsTransparent(neighborblocks[1][ChunkSize - 1][y][z],blocks[x][y][z])) or (x == 0 and neighbors[1] == null)) {
+                        if ((x == 0 and neighbors[1] != null and IsTransparent(neighborblocks[1][ChunkSize - 1][y][z], blocks[x][y][z])) or (x == 0 and neighbors[1] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (x != 0 and IsTransparent(blocks[x - 1][y][z],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(0, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (x != 0 and IsTransparent(blocks[x - 1][y][z], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                         }
 
-                        if ((y == ChunkSize - 1 and neighbors[2] != null and IsTransparent(neighborblocks[2][x][0][z],blocks[x][y][z])) or (y == ChunkSize - 1 and neighbors[2] == null)) {
+                        if ((y == ChunkSize - 1 and neighbors[2] != null and IsTransparent(neighborblocks[2][x][0][z], blocks[x][y][z])) or (y == ChunkSize - 1 and neighbors[2] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(3, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (y != ChunkSize - 1 and IsTransparent(blocks[x][y + 1][z],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(3, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (y != ChunkSize - 1 and IsTransparent(blocks[x][y + 1][z], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                         }
 
-                        if ((y == 0 and neighbors[3] != null and IsTransparent(neighborblocks[3][x][ChunkSize - 1][z],blocks[x][y][z])) or (y == 0 and neighbors[3] == null)) {
+                        if ((y == 0 and neighbors[3] != null and IsTransparent(neighborblocks[3][x][ChunkSize - 1][z], blocks[x][y][z])) or (y == 0 and neighbors[3] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(2, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (y != 0 and IsTransparent(blocks[x][y - 1][z],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(2, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (y != 0 and IsTransparent(blocks[x][y - 1][z], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                         }
 
-                        if ((z == ChunkSize - 1 and neighbors[4] != null and IsTransparent(neighborblocks[4][x][y][0],blocks[x][y][z])) or (z == ChunkSize - 1 and neighbors[4] == null)) {
+                        if ((z == ChunkSize - 1 and neighbors[4] != null and IsTransparent(neighborblocks[4][x][y][0], blocks[x][y][z])) or (z == ChunkSize - 1 and neighbors[4] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(5, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (z != ChunkSize - 1 and IsTransparent(blocks[x][y][z + 1],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(5, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (z != ChunkSize - 1 and IsTransparent(blocks[x][y][z + 1], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
                         }
 
-                        if ((z == 0 and neighbors[5] != null and IsTransparent(neighborblocks[5][x][y][ChunkSize - 1],blocks[x][y][z])) or (z == 0 and neighbors[5] == null)) {
+                        if ((z == 0 and neighbors[5] != null and IsTransparent(neighborblocks[5][x][y][ChunkSize - 1], blocks[x][y][z])) or (z == 0 and neighbors[5] == null)) {
                             @branchHint(.unlikely);
-                            _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
-                        } else if (z != 0 and IsTransparent(blocks[x][y][z - 1],blocks[x][y][z])) {
-                            _ = try mesh.appendSlice(&EncodeFace(4, blocks[x][y][z], [3]usize{ x, y, z }));
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                        } else if (z != 0 and IsTransparent(blocks[x][y][z - 1], blocks[x][y][z])) {
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z },&mesh,&transparentmesh);
                         }
                     }
                 }
             }
         }
         mesh.shrinkAndFree(mesh.items.len);
-        return allocator.dupe(u32, mesh.items);
+        transparentmesh.shrinkAndFree(transparentmesh.items.len);
+        return [2]?[]u32{ if (mesh.items.len == 0) null else try allocator.dupe(u32, mesh.items), if (transparentmesh.items.len == 0) null else try allocator.dupe(u32, transparentmesh.items) };
     }
-    pub fn CreateMeshVBO(mesh: []u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, scale: f32, usage: comptime_int) MeshBufferIDs {
+
+    pub fn CreateMeshVBOs(mesh: ?[]u32, transparentmesh: ?[]u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, scale: f32, usage: comptime_int) MeshBufferIDs {
+        //TODO optimize by batching
         const createvbo = ztracy.ZoneNC(@src(), "createvbo", 0x00_ff_00_00);
         defer createvbo.End();
-        var NewMeshIDs: MeshBufferIDs = undefined;
-        std.debug.assert(mesh.len > 0);
-        gl.GenVertexArrays(1, @ptrCast(&NewMeshIDs.vao));
-        gl.GenBuffers(1, @ptrCast(&NewMeshIDs.vbo));
-        gl.BindVertexArray(NewMeshIDs.vao);
-        gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * mesh.len), mesh.ptr, usage);
-        NewMeshIDs.pos = pos;
-        NewMeshIDs.scale = scale;
-        NewMeshIDs.count = @intCast(mesh.len);
-        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
-        gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
-        gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-        gl.EnableVertexAttribArray(0);
-        gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo);
-        gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-        gl.EnableVertexAttribArray(1);
-        gl.VertexAttribDivisor(1, 1);
+        var NewMeshIDs: MeshBufferIDs = .{
+            .vao = [2]?c_uint{ 0, 0 },
+            .vbo = [2]?c_uint{ 0, 0 },
+            .count = [2]u32{ 0, 0 },
+            .scale = scale,
+            .pos = pos,
+            .time = undefined,
+        };
+        const mm = ztracy.ZoneNC(@src(), "opaque", 0x00_ff_00_00);
+
+        if (mesh != null) {
+            gl.GenVertexArrays(1, @ptrCast(&NewMeshIDs.vao[0].?));
+            const o = ztracy.ZoneNC(@src(), "1", 0x00_ff_00_00);
+            gl.GenBuffers(1, @ptrCast(&NewMeshIDs.vbo[0].?));
+            o.End();
+            gl.BindVertexArray(NewMeshIDs.vao[0].?);
+            gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo[0].?);
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * mesh.?.len), mesh.?.ptr, usage);
+            NewMeshIDs.count[0] = @intCast(mesh.?.len);
+            gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
+            gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
+            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
+            gl.EnableVertexAttribArray(0);
+            gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo[0].?);
+            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+            gl.EnableVertexAttribArray(1);
+            gl.VertexAttribDivisor(1, 1);
+            //std.debug.print("mesh made:{d}faces\n", .{mesh.len});
+        } else {
+            NewMeshIDs.vao[0] = null;
+            NewMeshIDs.vbo[0] = null;
+        }
+        mm.End();
+
+        const t = ztracy.ZoneNC(@src(), "transparent", 0x00_ff_00_00);
+        if (transparentmesh != null) {
+            gl.GenVertexArrays(1, @ptrCast(&NewMeshIDs.vao[1]));
+            gl.GenBuffers(1, @ptrCast(&NewMeshIDs.vbo[1]));
+            gl.BindVertexArray(NewMeshIDs.vao[1].?);
+            gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo[1].?);
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(u32) * transparentmesh.?.len), transparentmesh.?.ptr, usage);
+            NewMeshIDs.pos = pos;
+            NewMeshIDs.scale = scale;
+            NewMeshIDs.count[1] = @intCast(transparentmesh.?.len);
+            gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, indecies);
+            gl.BindBuffer(gl.ARRAY_BUFFER, facebuffer);
+            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
+            gl.EnableVertexAttribArray(0);
+            gl.BindBuffer(gl.ARRAY_BUFFER, NewMeshIDs.vbo[1].?);
+            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+            gl.EnableVertexAttribArray(1);
+            gl.VertexAttribDivisor(1, 1);
+        } else {
+            NewMeshIDs.vao[1] = null;
+            NewMeshIDs.vbo[1] = null;
+        }
+        t.End();
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-        //std.debug.print("mesh made:{d}faces\n", .{mesh.len});
         gl.BindVertexArray(0);
         NewMeshIDs.time = std.time.milliTimestamp();
         return NewMeshIDs;
@@ -394,7 +452,7 @@ pub const Generator = struct {
         //
         //
         var blocks: [32][32][32]Blocks = undefined;
-        @memset(&blocks, @splat(@splat(if(chunk_offset[1] < 0) Blocks.Water else Blocks.Air)));
+        @memset(&blocks, @splat(@splat(if (chunk_offset[1] < 0) Blocks.Water else Blocks.Air)));
         //
         var has_terrain = chunk_offset[1] < 0;
         const terrain = ztracy.ZoneNC(@src(), "terrain", 0x692de);
@@ -480,7 +538,6 @@ pub const Generator = struct {
                 if (trees and Pos[1] >= 0 and !is_top_chunk and
                     blocks[xx][@intCast(height)][zz] == Blocks.Grass and
                     rand_impl.random().float(f32) < tree_chance)
-                
                 {
                     generateTree(&blocks, xx, zz, @as(i32, @intFromFloat(@as(f32, @floatFromInt(height)) / scale)), scale, &rand_impl);
                 }

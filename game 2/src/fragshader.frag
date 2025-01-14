@@ -75,7 +75,7 @@ void main()
     }
     else if (blocktype == 6)
     {
-        FragColor = vec4(cdfs, cdfs + 0.2, cdfs + 0.5, 0.5);
+        FragColor = vec4(cdfs-0.3, cdfs, cdfs + 0.3, 0.8);
     }
     else if (blocktype == 4)
     {   

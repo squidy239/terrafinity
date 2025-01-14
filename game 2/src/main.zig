@@ -53,9 +53,8 @@ var lastX: f64 = undefined;
 var lastY: f64 = undefined;
 
 //change gamemode here
-const GameMode = Entitys.GameMode.Spectator;
+const GameMode = Entitys.GameMode.Survival;
 //
-
 
 var player: Entitys.Player = Entitys.Player{
     .yaw = 0,
@@ -75,8 +74,8 @@ var player: Entitys.Player = Entitys.Player{
     .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
     .OnGround = false,
     .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10, 20 },
-    .MeshDistance = [3]u32{ 20, 10, 20 },
+    .LoadDistance = [3]u32{ 20, 10,20 },
+    .MeshDistance = [3]u32{ 40, 20, 40 },
     .lock = .{},
 };
 
@@ -168,6 +167,7 @@ pub fn main() !void {
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .Entitys = std.AutoHashMap(Entitys.EntityUUID, type).init(allocator),
         .MeshesToLoad = std.DoublyLinkedList(ChunkMesh){},
+        .TransparentChunkMeshes = std.ArrayList(RenderIDs).init(allocator),
         //using seprate allocator
         .TerrainHeightCache = try cache.Cache([32][32]i32).init(c_allocator.allocator(), .{ .segment_count = 1, .gets_per_promote = 1, .max_size = 1000 }),
         .TerrainHeightCacheMutex = .{},
@@ -269,6 +269,7 @@ pub fn main() !void {
     const scalelocation = gl.GetUniformLocation(shaderprogram, "scale");
     var frame: u64 = 0;
     while (!window.shouldClose()) {
+        //need to submit draw calls quicker and batch chunk loading
         frame +|= 1;
         //_ = try MainWorld.pool.spawn(Physics.PlayerPhysics, .{&player, &physicsTimer, &MainWorld});
         const tracy_zone = ztracy.ZoneNC(@src(), "Frametime", 0x00_ff_00_00);
@@ -276,7 +277,7 @@ pub fn main() !void {
         gl.ClearColor(0, 0.3, 0.5, 1.0);
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(90.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 2000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4d.perspective(zm.toRadians(45.0), @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)), 0.1, 2000).multiply(zm.Mat4d.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + player.cameraFront, player.cameraUp)).data));
         gl.UniformMatrix4fv(projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, zm.toRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         gl.UniformMatrix4fv(sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -287,10 +288,15 @@ pub fn main() !void {
         player.lock.lockShared();
         const ploc = player.pos;
         player.lock.unlockShared();
-        var drawnchunks:u64 = 0;
+        var drawnchunks: u64 = 0;
+        const millitimestamp = std.time.milliTimestamp();
+        inline for(0..2)|i|{
+        if(i == 1)gl.Disable(gl.CULL_FACE);
+        defer gl.Enable(gl.CULL_FACE);
         for (it) |mesh| {
+            gl.BindVertexArray(mesh.vao[i] orelse continue);
             drawnchunks += 1;
-            var tr = std.time.milliTimestamp() - mesh.time;
+            var tr = millitimestamp - mesh.time;
             if (tr > 1000) {
                 @branchHint(.likely);
                 tr = 1000;
@@ -300,11 +306,10 @@ pub fn main() !void {
             gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
             //                                                                                                                                                                                                     //player height
             gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
-            gl.BindVertexArray(mesh.vao);
             //TODO frustrum cullling and LODs
-            gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count / 2));
+            gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count[i] / 2));
         }
-        std.debug.assert(it.len == MainWorld.ChunkMeshes.items.len);
+        }
         drawtime.End();
 
         const prossesinput = ztracy.ZoneNC(@src(), "prossesInput", 0x00_ff_00_00);
@@ -325,7 +330,7 @@ pub fn main() !void {
             unloadTimer.reset();
             World.UnloadMeshes(&player, &MainWorld);
         }
-        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}                  \r", .{drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) });
+        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}                  \r", .{ drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) });
 
         const poll = ztracy.ZoneNC(@src(), "finish", 0x00_ff_00_00);
         gl.Finish();
