@@ -36,6 +36,7 @@ const allocator = main_c_allocator.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 var Worldptr: *World = undefined;
+var lastfullscreenedtime:i128 = 0;
 var fast = false;
 const vertices = [_]f32{
     -0.5, -0.5, 0.0, // bottom left corner
@@ -207,7 +208,7 @@ pub fn main() !void {
 
     var g = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
     //TODO put in threadpool
-    var ph = try std.Thread.spawn(.{}, Physics.PlayerPhysicsLoop, .{ &player, &physicsTimer, &MainWorld });
+    //var ph = try std.Thread.spawn(.{}, Physics.PlayerPhysicsLoop, .{ &player, &physicsTimer, &MainWorld });
     var u = try std.Thread.spawn(.{}, World.AddToUnload, .{ &MainWorld, &player, 1000 * std.time.ns_per_ms, allocator });
     var ul = try std.Thread.spawn(.{}, World.UnloadLoop, .{ &MainWorld, 1000 * std.time.ns_per_ms, allocator });
     //i am using a diffrent allocator for thread pool so it dosent get slowed down by other allocations, it makes a big diffrence
@@ -251,7 +252,7 @@ pub fn main() !void {
         g.join();
         u.join();
         std.debug.print("\nggg", .{});
-        ph.join();
+        //ph.join();
         std.debug.print("\nph", .{});
         //gl.DeleteTextures(1, @ptrCast(&BlockTextures));
         // Clean up GLFW
@@ -271,7 +272,7 @@ pub fn main() !void {
     const tlocation = gl.GetUniformLocation(shaderprogram, "chunktime");
     const sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot");
     const scalelocation = gl.GetUniformLocation(shaderprogram, "scale");
-    const underwaterlocation = gl.GetUniformLocation(shaderprogram, "HeadUnderwater");
+    const timelocation = gl.GetUniformLocation(shaderprogram, "time");
 
     var frame: u64 = 0;
     while (!window.shouldClose()) {
@@ -296,6 +297,7 @@ pub fn main() !void {
         player.lock.unlockShared();
         var drawnchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
+        gl.Uniform1d(timelocation, @floatFromInt(millitimestamp));//bool
         inline for(0..2)|i|{
         if(i == 1)gl.Disable(gl.CULL_FACE);
         defer gl.Enable(gl.CULL_FACE);
@@ -310,7 +312,6 @@ pub fn main() !void {
             gl.Uniform1f(scalelocation, mesh.scale);
             gl.Uniform1i(tlocation, @intCast(tr));
             gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
-            gl.Uniform1i(underwaterlocation, 0);//bool
             //                                                                                                                                                                                                     //player height
             gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
             //TODO frustrum cullling and LODs
@@ -323,6 +324,10 @@ pub fn main() !void {
         glfw.pollEvents();
         try prossesInput(window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         prossesinput.End();
+        const physics = ztracy.ZoneNC(@src(), "physics", 754574);
+        Physics.PlayerPhysics(&player,&physicsTimer,&MainWorld);
+        physics.End();
+
 
         {
             //std.debug.print("gen\n", .{});
@@ -446,8 +451,9 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
             glfw.Window.setInputModeCursor(window, .normal);
     }
 
-    if (window.getKey(glfw.Key.F11) == glfw.Action.press) {
-        std.time.sleep(400 * std.time.ns_per_ms);
+    if (window.getKey(glfw.Key.F11) == glfw.Action.press and (std.time.nanoTimestamp() - lastfullscreenedtime) > 400 * std.time.ns_per_ms) {
+        defer lastfullscreenedtime = std.time.nanoTimestamp();
+        //std.debug.print("\n fs:{} < {}", .{lastfullscreenedtime -  std.time.nanoTimestamp(),400 * std.time.ns_per_ms});
         const w = glfw.Monitor.getPrimary().?.getVideoMode().?.getWidth();
         const h = glfw.Monitor.getPrimary().?.getVideoMode().?.getHeight();
         if (!fullscreen) {

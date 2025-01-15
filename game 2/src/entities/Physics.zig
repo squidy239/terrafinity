@@ -6,15 +6,16 @@ const Blocks = @import("../chunk/Blocks.zig").Blocks;
 const ztracy = @import("ztracy");
 
 pub fn PlayerPhysicsLoop(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
-    while (world.running.load(.seq_cst)) {
+    while (world.running.load(.seq_cst)) :(std.Thread.sleep(2 * std.time.ns_per_ms)) {
         PlayerPhysics(playerr, timer, world);
-        std.time.sleep(2 * std.time.ns_per_ms);
     }
 }
 pub fn PlayerPhysics(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
     const tracy_zone = ztracy.ZoneNC(@src(), "PlayerPhysics", 34234);
     defer tracy_zone.End();
-    const dt = @as(f64, @floatFromInt(timer.lap())) / std.time.ns_per_s;
+    playerr.lock.lock();
+    defer playerr.lock.unlock();
+    const dt = @as(f64,@floatCast(@as(f128, @floatFromInt(timer.lap())) / std.time.ns_per_s));
     if (playerr.gameMode != Entitys.GameMode.Spectator) {
         playerr.Movement[1] -= 9.81 * dt;
         // Air resistance calculation
@@ -23,6 +24,7 @@ pub fn PlayerPhysics(playerr: *Entitys.Player, timer: *std.time.Timer, world: *W
         p +=  (playerr.Movement * @as(@Vector(3, f64), @splat(dt)));
         const c = BlockPlayerCollision(playerr,p, world, @Vector(3, f64){ 10.0, 10.0, 10.0 }, dt);
         p += c;
+        //std.debug.print("\ndt:{d}\n", .{dt});
         playerr.pos = p;
         //std.debug.print("\nc:{d}, m:{d}\n", .{c,(playerr.Movement * @as(@Vector(3, f64), @splat(dt)))});
     } else {

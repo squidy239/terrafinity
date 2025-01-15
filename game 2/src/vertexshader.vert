@@ -4,6 +4,7 @@ layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
 uniform float scale;
 uniform mat4 sunrot;
+uniform double time;
 uniform vec3 relativechunkpos;
 uniform ivec3 chunkpos;
 uniform int chunktime;
@@ -15,6 +16,24 @@ flat out vec3 sunpos;
 flat out float sscale;
 flat out vec3 position;
 flat out uint blocktype;
+
+
+float bouncingMod(float x, float n) {
+    // Make x positive
+    x = abs(x);
+
+    // Calculate the cycle number and remainder
+    float cycle = floor(x / n);
+    float remainder = mod(x, n);
+
+    // Reflect if the cycle is odd
+    if (mod(cycle, 2.0) == 0.0) {
+        return remainder; // Normal case
+    } else {
+        return n - remainder; // Reflection case
+    }
+}
+
 
 uvec3 DecodePosition(uvec2 encodedBlock) {
     return uvec3(
@@ -106,6 +125,16 @@ void main() {
     fragpos = vec3((pos*scale) + (coords*scale) + (chunkpos*32*scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0,1.0)).xyz;
 
-    gl_Position = projview * vec4((coords*scale + ((pos*scale) + (relativechunkpos))),1);
+    float speed = 2000.0;
+    float t = 1.0+((float(mod(time,100000000.0)))/10000000);
+
+    vec3 vertexposition = coords*scale + ((pos*scale) + (chunkpos*32.0));
+    
+    float p = 1.0+bouncingMod(vertexposition.x*vertexposition.y*vertexposition.z*(vertexposition.x/vertexposition.y/vertexposition.z)*(sin(vertexposition.x)*sin(vertexposition.y)*sin(vertexposition.z)),400.0)/400.0;
+
+
+    if(blocktype == 6)coords.y -= bouncingMod((p*t*speed),0.4);
+    gl_Position = projview * vec4(coords*scale + ((pos*scale) + (relativechunkpos)),1);
     
 }
+
