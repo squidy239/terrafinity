@@ -25,7 +25,7 @@ pub const Player = struct {
     pos: @Vector(3, f64),
     pitch: f32,
     yaw: f32,
-    inWater:bool,
+    inWater: bool,
     roll: f32,
     hitboxmin: @Vector(3, f64),
     hitboxmax: @Vector(3, f64),

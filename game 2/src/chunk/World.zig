@@ -79,7 +79,6 @@ pub const World = struct {
         _ = player;
         //seed 0
         const p = self.Chunks.get(chunkpos).?;
-
         //p.lock.lock();
         p.EncodeAndPutBlocks(Generator.GenChunk(chunkpos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.TerrainNoise, self.TerrainNoise2, self.CaveNoise, self.min, self.max, self.caveness, scale, false, true) orelse {
             p.state.store(ChunkState.AllAir, .seq_cst);
@@ -104,10 +103,13 @@ pub const World = struct {
         }, .None, allocator, true) catch |err| std.debug.panic("\n{any}", .{err});
         //p.lock.unlock();
         const ch = p.state.load(.seq_cst);
-        std.debug.assert(ch == ChunkState.ToGenerate or ch == ChunkState.InMemoryMeshUnloaded or ch == ChunkState.GeneratingAndMesh);
+        std.debug.assert(ch == ChunkState.ToGenerate or ch == ChunkState.GeneratingAndMesh);
         if (p.state.load(.seq_cst) != ChunkState.GeneratingAndMesh) {
-            @branchHint(.unlikely);
+            @branchHint(.likely);
             p.state.store(ChunkState.Generating, .seq_cst);
+        } else {
+            p.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
+            return;
         }
         _ = self.pool.spawn(MeshChunk, .{ self, chunkpos, allocator }) catch |err| std.debug.panic("\n{any}", .{err});
     }
@@ -122,12 +124,12 @@ pub const World = struct {
 
         chstate.lock.lockShared();
         defer chstate.lock.unlockShared();
-        chstate.addRef();
-        defer chstate.release();
+        //chstate.addRef();
+        //relesed when mesh is loaded
         const ch = chstate.state.load(.seq_cst);
-        if (!(ch == ChunkState.Generating or ch == ChunkState.ReMesh or ch == ChunkState.GeneratingAndMesh)) {
+        if (!(ch == ChunkState.Generating or ch == ChunkState.ReMesh or ch == ChunkState.MeshAgain or ch == ChunkState.InMemoryMeshGenerating )) {
             @branchHint(.cold);
-            std.debug.print("\nerror: {any} not remesh or generating or meshandgenerating\n", .{chstate.state.load(.seq_cst)});
+            std.debug.print("\nerror: {any} not remesh or generating or InMemoryMeshGenerating\n", .{chstate.state.load(.seq_cst)});
         }
         const neighbors: [6]?*Chunk = GetAndLockNeighbors(self, pos);
         //const neighbors = [6]?*Chunk{null,null,null,null,null,null};
@@ -148,7 +150,7 @@ pub const World = struct {
                 wfn += 1;
             }
 
-            if (neighbors[i] != null and neighbors[i].?.state.load(.seq_cst) == ChunkState.WaitingForNeighbors and chstate.state.load(.seq_cst) == ChunkState.Generating) {
+            if (neighbors[i] != null and neighbors[i].?.state.load(.seq_cst) == ChunkState.WaitingForNeighbors and (chstate.state.load(.seq_cst) != ChunkState.ReMesh and chstate.state.load(.seq_cst) != ChunkState.MeshAgain)) {
                 neighbors[i].?.state.store(ChunkState.ReMesh, .seq_cst);
                 std.debug.assert(neighbors[i].?.state.load(.seq_cst) == ChunkState.ReMesh);
                 self.pool.spawn(MeshChunk, .{ self, neighbors[i].?.pos, allocator }) catch |err| {
@@ -157,12 +159,11 @@ pub const World = struct {
             }
         }
         if (wfn > 0) {
-            //std.debug.print("\nl{any}", .{chstate.lock.impl});
             chstate.state.store(ChunkState.WaitingForNeighbors, .seq_cst);
             prossesnehbors.End();
             return;
         }
-        std.debug.assert(chstate.state.load(.seq_cst) == ChunkState.Generating or chstate.state.load(.seq_cst) == ChunkState.ReMesh or chstate.state.load(.seq_cst) == ChunkState.GeneratingAndMesh);
+        std.debug.assert(chstate.state.load(.seq_cst) == ChunkState.Generating or chstate.state.load(.seq_cst) == ChunkState.ReMesh or chstate.state.load(.seq_cst) == ChunkState.GeneratingAndMesh or chstate.state.load(.seq_cst) == ChunkState.MeshAgain);
         prossesnehbors.End();
 
         const mesh = Render.MeshChunk_Normal(chstate, allocator, neighborptrs) catch |err| {
@@ -171,13 +172,15 @@ pub const World = struct {
 
         if (mesh[0] == null and mesh[1] == null) {
             chstate.state.store(ChunkState.InMemoryNoMesh, .seq_cst);
+            // need to remove mesh if deleting last block
             return;
         }
 
         const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
         defer putmesh.End();
         //chstate.lock.lock();
-        chstate.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
+        if(chstate.state.load(.seq_cst) != ChunkState.MeshAgain)
+            chstate.state.store(ChunkState.InMemoryMeshLoading, .seq_cst);
         //chstate.lock.unlock();
         var node = allocator.create(std.DoublyLinkedList(ChunkMesh).Node) catch |err| {
             std.debug.panic("\n{any}", .{err});
@@ -195,7 +198,20 @@ pub const World = struct {
         while (i > 0) {
             i -= 1;
             const mesh = world.ChunkMeshes.items[i];
-            const p = world.Chunks.get(mesh.pos).?;
+            const p = world.Chunks.get(mesh.pos) orelse {
+                std.debug.print("\nerror null\n", .{});
+                var l = world.ChunkMeshes.swapRemove(i);
+                o: {
+                    gl.DeleteBuffers(1, (@ptrCast(&(l.vbo[0] orelse break :o))));
+                    gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[0].?)));
+                }
+
+                t: {
+                    gl.DeleteBuffers(1, @ptrCast(&(l.vbo[1] orelse break :t)));
+                    gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[1].?)));
+                }
+                continue;
+            };
 
             if (@reduce(.Or, @abs(pi - mesh.pos) > @as(@Vector(3, u32), ((player.MeshDistance))))) {
                 if (p.state.load(.seq_cst) == ChunkState.InMemoryAndMesh) {
@@ -203,19 +219,24 @@ pub const World = struct {
                 } else if (p.state.load(.seq_cst) == ChunkState.MeshOnly) {
                     std.debug.assert(p.ChunkData == null or p.Unloading == true);
                     _ = world.Chunks.remove(p.pos);
-                } else {
-                    std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly, pos:{d}\n", .{p.state,p.pos});
+                } else if(p.state.load(.seq_cst) == ChunkState.GeneratingAndMesh){
+                    p.state.store(ChunkState.Generating, .seq_cst);
+                    std.debug.print("\nggk\n", .{});
+                }
+                
+                else {
+                    std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly or GeneratingAndMesh, pos:{d}\n", .{ p.state, @as(@Vector(3, i32), (p.pos)) * @Vector(3, i32){ 32, 32, 32 } });
                 }
 
                 var l = world.ChunkMeshes.swapRemove(i);
-                o:{
-                gl.DeleteBuffers(1, (@ptrCast(&(l.vbo[0] orelse break:o))));
-                gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[0].?)));
+                o: {
+                    gl.DeleteBuffers(1, (@ptrCast(&(l.vbo[0] orelse break :o))));
+                    gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[0].?)));
                 }
 
-                t:{
-                gl.DeleteBuffers(1, @ptrCast(&(l.vbo[1] orelse break:t)));
-                gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[1].?)));
+                t: {
+                    gl.DeleteBuffers(1, @ptrCast(&(l.vbo[1] orelse break :t)));
+                    gl.DeleteVertexArrays(1, @ptrCast(&(l.vao[1].?)));
                 }
             }
         }
@@ -224,8 +245,8 @@ pub const World = struct {
     pub fn RemeshChunk(self: *@This(), pos: [3]i32, allocator: std.mem.Allocator) !bool {
         var ch = self.Chunks.get(pos);
 
-        if (ch != null and ch.?.chunkPtr != null) {
-            ch.?.state.store(ChunkState.ReMesh, .seq_cst);
+        if (ch != null and (ch.?.state.load(.seq_cst) == ChunkState.InMemoryAndMesh or ch.?.state.load(.seq_cst) == ChunkState.InMemoryNoMesh or ch.?.state.load(.seq_cst) == ChunkState.InMemoryMeshUnloaded)) {
+            ch.?.state.store(ChunkState.MeshAgain, .seq_cst);
             _ = try self.pool.spawn(MeshChunk, .{ self, pos, allocator });
             return true;
         }
@@ -245,7 +266,7 @@ pub const World = struct {
         return chunks;
     }
 
-    pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, maxtime: u64) !void {
+    pub fn LoadMeshes(self: *@This(), ebo: c_uint, facebuffer: c_uint, allocator: std.mem.Allocator, world: *World, maxtime: u64) !void {
         const loadmeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 0x4aeb2a);
         defer loadmeshes.End();
         var timer = try std.time.Timer.start();
@@ -261,6 +282,22 @@ pub const World = struct {
                 self.MeshesToLoadMutex.unlock();
                 return;
             };
+            const ch = world.Chunks.get(mesh.data.position) orelse {
+                std.debug.print("\nerror:chunk to load is not in world\n", .{});
+                continue;
+            };
+            if (ch.state.load(.seq_cst) != ChunkState.InMemoryMeshLoading and ch.state.load(.seq_cst) != ChunkState.MeshAgain) {
+                std.debug.print("error: {any} != ChunkState.InMemoryMeshLoading or MeshAgain", .{ch.state.load(.seq_cst)});
+            }
+            //bad TODO edo function
+            if(ch.state.load(.seq_cst) == ChunkState.MeshAgain)
+            for(self.ChunkMeshes.items,0..)|m,ii|{
+                if(@as(u96,@bitCast(m.pos)) == @as(u96,@bitCast(ch.pos))){
+                    _ = world.ChunkMeshes.swapRemove(ii);
+                }
+            ch.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
+            };
+            defer ch.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
             defer {
                 o: {
                     allocator.free(mesh.data.faces orelse break :o);
@@ -325,7 +362,7 @@ pub const World = struct {
                             _ = try SortToGen.add(pos);
                             continue;
                         } else if (cg.?.state.load(.seq_cst) == ChunkState.InMemoryMeshUnloaded) {
-                            cg.?.state.store(ChunkState.ReMesh, .seq_cst);
+                            cg.?.state.store(ChunkState.InMemoryMeshGenerating, .seq_cst);
                             _ = try self.pool.spawn(MeshChunk, .{ self, cg.?.pos, allocator });
                         } else if (cg.?.state.load(.seq_cst) == ChunkState.MeshOnly) {
                             cg.?.state.store(ChunkState.GeneratingAndMesh, .seq_cst);
@@ -412,7 +449,7 @@ pub const World = struct {
             defer allocator.destroy(chunktounload);
             self.ToUnloadMutex.unlock();
             UnloadChunk(self, self.Chunks.get(chunktounload.data) orelse {
-                std.debug.print("\n\nerr unloading chunk {any}, len:{}\n\n", .{ chunktounload.data, self.ToUnload.len });
+                //std.debug.print("\n\nerr unloading chunk {any}, len:{}\n\n", .{ chunktounload.data, self.ToUnload.len });
                 continue;
             }, allocator);
         }
@@ -429,20 +466,22 @@ pub const World = struct {
                 chunk.state.store(ChunkState.MeshOnly, .seq_cst);
                 allocator.free(chunk.ChunkData.?);
                 chunk.ChunkData = null;
+                chunk.Unloading = false;
                 chunk.lock.unlock();
             },
 
             ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
-                _ = self.Chunks.remove(chunk.pos);
-                chunk.lock.lock();
-                allocator.free(chunk.ChunkData.?);
-                allocator.destroy(chunk);
+                //_ = self.Chunks.remove(chunk.pos);
+                //chunk.lock.lock();
+                //allocator.free(chunk.ChunkData.?);
+               // allocator.destroy(chunk);
             },
             ChunkState.AllAir => {
-                std.debug.assert(chunk.ChunkData == null);
-                _ = self.Chunks.remove(chunk.pos);
-                chunk.lock.lock();
-                allocator.destroy(chunk);
+                //std.debug.assert(chunk.ChunkData == null);
+                //_ = self.Chunks.remove(chunk.pos);
+                //chunk.lock.lock();
+                //allocator.destroy(chunk);
+                _ = self;
             },
             else => {},
         }
@@ -478,7 +517,7 @@ pub const World = struct {
                 allocator.destroy(ch.*);
             }
         }
-        
+
         self.Chunks.deinit();
     }
 };

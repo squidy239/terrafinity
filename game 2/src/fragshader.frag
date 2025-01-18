@@ -94,7 +94,7 @@ void main()
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
     vec3 result = (0.2 + diffuse) * FragColor.xyz;
-    result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 1024));
+    result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
     if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
     FragColor = vec4(result, FragColor[3]);
 }

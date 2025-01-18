@@ -6,7 +6,7 @@ const Blocks = @import("../chunk/Blocks.zig").Blocks;
 const ztracy = @import("ztracy");
 
 pub fn PlayerPhysicsLoop(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
-    while (world.running.load(.seq_cst)) :(std.Thread.sleep(2 * std.time.ns_per_ms)) {
+    while (world.running.load(.seq_cst)) : (std.Thread.sleep(2 * std.time.ns_per_ms)) {
         PlayerPhysics(playerr, timer, world);
     }
 }
@@ -15,14 +15,14 @@ pub fn PlayerPhysics(playerr: *Entitys.Player, timer: *std.time.Timer, world: *W
     defer tracy_zone.End();
     playerr.lock.lock();
     defer playerr.lock.unlock();
-    const dt = @as(f64,@floatCast(@as(f128, @floatFromInt(timer.lap())) / std.time.ns_per_s));
+    const dt = @as(f64, @floatCast(@as(f128, @floatFromInt(timer.lap())) / std.time.ns_per_s));
     if (playerr.gameMode != Entitys.GameMode.Spectator) {
         playerr.Movement[1] -= 9.81 * dt;
         // Air resistance calculation
         playerr.Movement += AirResistance(playerr.Movement, dt, @splat(0.1));
         var p = playerr.pos;
-        p +=  (playerr.Movement * @as(@Vector(3, f64), @splat(dt)));
-        const c = BlockPlayerCollision(playerr,p, world, @Vector(3, f64){ 10.0, 10.0, 10.0 }, dt);
+        p += (playerr.Movement * @as(@Vector(3, f64), @splat(dt)));
+        const c = BlockPlayerCollision(playerr, p, world, @Vector(3, f64){ 10.0, 10.0, 10.0 }, dt);
         p += c;
         //std.debug.print("\ndt:{d}\n", .{dt});
         playerr.pos = p;
@@ -56,7 +56,7 @@ fn AirResistance(Movement: @Vector(3, f64), DeltaTime: f64, drag_co: @Vector(3, 
     } else return comptime @Vector(3, f64){ 0.0, 0.0, 0.0 };
 }
 
-fn BlockPlayerCollision(playerr: *Entitys.Player,playerpos:@Vector(3, f64), world: *World, check_radius: @Vector(3, f64), dt: f64) [3]f64 {
+fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), world: *World, check_radius: @Vector(3, f64), dt: f64) [3]f64 {
     const tracy_zone = ztracy.ZoneNC(@src(), "BlockCollision", 47539753);
     defer tracy_zone.End();
     //std.debug.print("\nrad: {d}\n", .{check_radius});
@@ -65,7 +65,7 @@ fn BlockPlayerCollision(playerr: *Entitys.Player,playerpos:@Vector(3, f64), worl
     const allocator = fba.allocator();
     const player_min = playerpos - playerr.hitboxmin;
     const player_max = playerpos + playerr.hitboxmax;
-    var playerposcorrection = @Vector(3, f64){0.0,0.0,0.0};
+    var playerposcorrection = @Vector(3, f64){ 0.0, 0.0, 0.0 };
     const min_check = @floor(player_min - check_radius);
     const max_check = @ceil(player_max + check_radius);
     var list = std.PriorityQueue(@Vector(3, f64), @Vector(3, f64), DistanceOrder).init(allocator, playerpos);
@@ -171,27 +171,24 @@ fn BlockPlayerCollision(playerr: *Entitys.Player,playerpos:@Vector(3, f64), worl
                         },
                         else => unreachable,
                     }
-                }
-                else if(blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] == Blocks.Water){
+                } else if (blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] == Blocks.Water) {
                     const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
                     const b = @Vector(6, f64){ pos[0] - 0.5, pos[1] - 0.5, pos[2] - 0.5, pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5 };
                     // Collision detected, stop movement
-                    const overlap:f64 = @reduce(.Mul,GetOverlap(a, b));
+                    const overlap: f64 = @reduce(.Mul, GetOverlap(a, b));
                     iw = true;
-                    playerr.Movement[1] += 14.0*dt*overlap;//boyency
-                    playerr.Movement += LiquidResistance(playerr.Movement, dt, @splat(0.1),@splat(100.0))*@as(@Vector(3,f64),@splat(overlap));
-                    
+                    playerr.Movement[1] += 14.0 * dt * overlap; //boyency
+                    playerr.Movement += LiquidResistance(playerr.Movement, dt, @splat(0.1), @splat(100.0)) * @as(@Vector(3, f64), @splat(overlap));
                 }
             }
         }
     }
-   playerr.OnGround = og;
-   playerr.inWater = iw;
-   return playerposcorrection;
+    playerr.OnGround = og;
+    playerr.inWater = iw;
+    return playerposcorrection;
 }
 
-
-fn LiquidResistance(Movement: @Vector(3, f64), DeltaTime: f64, drag_co: @Vector(3, f64),viscosity: @Vector(3, f64)) [3]f64 {
+fn LiquidResistance(Movement: @Vector(3, f64), DeltaTime: f64, drag_co: @Vector(3, f64), viscosity: @Vector(3, f64)) [3]f64 {
     //player, will add paramiters for other entitys
     const surface_area: @Vector(3, f64) = comptime @Vector(3, f64){ 1.0, 0.5, 1.0 };
 

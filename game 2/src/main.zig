@@ -22,6 +22,7 @@ const ChunkMesh = @import("./chunk/World.zig").ChunkMesh;
 const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
 const Entitys = @import("./entities/Entitys.zig");
 const ConcurrentHashMap = @import("./libs/ConcurrentHashMap.zig").ConcurrentHashMap;
+const RayIntersection = @import("./chunk//RayIntersection.zig");
 
 var procs: gl.ProcTable = undefined;
 var gpa = (std.heap.GeneralPurposeAllocator(.{
@@ -32,11 +33,11 @@ var gpa = (std.heap.GeneralPurposeAllocator(.{
 var c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
 var main_c_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = std.heap.c_allocator };
 
-const allocator = main_c_allocator.allocator();
+const allocator = gpa.allocator();
 var width: u32 = 800;
 var height: u32 = 600;
 var Worldptr: *World = undefined;
-var lastfullscreenedtime:i128 = 0;
+var lastfullscreenedtime: i128 = 0;
 var fast = false;
 const vertices = [_]f32{
     -0.5, -0.5, 0.0, // bottom left corner
@@ -54,7 +55,7 @@ var lastX: f64 = undefined;
 var lastY: f64 = undefined;
 
 //change gamemode here
-const GameMode = Entitys.GameMode.Survival;
+const GameMode = Entitys.GameMode.Spectator;
 //
 
 var player: Entitys.Player = Entitys.Player{
@@ -75,9 +76,9 @@ var player: Entitys.Player = Entitys.Player{
     },
     .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
     .OnGround = false,
-    .GenDistance = [3]u32{ 20, 10, 20 },
-    .LoadDistance = [3]u32{ 20, 10,20 },
-    .MeshDistance = [3]u32{ 40, 20, 40 },
+    .GenDistance = [3]u32{ 20, 20, 20 },
+    .LoadDistance = [3]u32{ 20, 20, 20 },
+    .MeshDistance = [3]u32{ 20, 20, 20 },
     .lock = .{},
 };
 
@@ -297,26 +298,26 @@ pub fn main() !void {
         player.lock.unlockShared();
         var drawnchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
-        gl.Uniform1d(timelocation, @floatFromInt(millitimestamp));//bool
-        inline for(0..2)|i|{
-        if(i == 1)gl.Disable(gl.CULL_FACE);
-        defer gl.Enable(gl.CULL_FACE);
-        for (it) |mesh| {
-            gl.BindVertexArray(mesh.vao[i] orelse continue);
-            drawnchunks += 1;
-            var tr = millitimestamp - mesh.time;
-            if (tr > 1000) {
-                @branchHint(.likely);
-                tr = 1000;
+        gl.Uniform1d(timelocation, @floatFromInt(millitimestamp)); //bool
+        inline for (0..2) |i| {
+            if (i == 1) gl.Disable(gl.CULL_FACE);
+            defer gl.Enable(gl.CULL_FACE);
+            for (it) |mesh| {
+                gl.BindVertexArray(mesh.vao[i] orelse continue);
+                drawnchunks += 1;
+                var tr = millitimestamp - mesh.time;
+                if (tr > 1000) {
+                    @branchHint(.likely);
+                    tr = 1000;
+                }
+                gl.Uniform1f(scalelocation, mesh.scale);
+                gl.Uniform1i(tlocation, @intCast(tr));
+                gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
+                //                                                                                                                                                                                                     //player height
+                gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
+                //TODO frustrum cullling and LODs
+                gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count[i] / 2));
             }
-            gl.Uniform1f(scalelocation, mesh.scale);
-            gl.Uniform1i(tlocation, @intCast(tr));
-            gl.Uniform3i(chunkposlocation, mesh.pos[0], mesh.pos[1], mesh.pos[2]);
-            //                                                                                                                                                                                                     //player height
-            gl.Uniform3f(relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(mesh.pos[0])) * mesh.scale * 32.0) - ploc[0]), @floatCast((@as(f64, @floatFromInt(mesh.pos[1])) * mesh.scale * 32.0) - ploc[1]), @floatCast((@as(f64, @floatFromInt(mesh.pos[2])) * mesh.scale * 32.0) - ploc[2]));
-            //TODO frustrum cullling and LODs
-            gl.DrawElementsInstanced(gl.TRIANGLES, indices.len, gl.UNSIGNED_INT, null, @intCast(mesh.count[i] / 2));
-        }
         }
         drawtime.End();
 
@@ -325,15 +326,14 @@ pub fn main() !void {
         try prossesInput(window, @as(f64, @floatFromInt(inputtimer.lap())) / std.time.ns_per_s);
         prossesinput.End();
         const physics = ztracy.ZoneNC(@src(), "physics", 754574);
-        Physics.PlayerPhysics(&player,&physicsTimer,&MainWorld);
+        Physics.PlayerPhysics(&player, &physicsTimer, &MainWorld);
         physics.End();
-
 
         {
             //std.debug.print("gen\n", .{});
             const loadmeshestop = ztracy.ZoneNC(@src(), "loadmeshestop", 0x00_ff_00_00);
             defer loadmeshestop.End();
-            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, 4 * std.time.ns_per_ms);
+            _ = try MainWorld.LoadMeshes(ebo, facebuffer, allocator, &MainWorld, 4 * std.time.ns_per_ms);
         }
 
         if (unloadTimer.read() > 2 * std.time.ns_per_ms) {
@@ -342,7 +342,7 @@ pub fn main() !void {
             unloadTimer.reset();
             World.UnloadMeshes(&player, &MainWorld);
         }
-        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}, onGround:{}              \r", .{ drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1) ,player.OnGround});
+        std.debug.print("{d} chunks drawn, pos:{d}, avg fps:{d}, onGround:{}              \r", .{ drawnchunks, @round(player.pos), @divFloor(frame + 1, @divFloor(starttimer.read(), std.time.ns_per_s) + 1), player.OnGround });
 
         const poll = ztracy.ZoneNC(@src(), "finish", 0x00_ff_00_00);
         gl.Finish();
@@ -380,8 +380,11 @@ fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
         player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
     }
     if (window.getMouseButton(.left) == glfw.Action.press) {
-        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled)
-            glfw.Window.setInputModeCursor(window, .disabled);
+        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled){
+            glfw.Window.setInputModeCursor(window, .disabled);}
+        else {
+            RayIntersection.BreakFirstBlockOnRay(player.pos+@Vector(3,f64){0.0,player.hitboxmin[1],0.0}, 20.0, player.cameraFront, Worldptr,allocator) catch |err|{std.debug.panic("\n\n{any}\n\n", .{err});};
+        }
     }
 }
 
@@ -449,6 +452,10 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     if (window.getKey(glfw.Key.escape) == glfw.Action.press or window.getKey(glfw.Key.left_super) == glfw.Action.press) {
         if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.normal)
             glfw.Window.setInputModeCursor(window, .normal);
+    }
+    
+    if (window.getKey(glfw.Key.b) == glfw.Action.press) {
+        std.debug.print("\n\n{any}\n\n", .{(Worldptr.Chunks.get(@as(@Vector(3, i32), @intFromFloat((player.pos+@Vector(3, f64){16,16,16})/@Vector(3, f64){32,32,32}))) orelse {return;}).state});
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press and (std.time.nanoTimestamp() - lastfullscreenedtime) > 400 * std.time.ns_per_ms) {

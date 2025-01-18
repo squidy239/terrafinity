@@ -20,6 +20,8 @@ pub const ChunkState = enum(u8) {
     ToGenerate = 13,
     ReMesh = 24,
     AllAir = 1,
+    MeshAgain = 12,
+    InMemoryMeshLoading = 11,
     Generating = 2,
     InMemoryNoMesh = 3,
     MeshOnly = 4,
@@ -145,7 +147,7 @@ pub const Render = struct {
         0.5, 0.5,  0.0, // top right corner
         0.5, -0.5, 0.0,
     }; // bottom right corner
-    fn EncodeAndPutFace(side: u3, blocktype: Blocks, pos: [3]usize, mesh:*std.ArrayList(u32), transparentmesh:*std.ArrayList(u32)) !void {
+    fn EncodeAndPutFace(side: u3, blocktype: Blocks, pos: [3]usize, mesh: *std.ArrayList(u32), transparentmesh: *std.ArrayList(u32)) !void {
         var EncodedBlock = [2]u32{ 0, 0 };
         //bitpacking structure
         //pos|5 x 5 y 5 z| face|3| blocktype|20| 26 leftover bits
@@ -155,11 +157,11 @@ pub const Render = struct {
         //block type bits
         EncodedBlock[0] |= @as(u32, @intCast(side)) << (@bitSizeOf(u32) - 18);
         EncodedBlock[1] |= @as(u32, @intCast(@intFromEnum(blocktype))) << (@bitSizeOf(u32) - 20);
-        if(IsTransparentNoCompare(blocktype)){
+        if (IsTransparentNoCompare(blocktype)) {
             @branchHint(.unlikely);
             _ = try transparentmesh.append(EncodedBlock[0]);
             _ = try transparentmesh.append(EncodedBlock[1]);
-        }else {
+        } else {
             @branchHint(.likely);
             _ = try mesh.append(EncodedBlock[0]);
             _ = try mesh.append(EncodedBlock[1]);
@@ -217,54 +219,54 @@ pub const Render = struct {
                         @branchHint(.likely);
                         if (false and blocks[x][y][z] == Blocks.Leaves) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z},&mesh,&transparentmesh);
-                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
-                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
-                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
-                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
-                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                             continue;
                         }
                         if ((x == ChunkSize - 1 and neighbors[0] != null and IsTransparent(neighborblocks[0][0][y][z], blocks[x][y][z])) or (x == ChunkSize - 1 and neighbors[0] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (x != ChunkSize - 1 and IsTransparent(blocks[x + 1][y][z], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(1, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
 
                         if ((x == 0 and neighbors[1] != null and IsTransparent(neighborblocks[1][ChunkSize - 1][y][z], blocks[x][y][z])) or (x == 0 and neighbors[1] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (x != 0 and IsTransparent(blocks[x - 1][y][z], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(0, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
 
                         if ((y == ChunkSize - 1 and neighbors[2] != null and IsTransparent(neighborblocks[2][x][0][z], blocks[x][y][z])) or (y == ChunkSize - 1 and neighbors[2] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (y != ChunkSize - 1 and IsTransparent(blocks[x][y + 1][z], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(3, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
 
                         if ((y == 0 and neighbors[3] != null and IsTransparent(neighborblocks[3][x][ChunkSize - 1][z], blocks[x][y][z])) or (y == 0 and neighbors[3] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (y != 0 and IsTransparent(blocks[x][y - 1][z], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(2, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
 
                         if ((z == ChunkSize - 1 and neighbors[4] != null and IsTransparent(neighborblocks[4][x][y][0], blocks[x][y][z])) or (z == ChunkSize - 1 and neighbors[4] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (z != ChunkSize - 1 and IsTransparent(blocks[x][y][z + 1], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(5, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
 
                         if ((z == 0 and neighbors[5] != null and IsTransparent(neighborblocks[5][x][y][ChunkSize - 1], blocks[x][y][z])) or (z == 0 and neighbors[5] == null)) {
                             @branchHint(.unlikely);
-                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         } else if (z != 0 and IsTransparent(blocks[x][y][z - 1], blocks[x][y][z])) {
-                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z },&mesh,&transparentmesh);
+                            _ = try EncodeAndPutFace(4, blocks[x][y][z], [3]usize{ x, y, z }, &mesh, &transparentmesh);
                         }
                     }
                 }
@@ -525,13 +527,14 @@ pub const Generator = struct {
                         blocks[xx][yy][zz] = if (!is_top_chunk) blk: {
                             var gm = @as(i32, @intFromFloat(@as(f32, @floatFromInt(Pos[1] * ChunkSize)) * scale)) + @as(i32, @intCast(yy));
                             if (gm <= 0) gm = 1;
-                            if (yy == height and (std.Random.uintAtMost(rand_impl.random(), u32, 256) > gm) and Pos[1] >= 0) {break :blk Blocks.Grass;}
-                            else if (yy > height - 5 and (std.Random.uintAtMost(rand_impl.random(), u32, 512) > gm)) break :blk Blocks.Dirt;
+                            if (yy == height and (std.Random.uintAtMost(rand_impl.random(), u32, 256) > gm) and Pos[1] >= 0) {
+                                break :blk Blocks.Grass;
+                            } else if (yy > height - 5 and (std.Random.uintAtMost(rand_impl.random(), u32, 512) > gm)) break :blk Blocks.Dirt;
                             break :blk Blocks.Stone;
                         } else Blocks.Stone;
 
                         has_terrain = true;
-                    }else blocks[xx][yy][zz] = Blocks.Air;
+                    } else blocks[xx][yy][zz] = Blocks.Air;
                 }
 
                 // Tree generation
