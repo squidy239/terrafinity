@@ -35,7 +35,7 @@ pub fn DistanceFloat(c1: [3]f32, c2: [3]f32) f32 {
 }
 pub fn DistanceOrder(player: Entitys.Player, a: [3]i32, b: [3]i32) std.math.Order {
     // Convert coordinates to float32 and scale them
-    const pi = [3]i32{ @intFromFloat(player.pos[0]), @intFromFloat(player.pos[1]), @intFromFloat(player.pos[2]) } / @Vector(3, i32){ 32, 32, 32 };
+    const pi: @Vector(3, i32) = @intFromFloat(player.pos / @Vector(3, f64){ 32.0, 32.0, 32.0 });
 
     const d1 = Distance(pi, a);
     const d2 = Distance(pi, b);
@@ -127,7 +127,7 @@ pub const World = struct {
         //chstate.addRef();
         //relesed when mesh is loaded
         const ch = chstate.state.load(.seq_cst);
-        if (!(ch == ChunkState.Generating or ch == ChunkState.ReMesh or ch == ChunkState.MeshAgain or ch == ChunkState.InMemoryMeshGenerating )) {
+        if (!(ch == ChunkState.Generating or ch == ChunkState.ReMesh or ch == ChunkState.MeshAgain or ch == ChunkState.InMemoryMeshGenerating)) {
             @branchHint(.cold);
             std.debug.print("\nerror: {any} not remesh or generating or InMemoryMeshGenerating\n", .{chstate.state.load(.seq_cst)});
         }
@@ -179,7 +179,7 @@ pub const World = struct {
         const putmesh = ztracy.ZoneNC(@src(), "putmesh", 0x9692d);
         defer putmesh.End();
         //chstate.lock.lock();
-        if(chstate.state.load(.seq_cst) != ChunkState.MeshAgain)
+        if (chstate.state.load(.seq_cst) != ChunkState.MeshAgain)
             chstate.state.store(ChunkState.InMemoryMeshLoading, .seq_cst);
         //chstate.lock.unlock();
         var node = allocator.create(std.DoublyLinkedList(ChunkMesh).Node) catch |err| {
@@ -219,12 +219,10 @@ pub const World = struct {
                 } else if (p.state.load(.seq_cst) == ChunkState.MeshOnly) {
                     std.debug.assert(p.ChunkData == null or p.Unloading == true);
                     _ = world.Chunks.remove(p.pos);
-                } else if(p.state.load(.seq_cst) == ChunkState.GeneratingAndMesh){
+                } else if (p.state.load(.seq_cst) == ChunkState.GeneratingAndMesh) {
                     p.state.store(ChunkState.Generating, .seq_cst);
                     std.debug.print("\nggk\n", .{});
-                }
-                
-                else {
+                } else {
                     std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly or GeneratingAndMesh, pos:{d}\n", .{ p.state, @as(@Vector(3, i32), (p.pos)) * @Vector(3, i32){ 32, 32, 32 } });
                 }
 
@@ -290,13 +288,13 @@ pub const World = struct {
                 std.debug.print("error: {any} != ChunkState.InMemoryMeshLoading or MeshAgain", .{ch.state.load(.seq_cst)});
             }
             //bad TODO edo function
-            if(ch.state.load(.seq_cst) == ChunkState.MeshAgain)
-            for(self.ChunkMeshes.items,0..)|m,ii|{
-                if(@as(u96,@bitCast(m.pos)) == @as(u96,@bitCast(ch.pos))){
-                    _ = world.ChunkMeshes.swapRemove(ii);
-                }
-            ch.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
-            };
+            if (ch.state.load(.seq_cst) == ChunkState.MeshAgain)
+                for (self.ChunkMeshes.items, 0..) |m, ii| {
+                    if (@as(u96, @bitCast(m.pos)) == @as(u96, @bitCast(ch.pos))) {
+                        _ = world.ChunkMeshes.swapRemove(ii);
+                    }
+                    ch.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
+                };
             defer ch.state.store(ChunkState.InMemoryAndMesh, .seq_cst);
             defer {
                 o: {
@@ -309,7 +307,7 @@ pub const World = struct {
             }
 
             self.MeshesToLoadMutex.unlock();
-            const vbo = Render.CreateMeshVBOs(mesh.data.faces, mesh.data.transparentfaces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW);
+            const vbo = Render.CreateMeshVBOs(mesh.data.faces, mesh.data.transparentfaces, mesh.data.position, ebo, facebuffer, mesh.data.scale, gl.STATIC_DRAW, ch.state.load(.seq_cst) == ChunkState.MeshAgain);
 
             _ = try self.ChunkMeshes.append(vbo);
             i += 1;
@@ -474,7 +472,7 @@ pub const World = struct {
                 //_ = self.Chunks.remove(chunk.pos);
                 //chunk.lock.lock();
                 //allocator.free(chunk.ChunkData.?);
-               // allocator.destroy(chunk);
+                // allocator.destroy(chunk);
             },
             ChunkState.AllAir => {
                 //std.debug.assert(chunk.ChunkData == null);

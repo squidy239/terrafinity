@@ -107,7 +107,7 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                 chunk.lock.lockShared();
                 defer chunk.lock.unlockShared();
 
-                const blocks = chunk.DecodeAndGetBlocks();
+                const blocks = chunk.DecodeAndGetBlocks() orelse {std.debug.panic("\n\nerror:physics:no blocks in chunk\n\n", .{});};
                 if (blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] != Blocks.Air and blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] != Blocks.Water) {
                     const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
                     const b = @Vector(6, f64){ pos[0] - 0.5, pos[1] - 0.5, pos[2] - 0.5, pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5 };
@@ -174,7 +174,7 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                 } else if (blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] == Blocks.Water) {
                     const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
                     const b = @Vector(6, f64){ pos[0] - 0.5, pos[1] - 0.5, pos[2] - 0.5, pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5 };
-                    // Collision detected, stop movement
+                    // water
                     const overlap: f64 = @reduce(.Mul, GetOverlap(a, b));
                     iw = true;
                     playerr.Movement[1] += 14.0 * dt * overlap; //boyency

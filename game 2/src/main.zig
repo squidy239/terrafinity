@@ -74,7 +74,7 @@ var player: Entitys.Player = Entitys.Player{
         Entitys.GameMode.Creative => @Vector(3, f32){ 20.0, 20.0, 20.0 },
         Entitys.GameMode.Survival => @Vector(3, f32){ 15.0, 5.0, 15.0 },
     },
-    .pos = @Vector(3, f64){ 0.0, 10.0, 0.0 },
+    .pos = @Vector(3, f64){ 2_000.0, 0.0, 0.0 },
     .OnGround = false,
     .GenDistance = [3]u32{ 20, 20, 20 },
     .LoadDistance = [3]u32{ 20, 20, 20 },
@@ -379,13 +379,6 @@ fn MouseCallback(window: glfw.Window, xpos: f64, ypos: f64) void {
         player.cameraFront[1] = @floatCast(@sin(zm.toRadians(player.pitch)));
         player.cameraFront[2] = @floatCast(@cos(zm.toRadians(player.yaw)) * @cos(zm.toRadians(player.pitch)));
     }
-    if (window.getMouseButton(.left) == glfw.Action.press) {
-        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled){
-            glfw.Window.setInputModeCursor(window, .disabled);}
-        else {
-            RayIntersection.BreakFirstBlockOnRay(player.pos+@Vector(3,f64){0.0,player.hitboxmin[1],0.0}, 20.0, player.cameraFront, Worldptr,allocator) catch |err|{std.debug.panic("\n\n{any}\n\n", .{err});};
-        }
-    }
 }
 
 fn prossesInput(window: glfw.Window, dt: f64) !void {
@@ -453,9 +446,11 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
         if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.normal)
             glfw.Window.setInputModeCursor(window, .normal);
     }
-    
+
     if (window.getKey(glfw.Key.b) == glfw.Action.press) {
-        std.debug.print("\n\n{any}\n\n", .{(Worldptr.Chunks.get(@as(@Vector(3, i32), @intFromFloat((player.pos+@Vector(3, f64){16,16,16})/@Vector(3, f64){32,32,32}))) orelse {return;}).state});
+        std.debug.print("\n\n{any}\n\n", .{(Worldptr.Chunks.get(@as(@Vector(3, i32), @intFromFloat((player.pos + @Vector(3, f64){ 16, 16, 16 }) / @Vector(3, f64){ 32, 32, 32 }))) orelse {
+            return;
+        }).state});
     }
 
     if (window.getKey(glfw.Key.F11) == glfw.Action.press and (std.time.nanoTimestamp() - lastfullscreenedtime) > 400 * std.time.ns_per_ms) {
@@ -474,5 +469,56 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
             height = 600;
             fullscreen = false;
         }
+    }
+
+    if (window.getMouseButton(.left) == glfw.Action.press) {
+        if (glfw.Window.getInputModeCursor(window) != glfw.Window.InputModeCursor.disabled) {
+            @branchHint(.unlikely);
+            glfw.Window.setInputModeCursor(window, .disabled);
+        } else {
+            const h = RayIntersection.BreakFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
+            if(h)|hit|{
+            const chunk = Worldptr.Chunks.get(hit.chunk) orelse {std.debug.print("error hit chunk is null", .{});return;};
+            const blocks = chunk.DecodeAndGetBlocks() orelse undefined;
+            blocks[hit.posinchunk[0]][hit.posinchunk[1]][hit.posinchunk[2]] = Blocks.Air;
+            _ = try World.RemeshChunk(Worldptr, hit.chunk, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ -1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, -1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, 1 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, -1 }, allocator);
+            }
+        }
+    }
+
+    if (window.getMouseButton(.right) == glfw.Action.press) {
+            blk:{
+            const h = RayIntersection.BreakFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
+            if(h)|hit|{
+            const offset = switch (hit.side) {
+                0 => @Vector(3,i32){1,0,0},
+                1 => @Vector(3,i32){-1,0,0},
+                2 => @Vector(3,i32){0,1,0},
+                3 => @Vector(3,i32){0,-1,0},
+                4 => @Vector(3,i32){0,0,1},
+                5 => @Vector(3,i32){0,0,-1},
+                else => undefined
+
+            };
+            std.debug.print("\noffset:{d}\n", .{offset});
+            const placepos:@Vector(3, i32) = (hit.chunk * @Vector(3, i32){32,32,32}) + @as(@Vector(3, i32),@intCast(@as(@Vector(3, u8),(hit.posinchunk))))+offset;
+            const chunk = Worldptr.Chunks.get(@divFloor(placepos, @Vector(3, i32){32,32,32})) orelse {std.debug.print("error hit chunk is null", .{});return;};
+            const blocks = chunk.DecodeAndGetBlocks() orelse break:blk;//TODO make new chunk with only that block
+            blocks[@intCast(@mod(placepos[0],32))][@intCast(@mod(placepos[1],32))][@intCast(@mod(placepos[2],32))] = Blocks.Stone;
+            _ = try World.RemeshChunk(Worldptr, hit.chunk, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ -1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, -1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, 1 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, -1 }, allocator);
+        }
+    }
     }
 }

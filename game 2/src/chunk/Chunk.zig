@@ -79,13 +79,13 @@ pub const Chunk = struct {
             //else => {@branchHint(.cold);std.debug.panic("\n\nInvalid CompressionType: {}\n", .{commtype});},
         }
     }
-    pub fn DecodeAndGetBlocks(self: *@This()) *align(1) [32][32][32]Blocks {
+    pub fn DecodeAndGetBlocks(self: *@This()) ?*align(1) [32][32][32]Blocks {
         const decodeandgetblocks = ztracy.ZoneNC(@src(), "decodeandgetblocks", 1838292929);
         defer decodeandgetblocks.End();
         self.lock.lockShared();
         defer self.lock.unlockShared();
         switch (self.CompressionType) {
-            CompressionType.None => return std.mem.bytesAsValue([32][32][32]Blocks, self.ChunkData.?),
+            CompressionType.None => return std.mem.bytesAsValue([32][32][32]Blocks, self.ChunkData orelse return null),
             CompressionType.Flate => {
                 std.debug.panic("Flate decoding not working", .{});
                 //too slow bc of memcpy
@@ -193,12 +193,12 @@ pub const Render = struct {
         const convertfrombytes = ztracy.ZoneNC(@src(), "convertfrombytes", 2387947234);
         //std.debug.print("{any}", .{neighbors});
         //std.compress.flate.decompress(std.io.bufferedReader(chunk.ChunkData),std.io.bufferedWriter(&blocks));
-        const blocks = chunk.DecodeAndGetBlocks();
+        const blocks = chunk.DecodeAndGetBlocks() orelse return error.nullblocks;
 
         var neighborblocks: [6]*align(1) [32][32][32]Blocks = undefined;
         for (0..6) |n| {
             if (neighbors[n] != null and neighbors[n].?.ChunkData != null) {
-                neighborblocks[n] = neighbors[n].?.DecodeAndGetBlocks();
+                neighborblocks[n] = neighbors[n].?.DecodeAndGetBlocks() orelse return error.nullblocks;
             }
         }
         convertfrombytes.End();
@@ -277,7 +277,7 @@ pub const Render = struct {
         return [2]?[]u32{ if (mesh.items.len == 0) null else try allocator.dupe(u32, mesh.items), if (transparentmesh.items.len == 0) null else try allocator.dupe(u32, transparentmesh.items) };
     }
 
-    pub fn CreateMeshVBOs(mesh: ?[]u32, transparentmesh: ?[]u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, scale: f32, usage: comptime_int) MeshBufferIDs {
+    pub fn CreateMeshVBOs(mesh: ?[]u32, transparentmesh: ?[]u32, pos: [3]i32, indecies: c_uint, facebuffer: c_uint, scale: f32, usage: comptime_int, animation: bool) MeshBufferIDs {
         //TODO optimize by batching
         const createvbo = ztracy.ZoneNC(@src(), "createvbo", 0x00_ff_00_00);
         defer createvbo.End();
@@ -287,7 +287,7 @@ pub const Render = struct {
             .count = [2]u32{ 0, 0 },
             .scale = scale,
             .pos = pos,
-            .time = undefined,
+            .time = 0,
         };
         const mm = ztracy.ZoneNC(@src(), "opaque", 0x00_ff_00_00);
 
@@ -340,7 +340,7 @@ pub const Render = struct {
         t.End();
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
         gl.BindVertexArray(0);
-        NewMeshIDs.time = std.time.milliTimestamp();
+        if (animation) NewMeshIDs.time = std.time.milliTimestamp();
         return NewMeshIDs;
     }
 };
@@ -443,16 +443,11 @@ pub const Generator = struct {
         // Pre-calculate chunk position offset
         @setFloatMode(.optimized);
         const chunk_offset = @Vector(3, f32){
-            @floatFromInt(Pos[0] *% 32),
-            @floatFromInt(Pos[1] *% 32),
-            @floatFromInt(Pos[2] *% 32),
+            @floatFromInt(Pos[0] << 5), // times 32 bitshift
+            @floatFromInt(Pos[1] << 5),
+            @floatFromInt(Pos[2] << 5),
         };
-        //const init = ztracy.ZoneNC(@src(), "initchunk", 0x692de);
-        // Initialize chunk with air blocks
 
-        //init.End();
-        //
-        //
         var blocks: [32][32][32]Blocks = undefined;
         @memset(&blocks, @splat(@splat(if (chunk_offset[1] < 0) Blocks.Water else Blocks.Air)));
         //
