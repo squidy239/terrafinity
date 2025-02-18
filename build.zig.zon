@@ -1,0 +1,65 @@
+.{
+    // This is the default name used by packages depending on this one. For
+    // example, when a user runs `zig fetch --save <url>`, this field is used
+    // as the key in the `dependencies` table. Although the user can choose a
+    // different name, most users will stick with this provided value.
+    //
+    // It is redundant to include "zig" in this name because it is already
+    // within the Zig package namespace.
+    .name = "voxelgame",
+
+    // This is a [Semantic Version](https://semver.org/).
+    // In a future version of Zig it will be used for package deduplication.
+    .version = "0.2.0",
+
+    // This field is optional.
+    // This is currently advisory only; Zig does not yet do anything
+    // with this value.
+    //.minimum_zig_version = "0.11.0",
+
+    // This field is optional.
+    // Each dependency must either provide a `url` and `hash`, or a `path`.
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    // Once all dependencies are fetched, `zig build` no longer requires
+    // internet connectivity.
+
+    .dependencies = .{
+        .glfw = .{
+            .url = "git+https://github.com/slimsag/mach-glfw#daeb7b10187249aade7d92ccfef8dcf5a94f8148",
+            .hash = "12207f4bba892c44b3b1b92b13b7ce5df2b49da1e797ba3e02b38b08d1e78c5cec0d",
+        }, //.zstbi = .{
+        // .url = "https://github.com/zig-gamedev/zstbi/archive/ec86094475a10ba07b141b12b7020f7b88b0e77b.tar.gz",
+        // .hash = "122009ea2ff8496071dbe447731a62e6c7c731b6aca5ac3a01992a8d3330d4482a88",
+        //},
+        .zm = .{
+            .url = "git+https://github.com/griush/zm#dbb86079993637e3b0ab12323e08461ea6325ca6",
+            .hash = "1220897b0db58d1867fef1672a72f886f27af6a22e561797c48c9f793b06961c60ab",
+        },
+        .ztracy = .{ .path = "./ztracy/" },
+        .zigglgen = .{
+            .url = "git+https://github.com/castholm/zigglgen#701f41808086411f14d3bc2d87fc0b14bd09ceba",
+            .hash = "1220acff2285b51630055c7c062fb62a01b32272297b27e90cd6f85901c1b4d1c48d",
+        },
+        .cache = .{
+            .url = "git+https://github.com/karlseguin/cache.zig#f9641d1a91bb56f6a640a7552c008671246ee4b3",
+            .hash = "1220f32208026fea0c75bf6225630a3fa02e7f7f7070192d5ecd757b4fb0d2d10d64",
+        },
+    },
+
+    // Specifies the set of files and directories that are included in this package.
+    // Only files and directories listed here are included in the `hash` that
+    // is computed for this package. Only files listed here will remain on disk
+    // when using the zig package manager. As a rule of thumb, one should list
+    // files required for compilation plus any license(s).
+    // Paths are relative to the build root. Use the empty string (`""`) to refer to
+    // the build root itself.
+    // A directory listed here means that all files within, recursively, are included.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
