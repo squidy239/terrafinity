@@ -1,9 +1,11 @@
 const std = @import("std");
-const Entitys = @import("Entitys.zig");
-const World = @import("../chunk/World.zig").World;
-const ChunkStates = @import("../chunk/Chunk.zig").ChunkState;
-const Blocks = @import("../chunk/Blocks.zig").Blocks;
+
 const ztracy = @import("ztracy");
+
+const Blocks = @import("../chunk/Blocks.zig").Blocks;
+const ChunkStates = @import("../chunk/Chunk.zig").ChunkState;
+const World = @import("../chunk/World.zig").World;
+const Entitys = @import("Entitys.zig");
 
 pub fn PlayerPhysicsLoop(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
     while (world.running.load(.seq_cst)) : (std.Thread.sleep(2 * std.time.ns_per_ms)) {
@@ -62,7 +64,7 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
     const tracy_zone = ztracy.ZoneNC(@src(), "BlockCollision", 47539753);
     defer tracy_zone.End();
     //std.debug.print("\nrad: {d}\n", .{check_radius});
-    var buffer: [1000000]u8 = undefined;
+    var buffer: [100000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
     var player_min = playerpos - playerr.hitboxmin;
@@ -187,8 +189,8 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                     // water
                     const overlap: f64 = @reduce(.Mul, GetOverlap(a, b));
                     iw = true;
-                    playerr.Movement[1] += 14.0 * dt * overlap; //boyency
-                    playerr.Movement += LiquidResistance(playerr.Movement, dt, @splat(0.1), @splat(100.0)) * @as(@Vector(3, f64), @splat(overlap));
+                    playerr.Movement[1] += 13.0 * dt * overlap; //boyency
+                    playerr.Movement += LiquidResistance(playerr.Movement, dt, @splat(0.1), @splat(10.0)) * @as(@Vector(3, f64), @splat(overlap));
                 }
             }
         }
@@ -243,6 +245,6 @@ fn CheckOverlap(a: @Vector(6, f64), b: @Vector(6, f64)) bool {
     return cx and cy and cz;
 }
 
-fn GetOverlap(a: @Vector(6, f64), b: @Vector(6, f64)) @Vector(3, f64) {
+pub fn GetOverlap(a: @Vector(6, f64), b: @Vector(6, f64)) @Vector(3, f64) {
     return @Vector(3, f64){ (@min(a[3], b[3]) - @max(a[0], b[0])), (@min(a[4], b[4]) - @max(a[1], b[1])), (@min(a[5], b[5]) - @max(a[2], b[2])) };
 }

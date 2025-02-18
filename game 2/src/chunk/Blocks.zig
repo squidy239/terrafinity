@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zstbi = @import("zstbi");
+//const zstbi = @import("zstbi");
 
 pub const Blocks = enum(u4) {
     Air = 0,
@@ -17,10 +17,10 @@ pub const Blocks = enum(u4) {
 };
 
 pub const Textures = struct {
-    pub fn LoadAtlas(file: [:0]const u8, allocator: std.mem.Allocator) !zstbi.Image {
-        zstbi.init(allocator);
+//    pub fn LoadAtlas(file: [:0]const u8, allocator: std.mem.Allocator) !zstbi.Image {
+ //       zstbi.init(allocator);
         //defer zstbi.deinit();
-        zstbi.setFlipVerticallyOnLoad(true);
-        return zstbi.Image.loadFromFile(file, 0);
-    }
+   //     zstbi.setFlipVerticallyOnLoad(true);
+   //     return zstbi.Image.loadFromFile(file, 0);
+    //}
 };

@@ -5,7 +5,7 @@ const cache = @import("cache");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zm = @import("zm");
-const zstbi = @import("zstbi");
+//const zstbi = @import("zstbi");
 const ztracy = @import("ztracy");
 
 const RayIntersection = @import("./chunk//RayIntersection.zig");
@@ -122,7 +122,7 @@ pub fn main() !void {
     glfw.Window.setFramebufferSizeCallback(window, glfwSizeCallback);
     glfw.Window.setInputMode(window, glfw.Window.InputMode.cursor, glfw.Window.InputModeCursor.disabled);
     glfw.Window.setCursorPosCallback(window, MouseCallback);
-    glfw.swapInterval(0);
+    glfw.swapInterval(60);
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -374,7 +374,7 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     defer player.lock.unlock();
     const deltaTime: f32 = @floatCast(dt);
     var cf = player.cameraFront;
-    if (player.gameMode != Entitys.GameMode.Spectator) cf[1] = 0;
+    if (player.gameMode != Entitys.GameMode.Spectator) {cf[1] = 0;cf = zm.vec.normalize(cf);}
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
     if (window.getKey(glfw.Key.w) == glfw.Action.press) {
         if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
@@ -503,36 +503,41 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     }
 
     if (window.getMouseButton(.right) == glfw.Action.press) {
-        blk: {
-            const h = RayIntersection.BreakFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {
-                std.debug.panic("\n\n{any}\n\n", .{err});
+            blk:{
+            const h = RayIntersection.GetFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
+            if(h)|hit|{
+            const offset = switch (hit.side) {
+                0 => @Vector(3,i32){1,0,0},
+                1 => @Vector(3,i32){-1,0,0},
+                2 => @Vector(3,i32){0,1,0},
+                3 => @Vector(3,i32){0,-1,0},
+                4 => @Vector(3,i32){0,0,1},
+                5 => @Vector(3,i32){0,0,-1},
+                else => undefined
+
             };
-            if (h) |hit| {
-                const offset = switch (hit.side) {
-                    0 => @Vector(3, i32){ 1, 0, 0 },
-                    1 => @Vector(3, i32){ -1, 0, 0 },
-                    2 => @Vector(3, i32){ 0, 1, 0 },
-                    3 => @Vector(3, i32){ 0, -1, 0 },
-                    4 => @Vector(3, i32){ 0, 0, 1 },
-                    5 => @Vector(3, i32){ 0, 0, -1 },
-                    else => undefined,
-                };
-                std.debug.print("\noffset:{d}\n", .{offset});
-                const placepos: @Vector(3, i32) = (hit.chunk * @Vector(3, i32){ 32, 32, 32 }) + @as(@Vector(3, i32), @intCast(@as(@Vector(3, u8), (hit.posinchunk)))) + offset;
-                const chunk = Worldptr.Chunks.get(@divFloor(placepos, @Vector(3, i32){ 32, 32, 32 })) orelse {
-                    std.debug.print("error hit chunk is null", .{});
-                    return;
-                };
-                const blocks = chunk.DecodeAndGetBlocks() orelse break :blk; //TODO make new chunk with only that block
-                blocks[@intCast(@mod(placepos[0], 32))][@intCast(@mod(placepos[1], 32))][@intCast(@mod(placepos[2], 32))] = Blocks.Stone;
-                _ = try World.RemeshChunk(Worldptr, hit.chunk, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 1, 0, 0 }, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ -1, 0, 0 }, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 1, 0 }, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, -1, 0 }, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, 1 }, allocator);
-                _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, -1 }, allocator);
+            const placepos:@Vector(3, i32) = (hit.chunk * @Vector(3, i32){32,32,32}) + @as(@Vector(3, i32),@intCast(@as(@Vector(3, u8),(hit.posinchunk))))+offset;
+            const placeposfloat = @as(@Vector(3, f64),@floatFromInt(placepos));
+            const player_min = player.pos - player.hitboxmin;
+            const player_max = player.pos + player.hitboxmax;
+            const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
+            const b = @Vector(6, f64){ placeposfloat[0] - 0.5, placeposfloat[1] - 0.5, placeposfloat[2] - 0.5, placeposfloat[0] + 0.5, placeposfloat[1] + 0.5, placeposfloat[2] + 0.5 };
+            if (@reduce(.And, Physics.GetOverlap(a, b) > @Vector(3, f64){ 0.0, 0.0, 0.0 })) {
+                //std.debug.print("\nPlayer in the way!\n", .{});
+                break:blk;
             }
+            const chunk = Worldptr.Chunks.get(@divFloor(placepos, @Vector(3, i32){32,32,32})) orelse {std.debug.print("error hit chunk is null", .{});return;};
+            const blocks = chunk.DecodeAndGetBlocks() orelse break:blk;//TODO make new chunk with only that block
+            blocks[@intCast(@mod(placepos[0],32))][@intCast(@mod(placepos[1],32))][@intCast(@mod(placepos[2],32))] = Blocks.Stone;
+            _ = try World.RemeshChunk(Worldptr, hit.chunk, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ -1, 0, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, -1, 0 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, 1 }, allocator);
+            _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, -1 }, allocator);
         }
+    }
+    std.debug.print("a", .{});
     }
 }
