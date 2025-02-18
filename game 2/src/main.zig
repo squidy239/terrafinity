@@ -4,7 +4,7 @@ const cache = @import("cache");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zm = @import("zm");
-const zstbi = @import("zstbi");
+//const zstbi = @import("zstbi");
 const ztracy = @import("ztracy");
 
 const Textures = @import("./chunk/Blocks.zig").Textures;
@@ -22,7 +22,7 @@ const ChunkMesh = @import("./chunk/World.zig").ChunkMesh;
 const DistanceOrder = @import("./chunk/World.zig").DistanceOrder;
 const Entitys = @import("./entities/Entitys.zig");
 const ConcurrentHashMap = @import("./libs/ConcurrentHashMap.zig").ConcurrentHashMap;
-const RayIntersection = @import("./chunk//RayIntersection.zig");
+const RayIntersection = @import("./chunk/RayIntersection.zig");
 
 var procs: gl.ProcTable = undefined;
 var gpa = (std.heap.GeneralPurposeAllocator(.{
@@ -55,7 +55,7 @@ var lastX: f64 = undefined;
 var lastY: f64 = undefined;
 
 //change gamemode here
-const GameMode = Entitys.GameMode.Spectator;
+const GameMode = Entitys.GameMode.Survival;
 //
 
 var player: Entitys.Player = Entitys.Player{
@@ -74,7 +74,7 @@ var player: Entitys.Player = Entitys.Player{
         Entitys.GameMode.Creative => @Vector(3, f32){ 20.0, 20.0, 20.0 },
         Entitys.GameMode.Survival => @Vector(3, f32){ 15.0, 5.0, 15.0 },
     },
-    .pos = @Vector(3, f64){ 2_000.0, 0.0, 0.0 },
+    .pos = @Vector(3, f64){ 10.0, 100.0, 0.0 },
     .OnGround = false,
     .GenDistance = [3]u32{ 20, 20, 20 },
     .LoadDistance = [3]u32{ 20, 20, 20 },
@@ -118,7 +118,7 @@ pub fn main() !void {
     glfw.Window.setFramebufferSizeCallback(window, glfwSizeCallback);
     glfw.Window.setInputMode(window, glfw.Window.InputMode.cursor, glfw.Window.InputModeCursor.disabled);
     glfw.Window.setCursorPosCallback(window, MouseCallback);
-    glfw.swapInterval(0);
+    glfw.swapInterval(60);
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -386,7 +386,7 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
     defer player.lock.unlock();
     const deltaTime: f32 = @floatCast(dt);
     var cf = player.cameraFront;
-    if (player.gameMode != Entitys.GameMode.Spectator) cf[1] = 0;
+    if (player.gameMode != Entitys.GameMode.Spectator) {cf[1] = 0;cf = zm.vec.normalize(cf);}
     const cameraSpeed: zm.Vec3f = zm.Vec3f{ deltaTime, deltaTime, deltaTime } * player.speed;
     if (window.getKey(glfw.Key.w) == glfw.Action.press) {
         if (player.gameMode != Entitys.GameMode.Survival or player.OnGround or player.inWater) {
@@ -476,7 +476,7 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
             @branchHint(.unlikely);
             glfw.Window.setInputModeCursor(window, .disabled);
         } else {
-            const h = RayIntersection.BreakFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
+            const h = RayIntersection.GetFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
             if(h)|hit|{
             const chunk = Worldptr.Chunks.get(hit.chunk) orelse {std.debug.print("error hit chunk is null", .{});return;};
             const blocks = chunk.DecodeAndGetBlocks() orelse undefined;
@@ -494,7 +494,7 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
 
     if (window.getMouseButton(.right) == glfw.Action.press) {
             blk:{
-            const h = RayIntersection.BreakFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
+            const h = RayIntersection.GetFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {std.debug.panic("\n\n{any}\n\n", .{err});};
             if(h)|hit|{
             const offset = switch (hit.side) {
                 0 => @Vector(3,i32){1,0,0},
@@ -506,8 +506,16 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
                 else => undefined
 
             };
-            std.debug.print("\noffset:{d}\n", .{offset});
             const placepos:@Vector(3, i32) = (hit.chunk * @Vector(3, i32){32,32,32}) + @as(@Vector(3, i32),@intCast(@as(@Vector(3, u8),(hit.posinchunk))))+offset;
+            const placeposfloat = @as(@Vector(3, f64),@floatFromInt(placepos));
+            const player_min = player.pos - player.hitboxmin;
+            const player_max = player.pos + player.hitboxmax;
+            const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
+            const b = @Vector(6, f64){ placeposfloat[0] - 0.5, placeposfloat[1] - 0.5, placeposfloat[2] - 0.5, placeposfloat[0] + 0.5, placeposfloat[1] + 0.5, placeposfloat[2] + 0.5 };
+            if (@reduce(.And, Physics.GetOverlap(a, b) > @Vector(3, f64){ 0.0, 0.0, 0.0 })) {
+                //std.debug.print("\nPlayer in the way!\n", .{});
+                break:blk;
+            }
             const chunk = Worldptr.Chunks.get(@divFloor(placepos, @Vector(3, i32){32,32,32})) orelse {std.debug.print("error hit chunk is null", .{});return;};
             const blocks = chunk.DecodeAndGetBlocks() orelse break:blk;//TODO make new chunk with only that block
             blocks[@intCast(@mod(placepos[0],32))][@intCast(@mod(placepos[1],32))][@intCast(@mod(placepos[2],32))] = Blocks.Stone;
@@ -520,5 +528,6 @@ fn prossesInput(window: glfw.Window, dt: f64) !void {
             _ = try World.RemeshChunk(Worldptr, hit.chunk + @Vector(3, i32){ 0, 0, -1 }, allocator);
         }
     }
+    std.debug.print("a", .{});
     }
 }

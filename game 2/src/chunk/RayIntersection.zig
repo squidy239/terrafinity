@@ -1,9 +1,10 @@
 const std = @import("std");
-const World = @import("World.zig").World;
+
+const Entitys = @import("../entities/Entitys.zig");
 const Blocks = @import("Blocks.zig").Blocks;
 const Chunk = @import("Chunk.zig").Chunk;
 const ChunkState = @import("Chunk.zig").ChunkState;
-const Entitys = @import("../entities/Entitys.zig");
+const World = @import("World.zig").World;
 
 inline fn IsTransparent(block: Blocks) bool {
     return switch (block) {
@@ -31,9 +32,8 @@ const BlockHit = struct {
     time: i64,
 };
 
-pub fn BreakFirstBlockOnRay(start: @Vector(3, f64), length: f64, direction: @Vector(3, f64), world: *World) !?BlockHit {
+pub fn GetFirstBlockOnRay(start: @Vector(3, f64), length: f64, direction: @Vector(3, f64), world: *World) !?BlockHit {
     var CachedChunk: ?*Chunk = null;
-
     var current_voxel = @round(start);
     const step = direction / @abs(direction);
     const delta_t = @abs(@as(@Vector(3, f64), @splat(1.0)) / direction);
@@ -45,6 +45,7 @@ pub fn BreakFirstBlockOnRay(start: @Vector(3, f64), length: f64, direction: @Vec
     };
 
     while (@min(t_max[0], t_max[1], t_max[2]) < length) {
+        {
         const chunkpos = @as(@Vector(3, i32), @intFromFloat(@floor(current_voxel / @as(@Vector(3, f64), @splat(32.0)))));
         if (CachedChunk == null or @reduce(.Or, CachedChunk.?.pos != chunkpos)) {
             //std.debug.print("recaching\n", .{});
@@ -61,13 +62,14 @@ pub fn BreakFirstBlockOnRay(start: @Vector(3, f64), length: f64, direction: @Vec
             var side: u3 = undefined;
 
             if (t_max[0] < t_max[1] and t_max[0] < t_max[2]) {
-                side = @intFromFloat(0 + @max(0,step[0]/@abs(step[0]))); // X face hit
+                // X-axis intersection
+                side = if (step[0] > 0) 1 else 0;
             } else if (t_max[1] < t_max[2]) {
-                side = @intFromFloat(2 + @max(0,step[1]/@abs(step[1]))); // Y face hit
-
+                // Y-axis intersection
+                side = if (step[1] > 0) 3 else 2;
             } else {
-                side = @intFromFloat(4 + @max(0,step[2]/@abs(step[2]))); // Z face hit
-
+                // Z-axis intersection
+                side = if (step[2] > 0) 5 else 4;
             }
             return BlockHit{
                 .chunk = CachedChunk.?.pos,
@@ -76,6 +78,7 @@ pub fn BreakFirstBlockOnRay(start: @Vector(3, f64), length: f64, direction: @Vec
                 .side = side,
                 .time = std.time.timestamp(),
             };
+        }
         }
 
         if (t_max[0] < t_max[1] and t_max[0] < t_max[2]) {
