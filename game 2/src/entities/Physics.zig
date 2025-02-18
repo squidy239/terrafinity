@@ -10,6 +10,8 @@ pub fn PlayerPhysicsLoop(playerr: *Entitys.Player, timer: *std.time.Timer, world
         PlayerPhysics(playerr, timer, world);
     }
 }
+//TODO redo pcollision detection
+//maybie move 1 block in each direction and check for collision
 pub fn PlayerPhysics(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
     const tracy_zone = ztracy.ZoneNC(@src(), "PlayerPhysics", 34234);
     defer tracy_zone.End();
@@ -63,14 +65,13 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
     var buffer: [1000000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
-    const player_min = playerpos - playerr.hitboxmin;
-    const player_max = playerpos + playerr.hitboxmax;
-    var playerposcorrection = @Vector(3, f64){ 0.0, 0.0, 0.0 };
+    var player_min = playerpos - playerr.hitboxmin;
+    var player_max = playerpos + playerr.hitboxmax;
     const min_check = @floor(player_min - check_radius);
     const max_check = @ceil(player_max + check_radius);
-    var list = std.PriorityQueue(@Vector(3, f64), @Vector(3, f64), DistanceOrder).init(allocator, playerpos);
+    var playerposcorrection = @Vector(3, f64){ 0.0, 0.0, 0.0 };
+    var list = std.PriorityQueue(@Vector(3, f64), @Vector(3, f64), ReverseDistanceOrder).init(allocator, playerpos);
     defer list.deinit();
-
     var x = min_check[0];
     while (x < max_check[0]) : (x += 1.0) {
         var y = min_check[1];
@@ -82,7 +83,7 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                 // Check if the player's bounding box overlaps with this block
                 const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
                 const b = @Vector(6, f64){ block_pos[0] - 0.5, block_pos[1] - 0.5, block_pos[2] - 0.5, block_pos[0] + 0.5, block_pos[1] + 0.5, block_pos[2] + 0.5 };
-                if (@reduce(.And, GetOverlap(a, b) > @Vector(3, f64){ 0.0, 0.0, 0.0 })) {
+                if (@reduce(.And, GetOverlap(a, b) > @Vector(3, f64){ 0, 0, 0 })) {
                     list.add(block_pos) catch |err| {
                         std.debug.panic("\n\n{any}\n", .{err});
                     };
@@ -107,7 +108,9 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                 chunk.lock.lockShared();
                 defer chunk.lock.unlockShared();
 
-                const blocks = chunk.DecodeAndGetBlocks() orelse {std.debug.panic("\n\nerror:physics:no blocks in chunk\n\n", .{});};
+                const blocks = chunk.DecodeAndGetBlocks() orelse {
+                    std.debug.panic("\n\nerror:physics:no blocks in chunk\n\n", .{});
+                };
                 if (blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] != Blocks.Air and blocks[block_in_chunk[0]][block_in_chunk[1]][block_in_chunk[2]] != Blocks.Water) {
                     const a = @Vector(6, f64){ player_min[0], player_min[1], player_min[2], player_max[0], player_max[1], player_max[2] };
                     const b = @Vector(6, f64){ pos[0] - 0.5, pos[1] - 0.5, pos[2] - 0.5, pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5 };
@@ -135,6 +138,9 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                                 } else {
                                     playerposcorrection[0] += overlap[0];
                                 }
+                                player_min = playerpos + playerposcorrection - playerr.hitboxmin;
+                                player_max = playerpos + playerposcorrection + playerr.hitboxmax;
+
                                 playerr.Movement[0] = 0;
                             }
                         },
@@ -155,6 +161,8 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                                     playerr.Movement[2] -= if (playerr.Movement[2] > 0) @min(0.2 * dt, playerr.Movement[2]) else if (playerr.Movement[2] < 0) @max(-0.2 * dt, playerr.Movement[2]) else 0;
                                     og = true;
                                 }
+                                player_min = playerpos + playerposcorrection - playerr.hitboxmin;
+                                player_max = playerpos + playerposcorrection + playerr.hitboxmax;
                                 playerr.Movement[1] = 0;
                             }
                         },
@@ -166,6 +174,8 @@ fn BlockPlayerCollision(playerr: *Entitys.Player, playerpos: @Vector(3, f64), wo
                                 } else {
                                     playerposcorrection[2] += overlap[2];
                                 }
+                                player_min = playerpos + playerposcorrection - playerr.hitboxmin;
+                                player_max = playerpos + playerposcorrection + playerr.hitboxmax;
                                 playerr.Movement[2] = 0;
                             }
                         },
@@ -204,15 +214,15 @@ fn LiquidResistance(Movement: @Vector(3, f64), DeltaTime: f64, drag_co: @Vector(
     } else return comptime @Vector(3, f64){ 0.0, 0.0, 0.0 };
 }
 
-pub fn DistanceOrder(playerpos: @Vector(3, f64), a: @Vector(3, f64), b: @Vector(3, f64)) std.math.Order {
+pub fn ReverseDistanceOrder(playerpos: @Vector(3, f64), a: @Vector(3, f64), b: @Vector(3, f64)) std.math.Order {
     // Convert coordinates to float32 and scale them
     const d1 = Distance(playerpos, a);
     const d2 = Distance(playerpos, b);
 
     if (d1 < d2) {
-        return std.math.Order.gt;
-    } else if (d1 > d2) {
         return std.math.Order.lt;
+    } else if (d1 > d2) {
+        return std.math.Order.gt;
     } else {
         @branchHint(.unlikely);
         return std.math.Order.eq;

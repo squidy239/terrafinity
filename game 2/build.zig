@@ -8,15 +8,14 @@ pub fn build(b: *std.Build) void {
         .name = "voxelgame",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-
         .optimize = optimize,
     });
-    const zstbi = b.dependency("zstbi", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zstbi", zstbi.module("root"));
-    exe.linkLibrary(zstbi.artifact("zstbi"));
+    //const zstbi = b.dependency("zstbi", .{
+    //    .target = target,
+    //    .optimize = optimize,
+    //});
+    //exe.root_module.addImport("zstbi", zstbi.module("root"));
+    //exe.linkLibrary(zstbi.artifact("zstbi"));
 
     const zm = b.dependency("zm", .{
         .target = target,
@@ -68,7 +67,7 @@ pub fn build(b: *std.Build) void {
 
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
-        .version = .@"4.6",
+        .version = .@"4.1",
         .profile = .core,
     });
     exe.root_module.addImport("gl", gl_bindings);

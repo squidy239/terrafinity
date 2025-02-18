@@ -103,7 +103,9 @@ pub const World = struct {
         }, .None, allocator, true) catch |err| std.debug.panic("\n{any}", .{err});
         //p.lock.unlock();
         const ch = p.state.load(.seq_cst);
-        std.debug.assert(ch == ChunkState.ToGenerate or ch == ChunkState.GeneratingAndMesh);
+        if (!(ch == ChunkState.ToGenerate or ch == ChunkState.GeneratingAndMesh or ch == ChunkState.Generating)) {
+            std.debug.print("\nerr: {} is invalid chstate\n", .{ch});
+        }
         if (p.state.load(.seq_cst) != ChunkState.GeneratingAndMesh) {
             @branchHint(.likely);
             p.state.store(ChunkState.Generating, .seq_cst);
@@ -163,7 +165,7 @@ pub const World = struct {
             prossesnehbors.End();
             return;
         }
-        std.debug.assert(chstate.state.load(.seq_cst) == ChunkState.Generating or chstate.state.load(.seq_cst) == ChunkState.ReMesh or chstate.state.load(.seq_cst) == ChunkState.GeneratingAndMesh or chstate.state.load(.seq_cst) == ChunkState.MeshAgain);
+        std.debug.assert(chstate.state.load(.seq_cst) == ch);
         prossesnehbors.End();
 
         const mesh = Render.MeshChunk_Normal(chstate, allocator, neighborptrs) catch |err| {
@@ -221,7 +223,6 @@ pub const World = struct {
                     _ = world.Chunks.remove(p.pos);
                 } else if (p.state.load(.seq_cst) == ChunkState.GeneratingAndMesh) {
                     p.state.store(ChunkState.Generating, .seq_cst);
-                    std.debug.print("\nggk\n", .{});
                 } else {
                     std.debug.print("\n\n\n{} != InMemoryAndMesh or MeshOnly or GeneratingAndMesh, pos:{d}\n", .{ p.state, @as(@Vector(3, i32), (p.pos)) * @Vector(3, i32){ 32, 32, 32 } });
                 }
@@ -287,7 +288,7 @@ pub const World = struct {
             if (ch.state.load(.seq_cst) != ChunkState.InMemoryMeshLoading and ch.state.load(.seq_cst) != ChunkState.MeshAgain) {
                 std.debug.print("error: {any} != ChunkState.InMemoryMeshLoading or MeshAgain", .{ch.state.load(.seq_cst)});
             }
-            //bad TODO edo function
+            //bad TODO redo function
             if (ch.state.load(.seq_cst) == ChunkState.MeshAgain)
                 for (self.ChunkMeshes.items, 0..) |m, ii| {
                     if (@as(u96, @bitCast(m.pos)) == @as(u96, @bitCast(ch.pos))) {
@@ -317,6 +318,7 @@ pub const World = struct {
     pub fn AddToGen(self: *@This(), player: *Entitys.Player, sleeptime: u64, allocator: std.mem.Allocator) !void {
         const buffer = try allocator.alloc(u8, @sizeOf(i32) * 3 * player.GenDistance[0] * player.GenDistance[1] * player.GenDistance[2] * 2 * 2 * 2 * 32);
         defer allocator.free(buffer);
+        std.debug.print("Addtogenbuffer:{} bytes", .{@sizeOf(i32) * 3 * player.GenDistance[0] * player.GenDistance[1] * player.GenDistance[2] * 2 * 2 * 2 * 32});
         var fba = std.heap.FixedBufferAllocator.init(buffer);
         const fballoc = fba.allocator();
         var SortToGen = std.PriorityQueue([3]i32, Entitys.Player, DistanceOrder).init(fballoc, player.*);
@@ -362,8 +364,9 @@ pub const World = struct {
                         } else if (cg.?.state.load(.seq_cst) == ChunkState.InMemoryMeshUnloaded) {
                             cg.?.state.store(ChunkState.InMemoryMeshGenerating, .seq_cst);
                             _ = try self.pool.spawn(MeshChunk, .{ self, cg.?.pos, allocator });
-                        } else if (cg.?.state.load(.seq_cst) == ChunkState.MeshOnly) {
+                        } else if (cg.?.state.load(.seq_cst) == ChunkState.MeshOnly and !@reduce(.Or, @abs(@as(@Vector(3, i32), @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 })) - cg.?.pos) >= @as(@Vector(3, u32), ((player.LoadDistance))))) {
                             cg.?.state.store(ChunkState.GeneratingAndMesh, .seq_cst);
+                            std.debug.print("a\n", .{});
                             _ = try SortToGen.add(cg.?.pos);
                         }
                     }
@@ -469,17 +472,16 @@ pub const World = struct {
             },
 
             ChunkState.InMemoryMeshUnloaded, ChunkState.InMemoryNoMesh, ChunkState.WaitingForNeighbors => {
-                //_ = self.Chunks.remove(chunk.pos);
-                //chunk.lock.lock();
-                //allocator.free(chunk.ChunkData.?);
-                // allocator.destroy(chunk);
+                _ = self.Chunks.remove(chunk.pos);
+                chunk.lock.lock();
+                allocator.free(chunk.ChunkData.?);
+                allocator.destroy(chunk);
             },
             ChunkState.AllAir => {
-                //std.debug.assert(chunk.ChunkData == null);
-                //_ = self.Chunks.remove(chunk.pos);
-                //chunk.lock.lock();
-                //allocator.destroy(chunk);
-                _ = self;
+                std.debug.assert(chunk.ChunkData == null);
+                _ = self.Chunks.remove(chunk.pos);
+                chunk.lock.lock();
+                allocator.destroy(chunk);
             },
             else => {},
         }
@@ -488,7 +490,6 @@ pub const World = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.pool.deinit();
         self.TerrainHeightCache.deinit();
-        std.debug.print("deinit\n", .{});
         //self.Entitys.deinit();
         while (self.MeshesToLoad.popFirst()) |m| {
             o: {
