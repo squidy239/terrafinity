@@ -366,7 +366,6 @@ pub const World = struct {
                             _ = try self.pool.spawn(MeshChunk, .{ self, cg.?.pos, allocator });
                         } else if (cg.?.state.load(.seq_cst) == ChunkState.MeshOnly and !@reduce(.Or, @abs(@as(@Vector(3, i32), @intFromFloat(player.pos / @Vector(3, f64){ 32, 32, 32 })) - cg.?.pos) >= @as(@Vector(3, u32), ((player.LoadDistance))))) {
                             cg.?.state.store(ChunkState.GeneratingAndMesh, .seq_cst);
-                            std.debug.print("a\n", .{});
                             _ = try SortToGen.add(cg.?.pos);
                         }
                     }

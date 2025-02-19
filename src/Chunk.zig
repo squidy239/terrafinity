@@ -441,13 +441,14 @@ pub const Generator = struct {
         const gen = ztracy.ZoneNC(@src(), "genchunk", 0x692de);
         defer gen.End();
         // Pre-calculate chunk position offset
-        @setFloatMode(.optimized);
+        //@setFloatMode(.optimized);
         const chunk_offset = @Vector(3, f32){
             @floatFromInt(Pos[0] << 5), // times 32 bitshift
             @floatFromInt(Pos[1] << 5),
             @floatFromInt(Pos[2] << 5),
         };
 
+        const thdiff = @as(f32, @floatFromInt(terrainmax - terrainmin)) / scale;
         var blocks: [32][32][32]Blocks = undefined;
         @memset(&blocks, @splat(@splat(if (chunk_offset[1] < 0) Blocks.Water else Blocks.Air)));
         //
@@ -468,18 +469,9 @@ pub const Generator = struct {
                 const x = @as(f32, @floatFromInt(xx)) + chunk_offset[0];
                 for (0..ChunkSize) |zz| {
                     const z = @as(f32, @floatFromInt(zz)) + chunk_offset[2];
-
-                    const firstnoise = TerrainNoise.genNoise2D(x * scale, z * scale);
-                    var secondnoise = TerrainNoise2.genNoise2D(x * scale, z * scale);
-                    if (secondnoise < 0.0) secondnoise = 0.0;
-                    const P = 2.0; //Higher for stronger bias.
-                    const E = firstnoise * (if (secondnoise < 0.5)
-                        (std.math.pow(f32, secondnoise * 2, P) * 0.5)
-                    else
-                        (1 - (std.math.pow(f32, (1 - secondnoise) * 2, P) * 0.5)));
-
-                    terrain_heights[xx][zz] = @as(i32, @intFromFloat(((E)) * @as(f32, @floatFromInt(terrainmax - terrainmin)) / scale));
-                    //std.debug.assert( ( terrain_heights[xx][zz] <= terrainmax));
+                    _ = TerrainNoise;
+                    const noise = TerrainNoise2.genNoise2D(x * scale, z * scale);
+                    terrain_heights[xx][zz] = @as(i32, @intFromFloat(noise * thdiff)) + terrainmin;
                 }
             }
             TerrainHeightCacheMutex.lock();

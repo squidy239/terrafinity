@@ -1058,7 +1058,6 @@ pub fn Noise(comptime Float: type) type {
             y0 *%= prime_y;
             const x1 = x0 +% prime_x;
             const y1 = y0 +% prime_y;
-
             const xf0: Float = lerp(gradCoord2D(seed, x0, y0, xd0, yd0), gradCoord2D(seed, x1, y0, xd1, yd0), xs);
             const xf1: Float = lerp(gradCoord2D(seed, x0, y1, xd0, yd1), gradCoord2D(seed, x1, y1, xd1, yd1), xs);
 

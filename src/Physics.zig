@@ -8,7 +8,7 @@ const World = @import("./World.zig").World;
 const Entitys = @import("Entitys.zig");
 
 pub fn PlayerPhysicsLoop(playerr: *Entitys.Player, timer: *std.time.Timer, world: *World) void {
-    while (world.running.load(.seq_cst)) : (std.Thread.sleep(2 * std.time.ns_per_ms)) {
+    while (world.running.load(.seq_cst)) : (std.Thread.sleep(0 * std.time.ns_per_ms)) {
         PlayerPhysics(playerr, timer, world);
     }
 }
@@ -20,6 +20,8 @@ pub fn PlayerPhysics(playerr: *Entitys.Player, timer: *std.time.Timer, world: *W
     playerr.lock.lock();
     defer playerr.lock.unlock();
     const dt = @as(f64, @floatCast(@as(f128, @floatFromInt(timer.lap())) / std.time.ns_per_s));
+    const chh = world.Chunks.get(@as(@Vector(3, i32), @intFromFloat(@floor(playerr.pos / @as(@Vector(3, f64), @splat(32.0)))))) orelse return;
+    if(playerr.gameMode != .Spectator and chh.ChunkData == null and chh.state.load(.seq_cst) != ChunkStates.AllAir) return;
     if (playerr.gameMode != Entitys.GameMode.Spectator) {
         playerr.Movement[1] -= 9.81 * dt;
         // Air resistance calculation

@@ -24,13 +24,10 @@
     // internet connectivity.
 
     .dependencies = .{
-        .glfw = .{
-            .url = "git+https://github.com/slimsag/mach-glfw#daeb7b10187249aade7d92ccfef8dcf5a94f8148",
-            .hash = "12207f4bba892c44b3b1b92b13b7ce5df2b49da1e797ba3e02b38b08d1e78c5cec0d",
-        }, //.zstbi = .{
-        // .url = "https://github.com/zig-gamedev/zstbi/archive/ec86094475a10ba07b141b12b7020f7b88b0e77b.tar.gz",
-        // .hash = "122009ea2ff8496071dbe447731a62e6c7c731b6aca5ac3a01992a8d3330d4482a88",
-        //},
+        .zglfw = .{
+            .url = "git+https://github.com/zig-gamedev/zglfw#e9bd486903b5904b6d4e27b8b3771b138a667ef1",
+            .hash = "12209fb981e7aab58c2f9062ab526bd43df3d7953aa41e131a173c37ad35d10b1132",
+        },
         .zm = .{
             .url = "git+https://github.com/griush/zm#dbb86079993637e3b0ab12323e08461ea6325ca6",
             .hash = "1220897b0db58d1867fef1672a72f886f27af6a22e561797c48c9f793b06961c60ab",

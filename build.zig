@@ -51,12 +51,12 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibrary(ztracy.artifact("tracy"));
 
-    const glfw_dep = b.dependency("glfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    const zglfw = b.dependency("zglfw", .{});
+    exe.root_module.addImport("zglfw", zglfw.module("root"));
 
-    exe.root_module.addImport("glfw", glfw_dep.module("mach-glfw"));
+    if (target.result.os.tag != .emscripten) {
+        exe.linkLibrary(zglfw.artifact("glfw"));
+    }
 
     const cache = b.dependency("cache", .{
         .target = target,
