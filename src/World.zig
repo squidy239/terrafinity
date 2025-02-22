@@ -410,7 +410,12 @@ pub const World = struct {
                         break :inner;
                     };
                     count += 1;
-                    if (!ch.*.Unloading and @reduce(.Or, @abs(pi - ch.*.pos) > @as(@Vector(3, u32), ((player.LoadDistance))))) {
+                    //const state = ch.*.state.load(.seq_cst);
+                    //std.debug.print("state:{any}|", .{state});
+                    //    if (ch.*.Unloading or !(state == ChunkState.InMemoryAndMesh or state == ChunkState.AllAir or state == ChunkState.InMemoryNoMesh or state == ChunkState.InMemoryMeshUnloaded or state == ChunkState.WaitingForNeighbors)) {
+                    //     continue;
+                    //    }
+                    if (@reduce(.Or, @abs(pi - ch.*.pos) > @as(@Vector(3, u32), ((player.LoadDistance))))) {
                         const unloadpos = try allocator.create(std.DoublyLinkedList([3]i32).Node);
                         const hash_code = self.Chunks.ctx.hash(ch.*.pos);
                         const bucket_index = @mod(hash_code, 32);

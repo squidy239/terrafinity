@@ -9,13 +9,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .use_llvm = true,
     });
-    //const zstbi = b.dependency("zstbi", .{
-    //    .target = target,
-    //    .optimize = optimize,
-    //});
-    //exe.root_module.addImport("zstbi", zstbi.module("root"));
-    //exe.linkLibrary(zstbi.artifact("zstbi"));
+
+    // linux dependancy: sudo apt install libx11-dev
 
     const zm = b.dependency("zm", .{
         .target = target,
@@ -64,7 +61,6 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("cache", cache.module("cache"));
-
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
         .version = .@"4.1",

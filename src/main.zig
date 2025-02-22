@@ -38,6 +38,7 @@ const allocator = gpa.allocator();
 
 var width: u32 = 800;
 var height: u32 = 600;
+
 var Worldptr: *World = undefined;
 var lastfullscreenedtime: i128 = 0;
 var fast = false;
@@ -94,7 +95,17 @@ pub fn main() !void {
     lastX = @floatFromInt(width / 2);
     lastY = @floatFromInt(height / 2);
     //var rand = std.Random.Xoshiro256.init(@bitCast(@bitReverse(std.time.microTimestamp())));
-    var window:*glfw.Window = undefined;
+    const screen_size = blk: {
+        const vm = (glfw.getPrimaryMonitor() orelse {
+            break :blk;
+        }).getVideoMode() catch {
+            break :blk;
+        };
+        width = @intCast(vm.width);
+        height = @intCast(vm.height);
+    };
+    screen_size;
+    var window: *glfw.Window = undefined;
     for (gl_versions) |version| {
         std.debug.print("trying OpenGL version {d}.{d}\n", .{ version[0], version[1] });
         glfw.windowHint(.context_version_major, version[0]);
@@ -102,7 +113,7 @@ pub fn main() !void {
         glfw.windowHint(.opengl_forward_compat, true);
         glfw.windowHint(.client_api, .opengl_api);
         glfw.windowHint(.doublebuffer, true);
-        glfw.windowHint(.samples,4);
+        glfw.windowHint(.samples, 4);
 
         window = try glfw.Window.create(@intCast(width), @intCast(height), "voxelgame", null);
 
@@ -120,6 +131,7 @@ pub fn main() !void {
     _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
     _ = glfw.Window.setCursorPosCallback(window, MouseCallback);
     glfw.swapInterval(1);
+
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -205,7 +217,7 @@ pub fn main() !void {
     var physicsTimer = try std.time.Timer.start();
     const noise = MainWorld.TerrainNoise2.genNoise2D(0, 0);
     const thdiff = @as(f32, @floatFromInt(MainWorld.max - MainWorld.min));
-    player.pos[1] = @as(f64,@floatFromInt(@as(i32, @intFromFloat(noise * thdiff)) + MainWorld.min + 0));
+    player.pos[1] = @as(f64, @floatFromInt(@as(i32, @intFromFloat(noise * thdiff)) + MainWorld.min + 0));
     var g = try std.Thread.spawn(.{}, World.AddToGen, .{ &MainWorld, &player, 20 * std.time.ns_per_ms, allocator });
     //TODO put in threadpool
     //var ph = try std.Thread.spawn(.{}, Physics.PlayerPhysicsLoop, .{ &player, &physicsTimer, &MainWorld });
@@ -237,7 +249,7 @@ pub fn main() !void {
         ul.join();
         g.join();
         u.join();
-      //  ph.join();
+        //  ph.join();
         std.debug.print("unloading world...\n", .{});
         //gl.DeleteTextures(1, @ptrCast(&BlockTextures));
         // Clean up GLFW
@@ -347,7 +359,7 @@ export fn glfwSizeCallback(window: *glfw.Window, w: c_int, h: c_int) void {
 }
 
 export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
-    _ =  window;
+    _ = window;
     if (cursor_disabled) {
         @branchHint(.likely);
         const sensitivity = 0.1;
@@ -434,7 +446,7 @@ fn prossesInput(window: *glfw.Window, dt: f64) !void {
     if (window.getKey(glfw.Key.escape) == glfw.Action.press or window.getKey(glfw.Key.left_super) == glfw.Action.press) {
         if (cursor_disabled) _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).normal);
         cursor_disabled = false;
-        }
+    }
 
     if (window.getKey(glfw.Key.b) == glfw.Action.press) {
         std.debug.print("\n\n{any}\n\n", .{(Worldptr.Chunks.get(@as(@Vector(3, i32), @intFromFloat((player.pos + @Vector(3, f64){ 16, 16, 16 }) / @Vector(3, f64){ 32, 32, 32 }))) orelse {
@@ -446,8 +458,8 @@ fn prossesInput(window: *glfw.Window, dt: f64) !void {
         defer lastfullscreenedtime = std.time.nanoTimestamp();
         //std.debug.print("\n fs:{} < {}", .{lastfullscreenedtime -  std.time.nanoTimestamp(),400 * std.time.ns_per_ms});
         const vm = try glfw.Monitor.getPrimary().?.getVideoMode();
-        const w:u32 = @intCast(vm.width);
-        const h:u32 = @intCast(vm.height);
+        const w: u32 = @intCast(vm.width);
+        const h: u32 = @intCast(vm.height);
         if (!fullscreen) {
             width = w;
             height = h;
@@ -483,8 +495,7 @@ fn prossesInput(window: *glfw.Window, dt: f64) !void {
             @branchHint(.unlikely);
             _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
             cursor_disabled = true;
-            } 
-            else {
+        } else {
             const h = RayIntersection.GetFirstBlockOnRay(player.pos, 5.0, player.cameraFront, Worldptr) catch |err| {
                 std.debug.panic("\n\n{any}\n\n", .{err});
             };

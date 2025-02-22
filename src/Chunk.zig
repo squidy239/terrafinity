@@ -33,6 +33,18 @@ pub const ChunkState = enum(u8) {
     WaitingForNeighbors = 7,
 };
 
+pub const NewChunkState = struct {
+    InMemory: bool,
+    Rendering: bool,
+    ToGenerate: bool,
+    ToDelete: bool,
+    WaitingForNeighbors: bool,
+    NeededByNeighbors: bool,
+    Meshing: bool,
+    Generating: bool,
+    AllAir: bool,
+};
+
 pub const CompressionType = enum(u8) {
     None = 0,
     Flate = 1,
