@@ -32,7 +32,10 @@
             .url = "git+https://github.com/griush/zm#dbb86079993637e3b0ab12323e08461ea6325ca6",
             .hash = "1220897b0db58d1867fef1672a72f886f27af6a22e561797c48c9f793b06961c60ab",
         },
-        .ztracy = .{ .path = "./ztracy/" },
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy#5af60074f355ecda6114d08dcc8c931c3d163c94",
+            .hash = "1220293b509e9238e43828b00ee18e38eeace190ef844b74bf54e3db6e7da7398f4b",
+        },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen#701f41808086411f14d3bc2d87fc0b14bd09ceba",
             .hash = "1220acff2285b51630055c7c062fb62a01b32272297b27e90cd6f85901c1b4d1c48d",
