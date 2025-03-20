@@ -3,13 +3,14 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-
+    const isserver = false;
+    const isclient = false;
+    std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
         .name = "voxelgame",
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = if (isserver) b.path("src/Server.zig") else if (isclient) b.path("src/Client.zig") else b.path("src/world/Chunk.zig"),
         .target = target,
         .optimize = optimize,
-        .use_llvm = true,
     });
 
     // linux dependancy: sudo apt install libx11-dev
@@ -19,6 +20,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zm", zm.module("zm"));
+
+    const zudp = b.dependency("zudp", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zudp", zudp.module("zudp"));
 
     const options = .{
         .enable_ztracy = b.option(
