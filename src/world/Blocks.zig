@@ -16,12 +16,3 @@ pub const Blocks = enum(u24) {
     OakRootCluster = 10,
     Snow = 11,
 };
-
-pub const Textures = struct {
-    //    pub fn LoadAtlas(file: [:0]const u8, allocator: std.mem.Allocator) !zstbi.Image {
-    //       zstbi.init(allocator);
-    //defer zstbi.deinit();
-    //     zstbi.setFlipVerticallyOnLoad(true);
-    //     return zstbi.Image.loadFromFile(file, 0);
-    //}
-};

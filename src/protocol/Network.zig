@@ -1,8 +1,8 @@
 const std = @import("std");
-const Requests = @import("Requests.zig");
+const Requests = @import("Requests");
 const zudp = @import("zudp");
-const SetData = @import("Requests.zig").SetData;
-const PacketType = @import("Requests.zig").PacketType;
+const SetData = @import("Requests").SetData;
+const PacketType = @import("Requests").PacketType;
 
 pub const Options = struct {
     verify: bool,
@@ -55,15 +55,16 @@ pub fn SendPacket(packet_type: PacketType, data: []const u8, comptime options: O
         },
     }
     const final_packet = pktbuffer[0..pos];
-    //std.debug.print("ct: {any}, finalpkt: {s}", .{ compression_type, final_packet });
+    //  std.debug.print("ct: {any}, finalpkt: {any}", .{ compression_type, final_packet });
     try conn.send(destenation_address, final_packet, options.verify, options.datasplitsize, options.rate_limit_bytes_second);
 }
 
 pub fn LoadPacket(packet: []const u8, buffer_to_put: []u8) !decompressedpkt {
     var end_pos: usize = 0;
     const header_size = @sizeOf(PacketType) + @sizeOf(Compression);
-    const packet_type: PacketType = std.mem.bytesToValue(PacketType, packet[0..1]);
-    const compression_type: Compression = std.mem.bytesToValue(Compression, packet[1..2]);
+    const packet_type: PacketType = std.mem.bytesToValue(PacketType, packet[0..2]);
+    const compression_type: Compression = std.mem.bytesToValue(Compression, packet[2..3]);
+    // std.debug.print("pkt: {any}\n", .{packet});
     var buffstream = std.io.fixedBufferStream(buffer_to_put);
     const writer = buffstream.writer();
     var rstream = std.io.fixedBufferStream(packet[header_size..]);

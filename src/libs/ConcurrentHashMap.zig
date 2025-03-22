@@ -18,13 +18,12 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].get(key);
         }
 
-        pub fn getandlockchunkshared(self: *Self, key: K) ?V {
-            //const hashget = ztracy.ZoneNC(@src(), "getandlockchunkshared", 0x9692d);
+        pub fn getandaddref(self: *Self, key: K) ?V {
+            //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
             //defer hashget.End();
-
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
-            return self.buckets[bucket_index].getandlockchunkshared(key);
+            return self.buckets[bucket_index].getandaddref(key);
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {
@@ -94,16 +93,15 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             return self.hash_map.get(key);
         }
 
-        pub fn getandlockchunkshared(self: *Self, key: K) ?V {
+        pub fn getandaddref(self: *Self, key: K) ?V {
             //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
             //bktlock.End();
             defer self.lock.unlockShared();
-            const ch: *Chunk = self.hash_map.get(key) orelse return null;
-            // std.debug.print("\n{*}", .{ch});
-            //if(ch.Unloading) return null;
-            ch.lock.lockShared();
-            return ch;
+            const r = self.hash_map.get(key);
+            if (r != null) {
+                r.?.addref();
+            } else return null;
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {

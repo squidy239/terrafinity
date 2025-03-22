@@ -3,17 +3,50 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const isserver = false;
-    const isclient = false;
-    std.debug.assert(!(isserver and isclient));
+    const isserver = true;
+    const isclient = true;
+    //std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
         .name = "voxelgame",
-        .root_source_file = if (isserver) b.path("src/Server.zig") else if (isclient) b.path("src/Client.zig") else b.path("src/world/Chunk.zig"),
+        .root_source_file = if (isserver) b.path("src/server/Server.zig") else if (isclient) b.path("src/client/Client.zig") else b.path("src/world/Chunk.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     // linux dependancy: sudo apt install libx11-dev
+    const cache = b.dependency("cache", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("cache", cache.module("cache"));
+
+    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig") });
+    exe.root_module.addImport("Requests", Requests);
+
+    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{
+        .{ .name = "cache", .module = cache.module("cache") },
+    } });
+    exe.root_module.addImport("Chunk", Chunk);
+
+    const Entitys = b.addModule("Entitys", .{
+        .root_source_file = b.path("src/world/Entitys.zig"),
+    });
+    exe.root_module.addImport("Entitys", Entitys);
+
+    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
+    exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
+
+    const world_module = b.addModule("World", .{
+        .root_source_file = b.path("src/world/World.zig"),
+        .imports = &.{
+            .{ .name = "Chunk", .module = Chunk },
+            .{ .name = "Entitys", .module = Entitys },
+            .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
+            .{ .name = "cache", .module = cache.module("cache") },
+        },
+    });
+    exe.root_module.addImport("World", world_module);
 
     const zm = b.dependency("zm", .{
         .target = target,
@@ -26,6 +59,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zudp", zudp.module("zudp"));
+
+    const Network = b.addModule("Network", .{
+        .root_source_file = b.path("src/protocol/Network.zig"),
+        .imports = &.{
+            .{ .name = "Requests", .module = Requests },
+            .{ .name = "zudp", .module = zudp.module("zudp") },
+        },
+    });
+    exe.root_module.addImport("Network", Network);
 
     const options = .{
         .enable_ztracy = b.option(
@@ -62,12 +104,6 @@ pub fn build(b: *std.Build) void {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
 
-    const cache = b.dependency("cache", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("cache", cache.module("cache"));
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
         .version = .@"4.1",

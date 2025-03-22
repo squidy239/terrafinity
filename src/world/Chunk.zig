@@ -15,32 +15,18 @@ pub const Chunk = struct {
     blocks: []u8,
     lock: std.Thread.RwLock,
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, TerrainNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32, seed: u64, allocator: std.mem.Allocator) !@This() {
-        const thamount: f32 = @floatFromInt(terrainmax + terrainmin);
-        var heights: [ChunkSize][ChunkSize]i32 = undefined;
+    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+        const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-
-        if (TerrainHeightCache != null and TerrainHeightCache != null) {
-            TerrainHeightCacheMutex.?.lock();
-            if (TerrainHeightCache.?.get(std.mem.sliceAsBytes(&Pos))) |T| {
-                @branchHint(.likely);
-                T.borrow();
-                heights = T.value;
-                T.release();
-                TerrainHeightCacheMutex.?.unlock();
-            } else {
-                TerrainHeightCacheMutex.?.unlock();
-                heights = GenTerrainHeight(Pos, TerrainNoise, terrainmin, terrainmax);
-            }
-        } else heights = GenTerrainHeight(Pos, TerrainNoise, terrainmin, terrainmax);
-
-        var rng = std.Random.DefaultPrng.init(seed + @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
+        const heights = GetHeightsFromCache(Pos, TerrainHeightCache, TerrainHeightCacheMutex) orelse GenTerrainHeight(Pos, gen_params.TerrainNoise, gen_params.terrainmin, gen_params.terrainmax);
+        var rng = std.Random.DefaultPrng.init(gen_params.seed + @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
         for (heights, 0..) |row, x| {
             for (row, 0..) |terrain_height, z| {
                 for (0..ChunkSize) |c| {
                     const block_height = (Pos[1] * 32) + @as(i32, @intCast(c));
-                    chunk[x][c][z] = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height - 1) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else Block.Air;
+                    const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else Block.Air;
+                    chunk[x][c][z] = block;
                 }
             }
         }
@@ -54,8 +40,21 @@ pub const Chunk = struct {
     }
 
     fn RandGround(rand: *std.Random, heightPercent: f32) Block {
-        const a = rand.float(f32) + heightPercent;
-        return if (a < 0.5) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.85) Block.Stone else Block.Snow;
+        const a = (rand.float(f32) + (heightPercent * 5)) / 6;
+        return if (a < 0.7) Block.Grass else if (a < 0.8) Block.Dirt else if (a < 0.93) Block.Stone else Block.Snow;
+    }
+
+    fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex) ?[ChunkSize][ChunkSize]i32 {
+        if (TerrainHeightCache != null and TerrainHeightCache != null) {
+            TerrainHeightCacheMutex.?.lock();
+            if (TerrainHeightCache.?.get(std.mem.sliceAsBytes(&Pos))) |T| {
+                @branchHint(.likely);
+                T.borrow();
+                defer T.release();
+                defer TerrainHeightCacheMutex.?.unlock();
+                return T.value;
+            } else return null;
+        } else return null;
     }
 
     fn GenTerrainHeight(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32) [ChunkSize][ChunkSize]i32 {
@@ -72,39 +71,42 @@ pub const Chunk = struct {
         return height;
     }
 
-    ///simultaneous frees on the safe chunk will block forever
-    fn free(self: *@This(), allocator: std.mem.Allocator) void {
-        self.addAndlock();
+    pub fn free(self: *@This(), allocator: std.mem.Allocator, max_tries: u32) bool {
+        var tries: u32 = 0;
         while (self.ref_count.load(.acquire) != 1) {
+            tries += 1;
+            if (tries > max_tries) return false;
             std.atomic.spinLoopHint();
         }
+        self.lock.lock();
         allocator.free(self.blocks);
+        return true;
     }
 
-    fn add(self: *@This()) void {
+    pub fn add_ref(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .release);
     }
 
-    fn release(self: *@This()) void {
+    pub fn release(self: *@This()) void {
         _ = self.ref_count.fetchSub(1, .release);
     }
 
-    fn addAndLockShared(self: *@This()) void {
+    pub fn addAndLockShared(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .release);
         self.lock.lockShared();
     }
 
-    fn addAndlock(self: *@This()) void {
+    pub fn addAndlock(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .release);
         self.lock.lock();
     }
 
-    fn addAndlockSharednoBlock(self: *@This()) void {
+    pub fn addAndlockSharednoBlock(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .release);
         self.lock.tryLockShared();
     }
 
-    fn addAndlocknoBlock(self: *@This()) void {
+    pub fn addAndlocknoBlock(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .release);
         self.lock.tryLock();
     }
@@ -118,6 +120,13 @@ pub const Chunk = struct {
         _ = self.ref_count.fetchSub(1, .release);
         self.lock.unlockShared();
     }
+
+    pub const GenParams = struct {
+        TerrainNoise: Noise.Noise(f32),
+        terrainmin: i32,
+        terrainmax: i32,
+        seed: u64,
+    };
 };
 
 pub fn main() !void {
