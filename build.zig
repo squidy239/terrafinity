@@ -34,6 +34,11 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("Entitys", Entitys);
 
+    const Block = b.addModule("Block", .{
+        .root_source_file = b.path("src/world/Blocks.zig"),
+    });
+    exe.root_module.addImport("Block", Block);
+
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 

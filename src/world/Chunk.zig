@@ -9,7 +9,7 @@ pub const Encoding = enum(u8) {
     Blocks,
     OneBlock,
 };
-//TODO cache with arrayhashmap
+
 pub const Chunk = struct {
     encoding: Encoding,
     blocks: []u8,
@@ -37,6 +37,29 @@ pub const Chunk = struct {
             .lock = .{},
             .ref_count = std.atomic.Value(u32).init(1),
         };
+    }
+
+    pub fn extractFace(self: *@This(), face: u5) [ChunkSize][ChunkSize]Block {
+        self.addAndLockShared();
+        defer self.releaseAndUnlockShared();
+        // Determine dimensions of the resulting 2D array
+        const cube = std.mem.bytesAsSlice([ChunkSize][ChunkSize][ChunkSize]Block, self.blocks);
+        var result: [ChunkSize][ChunkSize]Block = undefined;
+
+        for (&result, 0..) |*row, i| {
+            for (row.*, 0..) |*item, j| {
+                item.* = switch (face) {
+                    0 => cube[i][j][0],
+                    1 => cube[i][j][ChunkSize - 1],
+                    2 => cube[i][0][j],
+                    3 => cube[i][ChunkSize - 1][j],
+                    4 => cube[0][i][j],
+                    5 => cube[ChunkSize - 1][i][j],
+                };
+            }
+        }
+
+        return result;
     }
 
     fn RandGround(rand: *std.Random, heightPercent: f32) Block {
@@ -128,10 +151,3 @@ pub const Chunk = struct {
         seed: u64,
     };
 };
-
-pub fn main() !void {
-    const alloc = std.heap.c_allocator;
-    var chunk = try Chunk.GenChunk([3]i32{ 0, 0, 0 }, null, null, Noise.Noise(f32){}, -200, 200, 0, alloc);
-    defer chunk.free(alloc);
-    std.debug.print("chunk: {any}", .{std.mem.bytesAsValue([ChunkSize][ChunkSize][ChunkSize]Block, chunk.blocks)});
-}

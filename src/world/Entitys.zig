@@ -31,5 +31,5 @@ pub const Player = struct {
     Movement: @Vector(3, f64),
     speed: @Vector(3, f32),
     GenDistance: [3]u32,
-    ip: std.posix.sockaddr,
+    ip: ?std.posix.sockaddr,
 };

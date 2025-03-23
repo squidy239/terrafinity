@@ -36,7 +36,7 @@ pub const World = struct {
         try self.Players.put(UUID, pl);
     }
 
-    ///adds a ref and returns a chunk, generates it if it dosent exist
+    ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap
     pub fn LoadChunk(self: *@This(), Pos: [3]i32) !*Chunk {
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {

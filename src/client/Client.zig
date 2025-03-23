@@ -51,6 +51,28 @@ pub fn SinglePlayerWorld() !void {
         },
     };
     defer MainWorld.Deinit();
+    MainWorld.AddPlayer(0, .{
+        .GenDistance = [3]u32{ 20, 20, 20 },
+        .pos = @Vector(3, f64){ 0.0, 0.0, 0.0 },
+        .Movement = @Vector(3, f64){ 0.0, 0.0, 0.0 },
+        .ref_count = .init(1),
+        .lock = .{},
+        .OnGround = false,
+        .gameMode = .Spectator,
+        .ip = null,
+        .inWater = false,
+        .pitch = 0,
+        .eyepitch = 0,
+        .eyeroll = 0,
+        .eyeyaw = 0,
+        .yaw = 0,
+        .roll = 0,
+        .speed = @Vector(3, f64){ 0.0, 0.0, 0.0 },
+        .player_UUID = 0,
+        .player_name = "squid",
+        .hitboxmin = @Vector(3, f64){ 0.3, 2.0, 0.3 },
+        .hitboxmax = @Vector(3, f64){ 0.3, 0.3, 0.3 },
+    });
 
     while (true) std.Thread.sleep(100000000000000);
 }
