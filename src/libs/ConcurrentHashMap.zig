@@ -100,8 +100,9 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             defer self.lock.unlockShared();
             const r = self.hash_map.get(key);
             if (r != null) {
-                r.?.addref();
+                r.?.add_ref();
             } else return null;
+            return r;
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {

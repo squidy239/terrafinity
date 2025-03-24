@@ -17,7 +17,6 @@ flat out float sscale;
 flat out vec3 position;
 flat out uint blocktype;
 
-
 float bouncingMod(float x, float n) {
     // Make x positive
     x = abs(x);
@@ -34,22 +33,23 @@ float bouncingMod(float x, float n) {
     }
 }
 
-
 uvec3 DecodePosition(uvec2 encodedBlock) {
     return uvec3(
-        (encodedBlock[0] >> uint(32 - 5)) & uint(0x1F),
-        (encodedBlock[0] >> uint(32 - 10)) & uint(0x1F),
-        (encodedBlock[0] >> uint(32 - 15)) & uint(0x1F)
-
+        encodedBlock[0] & uint(0x1F), // x: first 5 bits
+        (encodedBlock[0] >> uint(5)) & uint(0x1F), // y: next 5 bits
+        (encodedBlock[0] >> uint(10)) & uint(0x1F) // z: next 5 bits
     );
 }
 
 uint DecodeSide(uvec2 encodedBlock) {
-    return (encodedBlock[0] >> uint(14)) & uint(0x7);
+    // rot: FaceRotation (bits 15-18)
+    return (encodedBlock[0] >> uint(15)) & uint(0xF);
 }
 
 uint DecodeBlockType(uvec2 encodedBlock) {
-    return (encodedBlock[1] >> uint(12)) & uint(0xFFFFF);
+    // BlockType is in the second 32-bit word
+    // It comes after isGreedy(1), height(6), width(6) bits
+    return (encodedBlock[1]) & uint(0xFFFFF); // 20-bit mask (0xFFFFF = 2^20 - 1)
 }
 vec3 rotateVertex(uint side, vec3 coords) {
     // Center the vertex at the origin for easier rotation
@@ -57,27 +57,27 @@ vec3 rotateVertex(uint side, vec3 coords) {
 
     // Rotate based on the cube face (side)
     switch (side) {
-        case 0:
-            // -X face (left)
-            coords = vec3(0.0, coords.y, coords.x);
-            break;
         case 1:
-            // +X face (right)
-            coords = vec3(0.0, coords.y, -coords.x - 1);
-            break;
-        case 2:
-            // -Y face (bottom)
-            coords = vec3(coords.x, 0.0, coords.y);
-            break;
+        // -X face (left)
+        coords = vec3(0.0, coords.y, coords.x);
+        break;
+        case 0:
+        // +X face (right)
+        coords = vec3(0.0, coords.y, -coords.x - 1);
+        break;
         case 3:
-            // +Y face (top)
-            coords = vec3(coords.x, 0.0, -coords.y - 1);
-            break;
-        case 4: // -Z face (back)
-            coords = vec3(coords.x, -coords.y - 1, 0.0);
-            break;
-        case 5:
-            break; // +Z face (front) requires no rotation
+        // -Y face (bottom)
+        coords = vec3(coords.x, 0.0, coords.y);
+        break;
+        case 2:
+        // +Y face (top)
+        coords = vec3(coords.x, 0.0, -coords.y - 1);
+        break;
+        case 5: // -Z face (back)
+        coords = vec3(coords.x, -coords.y - 1, 0.0);
+        break;
+        case 4:
+        break; // +Z face (front) requires no rotation
     }
 
     // Translate back to the correct cube face position
@@ -85,24 +85,24 @@ vec3 rotateVertex(uint side, vec3 coords) {
 
     // Offset to position each face at the correct distance from the origin
     switch (side) {
-        case 0:
-            coords.x = -0.5; // -X face
-            break;
         case 1:
-            coords.x = 0.5;  // +X face
-            break;
-        case 2:
-            coords.y = -0.5; // -Y face
-            break;
+        coords.x = -0.5; // -X face
+        break;
+        case 0:
+        coords.x = 0.5; // +X face
+        break;
         case 3:
-            coords.y = 0.5;  // +Y face
-            break;
-        case 4:
-            coords.z = -0.5; // -Z face
-            break;
+        coords.y = -0.5; // -Y face
+        break;
+        case 2:
+        coords.y = 0.5; // +Y face
+        break;
         case 5:
-            coords.z = 0.5;  // +Z face
-            break;
+        coords.z = -0.5; // -Z face
+        break;
+        case 4:
+        coords.z = 0.5; // +Z face
+        break;
     }
 
     return coords;
@@ -115,26 +115,23 @@ float rand(vec2 co) {
 void main() {
     uvec3 pos = DecodePosition(data);
     sscale = scale;
-    position = ((chunkpos*32 )+ivec3(pos) )*scale;
+    position = ((chunkpos * 32) + ivec3(pos)) * scale;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     vec3 coords = rotateVertex(side, incoords);
     pos.y -= (1000 - chunktime) / 10;
     if (pos.y < 1000)
         coordss = coords;
-    fragpos = vec3((pos*scale) + (coords*scale) + (chunkpos*32*scale));
-    sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0,1.0)).xyz;
+    fragpos = vec3((pos * scale) + (coords * scale) + (chunkpos * 32 * scale));
+    sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 
     float speed = 2000.0;
-    float t = 1.0+((float(mod(time,100000000.0)))/10000000);
+    float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
 
-    vec3 vertexposition = coords*scale + ((pos*scale) + (chunkpos*32.0));
-    
-    float p = 1.0+bouncingMod(vertexposition.x*vertexposition.y*vertexposition.z*(vertexposition.x/vertexposition.y/vertexposition.z)*(sin(vertexposition.x)*sin(vertexposition.y)*sin(vertexposition.z)),400.0)/400.0;
+    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkpos * 32.0));
 
+    float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
 
-    if(blocktype == 6)coords.y -= bouncingMod((p*t*speed),0.4);
-    gl_Position = projview * vec4(coords*scale + ((pos*scale) + (relativechunkpos)),1);
-    
+    if (blocktype == 6) coords.y -= bouncingMod((p * t * speed), 0.4);
+    gl_Position = projview * vec4(coords * scale + ((pos * scale) + (relativechunkpos)), 1);
 }
-

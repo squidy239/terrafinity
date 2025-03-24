@@ -2,21 +2,22 @@ const std = @import("std");
 
 //const zstbi = @import("zstbi");
 
-pub const Blocks = enum(i20) {
-    Air = -1,
-    GrassyDirt = 1,
-    Grass = -4,
-    Leaves = -2,
+pub const Blocks = enum(u20) {
+    Air = 0,
+    TallGrass = 1,
+    Grass = 4,
+    Leaves = 6,
     Wood = 5,
     Dirt = 2,
     Stone = 3,
-    Water = -3,
+    Water = 8,
     OakRoots = 7,
     Snow = 11,
+    ERROR = 888,
 
     pub fn Transperent(self: @This()) bool {
         return switch (self) {
-            .Air, .Water, .Leaves, .Grass => true,
+            .Air, .Water, .Leaves, .TallGrass => true,
             else => false,
         };
     }

@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const isserver = true;
+    const isserver = false;
     const isclient = true;
     //std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
@@ -23,9 +23,14 @@ pub fn build(b: *std.Build) void {
 
     const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig") });
     exe.root_module.addImport("Requests", Requests);
+    const Block = b.addModule("Block", .{
+        .root_source_file = b.path("src/world/Blocks.zig"),
+    });
+    exe.root_module.addImport("Block", Block);
 
     const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{
         .{ .name = "cache", .module = cache.module("cache") },
+        .{ .name = "Block", .module = Block },
     } });
     exe.root_module.addImport("Chunk", Chunk);
 
@@ -33,11 +38,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/world/Entitys.zig"),
     });
     exe.root_module.addImport("Entitys", Entitys);
-
-    const Block = b.addModule("Block", .{
-        .root_source_file = b.path("src/world/Blocks.zig"),
-    });
-    exe.root_module.addImport("Block", Block);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);

@@ -40,9 +40,9 @@ pub const World = struct {
     pub fn LoadChunk(self: *@This(), Pos: [3]i32) !*Chunk {
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
-            Chunk.GenChunk(Pos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.GenParams, self.allocator);
+            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.GenParams, self.allocator);
             const chunkptr = try self.allocator.create(Chunk);
-            chunkptr.* = chunk;
+            chunkptr.* = ch;
             chunkptr.add_ref();
             try self.Chunks.put(Pos, chunkptr);
             return chunkptr;
@@ -52,7 +52,7 @@ pub const World = struct {
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
         while (true) {
             const chunk = self.Chunks.getandaddref(Pos) orelse return;
-            self.Chunks.remove(Pos);
+            _ = self.Chunks.remove(Pos);
             chunk.release();
             if (chunk.free(self.allocator, 100) == false) continue;
             self.allocator.destroy(chunk);
@@ -60,14 +60,14 @@ pub const World = struct {
         }
     }
 
-    pub fn Deinit(self: *@This()) void {
+    pub fn Deinit(self: *@This()) !void {
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
             self.Chunks.buckets[b].lock.lockShared();
             var it = self.Chunks.buckets[b].hash_map.iterator();
             defer self.Chunks.buckets[b].lock.unlockShared();
             while (it.next()) |c| {
-                self.UnloadChunk(c.key_ptr.*);
+                try self.UnloadChunk(c.key_ptr.*);
             }
         }
         self.Chunks.deinit();

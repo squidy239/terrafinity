@@ -1,4 +1,4 @@
-const Block = @import("Blocks.zig").Blocks;
+const Block = @import("Block").Blocks;
 //const ztracy = @import("ztracy");
 const Noise = @import("fastnoise.zig");
 const cache = @import("cache");
@@ -18,14 +18,14 @@ pub const Chunk = struct {
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        const heights = GetHeightsFromCache(Pos, TerrainHeightCache, TerrainHeightCacheMutex) orelse GenTerrainHeight(Pos, gen_params.TerrainNoise, gen_params.terrainmin, gen_params.terrainmax);
-        var rng = std.Random.DefaultPrng.init(gen_params.seed + @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
+        const heights = GetHeightsFromCache(Pos, TerrainHeightCache, TerrainHeightCacheMutex) orelse GenTerrainHeight(Pos, gen_params);
+        var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
         for (heights, 0..) |row, x| {
             for (row, 0..) |terrain_height, z| {
                 for (0..ChunkSize) |c| {
-                    const block_height = (Pos[1] * 32) + @as(i32, @intCast(c));
-                    const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else Block.Air;
+                    const block_height = (Pos[1] * ChunkSize) + @as(i32, @intCast(c));
+                    const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else if (block_height > terrain_height) Block.Air else Block.ERROR;
                     chunk[x][c][z] = block;
                 }
             }
@@ -38,23 +38,31 @@ pub const Chunk = struct {
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
+    pub const FaceRotation = enum(u3) {
+        xPlus = 0,
+        xMinus = 1,
+        yPlus = 2,
+        yMinus = 3,
+        zPlus = 4,
+        zMinus = 5,
+    };
 
-    pub fn extractFace(self: *@This(), face: u5) [ChunkSize][ChunkSize]Block {
+    pub fn extractFace(self: *@This(), face: FaceRotation) [ChunkSize][ChunkSize]Block {
         self.addAndLockShared();
         defer self.releaseAndUnlockShared();
         // Determine dimensions of the resulting 2D array
-        const cube = std.mem.bytesAsSlice([ChunkSize][ChunkSize][ChunkSize]Block, self.blocks);
+        const cube = std.mem.bytesAsValue([ChunkSize][ChunkSize][ChunkSize]Block, self.blocks);
         var result: [ChunkSize][ChunkSize]Block = undefined;
 
         for (&result, 0..) |*row, i| {
-            for (row.*, 0..) |*item, j| {
+            for (row, 0..) |*item, j| {
                 item.* = switch (face) {
-                    0 => cube[i][j][0],
-                    1 => cube[i][j][ChunkSize - 1],
-                    2 => cube[i][0][j],
-                    3 => cube[i][ChunkSize - 1][j],
-                    4 => cube[0][i][j],
-                    5 => cube[ChunkSize - 1][i][j],
+                    .xPlus => cube[ChunkSize - 1][i][j],
+                    .xMinus => cube[0][i][j],
+                    .yPlus => cube[i][ChunkSize - 1][j],
+                    .yMinus => cube[i][0][j],
+                    .zPlus => cube[i][j][ChunkSize - 1],
+                    .zMinus => cube[i][j][0],
                 };
             }
         }
@@ -70,17 +78,17 @@ pub const Chunk = struct {
     fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex) ?[ChunkSize][ChunkSize]i32 {
         if (TerrainHeightCache != null and TerrainHeightCache != null) {
             TerrainHeightCacheMutex.?.lock();
+            defer TerrainHeightCacheMutex.?.unlock();
             if (TerrainHeightCache.?.get(std.mem.sliceAsBytes(&Pos))) |T| {
                 @branchHint(.likely);
                 T.borrow();
                 defer T.release();
-                defer TerrainHeightCacheMutex.?.unlock();
                 return T.value;
             } else return null;
         } else return null;
     }
 
-    fn GenTerrainHeight(Pos: [3]i32, TerrainNoise: Noise.Noise(f32), terrainmin: i32, terrainmax: i32) [ChunkSize][ChunkSize]i32 {
+    fn GenTerrainHeight(Pos: [3]i32, params: GenParams) [ChunkSize][ChunkSize]i32 {
         const floatpos = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
         var height: [ChunkSize][ChunkSize]i32 = undefined;
         for (0..ChunkSize) |ux| {
@@ -88,7 +96,7 @@ pub const Chunk = struct {
             const x: f32 = (@as(f32, @floatFromInt(ux)) * 0.03125) + floatpos[0];
             for (0..ChunkSize) |uz| {
                 const z: f32 = (@as(f32, @floatFromInt(uz)) * 0.03125) + floatpos[2];
-                height[ux][uz] = TerrainNoise.genNoise2DRange(x, z, i32, terrainmin, terrainmax);
+                height[ux][uz] = params.TerrainNoise.genNoise2DRange(x, z, i32, params.terrainmin, params.terrainmax);
             }
         }
         return height;
