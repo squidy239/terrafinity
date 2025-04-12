@@ -5,6 +5,7 @@ const World = @import("World").World;
 const Mesher = @import("Mesher.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
+const ztracy = @import("ztracy");
 
 const Block = @import("Block").Blocks;
 const ChunkSize = 32;
@@ -41,20 +42,24 @@ pub const Renderer = struct {
     pool: *std.Thread.Pool,
     world: *World,
     facebuffer: c_uint,
+    eyePos: @Vector(3, f64),
     indecies: c_uint,
     shaderprogram: c_uint,
     uniforms: UniformLocations,
     MeshesToLoad: std.ArrayList(Mesher.Mesh),
+    LoadingChunks: std.AutoArrayHashMap([3]i32, bool),
+    LoadingChunksLock: std.Thread.RwLock,
     MeshesToLoadLock: std.Thread.RwLock,
     ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
     ChunkRenderListLock: std.Thread.RwLock,
-    MeshDistance: [3]u32,
+    MeshDistance: [3]std.atomic.Value(u32),
+    GenerateDistance: [3]std.atomic.Value(u32),
     window: *glfw.Window,
     proc_table: *gl.ProcTable,
     screen_dimensions: [2]u32,
 
     ///must be called on main thread
-    pub fn Init(pool: *std.Thread.Pool, world: *World, proc_table_location: *gl.ProcTable, allocator: std.mem.Allocator) !@This() {
+    pub fn Init(pool: *std.Thread.Pool, world: *World, proc_table_location: *gl.ProcTable, eyepos: @Vector(3, f64), allocator: std.mem.Allocator) !@This() {
         var renderer = @This(){
             .allocator = allocator,
             .pool = pool,
@@ -65,9 +70,13 @@ pub const Renderer = struct {
             .MeshesToLoad = std.ArrayList(Mesher.Mesh).init(allocator),
             .MeshesToLoadLock = .{},
             .uniforms = undefined,
+            .eyePos = eyepos,
+            .LoadingChunks = std.AutoArrayHashMap([3]i32, bool).init(allocator),
+            .LoadingChunksLock = .{},
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
-            .MeshDistance = [3]u32{ 20, 20, 20 },
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
+            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
@@ -79,7 +88,28 @@ pub const Renderer = struct {
         renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram);
         return renderer;
     }
-
+    ///threadpool should be deinitualised before calling
+    pub fn deinit(self: *@This()) void {
+        self.window.destroy();
+        gl.DeleteBuffers(1, @ptrCast(&self.indecies));
+        gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
+        gl.DeleteProgram(self.shaderprogram);
+        self.ChunkRenderListLock.lock();
+        var it = self.ChunkRenderList.iterator();
+        while (it.next()) |mesh| {
+            inline for (0..1) |i| {
+                if (mesh.value_ptr.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
+                if (mesh.value_ptr.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));
+            }
+        }
+        glfw.terminate();
+        self.ChunkRenderList.deinit();
+        self.LoadingChunksLock.lock();
+        self.LoadingChunks.deinit();
+        self.MeshesToLoadLock.lock();
+        self.MeshesToLoad.deinit();
+        std.debug.print("stopped renderer\n", .{});
+    }
     fn InitWindowAndProcs(self: *@This()) !void {
         try glfw.init();
         const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
@@ -105,6 +135,13 @@ pub const Renderer = struct {
         gl.makeProcTableCurrent(self.proc_table);
         gl.Viewport(0, 0, 800, 600);
         glfw.swapInterval(1);
+        gl.Enable(gl.DEPTH_TEST);
+        gl.Enable(gl.CULL_FACE);
+        gl.CullFace(gl.BACK);
+        gl.FrontFace(gl.CW);
+        gl.DepthFunc(gl.LESS);
+        gl.Enable(gl.BLEND);
+        gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
 
     fn CompileShaders(self: *@This()) !void {
@@ -207,19 +244,34 @@ pub const Renderer = struct {
     }
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32) !void {
+        const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
+        defer GenMeshAndAdd.End();
         const chunk = try self.world.LoadChunk(Pos);
-        chunk.addAndLockShared();
+        chunk.lock.lockShared(); //ref is added in loadchunk
         defer chunk.releaseAndUnlockShared();
 
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 })).extractFace(.xMinus),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 })).extractFace(.xPlus),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 })).extractFace(.yMinus),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 })).extractFace(.yPlus),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 })).extractFace(.zMinus),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 })).extractFace(.zPlus),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 })).extractFace(.xMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 })).extractFace(.xPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 })).extractFace(.yMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 })).extractFace(.yPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 })).extractFace(.zMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 })).extractFace(.zPlus, true),
         };
-        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, @alignCast(std.mem.bytesAsValue([ChunkSize][ChunkSize][ChunkSize]Block, chunk.blocks)), neighbor_faces, self.allocator);
+        const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
+        var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        switch (chunk.blocks) {
+            .blocks => blocks = chunk.blocks.blocks,
+            .oneBlock => {
+                var dd: [ChunkSize][ChunkSize]Block = undefined;
+                @memset(&dd, @splat(chunk.blocks.oneBlock));
+                Tempcube = @splat((dd));
+                blocks = &Tempcube;
+            },
+        }
+        exbl.End();
+        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, (blocks), neighbor_faces, self.allocator);
         if (mesh) |m| {
             self.MeshesToLoadLock.lock();
             defer self.MeshesToLoadLock.unlock();
@@ -228,13 +280,13 @@ pub const Renderer = struct {
     }
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
-    pub fn AddChunkToRenderNoError(self: *@This(), Pos: [3]i32) void {
+    pub inline fn AddChunkToRenderNoError(self: *@This(), Pos: [3]i32) void {
         self.AddChunkToRender(Pos) catch |err| std.log.err("addchunktorenderError:{any}", .{err});
     }
 
     ///must be called on main thread
     pub fn LoadMeshes(self: *@This(), max_to_load: u32) !void {
-        self.MeshesToLoadLock.lock();
+        if (!self.MeshesToLoadLock.tryLock()) return; //dont block the main thread
         defer self.MeshesToLoadLock.unlock();
         const MeshesToLoadLen: usize = self.MeshesToLoad.items.len;
         for (0..MeshesToLoadLen) |amount_unloaded| {

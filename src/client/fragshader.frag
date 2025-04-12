@@ -79,6 +79,10 @@ void main()
     {
         FragColor = vec4(cdfs - 0.3, cdfs, cdfs + 0.3, 0.8);
     }
+    else if (blocktype == 11)
+    {
+        FragColor = vec4(cdfs + 0.8, cdfs + 0.8, cdfs + 0.8, 1);
+    }
     else if (blocktype == 4)
     {
         if (gl_FragCoord.z < 0.99999) {

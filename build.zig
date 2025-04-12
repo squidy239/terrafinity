@@ -13,67 +13,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // linux dependancy: sudo apt install libx11-dev
-    const cache = b.dependency("cache", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("cache", cache.module("cache"));
-
-    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig") });
-    exe.root_module.addImport("Requests", Requests);
-    const Block = b.addModule("Block", .{
-        .root_source_file = b.path("src/world/Blocks.zig"),
-    });
-    exe.root_module.addImport("Block", Block);
-
-    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{
-        .{ .name = "cache", .module = cache.module("cache") },
-        .{ .name = "Block", .module = Block },
-    } });
-    exe.root_module.addImport("Chunk", Chunk);
-
-    const Entitys = b.addModule("Entitys", .{
-        .root_source_file = b.path("src/world/Entitys.zig"),
-    });
-    exe.root_module.addImport("Entitys", Entitys);
-
-    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
-    exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
-
-    const world_module = b.addModule("World", .{
-        .root_source_file = b.path("src/world/World.zig"),
-        .imports = &.{
-            .{ .name = "Chunk", .module = Chunk },
-            .{ .name = "Entitys", .module = Entitys },
-            .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
-            .{ .name = "cache", .module = cache.module("cache") },
-        },
-    });
-    exe.root_module.addImport("World", world_module);
-
-    const zm = b.dependency("zm", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zm", zm.module("zm"));
-
-    const zudp = b.dependency("zudp", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zudp", zudp.module("zudp"));
-
-    const Network = b.addModule("Network", .{
-        .root_source_file = b.path("src/protocol/Network.zig"),
-        .imports = &.{
-            .{ .name = "Requests", .module = Requests },
-            .{ .name = "zudp", .module = zudp.module("zudp") },
-        },
-    });
-    exe.root_module.addImport("Network", Network);
-
     const options = .{
         .enable_ztracy = b.option(
             bool,
@@ -101,6 +40,65 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("ztracy", ztracy.module("root"));
 
     exe.linkLibrary(ztracy.artifact("tracy"));
+
+    // linux dependancy: sudo apt install libx11-dev
+    const cache = b.dependency("cache", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("cache", cache.module("cache"));
+
+    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig") });
+    exe.root_module.addImport("Requests", Requests);
+    const Block = b.addModule("Block", .{
+        .root_source_file = b.path("src/world/Blocks.zig"),
+    });
+    exe.root_module.addImport("Block", Block);
+
+    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{ .{ .name = "cache", .module = cache.module("cache") }, .{ .name = "Block", .module = Block }, .{
+        .name = "ztracy",
+        .module = ztracy.module("root"),
+    } } });
+    exe.root_module.addImport("Chunk", Chunk);
+
+    const Entitys = b.addModule("Entitys", .{
+        .root_source_file = b.path("src/world/Entitys.zig"),
+    });
+    exe.root_module.addImport("Entitys", Entitys);
+
+    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
+    exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
+
+    const world_module = b.addModule("World", .{
+        .root_source_file = b.path("src/world/World.zig"),
+        .imports = &.{ .{ .name = "Chunk", .module = Chunk }, .{ .name = "Entitys", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "cache", .module = cache.module("cache") }, .{
+            .name = "ztracy",
+            .module = ztracy.module("root"),
+        } },
+    });
+    exe.root_module.addImport("World", world_module);
+
+    const zm = b.dependency("zm", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zm", zm.module("zm"));
+
+    const zudp = b.dependency("zudp", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zudp", zudp.module("zudp"));
+
+    const Network = b.addModule("Network", .{
+        .root_source_file = b.path("src/protocol/Network.zig"),
+        .imports = &.{
+            .{ .name = "Requests", .module = Requests },
+            .{ .name = "zudp", .module = zudp.module("zudp") },
+        },
+    });
+    exe.root_module.addImport("Network", Network);
 
     const zglfw = b.dependency("zglfw", .{});
     exe.root_module.addImport("zglfw", zglfw.module("root"));

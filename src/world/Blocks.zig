@@ -15,14 +15,11 @@ pub const Blocks = enum(u20) {
     Snow = 11,
     ERROR = 888,
 
-    pub fn Transperent(self: @This()) bool {
-        return switch (self) {
-            .Air, .Water, .Leaves, .TallGrass => true,
-            else => false,
-        };
+    pub inline fn Transperent(self: @This()) bool {
+        return self == .Air or self == .Water or self == .Leaves or self == .TallGrass;
     }
 
-    pub fn Visible(self: @This()) bool {
+    pub inline fn Visible(self: @This()) bool {
         return self != Blocks.Air;
     }
 };

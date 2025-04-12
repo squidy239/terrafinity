@@ -1,6 +1,7 @@
 const std = @import("std");
 const Chunk = @import("Chunk").Chunk;
 const Block = @import("Block").Blocks;
+const ztracy = @import("ztracy");
 
 const ChunkSize = 32;
 
@@ -28,22 +29,27 @@ pub const Face = packed struct(u64) {
     _: u12,
 };
 
+threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
+threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
+
 pub const Mesh = struct {
     faces: ?[]const Face,
     TransperentFaces: ?[]const Face,
     Pos: [3]i32,
-    ///neighbor_faces format: x+,x-,y+,y-,z+,z-
+    ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
     pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !?@This() {
+        const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
+        defer mdc.End();
         const blocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = GenerateExtendedChunk(mainblocks, neighbor_faces);
-        var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
+        //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
-        var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
         var Tpos: usize = 0;
+        const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
         for (1..ChunkSize + 1) |x| {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
-                    const block = blocks[x][y][z];
-                    if (block.Visible()) {
+                    if (blocks[x][y][z].Visible()) {
+                        const block = blocks[x][y][z];
                         const neighboring_blocks = [6]Block{
                             blocks[x + 1][y][z],
                             blocks[x - 1][y][z],
@@ -52,8 +58,9 @@ pub const Mesh = struct {
                             blocks[x][y][z + 1],
                             blocks[x][y][z - 1],
                         };
-                        for (neighboring_blocks, 0..) |b, i| {
+                        inline for (neighboring_blocks, 0..) |b, i| {
                             if (b.Transperent()) {
+                                @branchHint(.unlikely);
                                 const face = Face{
                                     .BlockType = block,
                                     .isGreedy = false,
@@ -65,13 +72,14 @@ pub const Mesh = struct {
                                     .z = @intCast(z - 1),
                                     ._ = undefined,
                                 };
-                                if (block.Transperent()) {
-                                    TransparentfaceBuffer[Tpos] = face;
-                                    Tpos += 1;
-                                } else {
+                                if (!block.Transperent()) {
                                     @branchHint(.likely);
                                     faceBuffer[pos] = face;
                                     pos += 1;
+                                } else {
+                                    @branchHint(.unlikely);
+                                    TransparentfaceBuffer[Tpos] = face;
+                                    Tpos += 1;
                                 }
                             }
                         }
@@ -79,18 +87,27 @@ pub const Mesh = struct {
                 }
             }
         }
+        loop.End();
         if (pos > 0 or Tpos > 0) {
             //std.debug.print("mlen:{d}, faces:{any}\n", .{ pos, (faceBuffer[0..pos]) });
+            const aa = ztracy.ZoneNC(@src(), "AllocFaces", 222344);
+            defer aa.End();
             return @This(){
                 .faces = if (pos > 0) try allocator.dupe(Face, faceBuffer[0..pos]) else null,
-                .TransperentFaces = if (pos > 0) try allocator.dupe(Face, faceBuffer[0..pos]) else null,
+                .TransperentFaces = if (Tpos > 0) try allocator.dupe(Face, TransparentfaceBuffer[0..Tpos]) else null,
                 .Pos = ChunkPos,
             };
         } else return null;
     }
 
+    pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.faces) |f| allocator.free(f);
+        if (self.TransperentFaces) |f| allocator.free(f);
+    }
     ///x+,x-,y+,y-,z+,z-
     fn GenerateExtendedChunk(mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block) [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block {
+        const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
+        defer gec.End();
         var blocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined; // Initialize with Air blocks
 
         // Copy main blocks

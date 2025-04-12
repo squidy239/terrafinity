@@ -1,39 +1,53 @@
 const Block = @import("Block").Blocks;
-//const ztracy = @import("ztracy");
+const ztracy = @import("ztracy");
 const Noise = @import("fastnoise.zig");
 const cache = @import("cache");
 const std = @import("std");
 const ChunkSize = 32;
 
-pub const Encoding = enum(u8) {
-    Blocks,
-    OneBlock,
+pub const BlockEncoding = union(enum) {
+    blocks: *[32][32][32]Block,
+    oneBlock: Block,
 };
 
 pub const Chunk = struct {
-    encoding: Encoding,
-    blocks: []u8,
+    blocks: BlockEncoding,
     lock: std.Thread.RwLock,
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+        const gc = ztracy.ZoneNC(@src(), "GenChunk", 1);
+        defer gc.End();
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const heights = GetHeightsFromCache(Pos, TerrainHeightCache, TerrainHeightCacheMutex) orelse GenTerrainHeight(Pos, gen_params);
         var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
+        var LastBlock: ?Block = null;
+        var isOneBlock = true;
+        const SeaLevel: i32 = 0;
         for (heights, 0..) |row, x| {
             for (row, 0..) |terrain_height, z| {
                 for (0..ChunkSize) |c| {
                     const block_height = (Pos[1] * ChunkSize) + @as(i32, @intCast(c));
-                    const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else if (block_height > terrain_height) Block.Air else Block.ERROR;
+                    const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
                     chunk[x][c][z] = block;
+                    if (LastBlock != null and LastBlock != block) isOneBlock = false;
+                    LastBlock = block;
                 }
             }
         }
-
+        const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);
+        defer ad.End();
+        var blockEncoding: BlockEncoding = undefined;
+        if (isOneBlock) {
+            blockEncoding = BlockEncoding{ .oneBlock = LastBlock.? };
+        } else {
+            const mem = try allocator.create([32][32][32]Block);
+            mem.* = chunk;
+            blockEncoding = BlockEncoding{ .blocks = mem };
+        }
         return @This(){
-            .encoding = Encoding.Blocks,
-            .blocks = try allocator.dupe(u8, std.mem.sliceAsBytes(&chunk)),
+            .blocks = blockEncoding,
             .lock = .{},
             .ref_count = std.atomic.Value(u32).init(1),
         };
@@ -47,11 +61,25 @@ pub const Chunk = struct {
         zMinus = 5,
     };
 
-    pub fn extractFace(self: *@This(), face: FaceRotation) [ChunkSize][ChunkSize]Block {
+    pub fn extractFace(self: *@This(), face: FaceRotation, removeRef: bool) [ChunkSize][ChunkSize]Block {
+        const ef = ztracy.ZoneNC(@src(), "ExtractFace", 9999);
+        defer ef.End();
         self.addAndLockShared();
         defer self.releaseAndUnlockShared();
+        defer if (removeRef) self.release();
         // Determine dimensions of the resulting 2D array
-        const cube = std.mem.bytesAsValue([ChunkSize][ChunkSize][ChunkSize]Block, self.blocks);
+        var cube: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+
+        switch (self.blocks) {
+            .blocks => cube = self.blocks.blocks,
+            .oneBlock => {
+                var dd: [ChunkSize][ChunkSize]Block = undefined;
+                @memset(&dd, @splat(self.blocks.oneBlock));
+                Tempcube = @splat((dd));
+                cube = &Tempcube;
+            },
+        }
         var result: [ChunkSize][ChunkSize]Block = undefined;
 
         for (&result, 0..) |*row, i| {
@@ -72,7 +100,7 @@ pub const Chunk = struct {
 
     fn RandGround(rand: *std.Random, heightPercent: f32) Block {
         const a = (rand.float(f32) + (heightPercent * 5)) / 6;
-        return if (a < 0.7) Block.Grass else if (a < 0.8) Block.Dirt else if (a < 0.93) Block.Stone else Block.Snow;
+        return if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
     fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex) ?[ChunkSize][ChunkSize]i32 {
@@ -102,7 +130,17 @@ pub const Chunk = struct {
         return height;
     }
 
+    pub fn GetBlock(self: *@This(), x: u5, y: u5, z: u5) Block {
+        switch (self.blocks) {
+            .oneBlock => return self.blocks.oneBlock,
+            .blocks => self.blocks.blocks[x][y][z],
+        }
+    }
     pub fn free(self: *@This(), allocator: std.mem.Allocator, max_tries: u32) bool {
+        if (self.blocks != .blocks) {
+            std.debug.assert(self.blocks == .oneBlock);
+            return true;
+        }
         var tries: u32 = 0;
         while (self.ref_count.load(.acquire) != 1) {
             tries += 1;
@@ -110,7 +148,7 @@ pub const Chunk = struct {
             std.atomic.spinLoopHint();
         }
         self.lock.lock();
-        allocator.free(self.blocks);
+        allocator.destroy(self.blocks.blocks);
         return true;
     }
 

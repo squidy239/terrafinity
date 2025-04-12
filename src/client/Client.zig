@@ -5,15 +5,16 @@ const Requests = @import("Requests");
 const zm = @import("zm");
 const gl = @import("gl");
 const glfw = @import("zglfw");
+const ztracy = @import("ztracy");
 const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
 const Entitys = @import("Entitys");
 const Chunk = @import("Chunk").Chunk;
+const Loader = @import("Loader.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Cache = @import("cache").Cache;
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
-var eyePos = @Vector(3, f64){ 0, 0, 0 };
 var cameraFront = @Vector(3, f64){ 0, 1, 0 };
 var cameraUp = @Vector(3, f64){ 0, 1, 0 };
 var pitch: f64 = 1;
@@ -31,6 +32,22 @@ const op = Network.Options{
 };
 
 const Multyplayer = false;
+//TODO list
+//chunk loader thread(singleplayer and multiplayer)
+//server world and server chunk load response
+//player log into server, verify client ip
+//player send all keyboard inputs to server at a configurable max rate, default maybie 144?
+//server sends back updated player position so no hacking, player visually moves client side but gets corrected if move is wrong
+//entitys
+//need to redo physecs completely, trace player path, configurable gravity and each gas or liquid has its own propertys (not just air)
+//finally do textures
+//new trees
+//AUTH server and fully functional multyplayer
+//blockdata(hashmap with blockpos as key)
+//GUI
+//website for game
+
+var running = std.atomic.Value(bool).init(true);
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
@@ -41,11 +58,14 @@ pub fn main() !void {
     } else {
         std.debug.print("no leaks\n", .{});
     };
+    //const allocator = debug_allocator.allocator();
+
     const allocator = debug_allocator.allocator();
+    var tpa = std.heap.stackFallback(1000000, allocator);
+
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
-    defer pool.deinit();
+    try pool.init(.{ .n_jobs = cpu_count, .allocator = tpa.get() });
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
@@ -54,8 +74,8 @@ pub fn main() !void {
         .Players = ConcurrentHashMap(u128, *Entitys.Player, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .GenParams = .{
-            .terrainmin = 0,
-            .terrainmax = 32,
+            .terrainmin = -100,
+            .terrainmax = 256,
             .seed = 23,
             .TerrainNoise = .{
                 .fractal_type = .ridged,
@@ -64,7 +84,6 @@ pub fn main() !void {
             },
         },
     };
-    defer MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", err);
     try MainWorld.AddPlayer(0, .{
         .GenDistance = [3]u32{ 20, 20, 20 },
         .pos = @Vector(3, f64){ 0.0, 0.0, 0.0 },
@@ -87,45 +106,37 @@ pub fn main() !void {
         .hitboxmin = @Vector(3, f64){ 0.3, 2.0, 0.3 },
         .hitboxmax = @Vector(3, f64){ 0.3, 0.3, 0.3 },
     });
-    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, allocator);
+    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, allocator);
+    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
+    defer {
+        running.store(false, .monotonic);
+        pool.deinit();
+        renderer.deinit();
+
+        loaderThread.join();
+
+        MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", err);
+        std.debug.print("oooooo\n", .{});
+    }
     _ = renderer.window.setCursorPosCallback(MouseCallback);
     _ = renderer.window.setSizeCallback(glfwSizeCallback);
-    gl.Enable(gl.DEPTH_TEST);
-    //gl.Enable(gl.CULL_FACE);
-    gl.CullFace(gl.BACK);
-    gl.FrontFace(gl.CW);
-    gl.DepthFunc(gl.LESS);
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     _ = try glfw.Window.setInputMode(renderer.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
-
-    var x: i32 = -32;
-    var y: i32 = -32;
-    var z: i32 = -32;
-    while (x < 32) {
-        while (y < 32) {
-            while (z < 32) {
-                try pool.spawn(Renderer.AddChunkToRenderNoError, .{ &renderer, [3]i32{ x, y, z } });
-                z += 1;
-            }
-            z = -32;
-            y += 1;
-        }
-        y = -32;
-        x += 1;
-    }
-    std.debug.print("b", .{});
+    std.debug.print("\nwww", .{});
     var st = std.time.nanoTimestamp();
     while (!renderer.window.shouldClose()) {
-        try renderer.LoadMeshes(100);
+        const loadmeshes = ztracy.ZoneNC(@src(), "loadmeshes", 2222111);
+        try renderer.LoadMeshes(10000);
+        loadmeshes.End();
         renderer.window.swapBuffers();
         glfw.pollEvents();
-        processInput(renderer.window, &eyePos, cameraFront, cameraUp);
+        processInput(renderer.window, &renderer.eyePos, cameraFront, cameraUp);
         // std.debug.print("pos:{d}, front:{d}, up:{d}\n", .{ eyePos, cameraFront, cameraUp })
-
-        renderer.DrawChunks(.{ .eyePos = eyePos, .cameraFront = cameraFront, .cameraUp = cameraUp });
+        const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
+        renderer.DrawChunks(.{ .eyePos = renderer.eyePos, .cameraFront = cameraFront, .cameraUp = cameraUp });
+        drawChunks.End();
         st = std.time.nanoTimestamp();
     }
+    std.debug.print("aaaaaaaaaaa\n", .{});
 }
 
 fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: @Vector(3, f64), cameraup: @Vector(3, f64)) void {
