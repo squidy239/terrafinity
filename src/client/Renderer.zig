@@ -38,11 +38,15 @@ pub const ProjectionParams = struct {
 };
 
 pub const Renderer = struct {
+    pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,
     pool: *std.Thread.Pool,
     world: *World,
     facebuffer: c_uint,
-    eyePos: @Vector(3, f64),
+    eyePos: @Vector(3, f64),//x,y,z
+    rotationAxis:@Vector(3, f64), //pitch, yaw,roll
+    cameraFront:@Vector(3, f64),
+    mouseSensitivity:f64,
     indecies: c_uint,
     shaderprogram: c_uint,
     uniforms: UniformLocations,
@@ -64,6 +68,9 @@ pub const Renderer = struct {
             .allocator = allocator,
             .pool = pool,
             .world = world,
+            .mouseSensitivity = 0.2,
+            .rotationAxis = @Vector(3, f64){0,0,0},
+            .cameraFront = @Vector(3, f64){0,1,0},
             .facebuffer = undefined,
             .indecies = undefined,
             .shaderprogram = undefined,
@@ -88,9 +95,8 @@ pub const Renderer = struct {
         renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram);
         return renderer;
     }
-    ///threadpool should be deinitualised before calling
+    ///threadpool should be deinitualised before calling, dosent destroy window
     pub fn deinit(self: *@This()) void {
-        self.window.destroy();
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
         gl.DeleteProgram(self.shaderprogram);
@@ -107,6 +113,9 @@ pub const Renderer = struct {
         self.LoadingChunksLock.lock();
         self.LoadingChunks.deinit();
         self.MeshesToLoadLock.lock();
+        for (self.MeshesToLoad.items) |mesh| {
+            FreeMesh(mesh, self.allocator);
+        }
         self.MeshesToLoad.deinit();
         std.debug.print("stopped renderer\n", .{});
     }
@@ -200,7 +209,7 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
 
-    pub fn DrawChunks(self: *@This(), projParams: ProjectionParams) void {
+    pub fn DrawChunks(self: *@This()) void {
         self.ChunkRenderListLock.lockShared();
         defer self.ChunkRenderListLock.unlockShared();
         gl.ClearColor(0, 0.3, 0.5, 1.0);
@@ -208,7 +217,7 @@ pub const Renderer = struct {
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
 
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + projParams.cameraFront, projParams.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -236,7 +245,7 @@ pub const Renderer = struct {
                 gl.Uniform1i(self.uniforms.tlocation, @intCast(tr));
                 gl.Uniform3i(self.uniforms.chunkposlocation, Pos[0], Pos[1], Pos[2]);
                 //player height
-                gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - projParams.eyePos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - projParams.eyePos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - projParams.eyePos[2]));
+                gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - self.eyePos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - self.eyePos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - self.eyePos[2]));
                 //TODO frustrum cullling and LODs
                 gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, null, @intCast(buffer_ids.count[i]));
             }
@@ -292,11 +301,17 @@ pub const Renderer = struct {
         for (0..MeshesToLoadLen) |amount_unloaded| {
             if (amount_unloaded >= max_to_load) break;
             const mesh = self.MeshesToLoad.swapRemove(0);
+            defer FreeMesh(mesh, self.allocator);
             const mesh_buffer_ids = self.LoadMesh(mesh);
             self.ChunkRenderListLock.lock();
             defer self.ChunkRenderListLock.unlock();
             try self.ChunkRenderList.put(mesh.Pos, mesh_buffer_ids);
         }
+    }
+
+    pub fn FreeMesh(mesh:Mesher.Mesh,allocator:std.mem.Allocator)void{
+        if(mesh.faces)|faces|allocator.free(faces);
+        if(mesh.TransperentFaces)|tfaces|allocator.free(tfaces);
     }
 
     ///caller must free mesh, must be called from main thread

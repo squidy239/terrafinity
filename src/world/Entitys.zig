@@ -1,8 +1,9 @@
 const std = @import("std");
 pub var EntityId: u32 = 0;
 
-pub const EntityType = enum(u20) {
-    Player,
+pub const EntityType = union(enum) {
+    Player:*Player,
+    
 };
 
 pub const GameMode = enum(u8) {

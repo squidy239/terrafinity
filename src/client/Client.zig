@@ -11,6 +11,7 @@ const Renderer = @import("Renderer.zig").Renderer;
 const Entitys = @import("Entitys");
 const Chunk = @import("Chunk").Chunk;
 const Loader = @import("Loader.zig");
+const UserInput = @import("UserInput.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Cache = @import("cache").Cache;
 var lastx: f64 = undefined;
@@ -61,18 +62,18 @@ pub fn main() !void {
     //const allocator = debug_allocator.allocator();
 
     const allocator = debug_allocator.allocator();
-    var tpa = std.heap.stackFallback(1000000, allocator);
-
+    var sfa = std.heap.stackFallback(5000000, allocator);
+    var sfalloc = std.heap.ThreadSafeAllocator{.child_allocator = sfa.get()};
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count, .allocator = tpa.get() });
+    try pool.init(.{ .n_jobs = cpu_count-2, .allocator = sfalloc.allocator()});
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([32][32]i32).init(allocator, .{}),
+        .TerrainHeightCache = try Cache([32][32]i32).init(sfalloc.allocator(), .{}),
         .TerrainHeightCacheMutex = .{},
-        .Players = ConcurrentHashMap(u128, *Entitys.Player, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        .Players = ConcurrentHashMap(u128, *Entitys.Player, std.hash_map.AutoContext(u128), 80, 32).init(sfalloc.allocator()),
+        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(sfalloc.allocator()),
         .GenParams = .{
             .terrainmin = -100,
             .terrainmax = 256,
@@ -84,44 +85,27 @@ pub fn main() !void {
             },
         },
     };
-    try MainWorld.AddPlayer(0, .{
-        .GenDistance = [3]u32{ 20, 20, 20 },
-        .pos = @Vector(3, f64){ 0.0, 0.0, 0.0 },
-        .Movement = @Vector(3, f64){ 0.0, 0.0, 0.0 },
-        .ref_count = .init(1),
-        .lock = .{},
-        .OnGround = false,
-        .gameMode = .Spectator,
-        .ip = null,
-        .inWater = false,
-        .pitch = 0,
-        .eyepitch = 0,
-        .eyeroll = 0,
-        .eyeyaw = 0,
-        .yaw = 0,
-        .roll = 0,
-        .speed = @Vector(3, f64){ 0.0, 0.0, 0.0 },
-        .player_UUID = 0,
-        .player_name = "squid",
-        .hitboxmin = @Vector(3, f64){ 0.3, 2.0, 0.3 },
-        .hitboxmax = @Vector(3, f64){ 0.3, 0.3, 0.3 },
-    });
+    
     var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, allocator);
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
     defer {
+        std.debug.print("started closing\n", .{});
+        renderer.window.destroy();
         running.store(false, .monotonic);
         pool.deinit();
-        renderer.deinit();
-
+        std.debug.print("pool deinit\n", .{});
         loaderThread.join();
-
+        std.debug.print("loaderThread stopped\n", .{});
+        renderer.deinit();
+        std.debug.print("renderer deinit\n", .{});
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", err);
-        std.debug.print("oooooo\n", .{});
+        std.debug.print("World Closed\n", .{});
     }
-    _ = renderer.window.setCursorPosCallback(MouseCallback);
-    _ = renderer.window.setSizeCallback(glfwSizeCallback);
+    UserInput.init(&renderer);
+    
+    _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
+    _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     _ = try glfw.Window.setInputMode(renderer.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
-    std.debug.print("\nwww", .{});
     var st = std.time.nanoTimestamp();
     while (!renderer.window.shouldClose()) {
         const loadmeshes = ztracy.ZoneNC(@src(), "loadmeshes", 2222111);
@@ -129,18 +113,17 @@ pub fn main() !void {
         loadmeshes.End();
         renderer.window.swapBuffers();
         glfw.pollEvents();
-        processInput(renderer.window, &renderer.eyePos, cameraFront, cameraUp);
+        UserInput.processInput();
         // std.debug.print("pos:{d}, front:{d}, up:{d}\n", .{ eyePos, cameraFront, cameraUp })
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        renderer.DrawChunks(.{ .eyePos = renderer.eyePos, .cameraFront = cameraFront, .cameraUp = cameraUp });
+        renderer.DrawChunks();
         drawChunks.End();
         st = std.time.nanoTimestamp();
     }
-    std.debug.print("aaaaaaaaaaa\n", .{});
 }
 
 fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: @Vector(3, f64), cameraup: @Vector(3, f64)) void {
-    const cameraSpeed: @Vector(3, f64) = @splat(0.5); // adjust accordingly
+    const cameraSpeed: @Vector(3, f64) = @splat(2); // adjust accordingly
     if (window.getKey(glfw.Key.w) == .press)
         cameraPos.* += cameraSpeed * camerafront;
     if (window.getKey(glfw.Key.s) == .press)
@@ -151,27 +134,6 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
 }
 
-export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
-    _ = window;
-    const sensitivity = 0.1;
-    const yoffset = (ypos - lasty) * sensitivity;
-    const xoffset = (xpos - lastx) * sensitivity;
-    //std.debug.print("yo:{d},xo:{d},xpos:{d},ypos:{d}\n", .{ xoffset, yoffset, ypos, xpos });
-    lastx = xpos;
-    lasty = ypos;
-    yaw -= @floatCast(xoffset);
-    pitch -= @floatCast(yoffset);
-    //  std.debug.print("p:{d},y:{d}\n", .{ pitch, yaw });
-    if (pitch > 89.9)
-        pitch = 89.9;
-    if (pitch < -89.9)
-        pitch = -89.9;
-    cameraFront[0] = @floatCast(@sin(std.math.degreesToRadians(yaw)) * @cos(std.math.degreesToRadians(pitch)));
-    cameraFront[1] = @floatCast(@sin(std.math.degreesToRadians(pitch)));
-    cameraFront[2] = @floatCast(@cos(std.math.degreesToRadians(yaw)) * @cos(std.math.degreesToRadians(pitch)));
-
-    cameraFront = zm.vec.normalize(cameraFront);
-}
 
 pub fn MultiPlayerWorld() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -236,9 +198,4 @@ pub fn Handler(args: anytype, mem: []const u8, sender: *const std.posix.sockaddr
     }
 }
 
-export fn glfwSizeCallback(window: *glfw.Window, w: c_int, h: c_int) void {
-    width = @intCast(w);
-    height = @intCast(h);
-    gl.Viewport(0, 0, @intCast(w), @intCast(h));
-    _ = window;
-}
+

@@ -100,7 +100,9 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("Network", Network);
 
-    const zglfw = b.dependency("zglfw", .{});
+    const zglfw = b.dependency("zglfw", .{
+        .optimize = std.builtin.OptimizeMode.ReleaseSafe,
+    });
     exe.root_module.addImport("zglfw", zglfw.module("root"));
 
     if (target.result.os.tag != .emscripten) {

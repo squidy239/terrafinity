@@ -18,12 +18,36 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].get(key);
         }
 
+
+
+        pub fn contains(self: *Self, key: K) bool {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].contains(key);
+        }
+
+        ///returns null if item wasent present, else returns [newvalue, oldvalue], adds a ref to oldvalue
+        pub fn putNoOverrideaddRef(self: *Self, key: K, value: V) !?V {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return try self.buckets[bucket_index].putNoOverride(key, value);
+        }
+
+
         pub fn getandaddref(self: *Self, key: K) ?V {
             //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
             //defer hashget.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].getandaddref(key);
+        }
+
+        pub fn getandaddrefnolock(self: *Self, key: K) ?V {
+            //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
+            //defer hashget.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].getandaddrefnolock(key);
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {
@@ -40,6 +64,15 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             try self.buckets[bucket_index].put(key, value);
+        }
+
+        
+        pub fn fetchPut(self: *Self, key: K, value: V) !?V {
+            //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            //defer hashput.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return try self.buckets[bucket_index].fetchPut(key, value);
         }
 
         pub fn remove(self: *Self, key: K) bool {
@@ -93,11 +126,48 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             return self.hash_map.get(key);
         }
 
+         pub fn contains(self: *Self, key: K) bool {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lockShared();
+            //bktlock.End();
+            defer self.lock.unlockShared();
+            return self.hash_map.contains(key);
+        }
+
+        pub fn fetchPut(self: *Self, key: K, value: V) !?V {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lock();
+            //bktlock.End();
+            defer self.lock.unlock();
+            const res = try self.hash_map.fetchPut(key,value) orelse return null;
+            return res.value;
+        }
+
+        pub fn putNoOverride(self: *Self, key: K, value: V) !?V {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lock();
+            //bktlock.End();
+            defer self.lock.unlock();
+
+            const res = self.hash_map.get(key);
+            if(res)|r|{r.add_ref();return r;}
+            try self.hash_map.put(key, value);
+            return null;
+        }
+
         pub fn getandaddref(self: *Self, key: K) ?V {
             //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
             //bktlock.End();
             defer self.lock.unlockShared();
+            const r = self.hash_map.get(key);
+            if (r != null) {
+                r.?.add_ref();
+            } else return null;
+            return r;
+        }
+
+        pub fn getandaddrefnolock(self: *Self, key: K) ?V {
             const r = self.hash_map.get(key);
             if (r != null) {
                 r.?.add_ref();

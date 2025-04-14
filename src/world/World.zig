@@ -5,7 +5,6 @@ const Chunk = @import("Chunk").Chunk;
 const Entitys = @import("Entitys");
 const Block = @import("Block").Blocks;
 const ztracy = @import("ztracy");
-
 const ChunkSize = 32;
 pub const World = struct {
     allocator: std.mem.Allocator,
@@ -51,8 +50,15 @@ pub const World = struct {
             ad.End();
             chunkptr.* = ch;
             chunkptr.add_ref();
-            try self.Chunks.put(Pos, chunkptr);
-            return chunkptr;
+            const duplicate = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
+            if(duplicate)|d|{
+                @branchHint(.unlikely);
+                chunkptr.release(); //ref was added before putting
+                std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 1);
+                _ = chunkptr.free(self.allocator, null);
+                self.allocator.destroy(chunkptr);
+                return d;
+            }else return chunkptr;
         } else return chunk.?;
     }
     ///adds a ref and loads chunk, ref must be removed if not using chunk
@@ -73,27 +79,33 @@ pub const World = struct {
     }
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
-        std.debug.print("www\n", .{});
-
         while (true) {
             const chunk = self.Chunks.getandaddref(Pos) orelse return;
-            _ = self.Chunks.removemanuallock(Pos);
+            _ = self.Chunks.remove(Pos);
             chunk.release();
 
-            if (chunk.free(self.allocator, 100) == false) continue;
+            if (chunk.free(self.allocator, null) == false) continue;
             self.allocator.destroy(chunk);
             break;
         }
     }
 
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) !void {
+            std.debug.assert(chunk.free(self.allocator, 100_000000));
+            self.allocator.destroy(chunk);
+    }
+
     pub fn Deinit(self: *@This()) !void {
+        const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
+        defer deinitWorld.End();
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
             self.Chunks.buckets[b].lock.lock();
             var it = self.Chunks.buckets[b].hash_map.iterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                try self.UnloadChunk(c.key_ptr.*);
+                try self.UnloadChunkByPtr(c.value_ptr.*);
+
             }
         }
         self.Chunks.deinit();
@@ -109,6 +121,16 @@ pub const World = struct {
             }
         }
         std.debug.print("bbb\n", .{});
+        const bamount = self.Players.buckets.len;
+        for (0..bamount) |b| {
+            self.Players.buckets[b].lock.lock();
+            var it = self.Players.buckets[b].hash_map.iterator();
+            defer self.Players.buckets[b].lock.unlock();
+            while (it.next()) |c| {
+                self.allocator.destroy(c.value_ptr.*);
+
+            }
+        }
         self.Players.deinit();
         self.TerrainHeightCache.deinit();
     }

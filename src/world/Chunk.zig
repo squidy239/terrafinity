@@ -15,6 +15,7 @@ pub const Chunk = struct {
     lock: std.Thread.RwLock,
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+        //TODO SIMD perlin for HUGE speed increce
         const gc = ztracy.ZoneNC(@src(), "GenChunk", 1);
         defer gc.End();
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
@@ -42,7 +43,7 @@ pub const Chunk = struct {
         if (isOneBlock) {
             blockEncoding = BlockEncoding{ .oneBlock = LastBlock.? };
         } else {
-            const mem = try allocator.create([32][32][32]Block);
+            const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
             mem.* = chunk;
             blockEncoding = BlockEncoding{ .blocks = mem };
         }
@@ -136,16 +137,20 @@ pub const Chunk = struct {
             .blocks => self.blocks.blocks[x][y][z],
         }
     }
-    pub fn free(self: *@This(), allocator: std.mem.Allocator, max_tries: u32) bool {
+    pub fn free(self: *@This(), allocator: std.mem.Allocator, max_tries: ?u32) bool {
+        const freeChunk = ztracy.ZoneNC(@src(), "freeChunk", 11999);
+        defer freeChunk.End();
         if (self.blocks != .blocks) {
             std.debug.assert(self.blocks == .oneBlock);
             return true;
         }
         var tries: u32 = 0;
         while (self.ref_count.load(.acquire) != 1) {
-            tries += 1;
-            if (tries > max_tries) return false;
+            tries +|= 1;
+            if (max_tries != null and tries > max_tries.?) return false;
+            std.debug.print("refs:{d}\n", .{self.ref_count.load(.seq_cst)});
             std.atomic.spinLoopHint();
+            //break; //for testing REMOVE
         }
         self.lock.lock();
         allocator.destroy(self.blocks.blocks);
