@@ -18,8 +18,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].get(key);
         }
 
-
-
         pub fn contains(self: *Self, key: K) bool {
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
@@ -33,13 +31,20 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return try self.buckets[bucket_index].putNoOverride(key, value);
         }
 
-
         pub fn getandaddref(self: *Self, key: K) ?V {
             //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
             //defer hashget.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].getandaddref(key);
+        }
+
+        pub fn fetchremoveandaddref(self: *Self, key: K) ?V {
+            //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
+            //defer hashget.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return self.buckets[bucket_index].fetchremoveandaddref(key);
         }
 
         pub fn getandaddrefnolock(self: *Self, key: K) ?V {
@@ -66,7 +71,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             try self.buckets[bucket_index].put(key, value);
         }
 
-        
         pub fn fetchPut(self: *Self, key: K, value: V) !?V {
             //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
             //defer hashput.End();
@@ -125,8 +129,18 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             defer self.lock.unlockShared();
             return self.hash_map.get(key);
         }
+        ///dosent add a ref because one would have to be removed because is is being removed from the hashmap
+        pub fn fetchremoveandaddref(self: *Self, key: K) ?V {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lock();
+            //bktlock.End();
+            defer self.lock.unlock();
+            const r = self.hash_map.get(key);
+            _ = self.hash_map.remove(key);
+            return r;
+        }
 
-         pub fn contains(self: *Self, key: K) bool {
+        pub fn contains(self: *Self, key: K) bool {
             //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lockShared();
             //bktlock.End();
@@ -139,7 +153,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             self.lock.lock();
             //bktlock.End();
             defer self.lock.unlock();
-            const res = try self.hash_map.fetchPut(key,value) orelse return null;
+            const res = try self.hash_map.fetchPut(key, value) orelse return null;
             return res.value;
         }
 
@@ -150,7 +164,10 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             defer self.lock.unlock();
 
             const res = self.hash_map.get(key);
-            if(res)|r|{r.add_ref();return r;}
+            if (res) |r| {
+                r.add_ref();
+                return r;
+            }
             try self.hash_map.put(key, value);
             return null;
         }

@@ -3,6 +3,7 @@ pub var EntityId: u32 = 0;
 
 pub const EntityType = union(enum) {
     Player: *Player,
+    Cube: *Cube,
 };
 
 pub const Entity = struct {
@@ -63,4 +64,9 @@ pub const Player = struct {
     velocity: @Vector(3, f32),
     GenDistance: [3]u32,
     ip: ?std.posix.sockaddr,
+};
+
+pub const Cube = struct {
+    pos: @Vector(3, f64),
+    bodyRotationAxis: @Vector(3, f64),
 };

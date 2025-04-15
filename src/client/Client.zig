@@ -75,8 +75,8 @@ pub fn main() !void {
         .Entitys = ConcurrentHashMap(u128, *Entitys.Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .GenParams = .{
-            .terrainmin = -100,
-            .terrainmax = 1024,
+            .terrainmin = -256,
+            .terrainmax = 512,
             .seed = 23,
             .TerrainNoise = .{
                 .fractal_type = .ridged,
@@ -86,17 +86,18 @@ pub fn main() !void {
         },
     };
 
-    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, allocator);
-
-    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderUnloaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
+    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, &running, allocator);
+    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &renderer.eyePos, 40 * std.time.ns_per_ms, &running });
+    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
     defer {
         std.debug.print("started closing\n", .{});
         renderer.window.destroy();
         running.store(false, .monotonic);
+        loaderThread.join();
+        unloaderThread.join();
+        std.debug.print("loader and unloader Threads stopped\n", .{});
         pool.deinit();
         std.debug.print("pool deinit\n", .{});
-        loaderThread.join();
-        std.debug.print("loaderThread stopped\n", .{});
         renderer.deinit();
         std.debug.print("renderer deinit\n", .{});
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
@@ -106,7 +107,6 @@ pub fn main() !void {
 
     _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
-    _ = try glfw.Window.setInputMode(renderer.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
     var st = std.time.nanoTimestamp();
     while (!renderer.window.shouldClose()) {
         const loadmeshes = ztracy.ZoneNC(@src(), "loadmeshes", 2222111);
@@ -114,8 +114,8 @@ pub fn main() !void {
         loadmeshes.End();
         renderer.window.swapBuffers();
         glfw.pollEvents();
-        UserInput.processInput();
-        // std.debug.print("pos:{d}, front:{d}, up:{d}\n", .{ eyePos, cameraFront, cameraUp })
+        try UserInput.processInput();
+        //  std.debug.print("pos:{d}, front:{d}\n", .{ renderer.eyePos, renderer.cameraFront });
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
         renderer.DrawChunks();
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };

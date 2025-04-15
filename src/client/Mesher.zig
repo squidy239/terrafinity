@@ -76,7 +76,7 @@ pub const Mesh = struct {
                                     @branchHint(.likely);
                                     faceBuffer[pos] = face;
                                     pos += 1;
-                                } else {
+                                } else if (block != b) {
                                     @branchHint(.unlikely);
                                     TransparentfaceBuffer[Tpos] = face;
                                     Tpos += 1;

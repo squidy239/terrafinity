@@ -25,13 +25,25 @@ const KeyboardKey = enum(u7) {
     G,
 };
 
+const ToggleSettings = struct {
+    Fullscreen: bool,
+    Sprinting: bool,
+    CursorEscaped: bool,
+};
+var ts = ToggleSettings{
+    .Fullscreen = false,
+    .Sprinting = false,
+    .CursorEscaped = true,
+};
+
 const PlayerInput = struct { //server  will have a max deltatime
     microTimestamp: i64,
     keysPressedLen: u8,
     keysPressed: []const KeyboardKey,
 };
 
-pub fn processInput() void {
+pub fn processInput() !void {
+    std.debug.assert(isinit);
     const timestamp = std.time.microTimestamp();
     const dt = timestamp - lastmicrotime;
     lastmicrotime = timestamp;
@@ -44,10 +56,24 @@ pub fn processInput() void {
         render.eyePos -= zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
     if (render.window.getKey(glfw.Key.d) == .press)
         render.eyePos += zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
+    if (render.window.getMouseButton(glfw.MouseButton.left) == .press) {
+        if (ts.CursorEscaped) {
+            ts.CursorEscaped = false;
+            _ = try glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
+        }
+    }
+    if (render.window.getKey(glfw.Key.escape) == .press or render.window.getKey(glfw.Key.left_super) == .press) {
+        if (!ts.CursorEscaped) {
+            ts.CursorEscaped = true;
+            _ = try glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).normal);
+        }
+    }
 }
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;
+    std.debug.assert(isinit);
+    if (ts.CursorEscaped) return;
     const xoffset: f64 = (xpos - last_mouse_pos[0]) * render.mouseSensitivity;
     const yoffset: f64 = (ypos - last_mouse_pos[1]) * render.mouseSensitivity;
     last_mouse_pos[0] = xpos;

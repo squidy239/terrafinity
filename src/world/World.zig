@@ -49,16 +49,18 @@ pub const World = struct {
         if (chunk == null) {
             const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.GenParams, self.allocator);
             const ad = ztracy.ZoneNC(@src(), "allocChunkStruct", 234313);
-            const chunkptr = try self.allocator.create(Chunk);
+            var chunkptr = try self.allocator.create(Chunk);
+            @memset(std.mem.asBytes(chunkptr), 0);
             ad.End();
+
             chunkptr.* = ch;
-            chunkptr.add_ref();
-            const duplicate = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
-            if (duplicate) |d| {
+            chunkptr.ref_count.raw = 2; //add ref before hashmap non atomicly
+            const existing = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
+            //chptr is in hashmap past this point
+            if (existing) |d| {
                 @branchHint(.unlikely);
                 chunkptr.release(); //ref was added before putting
-                std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 1);
-                _ = chunkptr.free(self.allocator, null);
+                _ = chunkptr.free(self.allocator);
                 self.allocator.destroy(chunkptr);
                 return d;
             } else return chunkptr;
@@ -82,20 +84,15 @@ pub const World = struct {
     }
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
-        while (true) {
-            const chunk = self.Chunks.getandaddref(Pos) orelse return;
-            _ = self.Chunks.remove(Pos);
-            chunk.release();
-
-            if (chunk.free(self.allocator, null) == false) continue;
-            self.allocator.destroy(chunk);
-            break;
-        }
-    }
-
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) !void {
-        std.debug.assert(chunk.free(self.allocator, null));
+        const chunk = self.Chunks.fetchremoveandaddref(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
+        _ = chunk.WaitForRefAmount(1, null);
+        _ = chunk.free(self.allocator);
         self.allocator.destroy(chunk);
+    }
+    ///dosent remove chunk from hashmap, just frees it
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) !void {
+        _ = chunk.WaitForRefAmount(1, null);
+        _ = chunk.free(self.allocator);
     }
 
     pub fn Deinit(self: *@This()) !void {
@@ -108,11 +105,12 @@ pub const World = struct {
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
                 try self.UnloadChunkByPtr(c.*);
+                self.allocator.destroy(c.*);
             }
         }
         self.Chunks.deinit();
         //  std.debug.print("lll\n", .{});
-        const pbktamount = self.Chunks.buckets.len;
+        const pbktamount = self.Entitys.buckets.len;
         for (0..pbktamount) |b| {
             self.Entitys.buckets[b].lock.lock();
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
