@@ -197,7 +197,7 @@ pub const Render = struct {
     fn IsAir(block: Blocks) bool {
         return block == Blocks.Air;
     }
-    //nehbors +x -x +y -y +z -z
+    //nehbors +x -x +y -y +z -zGeneratingAndMesh
     //        0   1  2  3  4  5
     pub fn MeshChunk_Normal(chunk: *Chunk, allocator: std.mem.Allocator, neighbors: [6]?*Chunk) ![2]?[]u32 {
         const meshchunkreal = ztracy.ZoneNC(@src(), "meshchunkreal", 0x965792d);

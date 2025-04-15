@@ -6,7 +6,7 @@ const Mesher = @import("Mesher.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const ztracy = @import("ztracy");
-
+const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
 const ChunkSize = 32;
 
@@ -43,21 +43,21 @@ pub const Renderer = struct {
     pool: *std.Thread.Pool,
     world: *World,
     facebuffer: c_uint,
-    eyePos: @Vector(3, f64),//x,y,z
-    rotationAxis:@Vector(3, f64), //pitch, yaw,roll
-    cameraFront:@Vector(3, f64),
-    mouseSensitivity:f64,
+    eyePos: @Vector(3, f64), //x,y,z
+    rotationAxis: @Vector(3, f64), //pitch, yaw,roll
+    cameraFront: @Vector(3, f64),
+    mouseSensitivity: f64,
     indecies: c_uint,
     shaderprogram: c_uint,
     uniforms: UniformLocations,
     MeshesToLoad: std.ArrayList(Mesher.Mesh),
-    LoadingChunks: std.AutoArrayHashMap([3]i32, bool),
-    LoadingChunksLock: std.Thread.RwLock,
+    LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
     MeshesToLoadLock: std.Thread.RwLock,
     ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
     ChunkRenderListLock: std.Thread.RwLock,
     MeshDistance: [3]std.atomic.Value(u32),
     GenerateDistance: [3]std.atomic.Value(u32),
+    LoadDistance: [3]std.atomic.Value(u32),
     window: *glfw.Window,
     proc_table: *gl.ProcTable,
     screen_dimensions: [2]u32,
@@ -69,8 +69,8 @@ pub const Renderer = struct {
             .pool = pool,
             .world = world,
             .mouseSensitivity = 0.2,
-            .rotationAxis = @Vector(3, f64){0,0,0},
-            .cameraFront = @Vector(3, f64){0,1,0},
+            .rotationAxis = @Vector(3, f64){ 0, 0, 0 },
+            .cameraFront = @Vector(3, f64){ 0, 1, 0 },
             .facebuffer = undefined,
             .indecies = undefined,
             .shaderprogram = undefined,
@@ -78,11 +78,11 @@ pub const Renderer = struct {
             .MeshesToLoadLock = .{},
             .uniforms = undefined,
             .eyePos = eyepos,
-            .LoadingChunks = std.AutoArrayHashMap([3]i32, bool).init(allocator),
-            .LoadingChunksLock = .{},
+            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
             .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
             .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
             .window = undefined,
             .proc_table = proc_table_location,
@@ -110,7 +110,6 @@ pub const Renderer = struct {
         }
         glfw.terminate();
         self.ChunkRenderList.deinit();
-        self.LoadingChunksLock.lock();
         self.LoadingChunks.deinit();
         self.MeshesToLoadLock.lock();
         for (self.MeshesToLoad.items) |mesh| {
@@ -142,7 +141,8 @@ pub const Renderer = struct {
             }
         }
         gl.makeProcTableCurrent(self.proc_table);
-        gl.Viewport(0, 0, 800, 600);
+        const xz = self.window.getContentScale();
+        gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
         glfw.swapInterval(1);
         gl.Enable(gl.DEPTH_TEST);
         gl.Enable(gl.CULL_FACE);
@@ -251,7 +251,7 @@ pub const Renderer = struct {
             }
         }
     }
-    ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
+    ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
@@ -267,6 +267,7 @@ pub const Renderer = struct {
             (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 })).extractFace(.zMinus, true),
             (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 })).extractFace(.zPlus, true),
         };
+
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
@@ -303,15 +304,25 @@ pub const Renderer = struct {
             const mesh = self.MeshesToLoad.swapRemove(0);
             defer FreeMesh(mesh, self.allocator);
             const mesh_buffer_ids = self.LoadMesh(mesh);
-            self.ChunkRenderListLock.lock();
-            defer self.ChunkRenderListLock.unlock();
-            try self.ChunkRenderList.put(mesh.Pos, mesh_buffer_ids);
+            {
+                self.ChunkRenderListLock.lock();
+                defer self.ChunkRenderListLock.unlock();
+                const oldChunk = try self.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
+                if (oldChunk) |old_mesh| {
+                    std.debug.print("remeshed chunk at pos:{d}\n", .{mesh.Pos});
+                    inline for (0..1) |i| {
+                        if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
+                        if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));
+                    }
+                }
+            }
+            _ = self.LoadingChunks.remove(mesh.Pos);
         }
     }
 
-    pub fn FreeMesh(mesh:Mesher.Mesh,allocator:std.mem.Allocator)void{
-        if(mesh.faces)|faces|allocator.free(faces);
-        if(mesh.TransperentFaces)|tfaces|allocator.free(tfaces);
+    pub fn FreeMesh(mesh: Mesher.Mesh, allocator: std.mem.Allocator) void {
+        if (mesh.faces) |faces| allocator.free(faces);
+        if (mesh.TransperentFaces) |tfaces| allocator.free(tfaces);
     }
 
     ///caller must free mesh, must be called from main thread

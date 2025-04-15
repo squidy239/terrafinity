@@ -11,21 +11,24 @@ pub const World = struct {
     threadPool: *std.Thread.Pool,
     TerrainHeightCache: Cache([32][32]i32),
     TerrainHeightCacheMutex: std.Thread.Mutex,
-    Players: ConcurrentHashMap(u128, *Entitys.Player, std.hash_map.AutoContext(u128), 80, 32),
+    Entitys: ConcurrentHashMap(u128, *Entitys.Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     GenParams: Chunk.GenParams,
 
-    pub fn RemovePlayer(self: *@This(), UUID: u128, max_tries: ?u32) !void {
-        const pl = self.Players.get(UUID) orelse return error.PlayerNotFound;
-        pl.ref_count.fetchAdd(1, .seq_cst);
-        pl.lock.lock();
+    pub fn PlayerIDtoEntityId(playerID: u128) u128 {
+        return std.hash.int(playerID);
+    }
+    pub fn RemovePlayer(self: *@This(), entityUUID: u128, max_tries: ?u32) !void {
+        const en = self.Entitys.getandaddref(entityUUID) orelse return error.PlayerNotFound;
+        if (en.entity != .Player) return error.UUIDnotPlayer;
+        en.lock.lock();
         var tries: u32 = 0;
-        while (pl.ref_count.load(.seq_cst) != 1) {
+        while (en.ref_count.load(.seq_cst) != 1) {
             std.atomic.spinLoopHint();
             tries += 1;
             if (tries > max_tries) return error.MaxTries;
         }
-        self.allocator.destroy(pl);
+        self.allocator.destroy(en.entity.Player);
     }
 
     pub fn AddPlayer(self: *@This(), UUID: u128, player: Entitys.Player) !void {
@@ -51,14 +54,14 @@ pub const World = struct {
             chunkptr.* = ch;
             chunkptr.add_ref();
             const duplicate = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
-            if(duplicate)|d|{
+            if (duplicate) |d| {
                 @branchHint(.unlikely);
                 chunkptr.release(); //ref was added before putting
                 std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 1);
                 _ = chunkptr.free(self.allocator, null);
                 self.allocator.destroy(chunkptr);
                 return d;
-            }else return chunkptr;
+            } else return chunkptr;
         } else return chunk.?;
     }
     ///adds a ref and loads chunk, ref must be removed if not using chunk
@@ -91,8 +94,8 @@ pub const World = struct {
     }
 
     pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) !void {
-            std.debug.assert(chunk.free(self.allocator, 100_000000));
-            self.allocator.destroy(chunk);
+        std.debug.assert(chunk.free(self.allocator, null));
+        self.allocator.destroy(chunk);
     }
 
     pub fn Deinit(self: *@This()) !void {
@@ -101,37 +104,25 @@ pub const World = struct {
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
             self.Chunks.buckets[b].lock.lock();
-            var it = self.Chunks.buckets[b].hash_map.iterator();
+            var it = self.Chunks.buckets[b].hash_map.valueIterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                try self.UnloadChunkByPtr(c.value_ptr.*);
-
+                try self.UnloadChunkByPtr(c.*);
             }
         }
         self.Chunks.deinit();
-        std.debug.print("lll\n", .{});
+        //  std.debug.print("lll\n", .{});
         const pbktamount = self.Chunks.buckets.len;
         for (0..pbktamount) |b| {
-            self.Players.buckets[b].lock.lock();
-            var it = self.Players.buckets[b].hash_map.valueIterator();
-            defer self.Players.buckets[b].lock.unlock();
+            self.Entitys.buckets[b].lock.lock();
+            var it = self.Entitys.buckets[b].hash_map.valueIterator();
+            defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |p| {
-                //TODO send disconnect
-                _ = p;
+                try p.*.free(self.allocator, null);
+                //TODO send disconnect if entity is player
             }
         }
-        std.debug.print("bbb\n", .{});
-        const bamount = self.Players.buckets.len;
-        for (0..bamount) |b| {
-            self.Players.buckets[b].lock.lock();
-            var it = self.Players.buckets[b].hash_map.iterator();
-            defer self.Players.buckets[b].lock.unlock();
-            while (it.next()) |c| {
-                self.allocator.destroy(c.value_ptr.*);
-
-            }
-        }
-        self.Players.deinit();
+        self.Entitys.deinit();
         self.TerrainHeightCache.deinit();
     }
 };

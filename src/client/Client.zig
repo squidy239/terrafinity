@@ -63,20 +63,20 @@ pub fn main() !void {
 
     const allocator = debug_allocator.allocator();
     var sfa = std.heap.stackFallback(5000000, allocator);
-    var sfalloc = std.heap.ThreadSafeAllocator{.child_allocator = sfa.get()};
+    var sfalloc = std.heap.ThreadSafeAllocator{ .child_allocator = sfa.get() };
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count-2, .allocator = sfalloc.allocator()});
+    try pool.init(.{ .n_jobs = cpu_count - 2, .allocator = sfalloc.allocator() });
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
         .TerrainHeightCache = try Cache([32][32]i32).init(sfalloc.allocator(), .{}),
         .TerrainHeightCacheMutex = .{},
-        .Players = ConcurrentHashMap(u128, *Entitys.Player, std.hash_map.AutoContext(u128), 80, 32).init(sfalloc.allocator()),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(sfalloc.allocator()),
+        .Entitys = ConcurrentHashMap(u128, *Entitys.Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
+        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .GenParams = .{
             .terrainmin = -100,
-            .terrainmax = 256,
+            .terrainmax = 1024,
             .seed = 23,
             .TerrainNoise = .{
                 .fractal_type = .ridged,
@@ -85,9 +85,10 @@ pub fn main() !void {
             },
         },
     };
-    
+
     var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, allocator);
-    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
+
+    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderUnloaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
     defer {
         std.debug.print("started closing\n", .{});
         renderer.window.destroy();
@@ -98,11 +99,11 @@ pub fn main() !void {
         std.debug.print("loaderThread stopped\n", .{});
         renderer.deinit();
         std.debug.print("renderer deinit\n", .{});
-        MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", err);
+        MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
     }
     UserInput.init(&renderer);
-    
+
     _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     _ = try glfw.Window.setInputMode(renderer.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
@@ -117,6 +118,8 @@ pub fn main() !void {
         // std.debug.print("pos:{d}, front:{d}, up:{d}\n", .{ eyePos, cameraFront, cameraUp })
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
         renderer.DrawChunks();
+        const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
+        Loader.UnloadMeshes(&renderer, meshDistance);
         drawChunks.End();
         st = std.time.nanoTimestamp();
     }
@@ -133,7 +136,6 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
     if (window.getKey(glfw.Key.d) == .press)
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
 }
-
 
 pub fn MultiPlayerWorld() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -197,5 +199,3 @@ pub fn Handler(args: anytype, mem: []const u8, sender: *const std.posix.sockaddr
         else => std.debug.print("invalid packettype reiceived\n", .{}),
     }
 }
-
-
