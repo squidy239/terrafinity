@@ -6,16 +6,17 @@
     //
     // It is redundant to include "zig" in this name because it is already
     // within the Zig package namespace.
-    .name = "voxelgame",
+    .name = .voxelgame,
 
+    .fingerprint = 0xb568689f108c93a6,
     // This is a [Semantic Version](https://semver.org/).
     // In a future version of Zig it will be used for package deduplication.
-    .version = "0.2.0",
+    .version = "0.3.0",
 
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    //.minimum_zig_version = "0.11.0",
+    .minimum_zig_version = "0.14.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -23,28 +24,25 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
 
-    .dependencies = .{
-        .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#e9bd486903b5904b6d4e27b8b3771b138a667ef1",
-            .hash = "12209fb981e7aab58c2f9062ab526bd43df3d7953aa41e131a173c37ad35d10b1132",
-        },
-        .zm = .{
-            .url = "git+https://github.com/griush/zm#dbb86079993637e3b0ab12323e08461ea6325ca6",
-            .hash = "1220897b0db58d1867fef1672a72f886f27af6a22e561797c48c9f793b06961c60ab",
-        },
-        .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#5af60074f355ecda6114d08dcc8c931c3d163c94",
-            .hash = "1220293b509e9238e43828b00ee18e38eeace190ef844b74bf54e3db6e7da7398f4b",
-        },
-        .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#701f41808086411f14d3bc2d87fc0b14bd09ceba",
-            .hash = "1220acff2285b51630055c7c062fb62a01b32272297b27e90cd6f85901c1b4d1c48d",
-        },
-        .cache = .{
-            .url = "git+https://github.com/karlseguin/cache.zig#f9641d1a91bb56f6a640a7552c008671246ee4b3",
-            .hash = "1220f32208026fea0c75bf6225630a3fa02e7f7f7070192d5ecd757b4fb0d2d10d64",
-        },
-    },
+    .dependencies = .{ .zglfw = .{
+        .url = "git+https://github.com/zig-gamedev/zglfw#dcb1dae7d4a90f88b70dbae73300ab9b19fb250c",
+        .hash = "zglfw-0.10.0-dev-zgVDNJmZIQCIiO_94Sp5jqrPtz4Eumk3bDcxS7dSZfIj",
+    }, .zm = .{
+        .url = "git+https://github.com/griush/zm#319a44a9b0859214b9240a5c4ae0d8ae9ac16672",
+        .hash = "zm-0.3.0-AAAAAL3MAAA2du9TcSd0z2lFBF5_Qv-0zd7F566Z7B3K",
+    }, .ztracy = .{
+        .url = "git+https://github.com/zig-gamedev/ztracy#d6f78fe19497a5b341329f6f67e9f9ba38635e8e",
+        .hash = "ztracy-0.14.0-dev-zHJSq08NFwD4iNq3K_gFxZ7Y8mMQ5wVM494x8c4R2sMz",
+    }, .zigglgen = .{
+        .url = "git+https://github.com/castholm/zigglgen#d5f381759825ee0bac29bc294d47aa05be4ab7b5",
+        .hash = "zigglgen-0.4.0-bmyqLX_gLQDFXilQ5VQ9fJeOHKU1RFrggOzRqTGBX79W",
+    }, .cache = .{
+        .url = "git+https://github.com/karlseguin/cache.zig#f9641d1a91bb56f6a640a7552c008671246ee4b3",
+        .hash = "N-V-__8AAHKbAADzIggCb-oMdb9iJWMKP6Auf39wcBktXs11",
+    }, .zudp = .{
+        .url = "git+https://github.com/squidy239/zudp#b077a5b4014fa4ace5a26cf7ae191be83f8db47e",
+        .hash = "zudp-0.3.0-i2x3QEO6AAAUm1q__-SuiGj0l725Uqdv1fqUiSjgX4Ua",
+    } },
 
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

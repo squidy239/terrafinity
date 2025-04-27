@@ -1,28 +1,5 @@
-# The documentation for the voxeelgame network protocal
+# The documentation for the voxelgame network protocol
  NOT FINISHED OR WORKING, just a plan of what it will be
-
-# standerd packet types:
-
-## standerd no verify packet:
-[
-2 bytes: type
-1 bit: is packet split
-if split{2 bytes amount of packets, 2 bytes packet segment number}
-data
-]
-
-## standerd verify packet:
-[
-2 bytes: type
-1 bit: is packet split
-if split{2 bytes amount of packets, 2 bytes packet segment number}
-4 bytes: packet id,
-data
-]
-
-## packet aknolagement
-[2 bytes:type, 4 bytes: packet id, bit:intact, if(intact is false) 1 bit was packet split, if packet was split, 2 bytes segment number]
-aknolagement must get acnolaged
 
 
 # serverbound (just data):
@@ -36,10 +13,10 @@ url used to ping: string,
 ] -> ping response
 
 ## unverified login:
-verifyed
+verified
 [
 version: 2 bytes,
-username len:1 byte,
+username len: 1 byte,
 username: variable string,
 server adderess len: 1 byte,
 url_length:byte,
