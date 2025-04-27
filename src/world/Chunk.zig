@@ -16,16 +16,17 @@ pub const Chunk = struct {
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex, gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
-        const gc = ztracy.ZoneNC(@src(), "GenChunk", 1);
-        defer gc.End();
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
         const heights = GetHeightsFromCache(Pos, TerrainHeightCache, TerrainHeightCacheMutex) orelse GenTerrainHeight(Pos, gen_params);
+        gc.End();
         var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
         var LastBlock: ?Block = null;
         var isOneBlock = true;
         const SeaLevel: i32 = 0;
+        const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         for (heights, 0..) |row, x| {
             for (row, 0..) |terrain_height, z| {
                 for (0..ChunkSize) |c| {
@@ -37,6 +38,7 @@ pub const Chunk = struct {
                 }
             }
         }
+        gen.End();
         const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);
         defer ad.End();
         var blockEncoding: BlockEncoding = undefined;
@@ -108,7 +110,9 @@ pub const Chunk = struct {
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
-    fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex) ?[ChunkSize][ChunkSize]i32 {
+    pub fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: ?*cache.Cache([32][32]i32), TerrainHeightCacheMutex: ?*std.Thread.Mutex) ?[ChunkSize][ChunkSize]i32 {
+        const gth = ztracy.ZoneNC(@src(), "GetTerrainHeightsFromCache", 110029);
+        defer gth.End();
         if (TerrainHeightCache != null and TerrainHeightCache != null) {
             TerrainHeightCacheMutex.?.lock();
             defer TerrainHeightCacheMutex.?.unlock();
@@ -121,7 +125,9 @@ pub const Chunk = struct {
         } else return null;
     }
 
-    fn GenTerrainHeight(Pos: [3]i32, params: GenParams) [ChunkSize][ChunkSize]i32 {
+    pub fn GenTerrainHeight(Pos: [3]i32, params: GenParams) [ChunkSize][ChunkSize]i32 {
+        const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
+        defer gth.End();
         const floatpos = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
         var height: [ChunkSize][ChunkSize]i32 = undefined;
         for (0..ChunkSize) |ux| {
@@ -211,3 +217,124 @@ pub const Chunk = struct {
         seed: u64,
     };
 };
+
+test "fastnoiselite" {
+    var gridOne: [16][16]u8 = undefined;
+    var gridTwo: [16][16]u8 = undefined;
+    const noise = Noise.Noise(f64){
+        .seed = std.crypto.random.int(i32),
+        .noise_type = .perlin,
+    };
+    const noise2 = Noise.Noise(f64){
+        .seed = std.crypto.random.int(i32),
+        .noise_type = .perlin,
+    };
+    std.debug.print("eql: {any} == {any}\n", .{ singlePerlin2D(123312321, 0, 0), singlePerlin2D(-321355, 0, 0) });
+    for (0..16) |xx| {
+        for (0..16) |zz| {
+            gridOne[xx][zz] = noise.genNoise2DAsType(@floatFromInt(xx), @floatFromInt(zz), u8);
+        }
+    }
+    for (0..16) |xx| {
+        for (0..16) |zz| {
+            gridTwo[xx][zz] = noise2.genNoise2DAsType(@floatFromInt(xx), @floatFromInt(zz), u8);
+        }
+    }
+    std.debug.print("grid1: \n", .{});
+
+    for (gridOne) |row| {
+        std.debug.print("{d}\n", .{row});
+    }
+    std.debug.print("grid2: \n", .{});
+    for (gridTwo) |row| {
+        std.debug.print("{d}\n", .{row});
+    }
+
+    std.debug.print("isequal: {any}\n", .{std.mem.eql([16]u8, &gridOne, &gridTwo)});
+    // std.debug.print("n1:{d},\n n2:{d}\n", . gridOne, gridTwo });
+}
+pub fn singlePerlin2D(seed: i32, x: f32, y: f32) f32 {
+    var x0 = fastFloor(x + 5);
+    var y0 = fastFloor(y + 3);
+
+    const xd0: f32 = x - @as(f32, @floatFromInt(x0));
+    const yd0: f32 = y - @as(f32, @floatFromInt(y0));
+    const xd1: f32 = xd0 - 1;
+    const yd1: f32 = yd0 - 1;
+
+    const xs: f32 = interpQuintic(xd0);
+    const ys: f32 = interpQuintic(yd0);
+
+    x0 *%= prime_x;
+    y0 *%= prime_y;
+    const x1 = x0 +% prime_x;
+    const y1 = y0 +% prime_y;
+    const xf0: f32 = lerp(gradCoord2D(seed, x0, y0, xd0, yd0), gradCoord2D(seed, x1, y0, xd1, yd0), xs);
+    const xf1: f32 = lerp(gradCoord2D(seed, x0, y1, xd0, yd1), gradCoord2D(seed, x1, y1, xd1, yd1), xs);
+    std.debug.print("xf0:{d}, xf1:{d},ys:{d},xs:{d}, gc:{d}\n", .{ xf0, xf1, ys, xs, gradCoord2D(seed, x0, y0, xd0, yd0) });
+    return lerp(xf0, xf1, ys) * 1.4247691104677813;
+}
+
+inline fn interpQuintic(t: f32) f32 {
+    return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+inline fn hash2D(seed: i32, x_primed: i32, y_primed: i32) i32 {
+    const hash: i32 = seed ^ x_primed ^ y_primed;
+    return hash *% 0x27D4EB2D;
+}
+
+inline fn gradCoord2D(seed: i32, x_primed: i32, y_primed: i32, xd: f32, yd: f32) f32 {
+    var hash = hash2D(seed, x_primed, y_primed);
+    hash ^= (hash >> 15);
+    const index: usize = @intCast(hash & (127 << 1));
+    return xd * gradients_2d[index] + yd * gradients_2d[index | 1];
+}
+
+const gradients_2d = [256]f32{
+    0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
+    0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
+    0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
+    -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
+    0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
+    0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
+    0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
+    -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
+    0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
+    0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
+    0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
+    -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
+    0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
+    0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
+    0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
+    -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
+    0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
+    0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
+    0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
+    -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
+    0.38268343236509,   0.923879532511287,  0.923879532511287,  0.38268343236509,   0.923879532511287,  -0.38268343236509,  0.38268343236509,   -0.923879532511287,
+    -0.38268343236509,  -0.923879532511287, -0.923879532511287, -0.38268343236509,  -0.923879532511287, 0.38268343236509,   -0.38268343236509,  0.923879532511287,
+};
+
+inline fn lerp(a: f32, b: f32, t: f32) f32 {
+    return a + t * (b - a);
+}
+inline fn fastFloor(f: f32) i32 {
+    return @intFromFloat(if (f >= 0) f else f - 1);
+}
+
+const prime_x: i32 = 501125321;
+/// A constant prime-number used in y-axis calculations.
+const prime_y: i32 = 1136930381;
+/// A constant prime-number used in z-axis calculations.
+const prime_z: i32 = 1720413743;

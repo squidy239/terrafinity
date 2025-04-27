@@ -3,12 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const isserver = false;
-    const isclient = true;
+    const runGame = true;
+    const clientservertoggle = true;
     //std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
         .name = "voxelgame",
-        .root_source_file = if (isserver) b.path("src/server/Server.zig") else if (isclient) b.path("src/client/Client.zig") else b.path("src/world/Chunk.zig"),
+        .root_source_file = if (clientservertoggle and !runGame) b.path("src/server/Server.zig") else if (!clientservertoggle and !runGame) b.path("src/client/testClient.zig") else b.path("src/client/Client.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -48,9 +48,16 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("cache", cache.module("cache"));
+    const Entitys = b.addModule("Entity", .{
+        .root_source_file = b.path("src/world/Entity.zig"),
+    });
+    exe.root_module.addImport("Entity", Entitys);
 
-    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig") });
-    exe.root_module.addImport("Requests", Requests);
+    const EntityTypes = b.addModule("EntityTypes", .{
+        .root_source_file = b.path("src/world/EntityTypes.zig"),
+    });
+    exe.root_module.addImport("EntityTypes", EntityTypes);
+
     const Block = b.addModule("Block", .{
         .root_source_file = b.path("src/world/Blocks.zig"),
     });
@@ -62,17 +69,15 @@ pub fn build(b: *std.Build) void {
     } } });
     exe.root_module.addImport("Chunk", Chunk);
 
-    const Entitys = b.addModule("Entitys", .{
-        .root_source_file = b.path("src/world/Entitys.zig"),
-    });
-    exe.root_module.addImport("Entitys", Entitys);
-
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
+    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig"), .imports = &.{ .{ .name = "Entitys", .module = Entitys }, .{ .name = "Chunk", .module = Chunk } } });
+    exe.root_module.addImport("Requests", Requests);
+
     const world_module = b.addModule("World", .{
         .root_source_file = b.path("src/world/World.zig"),
-        .imports = &.{ .{ .name = "Chunk", .module = Chunk }, .{ .name = "Entitys", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "cache", .module = cache.module("cache") }, .{
+        .imports = &.{ .{ .name = "Chunk", .module = Chunk }, .{ .name = "Entity", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "cache", .module = cache.module("cache") }, .{
             .name = "ztracy",
             .module = ztracy.module("root"),
         } },

@@ -1,13 +1,16 @@
 const std = @import("std");
 
 const ChunkSize = 32;
+const Entitys = @import("Entitys");
+const Chunk = @import("Chunk");
 
 pub const PacketType = enum(u16) {
-    Ping = 0,
-    Pong = 1,
-    Unverifyed_Login = 2,
-    Login_Succeded = 3,
-    Login_Failed = 4,
+    ServerboundPing,
+    ClientboundPong,
+    ServerboundLoginStart,
+    ClientboundLoginData,
+    ServerboundLoginComplete,
+    ClientboundDisconnect,
 };
 
 pub const Version = enum(u16) {
@@ -16,15 +19,16 @@ pub const Version = enum(u16) {
 
 //TODO pick one endian and varint
 pub const Ping = struct {
-    pub const max_buffer_size: usize = 257;
+    pub const max_buffer_size: usize = 223;
     referrer_len: u8,
     referrer: []const u8,
-
+    version: Version,
     pub fn make(p: @This(), buf: []u8) []u8 {
         std.debug.assert(p.referrer_len == p.referrer.len);
         var pos: usize = 0;
         SetData(&pos, buf, p.referrer_len);
         SetData(&pos, buf, p.referrer);
+        SetData(&pos, buf, p.version);
         return buf[0..pos];
     }
 
@@ -32,10 +36,12 @@ pub const Ping = struct {
         var pos: usize = 0;
         const referrer_len = try GetData(&pos, ping_data, u8, null);
         const referrer = try GetData(&pos, ping_data, []const u8, referrer_len);
+        const version = try std.meta.intToEnum(Version, try GetData(&pos, ping_data, u16, null));
 
         return @This(){
             .referrer_len = referrer_len,
             .referrer = referrer,
+            .version = version,
         };
     }
 };
@@ -64,7 +70,7 @@ pub const Pong = struct {
         const server_name = try GetData(&pos, pong, []const u8, server_name_len);
         const MOTD_len: u8 = try GetData(&pos, pong, u8, null);
         const MOTD = try GetData(&pos, pong, []const u8, MOTD_len);
-        const version = try GetData(&pos, pong, Version, null);
+        const version = try std.meta.intToEnum(Version, try GetData(&pos, pong, u16, null));
         return @This(){
             .server_name_len = server_name_len,
             .server_name = server_name,
@@ -75,7 +81,7 @@ pub const Pong = struct {
     }
 };
 
-pub const Unverifyed_Login = struct { //TODO verifacation
+pub const LoginStart = struct { //TODO verifacation
     pub const max_buffer_size: usize = 532;
     version: Version,
     UUID: u128,
@@ -83,7 +89,6 @@ pub const Unverifyed_Login = struct { //TODO verifacation
     username: []const u8,
     referrer_len: u8,
     referrer: []const u8,
-    GenDistance: [2]u32,
 
     pub fn make(p: @This(), buf: []u8) []u8 {
         std.debug.assert(p.username_len == p.username.len);
@@ -95,19 +100,17 @@ pub const Unverifyed_Login = struct { //TODO verifacation
         SetData(&pos, buf, p.username);
         SetData(&pos, buf, p.referrer_len);
         SetData(&pos, buf, p.referrer);
-        SetData(&pos, buf, p.GenDistance);
         return buf[0..pos];
     }
 
     pub fn load(login_data: []const u8) !@This() {
         var pos: usize = 0;
-        const version = try GetData(&pos, login_data, Version, null);
+        const version = try std.meta.intToEnum(Version, try GetData(&pos, login_data, u16, null));
         const UUID = try GetData(&pos, login_data, u128, null);
         const username_len = try GetData(&pos, login_data, u8, null);
         const username = try GetData(&pos, login_data, []const u8, username_len);
         const referrer_len = try GetData(&pos, login_data, u8, null);
         const referrer = try GetData(&pos, login_data, []const u8, referrer_len);
-        const GenDistance = try GetData(&pos, login_data, [2]u32, null);
 
         return @This(){
             .version = version,
@@ -116,16 +119,56 @@ pub const Unverifyed_Login = struct { //TODO verifacation
             .username = username,
             .referrer_len = referrer_len,
             .referrer = referrer,
-            .GenDistance = GenDistance,
         };
     }
 };
 
-pub const Login_Succeded = struct {
-    //TODO chunkgenparams and playerdata
+pub const LoginData = struct {
+    pub const max_buffer_size: usize = 149;
+
+    ipVerifyNumber: u64,
+    pos: @Vector(3, f64),
+    Velocity: @Vector(3, f64),
+    GameMode: Entitys.GameMode,
+    maxGenDistance: [3]u32,
+    genParams: Chunk.Chunk.GenParams,
+
+    pub fn make(p: @This(), buf: []u8) []u8 {
+        var pos: usize = 0;
+        SetData(&pos, buf, p.ipVerifyNumber);
+        SetData(&pos, buf, p.pos);
+        SetData(&pos, buf, p.Velocity);
+        SetData(&pos, buf, p.GameMode);
+        SetData(&pos, buf, p.maxGenDistance);
+        SetData(&pos, buf, p.genParams);
+        return buf[0..pos];
+    }
+
+    pub fn load(login_data: []const u8) !@This() {
+        var pos: usize = 0;
+        const ipVerifyNumber = try GetData(&pos, login_data, u64, null);
+        const position = try GetData(&pos, login_data, @Vector(3, f64), null);
+        const velocity = try GetData(&pos, login_data, @Vector(3, f64), null);
+        const gameMode = try GetData(&pos, login_data, Entitys.GameMode, null);
+        const maxGenDistance = try GetData(&pos, login_data, [3]u32, null);
+        const genParams = try GetData(&pos, login_data, Chunk.Chunk.GenParams, null);
+
+        return @This(){
+            .ipVerifyNumber = ipVerifyNumber,
+            .pos = position,
+            .Velocity = velocity,
+            .GameMode = gameMode,
+            .maxGenDistance = maxGenDistance,
+            .genParams = genParams,
+        };
+    }
 };
 
-pub const Login_Failed = struct {
+pub const LoginComplete = packed struct {
+    ipVerifyNumber: u64, //must be the same one client reiceved
+};
+
+pub const Disconnect = struct {
     pub const max_buffer_size: usize = 257;
     message_len: u8,
     message: []const u8,
@@ -150,21 +193,30 @@ pub const Login_Failed = struct {
     }
 };
 
+//TODO beond this point
+//
+//
+//_____________________________________________
 pub const Send_Chunks = struct {
     chunk_amount: u8,
     chunks: []const len_prefixed_chunkdata,
 
     const len_prefixed_chunkdata = struct {
         chunk_len: u32,
-        chunk_data: []const u8,
+        chunk_data: []const u8, //will be blockencoding
     };
 };
 
 //client sends gendistance and server sends chunks, @min(client_gendistance, server_max_gendistance)
 
-pub const Send_Chunks_For_Client_Gen = struct {
+pub const Client_Chunk_Request = struct {
     chunk_amount: u8,
     chunks: []const [3]i32,
+};
+
+pub const Client_Chunk_Request_Response = struct {
+    chunk_amount: u8,
+    chunks_modified: []const [3]i32, //server will send these chunks
 };
 
 ///caller guarantees pos+sizeof data < buffer.len
@@ -182,7 +234,9 @@ pub fn SetData(pos: *usize, buffer: []u8, data: anytype) void {
     }
 }
 
+///wont validate enums
 pub fn GetData(pos: *usize, buffer: []const u8, comptime T: type, slicelen: ?usize) !T {
+    std.debug.assert(T != Version);
     if (T == []u8 or T == []const u8) {
         if (pos.* + slicelen.? > buffer.len) return error.BufferToSmall;
         const result = buffer[pos.* .. pos.* + slicelen.?];

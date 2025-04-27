@@ -16,7 +16,9 @@ const UniformLocations = struct {
     chunkposlocation: c_int,
     tlocation: c_int,
     sunlocation: c_int,
+    fogDensity: c_int,
     scalelocation: c_int,
+    skyColor: c_int,
     timelocation: c_int,
 
     pub fn GetLocations(shaderprogram: c_uint) @This() {
@@ -26,6 +28,8 @@ const UniformLocations = struct {
             .chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos"),
             .tlocation = gl.GetUniformLocation(shaderprogram, "chunktime"),
             .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
+            .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
+            .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
             .scalelocation = gl.GetUniformLocation(shaderprogram, "scale"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
         };
@@ -84,8 +88,8 @@ pub const Renderer = struct {
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
             .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(21), std.atomic.Value(u32).init(21), std.atomic.Value(u32).init(21) },
-            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
+            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
@@ -214,15 +218,6 @@ pub const Renderer = struct {
     pub fn DrawChunks(self: *@This()) void {
         self.ChunkRenderListLock.lockShared();
         defer self.ChunkRenderListLock.unlockShared();
-        gl.ClearColor(0, 0.3, 0.5, 1.0);
-
-        gl.Clear(gl.COLOR_BUFFER_BIT);
-        gl.Clear(gl.DEPTH_BUFFER_BIT);
-
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
-        gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
-        gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
 
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         var drawnchunks: u64 = 0;
@@ -295,7 +290,7 @@ pub const Renderer = struct {
         //TODO dont execute if not running
         const floatPlayerChunkPos = self.eyePos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-        if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst)), @intCast(self.GenerateDistance[1].load(.seq_cst)), @intCast(self.GenerateDistance[2].load(.seq_cst)) })) {
+        if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst) + 2), @intCast(self.GenerateDistance[1].load(.seq_cst) + 2), @intCast(self.GenerateDistance[2].load(.seq_cst) + 2) })) {
             self.AddChunkToRender(Pos) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
         } else {
             _ = self.LoadingChunks.remove(Pos);

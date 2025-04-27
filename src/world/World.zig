@@ -2,7 +2,9 @@ const std = @import("std");
 const Cache = @import("cache").Cache;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Chunk = @import("Chunk").Chunk;
-const Entitys = @import("Entitys");
+const Entity = @import("Entity").Entity;
+const EntityTypes = @import("EntityTypes");
+
 const Block = @import("Block").Blocks;
 const ztracy = @import("ztracy");
 const ChunkSize = 32;
@@ -10,37 +12,58 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     threadPool: *std.Thread.Pool,
     TerrainHeightCache: Cache([32][32]i32),
-    TerrainHeightCacheMutex: std.Thread.Mutex,
-    Entitys: ConcurrentHashMap(u128, *Entitys.Entity, std.hash_map.AutoContext(u128), 80, 32),
+    SpawnRange: u32,
+    SpawnCenterPos: [3]i32,
+    SpawnRand: std.Random,
+    TerrainHeightCacheMutex: std.Thread.Mutex, //TODO make rw lock
+    Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     GenParams: Chunk.GenParams,
 
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
     }
-    pub fn RemovePlayer(self: *@This(), entityUUID: u128, max_tries: ?u32) !void {
-        const en = self.Entitys.getandaddref(entityUUID) orelse return error.PlayerNotFound;
-        if (en.entity != .Player) return error.UUIDnotPlayer;
+    pub fn UnloadEntity(self: *@This(), entityUUID: u128) !void {
+        const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
+        en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
         en.lock.lock();
-        var tries: u32 = 0;
-        while (en.ref_count.load(.seq_cst) != 1) {
-            std.atomic.spinLoopHint();
-            tries += 1;
-            if (tries > max_tries) return error.MaxTries;
+        //TODO save entity to disk
+        en.fullfree(self.allocator);
+    }
+
+    pub fn SpawnEntity(self: *@This(), UUID: u128, entity: anytype) !void {
+        if (self.Entitys.contains(UUID)) return error.PlayerAlreadyConnected;
+        const allocated_entity = try entity.MakeEntity(self.allocator);
+        errdefer allocated_entity.fullfree(self.allocator);
+        const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
+        if (existing) |_| {
+            allocated_entity.fullfree(self.allocator);
         }
-        self.allocator.destroy(en.entity.Player);
     }
 
-    pub fn AddPlayer(self: *@This(), UUID: u128, player: Entitys.Player) !void {
-        std.debug.assert(UUID == player.player_UUID);
-        if (self.Players.get(UUID) != null) return error.PlayerAlreadyConnected;
-        var pl = try self.allocator.create(Entitys.Player);
-        errdefer self.allocator.destroy(pl);
-        pl.* = player;
-        pl.ref_count.store(1, .seq_cst);
-        try self.Players.put(UUID, pl);
+    pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
+        const pos = [2]i32{ self.SpawnRand.intRangeAtMost(i32, self.SpawnCenterPos[0] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.SpawnRand.intRangeAtMost(i32, self.SpawnCenterPos[2] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
+        const chunkPos = [2]i32{ @divFloor(pos[0], 32), @divFloor(pos[1], 32) };
+        const posInChunk = [2]i32{ @mod(pos[0], 32), @mod(pos[1], 32) };
+        const height = Chunk.GenTerrainHeight([3]i32{ chunkPos[0], 0, chunkPos[1] }, self.GenParams)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
+    pub fn TickEntitys(self: *@This()) !void {
+        const bktamount = self.Entitys.buckets.len;
+        for (0..bktamount) |b| {
+            self.Entitys.buckets[b].lock.lockShared();
+            var it = self.Entitys.buckets[b].hash_map.valueIterator();
+            defer self.Entitys.buckets[b].lock.unlockShared();
+            while (it.next()) |entity| {
+                entity.*.ref_count.fetchAdd(1, .seq_cst);
+                defer entity.*.ref_count.fetchSub(1, .seq_cst);
+                entity.*.lock.lock();
+                defer entity.*.lock.unlock();
+                entity.GetActive().update();
+            }
+        }
+    }
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
     pub fn LoadChunk(self: *@This(), Pos: [3]i32) !*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
@@ -109,15 +132,13 @@ pub const World = struct {
             }
         }
         self.Chunks.deinit();
-        //  std.debug.print("lll\n", .{});
-        const pbktamount = self.Entitys.buckets.len;
-        for (0..pbktamount) |b| {
+        const enbktamount = self.Entitys.buckets.len;
+        for (0..enbktamount) |b| {
             self.Entitys.buckets[b].lock.lock();
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
             defer self.Entitys.buckets[b].lock.unlock();
-            while (it.next()) |p| {
-                try p.*.free(self.allocator, null);
-                //TODO send disconnect if entity is player
+            while (it.next()) |c| {
+                c.*.fullfree(self.allocator);
             }
         }
         self.Entitys.deinit();

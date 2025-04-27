@@ -25,6 +25,16 @@ const KeyboardKey = enum(u7) {
     G,
 };
 
+const KeyboardAction = enum(u8) {
+    Forward,
+    Right,
+    Back,
+    Left,
+    CTRL,
+    JUMP,
+    SHIFT,
+    G,
+};
 const ToggleSettings = struct {
     Fullscreen: bool,
     Sprinting: bool,
@@ -38,8 +48,7 @@ var ts = ToggleSettings{
 
 const PlayerInput = struct { //server  will have a max deltatime
     microTimestamp: i64,
-    keysPressedLen: u8,
-    keysPressed: []const KeyboardKey,
+    keyToggled: KeyboardAction, //TODO figure out best format so send inputs, only ones changed or all each frame
 };
 
 pub fn processInput() !void {
@@ -47,7 +56,7 @@ pub fn processInput() !void {
     const timestamp = std.time.microTimestamp();
     const dt = timestamp - lastmicrotime;
     lastmicrotime = timestamp;
-    const cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.2, 0.2, 0.2 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
+    const cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.02, 0.02, 0.02 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (render.window.getKey(glfw.Key.w) == .press)
         render.eyePos += cameraSpeed * render.cameraFront;
     if (render.window.getKey(glfw.Key.s) == .press)

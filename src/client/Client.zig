@@ -8,7 +8,7 @@ const glfw = @import("zglfw");
 const ztracy = @import("ztracy");
 const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
-const Entitys = @import("Entitys");
+const Entity = @import("Entity").Entity;
 const Chunk = @import("Chunk").Chunk;
 const Loader = @import("Loader.zig");
 const UserInput = @import("UserInput.zig");
@@ -67,26 +67,35 @@ pub fn main() !void {
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 2, .allocator = sfalloc.allocator() });
+    var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
+    const seed = rand.random().int(u64);
+    std.log.info("using seed {d}\n", .{seed});
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
         .TerrainHeightCache = try Cache([32][32]i32).init(sfalloc.allocator(), .{}),
         .TerrainHeightCacheMutex = .{},
-        .Entitys = ConcurrentHashMap(u128, *Entitys.Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
+        .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        .SpawnRange = 0,
+        .SpawnCenterPos = [3]i32{ 0, 0, 0 },
+        .SpawnRand = rand.random(),
         .GenParams = .{
             .terrainmin = -256,
-            .terrainmax = 512,
-            .seed = 23,
+            .terrainmax = 256,
+            .seed = seed,
             .TerrainNoise = .{
+                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
-                .octaves = 10,
-                .frequency = 0.01,
+                .octaves = 16,
+                .noise_type = .value,
+                .frequency = 0.07,
             },
         },
     };
 
-    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, @Vector(3, f64){ 0, 0, 0 }, &running, allocator);
+    std.debug.print("gp: {any}\n", .{MainWorld.GenParams.TerrainNoise});
+    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, MainWorld.GetPlayerSpawnPos(), &running, allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &renderer.eyePos, 40 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
     defer {
@@ -115,7 +124,21 @@ pub fn main() !void {
         renderer.window.swapBuffers();
         glfw.pollEvents();
         try UserInput.processInput();
-        //  std.debug.print("pos:{d}, front:{d}\n", .{ renderer.eyePos, renderer.cameraFront });
+        std.debug.print("pos:{d}, front:{d}\t\t\r", .{ renderer.eyePos, renderer.cameraFront });
+        const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
+        const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+        const skyColor = mix(blueSky, greySky, @floatCast(@min(1.0, @max(0, renderer.eyePos[1] / 4096))));
+        gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+
+        gl.Clear(gl.COLOR_BUFFER_BIT);
+        gl.Clear(gl.DEPTH_BUFFER_BIT);
+        gl.Uniform4f(renderer.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+        gl.Uniform1f(renderer.uniforms.fogDensity, 0.001 + @as(f32, @floatCast(renderer.eyePos[1] / 800000)));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(renderer.screen_dimensions[0])) / @as(f32, @floatFromInt(renderer.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + renderer.cameraFront, Renderer.cameraUp)).data));
+        gl.UniformMatrix4fv(renderer.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
+        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
+        gl.UniformMatrix4fv(renderer.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
+
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
         renderer.DrawChunks();
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -137,65 +160,8 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
 }
 
-pub fn MultiPlayerWorld() !void {
-    var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    defer if (debug_allocator.deinit() == .leak) {
-        std.debug.panic("mem leaked", .{});
-    } else {};
-    const allocator = debug_allocator.allocator();
-    const cpu_count = try std.Thread.getCpuCount();
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
-    defer pool.deinit();
-    var client = try zudp.init("0.0.0.0", 0, allocator);
-
-    defer client.deinit();
-    try client.SpawnTimeoutManager(500 * std.time.us_per_ms, 5 * std.time.ns_per_ms, 5, null, false);
-    try client.SpawnListener(Handler, &pool, 65536, 150);
-    var buf: [Requests.Ping.max_buffer_size]u8 = undefined;
-    const ping_req = Requests.Ping.make(.{ .referrer = "test12345", .referrer_len = 9 }, &buf);
-    var buf2: [Requests.Unverifyed_Login.max_buffer_size]u8 = undefined;
-    const login_req = Requests.Unverifyed_Login.make(.{
-        .version = .Testing,
-        .UUID = 0,
-        .username_len = 13,
-        .username = "banned player",
-        .referrer_len = 9,
-        .referrer = "127.0.0.1",
-        .GenDistance = [2]u32{ 8, 8 },
-    }, &buf2);
-
-    while (true) {
-        var bf: [32]u8 = undefined;
-        const d = try std.io.getStdIn().reader().readUntilDelimiter(&bf, '\n');
-        if (d.len == 0) continue;
-        switch (d[0]) {
-            'p' => try Network.SendPacket(.Ping, ping_req, op, Requests.Ping.max_buffer_size, &client, (try std.net.Address.parseIp("127.0.0.1", 22522)).any),
-            'l' => try Network.SendPacket(.Unverifyed_Login, login_req, op, Requests.Unverifyed_Login.max_buffer_size, &client, (try std.net.Address.parseIp("127.0.0.1", 22522)).any),
-            else => {},
-        }
-    }
-    std.Thread.sleep(10000000000);
-}
-
-pub fn Handler(args: anytype, mem: []const u8, sender: *const std.posix.sockaddr) void {
-    //const server: *zudp = args.server;
-    _ = sender;
-    _ = args;
-    var receivebuffer: [524288]u8 = undefined;
-    const p = Network.LoadPacket(mem, &receivebuffer) catch |err| {
-        std.log.warn("voxelgame loadpacket error: {any}\n", .{err});
-        return;
-    };
-    switch (p.pktType) {
-        Requests.PacketType.Pong => {
-            const pong = Requests.Pong.load(p.data) catch |err| {
-                std.debug.print("err: {any}", .{err});
-                return;
-            };
-            std.debug.print("Pong reiceved:\nversion:{any}, \nserver name: {s},\nMOTD:{s}\n\n", .{ pong.version, pong.server_name, pong.MOTD });
-        },
-
-        else => std.debug.print("invalid packettype reiceived\n", .{}),
-    }
+fn mix(start: @Vector(4, f32), end: @Vector(4, f32), interpValue: f32) @Vector(4, f32) {
+    const iv: @Vector(4, f32) = @splat(interpValue);
+    const ones: @Vector(4, f32) = comptime @splat(1);
+    return start * (ones - iv) + end * iv;
 }

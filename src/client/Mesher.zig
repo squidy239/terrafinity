@@ -28,9 +28,11 @@ pub const Face = packed struct(u64) {
     BlockType: Block,
     _: u12,
 };
-
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
+threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
+//threadlocal var neighboring_blocks: [6]Block = undefined;
+//threadlocal var neighboring_blocks_transparent: @Vector(6, bool) = undefined;
 
 pub const Mesh = struct {
     faces: ?[]const Face,
@@ -40,23 +42,25 @@ pub const Mesh = struct {
     pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
-        const blocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = GenerateExtendedChunk(mainblocks, neighbor_faces);
+        const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
+        GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
         var Tpos: usize = 0;
+        ecp.End();
         const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
         for (1..ChunkSize + 1) |x| {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
-                    if (blocks[x][y][z].Visible()) {
-                        const block = blocks[x][y][z];
+                    const block = extendedBlocks[x][y][z];
+                    if (block.Visible()) {
                         const neighboring_blocks = [6]Block{
-                            blocks[x + 1][y][z],
-                            blocks[x - 1][y][z],
-                            blocks[x][y + 1][z],
-                            blocks[x][y - 1][z],
-                            blocks[x][y][z + 1],
-                            blocks[x][y][z - 1],
+                            extendedBlocks[x + 1][y][z],
+                            extendedBlocks[x - 1][y][z],
+                            extendedBlocks[x][y + 1][z],
+                            extendedBlocks[x][y - 1][z],
+                            extendedBlocks[x][y][z + 1],
+                            extendedBlocks[x][y][z - 1],
                         };
                         inline for (neighboring_blocks, 0..) |b, i| {
                             if (b.Transperent()) {
@@ -105,16 +109,15 @@ pub const Mesh = struct {
         if (self.TransperentFaces) |f| allocator.free(f);
     }
     ///x+,x-,y+,y-,z+,z-
-    fn GenerateExtendedChunk(mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block) [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block {
+    fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block) void {
         const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
         defer gec.End();
-        var blocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined; // Initialize with Air blocks
 
         // Copy main blocks
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {
-                    blocks[x + 1][y + 1][z + 1] = mainblocks[x][y][z];
+                    blocksToPut[x + 1][y + 1][z + 1] = mainblocks[x][y][z];
                 }
             }
         }
@@ -123,45 +126,43 @@ pub const Mesh = struct {
         // Face 4: -Z face (z=0)
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
-                blocks[x + 1][y + 1][0] = neighbor_faces[5][x][y];
+                blocksToPut[x + 1][y + 1][0] = neighbor_faces[5][x][y];
             }
         }
 
         // Face 5: +Z face (z=ChunkSize+1)
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
-                blocks[x + 1][y + 1][ChunkSize + 1] = neighbor_faces[4][x][y];
+                blocksToPut[x + 1][y + 1][ChunkSize + 1] = neighbor_faces[4][x][y];
             }
         }
 
         // Face 0: -X face (x=0)
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
-                blocks[0][y + 1][z + 1] = neighbor_faces[1][y][z];
+                blocksToPut[0][y + 1][z + 1] = neighbor_faces[1][y][z];
             }
         }
 
         // Face 1: +X face (x=ChunkSize+1)
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
-                blocks[ChunkSize + 1][y + 1][z + 1] = neighbor_faces[0][y][z];
+                blocksToPut[ChunkSize + 1][y + 1][z + 1] = neighbor_faces[0][y][z];
             }
         }
 
         // Face 2: -Y face (y=0)
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                blocks[x + 1][0][z + 1] = neighbor_faces[3][x][z];
+                blocksToPut[x + 1][0][z + 1] = neighbor_faces[3][x][z];
             }
         }
 
         // Face 3: +Y face (y=ChunkSize+1)
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                blocks[x + 1][ChunkSize + 1][z + 1] = neighbor_faces[2][x][z];
+                blocksToPut[x + 1][ChunkSize + 1][z + 1] = neighbor_faces[2][x][z];
             }
         }
-
-        return blocks;
     }
 };

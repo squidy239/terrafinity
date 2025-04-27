@@ -1,7 +1,7 @@
 const std = @import("std");
 
 //const zstbi = @import("zstbi");
-
+threadlocal var returnVec: @Vector(6, bool) = undefined;
 pub const Blocks = enum(u20) {
     Air = 0,
     TallGrass = 1,
@@ -17,6 +17,15 @@ pub const Blocks = enum(u20) {
 
     pub inline fn Transperent(self: @This()) bool {
         return self == .Air or self == .Water or self == .Leaves or self == .TallGrass;
+    }
+
+    pub inline fn Transperent6array(selfArray: [6]@This()) @Vector(6, bool) {
+        @setRuntimeSafety(false);
+        inline for (selfArray, 0..) |item, i| {
+            returnVec[i] = item.Transperent();
+        }
+
+        return returnVec;
     }
 
     pub inline fn Visible(self: @This()) bool {

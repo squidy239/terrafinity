@@ -4,8 +4,11 @@ const zudp = @import("zudp");
 const SetData = @import("Requests").SetData;
 const PacketType = @import("Requests").PacketType;
 
+const max_data_size: usize = 1_000_000;
+threadlocal var pktbuffer: [max_data_size + 500_000]u8 = undefined; //extra room incase compressed data takes more
+threadlocal var recvBuffer: [max_data_size + 500_000]u8 = undefined; //extra room incase compressed data takes more
+
 pub const Options = struct {
-    verify: bool,
     datasplitsize: u16,
     rate_limit_bytes_second: ?f64,
     compress_sizel1: u32,
@@ -19,10 +22,9 @@ pub const Compression = enum(u8) {
     zlib_6 = 2,
     zlib_9 = 3,
 };
-
-pub fn SendPacket(packet_type: PacketType, data: []const u8, comptime options: Options, max_data_size: comptime_int, conn: *zudp.Connection, destenation_address: std.posix.sockaddr) !void {
+pub fn SendPacket(packet_type: PacketType, data: []const u8, comptime options: Options, comptime verify: bool, conn: *zudp.Connection, destenation_address: std.posix.sockaddr) !void {
+    std.debug.assert(data.len < max_data_size);
     const header_size = @sizeOf(PacketType) + @sizeOf(Compression);
-    var pktbuffer: [max_data_size + header_size]u8 = undefined;
     var pos: usize = 0;
     const compression_type: Compression = switch (data.len + header_size) {
         0...options.compress_sizel1 => Compression.None,
@@ -56,22 +58,22 @@ pub fn SendPacket(packet_type: PacketType, data: []const u8, comptime options: O
     }
     const final_packet = pktbuffer[0..pos];
     //  std.debug.print("ct: {any}, finalpkt: {any}", .{ compression_type, final_packet });
-    try conn.send(destenation_address, final_packet, options.verify, options.datasplitsize, options.rate_limit_bytes_second);
+    try conn.send(destenation_address, final_packet, verify, options.datasplitsize, options.rate_limit_bytes_second);
 }
-
-pub fn LoadPacket(packet: []const u8, buffer_to_put: []u8) !decompressedpkt {
+///data will be invalidated if this is called a second time on the same thread
+pub fn LoadPacket(packet: []const u8) !decompressedpkt {
     var end_pos: usize = 0;
     const header_size = @sizeOf(PacketType) + @sizeOf(Compression);
-    const packet_type: PacketType = std.mem.bytesToValue(PacketType, packet[0..2]);
-    const compression_type: Compression = std.mem.bytesToValue(Compression, packet[2..3]);
+    const packet_type: PacketType = try std.meta.intToEnum(PacketType, std.mem.bytesToValue(u16, packet[0..2]));
+    const compression_type: Compression = try std.meta.intToEnum(Compression, std.mem.bytesToValue(u8, packet[2..3]));
     // std.debug.print("pkt: {any}\n", .{packet});
-    var buffstream = std.io.fixedBufferStream(buffer_to_put);
+    var buffstream = std.io.fixedBufferStream(&recvBuffer);
     const writer = buffstream.writer();
     var rstream = std.io.fixedBufferStream(packet[header_size..]);
     const reader = rstream.reader();
     switch (compression_type) {
         .None => {
-            @memcpy(buffer_to_put[0 .. packet.len - header_size], packet[header_size..packet.len]);
+            @memcpy(recvBuffer[0 .. packet.len - header_size], packet[header_size..packet.len]);
             end_pos += packet.len - header_size;
         },
         .zlib_4 => {
@@ -87,7 +89,7 @@ pub fn LoadPacket(packet: []const u8, buffer_to_put: []u8) !decompressedpkt {
             end_pos += writer.context.pos;
         },
     }
-    return decompressedpkt{ .pktType = packet_type, .data = buffer_to_put[0..end_pos] };
+    return decompressedpkt{ .pktType = packet_type, .data = recvBuffer[0..end_pos] };
 }
 
 const decompressedpkt = struct { pktType: PacketType, data: []u8 };

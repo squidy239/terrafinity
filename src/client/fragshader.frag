@@ -7,6 +7,8 @@ flat in vec3 position;
 flat in uint blocktype;
 flat in uint side;
 flat in float sscale;
+uniform vec4 skyColor;
+uniform float fogDensity;
 uniform sampler2D TextureAtlas;
 uniform uint AtlasHeight;
 uniform bool HeadUnderwater;
@@ -15,6 +17,15 @@ out vec4 FragColor;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+float fogFactorExp2(
+    const float dist,
+    const float density
+) {
+    const float LOG2 = -1.442695;
+    float d = density * dist;
+    return 1.0 - clamp(exp2(d * d * LOG2), 0.0, 1.0);
 }
 
 void main()
@@ -97,8 +108,13 @@ void main()
     vec3 lightDir = normalize(sunpos - fragpos);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
-    vec3 result = (0.2 + diffuse) * FragColor.xyz;
-    //result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
+    vec4 result = vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
+    float fogDistance = gl_FragCoord.z / gl_FragCoord.w;
+
+    float fogAmount = fogFactorExp2(fogDistance, fogDensity); //fog density
+    result = mix(result, skyColor, fogAmount);
+
+    //  result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
     //if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
-    FragColor = vec4(result, FragColor[3]);
+    FragColor = result;
 }
