@@ -9,7 +9,7 @@ const ztracy = @import("ztracy");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
 const ChunkSize = 32;
-
+const Player = @import("EntityTypes").Player;
 const UniformLocations = struct {
     projviewlocation: c_int,
     relativechunkposlocation: c_int,
@@ -48,7 +48,9 @@ pub const Renderer = struct {
     world: *World,
     running: *std.atomic.Value(bool),
     facebuffer: c_uint,
-    eyePos: @Vector(3, f64), //x,y,z
+    player: *Player,
+    playerLock: *std.Thread.RwLock,
+    //   eyePos: @Vector(3, f64), //x,y,z
     rotationAxis: @Vector(3, f64), //pitch, yaw,roll
     cameraFront: @Vector(3, f64),
     mouseSensitivity: f64,
@@ -68,7 +70,7 @@ pub const Renderer = struct {
     screen_dimensions: [2]u32,
 
     ///must be called on main thread
-    pub fn Init(pool: *std.Thread.Pool, world: *World, proc_table_location: *gl.ProcTable, eyepos: @Vector(3, f64), running: *std.atomic.Value(bool), allocator: std.mem.Allocator) !@This() {
+    pub fn Init(pool: *std.Thread.Pool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
         var renderer = @This(){
             .allocator = allocator,
             .pool = pool,
@@ -83,7 +85,9 @@ pub const Renderer = struct {
             .MeshesToLoad = std.ArrayList(Mesher.Mesh).init(allocator),
             .MeshesToLoadLock = .{},
             .uniforms = undefined,
-            .eyePos = eyepos,
+            .player = player,
+            .playerLock = playerLock,
+            //   .eyePos = eyepos,
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
@@ -215,7 +219,7 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
 
-    pub fn DrawChunks(self: *@This()) void {
+    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64)) void {
         self.ChunkRenderListLock.lockShared();
         defer self.ChunkRenderListLock.unlockShared();
 
@@ -242,7 +246,7 @@ pub const Renderer = struct {
                 gl.Uniform1i(self.uniforms.tlocation, @intCast(tr));
                 gl.Uniform3i(self.uniforms.chunkposlocation, Pos[0], Pos[1], Pos[2]);
                 //player height
-                gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - self.eyePos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - self.eyePos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - self.eyePos[2]));
+                gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - playerPos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - playerPos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - playerPos[2]));
                 //TODO frustrum cullling and LODs
                 gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, null, @intCast(buffer_ids.count[i]));
             }
@@ -287,8 +291,10 @@ pub const Renderer = struct {
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub inline fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32) void {
-        //TODO dont execute if not running
-        const floatPlayerChunkPos = self.eyePos / @as(@Vector(3, f64), @splat(32));
+        self.playerLock.lockShared();
+        const playerPos = self.player.pos;
+        self.playerLock.unlockShared();
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst) + 2), @intCast(self.GenerateDistance[1].load(.seq_cst) + 2), @intCast(self.GenerateDistance[2].load(.seq_cst) + 2) })) {
             self.AddChunkToRender(Pos) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
@@ -301,12 +307,15 @@ pub const Renderer = struct {
         return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(Pos))) > range);
     }
     ///must be called on main thread
-    pub fn LoadMeshes(self: *@This(), max_to_load: u32) !void {
+    pub fn LoadMeshes(self: *@This(), max_us: u32) !void {
+        const loadMeshes = ztracy.ZoneNC(@src(), "LoadMEshes", 156567756);
+        defer loadMeshes.End();
         if (!self.MeshesToLoadLock.tryLock()) return; //dont block the main thread
         defer self.MeshesToLoadLock.unlock();
+        const st = std.time.microTimestamp();
         const MeshesToLoadLen: usize = self.MeshesToLoad.items.len;
-        for (0..MeshesToLoadLen) |amount_unloaded| {
-            if (amount_unloaded >= max_to_load) break;
+        for (0..MeshesToLoadLen) |_| {
+            if (std.time.microTimestamp() - st > max_us) break;
             const mesh = self.MeshesToLoad.swapRemove(0);
             defer FreeMesh(mesh, self.allocator);
             const mesh_buffer_ids = self.LoadMesh(mesh);

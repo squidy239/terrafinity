@@ -25,20 +25,20 @@
     // internet connectivity.
 
     .dependencies = .{ .zglfw = .{
-        .url = "git+https://github.com/zig-gamedev/zglfw#dcb1dae7d4a90f88b70dbae73300ab9b19fb250c",
-        .hash = "zglfw-0.10.0-dev-zgVDNJmZIQCIiO_94Sp5jqrPtz4Eumk3bDcxS7dSZfIj",
+        .url = "git+https://github.com/zig-gamedev/zglfw#fa12b57541976561358c850337af8d08647879d6",
+        .hash = "zglfw-0.10.0-dev-zgVDNJKcIQDR2-i-qz-FlR6uUdODN0DNPQA9X1G034qr",
     }, .zm = .{
         .url = "git+https://github.com/griush/zm#319a44a9b0859214b9240a5c4ae0d8ae9ac16672",
         .hash = "zm-0.3.0-AAAAAL3MAAA2du9TcSd0z2lFBF5_Qv-0zd7F566Z7B3K",
     }, .ztracy = .{
-        .url = "git+https://github.com/zig-gamedev/ztracy#d6f78fe19497a5b341329f6f67e9f9ba38635e8e",
-        .hash = "ztracy-0.14.0-dev-zHJSq08NFwD4iNq3K_gFxZ7Y8mMQ5wVM494x8c4R2sMz",
+        .url = "git+https://github.com/zig-gamedev/ztracy#be3d003f29d59d72e68e493ab531374ab474a795",
+        .hash = "ztracy-0.14.0-dev-zHJSq1oQFwCAq2LhbqsBUmZAipMzsD8UfKL5Etc_OJMb",
     }, .zigglgen = .{
         .url = "git+https://github.com/castholm/zigglgen#d5f381759825ee0bac29bc294d47aa05be4ab7b5",
         .hash = "zigglgen-0.4.0-bmyqLX_gLQDFXilQ5VQ9fJeOHKU1RFrggOzRqTGBX79W",
     }, .cache = .{
-        .url = "git+https://github.com/karlseguin/cache.zig#f9641d1a91bb56f6a640a7552c008671246ee4b3",
-        .hash = "N-V-__8AAHKbAADzIggCb-oMdb9iJWMKP6Auf39wcBktXs11",
+        .url = "git+https://github.com/karlseguin/cache.zig#6876115a0bf73d1436c964bb10cb4ac15325108c",
+        .hash = "N-V-__8AALabAADUwRNxBfXnghuxpNGC-tJ48g3DDLdwjzG_",
     }, .zudp = .{
         .url = "git+https://github.com/squidy239/zudp#b077a5b4014fa4ace5a26cf7ae191be83f8db47e",
         .hash = "zudp-0.3.0-i2x3QEO6AAAUm1q__-SuiGj0l725Uqdv1fqUiSjgX4Ua",

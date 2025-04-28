@@ -9,10 +9,14 @@ const ztracy = @import("ztracy");
 const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
 const Entity = @import("Entity").Entity;
-const Chunk = @import("Chunk").Chunk;
-const Loader = @import("Loader.zig");
+const EntityTypes = @import("EntityTypes");
+pub const Chunk = @import("Chunk").Chunk;
+pub const Loader = @import("Loader.zig");
+pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
+const builtin = @import("builtin");
+const root = @import("root"); //TODO fix messy import system with root.Loader etc
 const UserInput = @import("UserInput.zig");
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Cache = @import("cache").Cache;
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -34,7 +38,6 @@ const op = Network.Options{
 
 const Multyplayer = false;
 //TODO list
-//chunk loader thread(singleplayer and multiplayer)
 //server world and server chunk load response
 //player log into server, verify client ip
 //player send all keyboard inputs to server at a configurable max rate, default maybie 144?
@@ -60,21 +63,24 @@ pub fn main() !void {
         std.debug.print("no leaks\n", .{});
     };
     //const allocator = debug_allocator.allocator();
-
+    const prioritySet = SetThreadPriority(.THREAD_PRIORITY_TIME_CRITICAL);
+    if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
     const allocator = debug_allocator.allocator();
-    var sfa = std.heap.stackFallback(5000000, allocator);
-    var sfalloc = std.heap.ThreadSafeAllocator{ .child_allocator = sfa.get() };
+    // var sfa = std.heap.stackFallback(5000000, allocator);
+    // var sfalloc = std.heap.ThreadSafeAllocator{ .child_allocator = sfa.get() };
     const cpu_count = try std.Thread.getCpuCount();
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count - 2, .allocator = sfalloc.allocator() });
+    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = allocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = rand.random().int(u64);
     std.log.info("using seed {d}\n", .{seed});
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([32][32]i32).init(sfalloc.allocator(), .{}),
-        .TerrainHeightCacheMutex = .{},
+        .TerrainHeightCache = try Cache([32][32]i32).init(allocator, .{
+            .gets_per_promote = 1,
+            .max_size = 1_000,
+        }),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .SpawnRange = 0,
@@ -93,11 +99,28 @@ pub fn main() !void {
             },
         },
     };
-
-    std.debug.print("gp: {any}\n", .{MainWorld.GenParams.TerrainNoise});
-    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, MainWorld.GetPlayerSpawnPos(), &running, allocator);
-    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &renderer.eyePos, 40 * std.time.ns_per_ms, &running });
-    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &running });
+    const tempPlayer: EntityTypes.Player = .{
+        .player_UUID = 0, //UUID 0 resurved for client
+        .player_name = .fromString("squid"),
+        .gameMode = .Spectator,
+        .OnGround = false,
+        .pos = MainWorld.GetPlayerSpawnPos(),
+        .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
+        .headRotationAxis = @Vector(2, f16){ 0, 0 },
+        .armSwings = [2]f16{ 0, 0 }, //right,left
+        .hitboxmin = @Vector(3, f64){ -1, 0.8, -1 },
+        .hitboxmax = @Vector(3, f64){ 1, 0.2, 1 },
+        .Velocity = @splat(0),
+        .ip = null,
+    };
+    const playerEntity = try tempPlayer.MakeEntity(allocator);
+    const player = @as(*EntityTypes.Player, @ptrCast(@alignCast(playerEntity.ptr)));
+    _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
+    try MainWorld.Entitys.put(World.PlayerIDtoEntityId(player.player_UUID), playerEntity);
+    _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
+    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator);
+    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
+    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     defer {
         std.debug.print("started closing\n", .{});
         renderer.window.destroy();
@@ -108,7 +131,9 @@ pub fn main() !void {
         pool.deinit();
         std.debug.print("pool deinit\n", .{});
         renderer.deinit();
+        _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         std.debug.print("renderer deinit\n", .{});
+        _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
     }
@@ -118,31 +143,49 @@ pub fn main() !void {
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     var st = std.time.nanoTimestamp();
     while (!renderer.window.shouldClose()) {
-        const loadmeshes = ztracy.ZoneNC(@src(), "loadmeshes", 2222111);
-        try renderer.LoadMeshes(10000);
-        loadmeshes.End();
+        const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
+        defer Frame.End();
+        try renderer.LoadMeshes(1000);
+        const swapandpoll = ztracy.ZoneNC(@src(), "swapandpoll", 456564);
         renderer.window.swapBuffers();
         glfw.pollEvents();
+        swapandpoll.End();
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
-        std.debug.print("pos:{d}, front:{d}\t\t\r", .{ renderer.eyePos, renderer.cameraFront });
+        prossesinput.End();
+        const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
+        playerEntity.lock.lockShared();
+        const playerPos = player.pos;
+        playerEntity.lock.unlockShared();
+        waitforlock.End();
+        //std.log.info("pos:{d}, front:{d}\t\t\r", .{ playerPos, renderer.cameraFront }); //HUGE FPS hit for printing on windows
+        //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
         const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-        const skyColor = mix(blueSky, greySky, @floatCast(@min(1.0, @max(0, renderer.eyePos[1] / 4096))));
+        const skyColor = mix(blueSky, greySky, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096))));
+        const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
         gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
+        clear.End();
+        const uniforms = ztracy.ZoneNC(@src(), "uniforms", 9802);
         gl.Uniform4f(renderer.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-        gl.Uniform1f(renderer.uniforms.fogDensity, 0.001 + @as(f32, @floatCast(renderer.eyePos[1] / 800000)));
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(renderer.screen_dimensions[0])) / @as(f32, @floatFromInt(renderer.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + renderer.cameraFront, Renderer.cameraUp)).data));
-        gl.UniformMatrix4fv(renderer.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
+        gl.Uniform1f(renderer.uniforms.fogDensity, 0.001 + @as(f32, @floatCast(playerPos[1] / 800000)));
         const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         gl.UniformMatrix4fv(renderer.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
+        uniforms.End();
+        const pv = ztracy.ZoneNC(@src(), "projview", 76859856);
 
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(renderer.screen_dimensions[0])) / @as(f32, @floatFromInt(renderer.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + renderer.cameraFront, Renderer.cameraUp)).data));
+        gl.UniformMatrix4fv(renderer.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
+        pv.End();
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        renderer.DrawChunks();
+        renderer.DrawChunks(playerPos);
+        //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
-        Loader.UnloadMeshes(&renderer, meshDistance);
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
+        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        Loader.UnloadMeshes(&renderer, meshDistance, playerChunkPos);
         drawChunks.End();
         st = std.time.nanoTimestamp();
     }

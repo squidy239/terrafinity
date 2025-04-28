@@ -15,7 +15,6 @@ pub const World = struct {
     SpawnRange: u32,
     SpawnCenterPos: [3]i32,
     SpawnRand: std.Random,
-    TerrainHeightCacheMutex: std.Thread.Mutex, //TODO make rw lock
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     GenParams: Chunk.GenParams,
@@ -45,7 +44,7 @@ pub const World = struct {
         const pos = [2]i32{ self.SpawnRand.intRangeAtMost(i32, self.SpawnCenterPos[0] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.SpawnRand.intRangeAtMost(i32, self.SpawnCenterPos[2] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
         const chunkPos = [2]i32{ @divFloor(pos[0], 32), @divFloor(pos[1], 32) };
         const posInChunk = [2]i32{ @mod(pos[0], 32), @mod(pos[1], 32) };
-        const height = Chunk.GenTerrainHeight([3]i32{ chunkPos[0], 0, chunkPos[1] }, self.GenParams)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = Chunk.GenTerrainHeight([3]i32{ chunkPos[0], 0, chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
@@ -70,7 +69,7 @@ pub const World = struct {
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
-            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, &self.TerrainHeightCacheMutex, self.GenParams, self.allocator);
+            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.GenParams, self.allocator);
             const ad = ztracy.ZoneNC(@src(), "allocChunkStruct", 234313);
             var chunkptr = try self.allocator.create(Chunk);
             @memset(std.mem.asBytes(chunkptr), 0);
@@ -138,6 +137,7 @@ pub const World = struct {
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
+                std.debug.print("freed: {any}\n", .{c.*.*});
                 c.*.fullfree(self.allocator);
             }
         }

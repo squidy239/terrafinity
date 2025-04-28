@@ -1,5 +1,5 @@
 const std = @import("std");
-const EntityTypes = @import("EntityTypes.zig");
+const EntityTypes = @import("EntityTypes");
 
 const EntityType = enum {
     Player,

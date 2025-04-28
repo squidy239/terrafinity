@@ -48,14 +48,18 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("cache", cache.module("cache"));
-    const Entitys = b.addModule("Entity", .{
+    var Entitys = b.addModule("Entity", .{
         .root_source_file = b.path("src/world/Entity.zig"),
     });
     exe.root_module.addImport("Entity", Entitys);
 
     const EntityTypes = b.addModule("EntityTypes", .{
         .root_source_file = b.path("src/world/EntityTypes.zig"),
+        .imports = &.{
+            .{ .name = "Entity", .module = Entitys },
+        },
     });
+    Entitys.addImport("EntityTypes", EntityTypes);
     exe.root_module.addImport("EntityTypes", EntityTypes);
 
     const Block = b.addModule("Block", .{
@@ -68,6 +72,9 @@ pub fn build(b: *std.Build) void {
         .module = ztracy.module("root"),
     } } });
     exe.root_module.addImport("Chunk", Chunk);
+
+    const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
+    exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);

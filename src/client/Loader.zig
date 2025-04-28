@@ -1,4 +1,6 @@
 const std = @import("std");
+const root = @import("root");
+const SetThreadPriority = root.SetThreadPriority;
 const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
 const zudp = @import("zudp").Connection;
@@ -10,37 +12,47 @@ threadlocal var meshesToUnloadBufferPos: u16 = 0;
 threadlocal var chunksToUnloadBuffer: [8192][3]i32 = undefined;
 threadlocal var chunksToUnloadBufferPos: u16 = 0;
 ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
-pub fn ChunkLoaderThread(renderer: *Renderer, conn: ?zudp, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
+pub fn ChunkLoaderThread(renderer: *Renderer, conn: ?zudp, intervel_ns: u64, pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, running: *std.atomic.Value(bool)) void {
+    _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
     while (running.load(.monotonic)) {
+        posLock.lockShared();
+        const playerPos = pos.*;
+        posLock.unlockShared();
         const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const genDistance = [3]u32{ renderer.GenerateDistance[0].load(.seq_cst), renderer.GenerateDistance[1].load(.seq_cst), renderer.GenerateDistance[2].load(.seq_cst) };
+        const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ 32, 32, 32 })));
         if (conn) |connection| {
             //multiplayer
             _ = connection;
         } else {
             //singleplayer
-            LoadChunksSingleplayer(renderer, genDistance);
+            LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
         }
         addChunkstoLoad.End();
     }
 }
 
-pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), player_pos: *@Vector(3, f64), intervel_ns: u64, running: *std.atomic.Value(bool)) void {
+pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
+    _ = SetThreadPriority(.THREAD_PRIORITY_LOWEST);
     while (running.load(.monotonic)) {
+        posLock.lockShared();
+        const playerPos = pos.*;
+        posLock.unlockShared();
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const loadDistance = [3]u32{ loadDistancePtr[0].load(.seq_cst), loadDistancePtr[1].load(.seq_cst), loadDistancePtr[2].load(.seq_cst) };
-        UnloadChunks(world, player_pos.*, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
+        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        UnloadChunks(world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
         unloadChunks.End();
     }
 }
 
-fn LoadChunksSingleplayer(renderer: *Renderer, distance: [3]u32) void {
+fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3]u32) void {
     var amount_loaded: u64 = 0;
-    const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(renderer.eyePos / @Vector(3, f64){ 32, 32, 32 })));
     var x: i32 = -@as(i32, @intCast(distance[0]));
     var y: i32 = -@as(i32, @intCast(distance[1]));
     var z: i32 = -@as(i32, @intCast(distance[2]));
@@ -65,16 +77,13 @@ fn LoadChunksSingleplayer(renderer: *Renderer, distance: [3]u32) void {
         y = -@as(i32, @intCast(distance[1]));
         x += 1;
     }
-    if (amount_loaded > 0) std.debug.print("added {d} chunks to load\n", .{amount_loaded});
+    //if (amount_loaded > 0) std.log.info("added {d} chunks to load\n", .{amount_loaded});
 }
 
-fn UnloadChunks(world: *World, player_pos: @Vector(3, f64), loadDistance: [3]u32) !void {
+fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3]u32) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
     const bktamount = world.Chunks.buckets.len;
-    const floatPlayerChunkPos = player_pos / @as(@Vector(3, f64), @splat(32));
-    const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-
     for (0..bktamount) |b| {
         world.Chunks.buckets[b].lock.lock();
         var it = world.Chunks.buckets[b].hash_map.iterator();
@@ -89,11 +98,11 @@ fn UnloadChunks(world: *World, player_pos: @Vector(3, f64), loadDistance: [3]u32
     for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
         try world.UnloadChunk(Pos);
     }
-    if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks\n", .{chunksToUnloadBufferPos});
+    //  if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks\n", .{chunksToUnloadBufferPos});
     chunksToUnloadBufferPos = 0;
 }
 
-pub fn UnloadMeshes(renderer: *Renderer, meshDistance: [3]u32) void {
+pub fn UnloadMeshes(renderer: *Renderer, meshDistance: [3]u32, playerChunkPos: @Vector(3, i32)) void {
     {
         renderer.ChunkRenderListLock.lockShared();
         defer renderer.ChunkRenderListLock.unlockShared();
@@ -101,8 +110,6 @@ pub fn UnloadMeshes(renderer: *Renderer, meshDistance: [3]u32) void {
         defer renderer.ChunkRenderList.unlockPointers();
         const values = renderer.ChunkRenderList.values();
         for (values) |mesh| {
-            const floatPlayerChunkPos = renderer.eyePos / @as(@Vector(3, f64), @splat(32));
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
             if (meshesToUnloadBufferPos < 1024 and outOfSquareRange(mesh.pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
                 meshesToUnloadBuffer[meshesToUnloadBufferPos] = mesh;
                 meshesToUnloadBufferPos += 1;

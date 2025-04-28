@@ -56,15 +56,21 @@ pub fn processInput() !void {
     const timestamp = std.time.microTimestamp();
     const dt = timestamp - lastmicrotime;
     lastmicrotime = timestamp;
+    var posAdjustment: @Vector(3, f64) = @splat(0);
+    defer {
+        render.playerLock.lock();
+        render.player.pos += posAdjustment;
+        render.playerLock.unlock();
+    }
     const cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.02, 0.02, 0.02 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (render.window.getKey(glfw.Key.w) == .press)
-        render.eyePos += cameraSpeed * render.cameraFront;
+        posAdjustment += cameraSpeed * render.cameraFront;
     if (render.window.getKey(glfw.Key.s) == .press)
-        render.eyePos -= cameraSpeed * render.cameraFront;
+        posAdjustment -= cameraSpeed * render.cameraFront;
     if (render.window.getKey(glfw.Key.a) == .press)
-        render.eyePos -= zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
+        posAdjustment -= zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
     if (render.window.getKey(glfw.Key.d) == .press)
-        render.eyePos += zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
+        posAdjustment += zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
     if (render.window.getMouseButton(glfw.MouseButton.left) == .press) {
         if (ts.CursorEscaped) {
             ts.CursorEscaped = false;

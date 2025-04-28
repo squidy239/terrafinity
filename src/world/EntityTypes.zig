@@ -7,20 +7,35 @@ pub const GameMode = enum(u8) {
     Spectator = 3,
 };
 
+pub const Name = struct {
+    data: [64]u8,
+    len: u8,
+
+    pub fn fromString(str: anytype) @This() {
+        var name = @This(){
+            .data = [_]u8{0} ** 64,
+            .len = str.len,
+        };
+        @memcpy(name.data[0..str.len], str);
+        return name;
+    }
+
+    pub fn toString(self: @This()) []const u8 {
+        return self.data[0..self.len];
+    }
+};
 pub const Player = struct {
     player_UUID: u128,
-    player_name_len: u8,
-    player_name: [64]u8,
+    player_name: Name,
     gameMode: GameMode,
     OnGround: bool,
     pos: @Vector(3, f64),
     bodyRotationAxis: @Vector(3, f16),
-    headRotationAxis: @Vector(3, f16),
+    headRotationAxis: @Vector(2, f16),
     armSwings: [2]f16, //right,left
     hitboxmin: @Vector(3, f64),
     hitboxmax: @Vector(3, f64),
     Velocity: @Vector(3, f64),
-    GenDistance: [3]u32,
     ip: ?std.posix.sockaddr,
 
     pub fn update(self: *@This()) !void {
