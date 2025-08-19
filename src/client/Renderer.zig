@@ -5,6 +5,7 @@ const World = @import("World").World;
 const Mesher = @import("Mesher.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
+const ThreadPool = @import("root").ThreadPool;
 const ztracy = @import("ztracy");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
@@ -12,7 +13,10 @@ const ChunkSize = 32;
 const Player = @import("EntityTypes").Player;
 const UniformLocations = struct {
     projviewlocation: c_int,
+    entityprojviewlocation: c_int,
     relativechunkposlocation: c_int,
+    relativeEntityposlocation: c_int,
+    EntityRotationlocation: c_int,
     chunkposlocation: c_int,
     tlocation: c_int,
     sunlocation: c_int,
@@ -21,10 +25,13 @@ const UniformLocations = struct {
     skyColor: c_int,
     timelocation: c_int,
 
-    pub fn GetLocations(shaderprogram: c_uint) @This() {
+    pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
         return @This(){
             .projviewlocation = gl.GetUniformLocation(shaderprogram, "projview"),
+            .entityprojviewlocation = gl.GetUniformLocation(entityshaderprogram, "ProjView"),
             .relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos"),
+            .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
+            .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
             .chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos"),
             .tlocation = gl.GetUniformLocation(shaderprogram, "chunktime"),
             .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
@@ -35,26 +42,21 @@ const UniformLocations = struct {
         };
     }
 };
-pub const ProjectionParams = struct {
-    eyePos: @Vector(3, f64),
-    cameraFront: @Vector(3, f64),
-    cameraUp: @Vector(3, f64),
-};
 
 pub const Renderer = struct {
     pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,
-    pool: *std.Thread.Pool,
+    pool: *ThreadPool,
     world: *World,
     running: *std.atomic.Value(bool),
     facebuffer: c_uint,
     player: *Player,
     playerLock: *std.Thread.RwLock,
     //   eyePos: @Vector(3, f64), //x,y,z
-    rotationAxis: @Vector(3, f64), //pitch, yaw,roll
     cameraFront: @Vector(3, f64),
     mouseSensitivity: f64,
     indecies: c_uint,
+    entityshaderprogram: c_uint,
     shaderprogram: c_uint,
     uniforms: UniformLocations,
     MeshesToLoad: std.ArrayList(Mesher.Mesh),
@@ -70,18 +72,18 @@ pub const Renderer = struct {
     screen_dimensions: [2]u32,
 
     ///must be called on main thread
-    pub fn Init(pool: *std.Thread.Pool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
+    pub fn Init(pool: *ThreadPool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
         var renderer = @This(){
             .allocator = allocator,
             .pool = pool,
             .world = world,
             .running = running,
             .mouseSensitivity = 0.2,
-            .rotationAxis = @Vector(3, f64){ 0, 0, 0 },
             .cameraFront = @Vector(3, f64){ 0, 1, 0 },
             .facebuffer = undefined,
             .indecies = undefined,
             .shaderprogram = undefined,
+            .entityshaderprogram = undefined,
             .MeshesToLoad = std.ArrayList(Mesher.Mesh).init(allocator),
             .MeshesToLoadLock = .{},
             .uniforms = undefined,
@@ -102,7 +104,7 @@ pub const Renderer = struct {
         try renderer.InitWindowAndProcs();
         try renderer.CompileShaders();
         renderer.LoadFacebuffer();
-        renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram);
+        renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
         return renderer;
     }
     ///threadpool should be deinitualised before calling, dosent destroy window
@@ -110,6 +112,7 @@ pub const Renderer = struct {
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
         gl.DeleteProgram(self.shaderprogram);
+        gl.DeleteProgram(self.entityshaderprogram);
         self.ChunkRenderListLock.lock();
         var it = self.ChunkRenderList.iterator();
         while (it.next()) |mesh| {
@@ -139,9 +142,7 @@ pub const Renderer = struct {
             glfw.windowHint(.client_api, .opengl_api);
             glfw.windowHint(.doublebuffer, true);
             glfw.windowHint(.samples, 4);
-
             self.window = try glfw.Window.create(800, 600, "voxelgame", null);
-
             glfw.makeContextCurrent(self.window);
             if (self.proc_table.init(glfw.getProcAddress)) {
                 std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });
@@ -188,10 +189,37 @@ pub const Renderer = struct {
             std.debug.panic("{s}\n\n{s}\n\n{s}", .{ vsbuffer, fsbuffer, plog });
             return error.ShaderCompilationFailed;
         }
-        gl.UseProgram(shaderprogram);
         gl.DeleteShader(vertexshader);
         gl.DeleteShader(fragshader);
         self.shaderprogram = shaderprogram;
+
+        const entityvertexshader = gl.CreateShader(gl.VERTEX_SHADER);
+        gl.ShaderSource(entityvertexshader, 1, @ptrCast(&@embedFile("./EntityVertexShader.vert")), null);
+        gl.CompileShader(entityvertexshader);
+
+        const entityfragshader = gl.CreateShader(gl.FRAGMENT_SHADER);
+        gl.ShaderSource(entityfragshader, 1, @ptrCast(&@embedFile("./EntityFragmentShader.frag")), null);
+        gl.CompileShader(entityfragshader);
+
+        const entityshaderprogram = gl.CreateProgram();
+        gl.AttachShader(entityshaderprogram, entityvertexshader);
+        gl.AttachShader(entityshaderprogram, entityfragshader);
+        gl.LinkProgram(entityshaderprogram);
+        var elinkstatus: c_int = undefined;
+        gl.GetProgramiv(entityshaderprogram, gl.LINK_STATUS, &elinkstatus);
+        if (elinkstatus == gl.FALSE) {
+            var vsbuffer: [1000]u8 = undefined;
+            var fsbuffer: [1000]u8 = undefined;
+            var plog: [1000]u8 = undefined;
+            gl.GetShaderInfoLog(entityvertexshader, 1000, null, &vsbuffer);
+            gl.GetShaderInfoLog(entityfragshader, 1000, null, &fsbuffer);
+            gl.GetProgramInfoLog(entityshaderprogram, 1000, null, &plog);
+            std.debug.panic("{s}\n\n{s}\n\n{s}", .{ vsbuffer, fsbuffer, plog });
+            return error.ShaderCompilationFailed;
+        }
+        gl.DeleteShader(entityvertexshader);
+        gl.DeleteShader(entityfragshader);
+        self.entityshaderprogram = entityshaderprogram;
     }
 
     fn LoadFacebuffer(self: *@This()) void {
@@ -219,7 +247,16 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
 
-    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64)) void {
+    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) void {
+        gl.FrontFace(gl.CW);
+        gl.UseProgram(self.shaderprogram);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+        gl.Uniform1f(self.uniforms.fogDensity, 0.001 + @as(f32, @floatCast(playerPos[1] / 800000)));
+        gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
+        gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         self.ChunkRenderListLock.lockShared();
         defer self.ChunkRenderListLock.unlockShared();
 
@@ -251,6 +288,26 @@ pub const Renderer = struct {
                 gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, null, @intCast(buffer_ids.count[i]));
             }
         }
+    }
+
+    pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64)) void {
+        gl.FrontFace(gl.CCW);
+        gl.UseProgram(self.entityshaderprogram);
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
+        const enbktamount = self.world.Entitys.buckets.len;
+        for (0..enbktamount) |b| {
+            self.world.Entitys.buckets[b].lock.lockShared();
+            var it = self.world.Entitys.buckets[b].hash_map.valueIterator();
+            defer self.world.Entitys.buckets[b].lock.unlockShared();
+            while (it.next()) |c| {
+                // std.debug.print("drawn: {any}\n", .{c.*.*});
+                _ = c.*.ref_count.fetchAdd(1, .seq_cst);
+                defer _ = c.*.ref_count.fetchSub(1, .seq_cst);
+                try c.*.draw(playerPos, self);
+            }
+        }
+        gl.UseProgram(self.entityshaderprogram);
     }
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32) !void {

@@ -85,9 +85,9 @@ fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3
     defer unloadChunks.End();
     const bktamount = world.Chunks.buckets.len;
     for (0..bktamount) |b| {
-        world.Chunks.buckets[b].lock.lock();
+        world.Chunks.buckets[b].lock.lockShared();
         var it = world.Chunks.buckets[b].hash_map.iterator();
-        defer world.Chunks.buckets[b].lock.unlock();
+        defer world.Chunks.buckets[b].lock.unlockShared();
         while (it.next()) |c| {
             if (chunksToUnloadBufferPos < chunksToUnloadBuffer.len and outOfSquareRange(c.key_ptr.* - playerChunkPos, [3]i32{ @intCast(loadDistance[0]), @intCast(loadDistance[1]), @intCast(loadDistance[2]) })) {
                 chunksToUnloadBuffer[chunksToUnloadBufferPos] = c.key_ptr.*;

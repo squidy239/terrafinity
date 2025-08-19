@@ -1,7 +1,7 @@
 const Block = @import("Block").Blocks;
 const ztracy = @import("ztracy");
 const Noise = @import("fastnoise.zig");
-const cache = @import("cache");
+const Cache = @import("Cache").Cache;
 const std = @import("std");
 const ChunkSize = 32;
 
@@ -15,13 +15,13 @@ pub const Chunk = struct {
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *cache.Cache([32][32]i32), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
-        const heights = GenTerrainHeight(Pos, gen_params, TerrainHeightCache);
-        //std.debug.print("hit/miss percent: {d} or {d}/{d}\n", .{@as(f32,@floatFromInt(cacheHits.load(.seq_cst)))/@as(f32,@floatFromInt(cacheMisses.load(.seq_cst))), cacheHits.load(.seq_cst), cacheMisses.load(.seq_cst)});
+        const heights = GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, gen_params, TerrainHeightCache);
+        //  std.debug.print("hit/miss percent: {d}%, theoretical percent: {d}%                 \r", .{ @as(f32, @floatFromInt(cacheHits.load(.seq_cst))) / @as(f32, @floatFromInt(cacheMisses.load(.seq_cst) + cacheHits.load(.seq_cst))), 20.0 / 21.0 });
         gc.End();
         var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
@@ -112,36 +112,41 @@ pub const Chunk = struct {
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
-    pub fn GetHeightsFromCache(Pos: [3]i32, TerrainHeightCache: *cache.Cache([32][32]i32)) ?[ChunkSize][ChunkSize]i32 {
+    pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024)) ?[ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeightsFromCache", 110029);
         defer gth.End();
-        if (TerrainHeightCache.getEntry(std.mem.sliceAsBytes(&Pos))) |T| {
+        if (TerrainHeightCache.get(Pos)) |T| {
             @branchHint(.likely);
-            defer T.release();
-            //  _ = cacheHits.fetchAdd(1, .seq_cst);
-            return T.value;
-        } else return null;
+            _ = cacheHits.fetchAdd(1, .seq_cst);
+            return T;
+        }
+        return null;
     }
 
-    pub fn GenTerrainHeight(Pos: [3]i32, params: GenParams, TerrainHeightCache: *cache.Cache([32][32]i32)) [ChunkSize][ChunkSize]i32 {
+    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024)) [ChunkSize][ChunkSize]i32 {
+        const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
+        defer gth.End();
+        _ = cacheHits.fetchAdd(1, .seq_cst);
+        if (GetHeightsFromCache(Pos, TerrainHeightCache)) |cachedHeight| return cachedHeight;
+        const generatedHeights = GenTerrainHeight(params, Pos);
+        TerrainHeightCache.put(Pos, generatedHeights) catch |err| std.debug.panic("{any}\n", .{err});
+        return generatedHeights;
+    }
+
+    fn GenTerrainHeight(params: GenParams, Pos: [2]i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
-        //if(GetHeightsFromCache(Pos, TerrainHeightCache))|heights|return heights;
-        const floatpos = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
+        const floatpos = @Vector(2, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]) };
         var height: [ChunkSize][ChunkSize]i32 = undefined;
         for (0..ChunkSize) |ux| {
             const x: f32 = (@as(f32, @floatFromInt(ux)) / 32) + floatpos[0];
             for (0..ChunkSize) |uz| {
-                const z: f32 = (@as(f32, @floatFromInt(uz)) / 32) + floatpos[2];
+                const z: f32 = (@as(f32, @floatFromInt(uz)) / 32) + floatpos[1];
                 height[ux][uz] = params.TerrainNoise.genNoise2DRange(x, z, i32, params.terrainmin, params.terrainmax);
             }
         }
-        _ = TerrainHeightCache;
-        //terrainheightcache temporaraly disabled because it wasent working
-        //   _ = cacheMisses.fetchAdd(1, .seq_cst);
-        //TerrainHeightCache.put(std.mem.asBytes(&Pos), height, .{.ttl = 100}) catch |err| {
-        //     std.log.err("error: {any}\n", .{err});
-        // };
+        _ = cacheMisses.fetchAdd(1, .seq_cst);
+        _ = cacheHits.fetchSub(1, .seq_cst);
         return height;
     }
 

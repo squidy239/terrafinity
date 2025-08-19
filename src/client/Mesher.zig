@@ -1,6 +1,7 @@
 const std = @import("std");
 const Chunk = @import("Chunk").Chunk;
 const Block = @import("Block").Blocks;
+const Obj = @import("obj");
 const ztracy = @import("ztracy");
 
 const ChunkSize = 32;
@@ -166,3 +167,5 @@ pub const Mesh = struct {
         }
     }
 };
+
+pub const EntityMesh = struct {};

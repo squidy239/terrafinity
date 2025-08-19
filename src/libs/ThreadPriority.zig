@@ -7,7 +7,7 @@ extern "kernel32" fn SetThreadPriority(hThread: HANDLE, nPriority: i32) callconv
 pub fn setThreadPriority(priority: Priority) bool {
     return switch (builtin.os.tag) {
         .windows => (SetThreadPriority(std.os.windows.GetCurrentThread(), @intFromEnum(priority)) != 0),
-        .linux => (0 == std.os.linux.sched_setparam(std.os.linux.getpid(), .{ .priority = @intFromEnum(priority) })),
+        .linux => false, //TODO
         else => false,
     };
 }
