@@ -8,9 +8,11 @@ pub fn build(b: *std.Build) void {
     //std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
         .name = "voxelgame",
-        .root_source_file = if (clientservertoggle and !runGame) b.path("src/server/Server.zig") else if (!clientservertoggle and !runGame) b.path("src/client/testClient.zig") else b.path("src/client/Client.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = if (clientservertoggle and !runGame) b.path("src/server/Server.zig") else if (!clientservertoggle and !runGame) b.path("src/client/testClient.zig") else b.path("src/client/Client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         //  .use_llvm = fal
     });
 

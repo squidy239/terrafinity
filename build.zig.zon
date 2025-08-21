@@ -26,28 +26,28 @@
 
     .dependencies = .{
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#fa12b57541976561358c850337af8d08647879d6",
-            .hash = "zglfw-0.10.0-dev-zgVDNJKcIQDR2-i-qz-FlR6uUdODN0DNPQA9X1G034qr",
+            .url = "git+https://github.com/zig-gamedev/zglfw#feeeff9386dd44ba2c18488113023865c41b80a4",
+            .hash = "zglfw-0.10.0-dev-zgVDNLyhIQCZR_rbIf7hnCKuifzcmPOLOQhd_hrqq8cl",
         },
         .zm = .{
-            .url = "git+https://github.com/griush/zm#319a44a9b0859214b9240a5c4ae0d8ae9ac16672",
-            .hash = "zm-0.3.0-AAAAAL3MAAA2du9TcSd0z2lFBF5_Qv-0zd7F566Z7B3K",
+            .url = "git+https://github.com/griush/zm#27ee118800e6ee0804499d053a54100beb579bf3",
+            .hash = "zm-0.3.0-cLX-WY3PAABvjPwxqDx9GZkMixyyrlHueLZTxpGy3kLE",
         },
         .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#be3d003f29d59d72e68e493ab531374ab474a795",
+            .url = "git+https://github.com/kcbanner/ztracy#be3d003f29d59d72e68e493ab531374ab474a795",
             .hash = "ztracy-0.14.0-dev-zHJSq1oQFwCAq2LhbqsBUmZAipMzsD8UfKL5Etc_OJMb",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#d5f381759825ee0bac29bc294d47aa05be4ab7b5",
-            .hash = "zigglgen-0.4.0-bmyqLX_gLQDFXilQ5VQ9fJeOHKU1RFrggOzRqTGBX79W",
+            .url = "git+https://github.com/castholm/zigglgen#595c65dcc7e4e194e405a6b8c98fe122e94c0b69",
+            .hash = "zigglgen-0.4.0-bmyqLejsLQCuWyKLwAy7X93Kz4rvYJ_VBL8O63o1wJ-R",
         },
         .zudp = .{
             .url = "git+https://github.com/squidy239/zudp#b077a5b4014fa4ace5a26cf7ae191be83f8db47e",
             .hash = "zudp-0.3.0-i2x3QEO6AAAUm1q__-SuiGj0l725Uqdv1fqUiSjgX4Ua",
         },
         .obj = .{
-            .url = "git+https://github.com/chip2n/zig-obj.git#4ad4f6463b553395a1cd5388846d8623f350bf8b",
-            .hash = "obj-3.0.0-v8OfipDLAAAfZnwVIVO_8cb6ZWpkxWK6-HTkkF-k6WuO",
+            .url = "git+https://github.com/chip2n/zig-obj.git#c49e1575b267aecaa5ebf29c9ba456690ebd2407",
+            .hash = "obj-3.0.1-v8OfiujLAABIhb_JGPB7s_4Tc4tkelEazCeOzOMjXV4A",
         },
     },
 
