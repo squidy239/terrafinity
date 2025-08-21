@@ -16,7 +16,7 @@ ids: if (builtin.single_threaded) struct {
     }
 } else std.AutoArrayHashMapUnmanaged(std.Thread.Id, void),
 
-const RunQueue = std.SinglyLinkedList;
+const RunQueue = std.SinglyLinkedList(Runnable);
 
 const Runnable = struct {
     runFn: RunProto,
@@ -24,7 +24,7 @@ const Runnable = struct {
 
 const RunnableNode = struct {
     runnable: Runnable,
-    node: std.SinglyLinkedList.Node,
+    node: std.SinglyLinkedList,
 };
 
 const RunProto = *const fn (*Runnable, id: ?usize) void;

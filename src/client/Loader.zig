@@ -67,7 +67,7 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
                 if (!loading and !loaded) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
-                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
+                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Low) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                 }
                 z += 1;
             }

@@ -12,7 +12,7 @@ const Entity = @import("Entity").Entity;
 const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 const EntityTypes = @import("EntityTypes");
 pub const Chunk = @import("Chunk").Chunk;
-pub const ThreadPool = std.Thread.Pool;
+pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 const builtin = @import("builtin");
@@ -120,7 +120,7 @@ pub fn main() !void {
             .pos = tempPlayer.pos,
             .timestamp = std.time.microTimestamp(),
         };
-        try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
+        _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
     }
     const player = @as(*EntityTypes.Player, @ptrCast(@alignCast(playerEntity.ptr)));
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);

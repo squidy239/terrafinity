@@ -30,14 +30,17 @@ pub const World = struct {
         en.fullfree(self.allocator);
     }
 
-    pub fn SpawnEntity(self: *@This(), UUID: u128, entity: anytype) !void {
-        if (self.Entitys.contains(UUID)) return error.PlayerAlreadyConnected;
+    pub fn SpawnEntity(self: *@This(), UUID: u128, entity: anytype) !?*Entity {
+        if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
         const allocated_entity = try entity.MakeEntity(self.allocator);
         errdefer allocated_entity.fullfree(self.allocator);
         const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
         if (existing) |_| {
             allocated_entity.fullfree(self.allocator);
+            return null;
         }
+
+        return allocated_entity;
     }
 
     pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
