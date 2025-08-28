@@ -93,8 +93,8 @@ pub const Renderer = struct {
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(10), std.atomic.Value(u32).init(10), std.atomic.Value(u32).init(10) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(12), std.atomic.Value(u32).init(12), std.atomic.Value(u32).init(12) }, //should be 2 or over gendistance
             .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
@@ -310,19 +310,19 @@ pub const Renderer = struct {
         gl.UseProgram(self.entityshaderprogram);
     }
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
-    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32) !void {
+    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
-        const chunk = try self.world.LoadChunk(Pos);
+        const chunk = self.world.LoadChunk(Pos, self, genStructures);
         std.debug.assert(chunk.ref_count.load(.seq_cst) >= 2);
         chunk.lock.lockShared(); //ref is added in loadchunk
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 })).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 })).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 })).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 })).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 })).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 })).extractFace(.zPlus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, self, false)).extractFace(.xMinus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, self, false)).extractFace(.xPlus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, self, false)).extractFace(.yMinus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, self, false)).extractFace(.yPlus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, self, false)).extractFace(.zMinus, true),
+            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
@@ -354,7 +354,7 @@ pub const Renderer = struct {
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst) + 2), @intCast(self.GenerateDistance[1].load(.seq_cst) + 2), @intCast(self.GenerateDistance[2].load(.seq_cst) + 2) })) {
-            self.AddChunkToRender(Pos) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+            self.AddChunkToRender(Pos, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
         } else {
             _ = self.LoadingChunks.remove(Pos);
         }

@@ -6,14 +6,29 @@ const std = @import("std");
 const ChunkSize = 32;
 
 pub const BlockEncoding = union(enum) {
-    blocks: *[32][32][32]Block,
+    blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 };
+
+pub const Genstate = enum(u8) {
+    TerrainGenerated,
+    StructuresGenerated,
+};
+
+pub const Function = enum(u8) {
+    GenerateStructures,
+    GenerateStructuresHH,
+    LoadChunk,
+    GenChunk,
+};
+
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
 pub const Chunk = struct {
+    debugTag: Function,
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
+    genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
@@ -41,6 +56,7 @@ pub const Chunk = struct {
             }
         }
         gen.End();
+        if (Pos[0] == 0) {}
         const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);
         defer ad.End();
         var blockEncoding: BlockEncoding = undefined;
@@ -54,6 +70,8 @@ pub const Chunk = struct {
         return @This(){
             .blocks = blockEncoding,
             .lock = .{},
+            .debugTag = .GenChunk,
+            .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
@@ -104,6 +122,15 @@ pub const Chunk = struct {
         }
 
         return result;
+    }
+    ///caller must hold lock and a ref
+    pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator) !void {
+        std.debug.assert(self.blocks == .oneBlock);
+        var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        @memset(&blocks, @splat(@splat(self.blocks.oneBlock)));
+        const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
+        mem.* = blocks;
+        self.blocks = BlockEncoding{ .blocks = mem };
     }
 
     fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32) Block {
