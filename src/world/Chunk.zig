@@ -25,7 +25,6 @@ pub const Function = enum(u8) {
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
 pub const Chunk = struct {
-    debugTag: Function,
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
@@ -70,7 +69,6 @@ pub const Chunk = struct {
         return @This(){
             .blocks = blockEncoding,
             .lock = .{},
-            .debugTag = .GenChunk,
             .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
             .ref_count = std.atomic.Value(u32).init(1),
         };

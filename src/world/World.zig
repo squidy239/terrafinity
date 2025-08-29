@@ -80,50 +80,35 @@ pub const World = struct {
             var chunkptr: *Chunk = self.allocator.create(Chunk) catch std.debug.panic("err", .{});
             ad.End();
             chunkptr.* = ch;
-            //    _ = renderer;
-            // defer if (Pos[1] == 0 and Pos[0] == 10 and Pos[2] == 0 and structures) std.debug.print("s:{any}\n", .{Pos});
-            // defer if (Pos[1] == 14 and @mod(Pos[0], 3) == 0 and Pos[2] == 0 and structures and chunkptr.genstate == .TerrainGenerated) self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), null, .chunkcube, null, null) catch std.debug.panic("err", .{});
-            //structures dont work, only fills one chunk, others are glitched.some have  2 refs somehow TODO fix
             chunkptr.ref_count.raw = 2; //add ref before hashmap non atomicly
-            chunkptr.lock.lock();
+            //chunkptr.lock.lock();
             const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch std.debug.panic("err", .{}); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
             //chptr is in hashmap past this point
             if (existing) |d| {
                 @branchHint(.unlikely);
-                chunkptr.lock.unlock();
+                // chunkptr.lock.unlock();
                 chunkptr.release(); //ref was added before putting
                 _ = chunkptr.free(self.allocator);
                 self.allocator.destroy(chunkptr);
-                d.debugTag = .LoadChunk;
                 return d;
             }
-
+            //chunkptr.lock.unlock();
             if (structures) {
                 GenerateStructures(self, chunkptr, Pos, renderer) catch std.debug.panic("err", .{});
                 std.debug.assert(chunkptr.genstate.load(.seq_cst) == .StructuresGenerated);
             }
-            chunkptr.lock.unlock();
-            chunkptr.debugTag = .LoadChunk;
             return chunkptr;
         } else {
             if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) GenerateStructures(self, chunk.?, Pos, renderer) catch std.debug.panic("err", .{});
-            chunk.?.debugTag = .LoadChunk;
             return chunk.?;
         }
     }
-    var a: i32 = 0;
     fn GenerateStructures(self: *@This(), chunk: *Chunk, Pos: [3]i32, renderer: ?*Renderer) !void {
+        const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
+        defer genstructures.End();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
-        defer chunk.debugTag = .GenerateStructuresHH;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
-        if (Pos[0] == 0 and Pos[1] == 15 and Pos[2] == 0) a += 1;
-        if (a > 1) {
-            std.debug.print("a:{any}\n", .{a});
-            //return;
-        }
-        if (@mod(Pos[0], 1) == 0 and Pos[1] == 20 and Pos[2] == 0) std.debug.print("gpos:{any}\n", .{Pos});
-        // _ = self;
-        if (@mod(Pos[0], 1) == 0 and Pos[1] == 20 and Pos[2] == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, .chunkcube, chunk, Pos);
+        if (@mod(Pos[0], 4) == 0 and Pos[1] == 20 and @mod(Pos[2], 4) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, .chunkcube, chunk, Pos);
     }
     ///adds a ref and loads chunk, ref must be removed if not using chunk
     pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {
@@ -142,14 +127,13 @@ pub const World = struct {
         } else return chunk.?;
     }
 
-    threadlocal var ChunksBuffer: [10485760]u8 = undefined;
+    threadlocal var ChunksBuffer: [250000]u8 = undefined;
     ///generates and places a structure at the given position, mainChunk is a chunk out of the hashmap that will be treated as the chunk at its pos, this does not lock it so caller must hold its lock. remeshes if there is a renderer. dosent remesh mainchunk
     pub fn GenStructure(self: *@This(), BlockPos: @Vector(3, i64), renderer: ?*Renderer, structure: Structure, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32) !void {
-        const genstructures = ztracy.ZoneNC(@src(), "genstructures", 222222);
+        const genstructures = ztracy.ZoneNC(@src(), "genstructure", 4369);
         defer genstructures.End();
         _ = structure;
-        std.debug.print("genstruct at {d}, {d}, {d}\n", .{ BlockPos[0], BlockPos[1], BlockPos[2] });
-        defer std.debug.print("done\n", .{});
+        //std.debug.print("genstruct at {d}, {d}, {d}\n", .{ BlockPos[0], BlockPos[1], BlockPos[2] });
         var stage: i64 = 0;
         var fb = std.heap.FixedBufferAllocator.init(&ChunksBuffer);
         const fba = fb.allocator();
@@ -163,7 +147,7 @@ pub const World = struct {
                 try mainChunk.?.ToBlocks(self.allocator);
             }
             ChunkMap.put(mainChunkPos.?, mainChunk.?) catch |err| {
-                std.log.err("error putting chunk into hashmap: {any}", .{err});
+                std.debug.panic("error putting chunk into hashmap: {any}", .{err});
             };
         }
         var chunk: ?*Chunk = undefined;
@@ -187,7 +171,8 @@ pub const World = struct {
                 ChunkMap.deinit();
             }
         }
-
+        const loop = ztracy.ZoneNC(@src(), "loop", 454369);
+        defer loop.End();
         while (true) {
             const nextstep = GenChunkCube(stage) orelse break;
             stage += 1;
@@ -198,9 +183,6 @@ pub const World = struct {
                 chunk = ChunkMap.get(nextchunk);
                 if (chunk == null) {
                     chunk = self.LoadChunk(nextchunk, null, false);
-                    //    while (!chunk.?.lock.tryLock()) {
-                    //   std.debug.print("chunkk lock failed: {any}, chunk: {any}\n", .{ nextchunk, chunk });
-                    //  }
                     chunk.?.lock.lock();
                     if (chunk.?.blocks != .blocks) {
                         std.debug.assert(chunk.?.blocks == .oneBlock);
@@ -211,14 +193,12 @@ pub const World = struct {
                 }
             }
             if (mainChunkPos == null or @reduce(.Or, nextchunk != mainChunkPos.?)) {
-                while (!chunk.?.lock.tryLock()) {
-                    std.debug.print("chunk lock failed: {any}, held by: {any}\n", .{ nextchunk, chunk.?.debugTag });
-                }
+                chunk.?.lock.lock();
             }
             blocks = chunk.?.blocks.blocks;
             lastchunkpos = nextchunk;
             blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = nextstep.block;
-            if (mainChunkPos != null and @reduce(.Or, nextchunk != mainChunkPos.?)) chunk.?.lock.unlock();
+            if (mainChunkPos == null or @reduce(.Or, nextchunk != mainChunkPos.?)) chunk.?.lock.unlock();
         }
     }
 
@@ -230,7 +210,7 @@ pub const World = struct {
 
     pub fn GenChunkCube(stage: i64) ?step {
         if (stage >= (64 * 64 * 64)) return null;
-        return step{ .block = .Stone, .pos = .{ @divFloor(stage, 64 * 64), @mod(@divFloor(stage, 64), 64), @mod(stage, 64) } };
+        return step{ .block = .Water, .pos = .{ @divFloor(stage, 64 * 64), @mod(@divFloor(stage, 64), 64), @mod(stage, 64) } };
     }
 
     pub const step = struct { block: Block, pos: @Vector(3, i64) };

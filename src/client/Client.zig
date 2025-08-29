@@ -66,7 +66,7 @@ pub fn main() !void {
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_TIME_CRITICAL);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
     const allocator = debug_allocator.allocator();
-    var sfa = std.heap.stackFallback(10000000, allocator);
+    var sfa = std.heap.stackFallback(1000000, allocator);
     var sfalloc = std.heap.ThreadSafeAllocator{ .child_allocator = sfa.get() };
     const sfallocator = sfalloc.allocator();
     const cpu_count = try std.Thread.getCpuCount();
@@ -126,7 +126,10 @@ pub fn main() !void {
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
     try MainWorld.Entitys.put(World.PlayerIDtoEntityId(player.player_UUID), playerEntity);
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
-    var renderer = try Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator);
+    var renderer = Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator) catch |err| {
+        std.debug.panic("Failed to initialize renderer: {}\n", .{err});
+        return err;
+    };
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });

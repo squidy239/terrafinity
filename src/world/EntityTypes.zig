@@ -40,12 +40,12 @@ pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
         defer allocator.free(fileContents);
         var parsedObj = try obj.parseObj(allocator, fileContents); //TODO somehow fetch files if they are missing
         defer parsedObj.deinit(allocator);
-        mesh.* = GlLoadEntity(parsedObj, &EntityMeshesLen[i]);
+        mesh.* = try GlLoadEntity(parsedObj, &EntityMeshesLen[i], allocator);
     }
     std.debug.print("done reading\n", .{});
 }
 
-pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int) ?EntityMeshBufferIDs {
+pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {
     if (entity.meshes.len == 0) return null;
     // std.debug.assert(entity.meshes.len == 1);
     var bufferids: EntityMeshBufferIDs = undefined;
@@ -58,7 +58,8 @@ pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int) ?EntityMeshBuffe
     gl.GenBuffers(1, @ptrCast(&bufferids.ebo));
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufferids.ebo);
     gl.EnableVertexAttribArray(0);
-    var indices: [4_000_000]u32 = undefined;
+    var indices = try allocator.alloc(u32, 4_000_000);
+    defer allocator.free(indices);
     var pos: usize = 0;
     for (entity.meshes) |mesh| {
         for (mesh.indices) |index| {

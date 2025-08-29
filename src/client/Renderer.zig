@@ -93,8 +93,8 @@ pub const Renderer = struct {
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(10), std.atomic.Value(u32).init(10), std.atomic.Value(u32).init(10) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(12), std.atomic.Value(u32).init(12), std.atomic.Value(u32).init(12) }, //should be 2 or over gendistance
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
             .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
@@ -381,7 +381,7 @@ pub const Renderer = struct {
                 defer self.ChunkRenderListLock.unlock();
                 const oldChunk = try self.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
                 if (oldChunk) |old_mesh| {
-                    std.debug.print("remeshed chunk at pos:{d}\n", .{mesh.Pos});
+                    //std.debug.print("remeshed chunk at pos:{d}\n", .{mesh.Pos});
                     inline for (0..2) |i| {
                         if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
                         if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));

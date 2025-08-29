@@ -34,7 +34,7 @@
             .hash = "zm-0.3.0-cLX-WY3PAABvjPwxqDx9GZkMixyyrlHueLZTxpGy3kLE",
         },
         .ztracy = .{
-            .url = "git+https://github.com/kcbanner/ztracy#be3d003f29d59d72e68e493ab531374ab474a795",
+            .url = "git+https://github.com/zig-gamedev/ztracy#367f640f77dc2de45a116cdd7c390770141721d8",
             .hash = "ztracy-0.14.0-dev-zHJSq1oQFwCAq2LhbqsBUmZAipMzsD8UfKL5Etc_OJMb",
         },
         .zigglgen = .{
