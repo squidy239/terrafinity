@@ -31,6 +31,7 @@ pub const Chunk = struct {
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
+        //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
         const thamount: f32 = @floatFromInt(gen_params.terrainmax - gen_params.terrainmin);
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
@@ -123,7 +124,7 @@ pub const Chunk = struct {
     }
     ///caller must hold lock and a ref
     pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator) !void {
-        std.debug.assert(self.blocks == .oneBlock);
+        if (self.blocks != .oneBlock) return error.InvalidState;
         var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         @memset(&blocks, @splat(@splat(self.blocks.oneBlock)));
         const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);

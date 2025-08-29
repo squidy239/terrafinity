@@ -92,8 +92,8 @@ pub fn processInput() !void {
     if (render.window.getKey(glfw.Key.r) == .press)
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }), true);
 
-    if (render.window.getKey(glfw.Key.b) == .press)
-        try render.world.GenStructure(@intFromFloat(render.player.pos), render, .chunkcube, null, null);
+    //if (render.window.getKey(glfw.Key.b) == .press)
+    //try render.world.GenStructure(@intFromFloat(render.player.pos), render, .chunkcube, null, null);
 
     if (render.window.getKey(glfw.Key.i) == .press)
         std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }))});

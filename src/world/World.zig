@@ -108,7 +108,13 @@ pub const World = struct {
         defer genstructures.End();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
-        if (@mod(Pos[0], 4) == 0 and Pos[1] == 20 and @mod(Pos[2], 4) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, .chunkcube, chunk, Pos);
+        if (Pos[1] == 20) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 8, chunk, Pos);
+        if (@mod(Pos[0], 2) == 0 and Pos[1] == 21 and @mod(Pos[2], 2) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 16, chunk, Pos);
+        if (@mod(Pos[0], 4) == 0 and Pos[1] == 22 and @mod(Pos[2], 4) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 32, chunk, Pos);
+        if (@mod(Pos[0], 8) == 0 and Pos[1] == 25 and @mod(Pos[2], 8) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 64, chunk, Pos);
+        if (@mod(Pos[0], 12) == 0 and Pos[1] == 30 and @mod(Pos[2], 12) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 128, chunk, Pos);
+        if (@mod(Pos[0], 24) == 0 and Pos[1] == 38 and @mod(Pos[2], 24) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 256, chunk, Pos);
+        //  if (@mod(Pos[0], 64) == 0 and Pos[1] == 50 and @mod(Pos[2], 64) == 0) try self.GenStructure((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), renderer, GenChunkCube, CubeState, 512, chunk, Pos);
     }
     ///adds a ref and loads chunk, ref must be removed if not using chunk
     pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {
@@ -129,12 +135,10 @@ pub const World = struct {
 
     threadlocal var ChunksBuffer: [250000]u8 = undefined;
     ///generates and places a structure at the given position, mainChunk is a chunk out of the hashmap that will be treated as the chunk at its pos, this does not lock it so caller must hold its lock. remeshes if there is a renderer. dosent remesh mainchunk
-    pub fn GenStructure(self: *@This(), BlockPos: @Vector(3, i64), renderer: ?*Renderer, structure: Structure, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32) !void {
+    pub fn GenStructure(self: *@This(), BlockPos: @Vector(3, i64), renderer: ?*Renderer, genStructure: fn (state: anytype, genParams: anytype) ?step, GenState: type, GenParams: anytype, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32) !void {
         const genstructures = ztracy.ZoneNC(@src(), "genstructure", 4369);
         defer genstructures.End();
-        _ = structure;
         //std.debug.print("genstruct at {d}, {d}, {d}\n", .{ BlockPos[0], BlockPos[1], BlockPos[2] });
-        var stage: i64 = 0;
         var fb = std.heap.FixedBufferAllocator.init(&ChunksBuffer);
         const fba = fb.allocator();
         var ChunkMap = std.AutoArrayHashMap([3]i32, *Chunk).init(fba);
@@ -154,6 +158,7 @@ pub const World = struct {
 
         var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var lastchunkpos: ?@Vector(3, i32) = null;
+        var chunkLock: ?*std.Thread.RwLock = null; //if it is not null its locked
         defer {
             var it = ChunkMap.iterator();
             while (it.next()) |entry| {
@@ -171,34 +176,44 @@ pub const World = struct {
                 ChunkMap.deinit();
             }
         }
+        var structureGenData: GenState = .{};
         const loop = ztracy.ZoneNC(@src(), "loop", 454369);
         defer loop.End();
-        while (true) {
-            const nextstep = GenChunkCube(stage) orelse break;
-            stage += 1;
+        while (genStructure(&structureGenData, GenParams)) |nextstep| {
             const nextblockpos = nextstep.pos + BlockPos;
             const nextchunk: @Vector(3, i32) = @intCast(@divFloor(nextblockpos, @Vector(3, i64){ 32, 32, 32 }));
             const nextchunkblockpos = @mod(nextblockpos, @Vector(3, i64){ 32, 32, 32 });
             if (lastchunkpos == null or @reduce(.Or, lastchunkpos.? != nextchunk)) {
+                if (chunk != null and (mainChunkPos == null or chunk.? != mainChunk.?) and chunkLock != null) {
+                    chunkLock.?.unlock();
+                    chunkLock = null;
+                }
                 chunk = ChunkMap.get(nextchunk);
                 if (chunk == null) {
                     chunk = self.LoadChunk(nextchunk, null, false);
-                    chunk.?.lock.lock();
-                    if (chunk.?.blocks != .blocks) {
-                        std.debug.assert(chunk.?.blocks == .oneBlock);
-                        try chunk.?.ToBlocks(self.allocator);
+                    chunk.?.lock.lockShared();
+                    const blockEncoding = chunk.?.blocks;
+                    chunk.?.lock.unlockShared();
+                    if (blockEncoding != .blocks) {
+                        chunk.?.lock.lock();
+                        defer chunk.?.lock.unlock();
+                        if (blockEncoding != .blocks) try chunk.?.ToBlocks(self.allocator);
                     }
-                    chunk.?.lock.unlock();
                     try ChunkMap.put(nextchunk, chunk.?);
                 }
-            }
-            if (mainChunkPos == null or @reduce(.Or, nextchunk != mainChunkPos.?)) {
-                chunk.?.lock.lock();
+                if (chunk != null and (mainChunkPos == null or chunk.? != mainChunk.?)) {
+                    std.debug.assert(chunkLock == null);
+                    chunkLock = &chunk.?.lock;
+                    chunkLock.?.lock();
+                }
             }
             blocks = chunk.?.blocks.blocks;
             lastchunkpos = nextchunk;
             blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = nextstep.block;
-            if (mainChunkPos == null or @reduce(.Or, nextchunk != mainChunkPos.?)) chunk.?.lock.unlock();
+        }
+        if (chunk != null and (mainChunkPos == null or chunk.? != mainChunk.?) and chunkLock != null) {
+            chunkLock.?.unlock();
+            chunkLock = null;
         }
     }
 
@@ -208,10 +223,17 @@ pub const World = struct {
         fourchunkcube,
     };
 
-    pub fn GenChunkCube(stage: i64) ?step {
-        if (stage >= (64 * 64 * 64)) return null;
-        return step{ .block = .Water, .pos = .{ @divFloor(stage, 64 * 64), @mod(@divFloor(stage, 64), 64), @mod(stage, 64) } };
+    pub fn GenChunkCube(state: anytype, genParams: anytype) ?step {
+        var State: *CubeState = state;
+        const stage = State.stage;
+        State.stage += 1;
+        if (stage >= (genParams * genParams * genParams)) return null;
+        return step{ .block = .Dirt, .pos = .{ @divFloor(stage, genParams * genParams), @mod(@divFloor(stage, genParams), genParams), @mod(stage, genParams) } };
     }
+
+    const CubeState = struct {
+        stage: i64 = 0,
+    };
 
     pub const step = struct { block: Block, pos: @Vector(3, i64) };
 
