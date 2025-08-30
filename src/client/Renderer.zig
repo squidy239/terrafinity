@@ -310,12 +310,12 @@ pub const Renderer = struct {
         gl.UseProgram(self.entityshaderprogram);
     }
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
+    threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    threadlocal var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
         const chunk = self.world.LoadChunk(Pos, self, genStructures);
-        std.debug.assert(chunk.ref_count.load(.seq_cst) >= 2);
-        chunk.lock.lockShared(); //ref is added in loadchunk
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
             (self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, self, false)).extractFace(.xMinus, true),
             (self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, self, false)).extractFace(.xPlus, true),
@@ -325,8 +325,7 @@ pub const Renderer = struct {
             (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
-        var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        chunk.lock.lockShared();
         switch (chunk.blocks) {
             .blocks => blocks = chunk.blocks.blocks,
             .oneBlock => {
@@ -373,7 +372,7 @@ pub const Renderer = struct {
         const MeshesToLoadLen: usize = self.MeshesToLoad.items.len;
         for (0..MeshesToLoadLen) |_| {
             if (std.time.microTimestamp() - st > max_us) break;
-            const mesh = self.MeshesToLoad.swapRemove(0);
+            const mesh = self.MeshesToLoad.swapRemove(0); //swapremove might cause the bug with the holes if it reorders the meshes TODO fix using either a hashmaparray or a sorted array ordering
             defer FreeMesh(mesh, self.allocator);
             const mesh_buffer_ids = self.LoadMesh(mesh);
             {

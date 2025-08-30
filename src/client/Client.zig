@@ -73,7 +73,7 @@ pub fn main() !void {
     var pool: ThreadPool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = sfallocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-    const seed = rand.random().int(u64);
+    const seed = 0; //rand.random().int(u64);
     std.log.info("using seed {d}\n", .{seed});
     var MainWorld = World{
         .allocator = allocator,
@@ -102,7 +102,7 @@ pub fn main() !void {
         .player_name = .fromString("squid"),
         .gameMode = .Spectator,
         .OnGround = false,
-        .pos = MainWorld.GetPlayerSpawnPos(),
+        .pos = MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 100, 0 },
         .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
         .headRotationAxis = @Vector(2, f16){ 0, 0 },
         .armSwings = [2]f16{ 0, 0 }, //right,left
@@ -113,7 +113,7 @@ pub fn main() !void {
 
     const playerEntity = try tempPlayer.MakeEntity(allocator);
 
-    for (0..1_000) |_| {
+    for (0..1) |_| {
         const tempCube: EntityTypes.Cube = .{
             .velocity = @splat(0),
             .bodyRotationAxis = @splat(0),
