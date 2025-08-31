@@ -134,6 +134,188 @@ pub const MassiveTreeGenParams = struct {
     leaf_density: u32, // Leaf clusters per branch
 };
 
+pub fn GenGiantTree(state: anytype, genParams: anytype) ?Step {
+    var State: *GiantTreeState = state;
+    const stage = State.stage;
+    State.stage += 1;
+
+    const p: GiantTreeGenParams = genParams;
+    const trunk_height = p.height;
+    const trunk_radius = p.base_radius;
+    const branch_start_y = @as(u32, @intFromFloat(@as(f32, @floatFromInt(trunk_height)) * genParams.branch_start_height_factor));
+    const num_branches = p.main_branches;
+    const branch_length = p.branch_length;
+    const canopy_radius = p.canopy_radius;
+    const num_roots = p.num_roots;
+    const root_length = p.root_length;
+
+    // Phase 1: Trunk
+    const trunk_blocks = calculateGiantTrunkBlocks(trunk_radius, trunk_height, p.top_radius_factor);
+    if (stage < trunk_blocks) {
+        if (getGiantTrunkPosition(stage, trunk_radius, trunk_height, p.top_radius_factor)) |pos| {
+            return Step{ .block = .Wood, .pos = pos };
+        }
+        return GenGiantTree(state, genParams); // Skip empty space in square iteration
+    }
+
+    // Phase 2: Buttress Roots
+    var current_stage = trunk_blocks;
+    const root_blocks_per_root = root_length * root_length; // Approximation
+    if (stage < current_stage + num_roots * root_blocks_per_root) {
+        const root_stage = stage - current_stage;
+        const root_index = @divFloor(root_stage, root_blocks_per_root);
+        const local_root_stage = @mod(root_stage, root_blocks_per_root);
+        const root_angle = @as(f32, @floatFromInt(root_index)) * 2.0 * std.math.pi / @as(f32, @floatFromInt(num_roots));
+
+        if (getButtressRootPosition(local_root_stage, root_angle, root_length, trunk_radius)) |pos| {
+            return Step{ .block = .Wood, .pos = pos };
+        }
+        return GenGiantTree(state, genParams);
+    }
+    current_stage += num_roots * root_blocks_per_root;
+
+    // Phase 3: Branches
+    const branch_blocks_per_branch = branch_length * branch_length; // Approximation
+    if (stage < current_stage + num_branches * branch_blocks_per_branch) {
+        const branch_stage = stage - current_stage;
+        const branch_index = @divFloor(branch_stage, branch_blocks_per_branch);
+        const local_branch_stage = @mod(branch_stage, branch_blocks_per_branch);
+
+        const branch_angle = @as(f32, @floatFromInt(branch_index)) * 2.0 * std.math.pi / @as(f32, @floatFromInt(num_branches)) + (@as(f32, @floatFromInt(@mod(branch_index, 2))) * std.math.pi / @as(f32, @floatFromInt(num_branches)));
+        const y_offset = @as(f32, @floatFromInt(@mod(branch_index, 4))) * 2.0;
+        const start_y = @as(f32, @floatFromInt(branch_start_y)) + y_offset;
+
+        if (getGiantBranchPosition(local_branch_stage, branch_angle, start_y, branch_length)) |pos| {
+            return Step{ .block = .Wood, .pos = pos };
+        }
+        return GenGiantTree(state, genParams);
+    }
+    current_stage += num_branches * branch_blocks_per_branch;
+
+    // Phase 4: Canopy
+    const canopy_volume = 4 * std.math.pi * std.math.pow(f32, @as(f32, @floatFromInt(canopy_radius)), 3) / 3; // Sphere volume
+    const canopy_blocks_approx = @as(i64, @intFromFloat(canopy_volume * 0.6)); // Approx fill ratio
+    if (stage < current_stage + canopy_blocks_approx) {
+        const canopy_center_y = trunk_height + canopy_radius / 3;
+        if (getCanopyPosition(stage, canopy_radius, State.rand.random())) |pos| {
+            return Step{ .block = .Leaves, .pos = .{ pos[0], pos[1] + canopy_center_y, pos[2] } };
+        }
+        return GenGiantTree(state, genParams);
+    }
+
+    return null;
+}
+
+fn getTaperedRadius(base_radius: u32, y: u32, height: u32, top_radius_factor: f32) u32 {
+    const progress = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(height));
+    const base_r = @as(f32, @floatFromInt(base_radius));
+    const top_r = base_r * top_radius_factor;
+    const radius = base_r * (1.0 - progress) + top_r * progress;
+    return @max(1, @as(u32, @intFromFloat(radius)));
+}
+
+fn calculateGiantTrunkBlocks(base_radius: u32, height: u32, top_radius_factor: f32) i64 {
+    var total: i64 = 0;
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        const radius = getTaperedRadius(base_radius, y, height, top_radius_factor);
+        total += (2 * radius + 1) * (2 * radius + 1);
+    }
+    return total;
+}
+
+fn getGiantTrunkPosition(stage: i64, base_radius: u32, height: u32, top_radius_factor: f32) ?@Vector(3, i64) {
+    var current_blocks: i64 = 0;
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        const radius = getTaperedRadius(base_radius, y, height, top_radius_factor);
+        const r_sq = radius * radius;
+        const blocks_at_height = (2 * radius + 1) * (2 * radius + 1);
+
+        if (stage < current_blocks + blocks_at_height) {
+            const local_stage = stage - current_blocks;
+            const diameter = 2 * radius + 1;
+            const x = @mod(local_stage, @as(i64, @intCast(diameter))) - @as(i64, @intCast(radius));
+            const z = @divFloor(local_stage, @as(i64, @intCast(diameter))) - @as(i64, @intCast(radius));
+
+            if (x * x + z * z <= @as(i64, r_sq)) {
+                return .{ x, @intCast(y), z };
+            }
+            return null;
+        }
+        current_blocks += blocks_at_height;
+    }
+    return null;
+}
+
+fn getButtressRootPosition(local_stage: i64, angle: f32, length: u32, trunk_radius: u32) ?@Vector(3, i64) {
+    const l = @as(f32, @floatFromInt(length));
+    const progress = std.math.sqrt(@as(f32, @floatFromInt(local_stage)) / (l * l));
+    if (progress > 1.0) return null;
+
+    const dist_from_trunk = @as(f32, @floatFromInt(trunk_radius)) + progress * l;
+    const root_height = @max(0, @as(i64, @intFromFloat(l / 2.0 * (1.0 - progress * progress))));
+
+    const x = @as(i64, @intFromFloat(@cos(angle) * dist_from_trunk));
+    const z = @as(i64, @intFromFloat(@sin(angle) * dist_from_trunk));
+
+    return .{ x, root_height, z };
+}
+
+fn getGiantBranchPosition(local_stage: i64, angle: f32, start_y: f32, length: u32) ?@Vector(3, i64) {
+    const l = @as(f32, @floatFromInt(length));
+    const progress = std.math.sqrt(@as(f32, @floatFromInt(local_stage)) / (l * l));
+    if (progress > 1.0) return null;
+
+    const branch_dist = progress * l;
+    const x = @as(i64, @intFromFloat(@cos(angle) * branch_dist));
+    const z = @as(i64, @intFromFloat(@sin(angle) * branch_dist));
+    const y = @as(i64, @intFromFloat(start_y + progress * l * 0.4)); // Upward curve
+
+    return .{ x, y, z };
+}
+
+fn getCanopyPosition(_: i64, radius: u32, rand: std.Random) ?@Vector(3, i64) {
+    const r_f = @as(f32, @floatFromInt(radius));
+
+    // Sample uniformly within a sphere
+    const u = rand.float(f32) * 2.0 - 1.0;
+    const theta = rand.float(f32) * 2.0 * std.math.pi;
+    const r_sample = std.math.pow(f32, rand.float(f32), 1.0 / 3.0) * r_f;
+
+    const x = @as(i64, @intFromFloat(r_sample * std.math.sqrt(1 - u * u) * @cos(theta)));
+    const y = @as(i64, @intFromFloat(r_sample * u));
+    const z = @as(i64, @intFromFloat(r_sample * std.math.sqrt(1 - u * u) * @sin(theta)));
+
+    // Reject points outside a slightly squashed ellipsoid for a more natural canopy shape
+    const x_f = @as(f32, @floatFromInt(x));
+    const y_f = @as(f32, @floatFromInt(y));
+    const z_f = @as(f32, @floatFromInt(z));
+
+    if ((x_f * x_f + z_f * z_f) / (r_f * r_f) + (y_f * y_f) / ((r_f * 0.7) * (r_f * 0.7)) > 1.0) {
+        return null;
+    }
+
+    return .{ x, y, z };
+}
+
+pub const GiantTreeState = struct {
+    stage: i64 = 0,
+    rand: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
+};
+
+pub const GiantTreeGenParams = struct {
+    height: u32,
+    base_radius: u32,
+    main_branches: u32,
+    branch_length: u32,
+    canopy_radius: u32,
+    num_roots: u32,
+    root_length: u32,
+    branch_start_height_factor: f32,
+    top_radius_factor: f32,
+};
+
 pub fn GenTree(state: anytype, genParams: anytype) ?Step {
     var State: *TreeState = state;
     const stage = State.stage;

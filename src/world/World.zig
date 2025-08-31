@@ -114,18 +114,49 @@ pub const World = struct {
         const randomSeed = std.hash.Wyhash.hash(self.GenParams.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
+
         if (chunk.blocks == .blocks) {
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |z| {
                     for (0..ChunkSize) |y| {
                         if (chunk.blocks.blocks[x][y][z] == .Grass) {
                             const treeChance: f64 = rand.float(f64);
-                            if (treeChance < 0.0001) {
-                                try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenOrganicTree, Structures.OrganicTreeState, Structures.OrganicTreeGenParams{}, chunk, Pos);
-                            } else if (treeChance < 0.001) {
-                                //try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structurdes.GenTree, Structures.TreeState, Structures.TreeGenParams{ .height = 20, .leaf_height = 10, .leaf_radius = 10 }, chunk, Pos);
-                            } else if (treeChance < 0.01) {
-                                //  try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenTree, Structures.TreeState, Structures.TreeGenParams{ .height = 10, .leaf_height = 5, .leaf_radius = 5 }, chunk, Pos);
+                            if (treeChance < 0.00001) {
+                                try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                    .height = 200,
+                                    .base_radius = 15,
+                                    .main_branches = 20,
+                                    .branch_length = 50,
+                                    .canopy_radius = 50,
+                                    .num_roots = 15,
+                                    .top_radius_factor = 0.75,
+                                    .branch_start_height_factor = 0.95,
+                                    .root_length = 12,
+                                }, chunk, Pos);
+                            } else if (treeChance < 0.00025) {
+                                try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                    .height = 30,
+                                    .base_radius = 3,
+                                    .main_branches = 4,
+                                    .branch_length = 8,
+                                    .canopy_radius = 10,
+                                    .num_roots = 6,
+                                    .top_radius_factor = 0.75,
+                                    .branch_start_height_factor = 0.90,
+                                    .root_length = 3,
+                                }, chunk, Pos);
+                            } else if (treeChance < 0.0025) {
+                                try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                    .height = 15,
+                                    .base_radius = 2,
+                                    .main_branches = 4,
+                                    .branch_length = 6,
+                                    .canopy_radius = 8,
+                                    .num_roots = 4,
+                                    .top_radius_factor = 0.75,
+                                    .branch_start_height_factor = 0.90,
+                                    .root_length = 2,
+                                }, chunk, Pos);
                             }
                         }
                     }
