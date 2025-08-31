@@ -62,9 +62,9 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
                 const ChunkPos = [3]i32{ x + eyePosChunk[0], y + eyePosChunk[1], z + eyePosChunk[2] };
                 const loading = renderer.LoadingChunks.contains(ChunkPos);
                 renderer.ChunkRenderListLock.lockShared();
-                const loaded = renderer.ChunkRenderList.contains(ChunkPos);
+                const loaded = renderer.ChunkRenderList.contains(ChunkPos); //if chunk was loaded without structures it wont be updated
                 renderer.ChunkRenderListLock.unlockShared();
-                if (!loading and !loaded) {
+                if (!loading and (!loaded or (renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated)) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
                     renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Low) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});

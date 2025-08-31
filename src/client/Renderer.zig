@@ -274,11 +274,7 @@ pub const Renderer = struct {
                 const Pos = item.key_ptr.*;
                 gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                 drawnchunks += 1;
-                var tr = millitimestamp - buffer_ids.time;
-                if (tr > 1000) {
-                    @branchHint(.likely);
-                    tr = 1000;
-                }
+                const tr = millitimestamp - buffer_ids.time;
                 gl.Uniform1f(self.uniforms.scalelocation, buffer_ids.scale);
                 gl.Uniform1i(self.uniforms.tlocation, @intCast(tr));
                 gl.Uniform3i(self.uniforms.chunkposlocation, Pos[0], Pos[1], Pos[2]);
@@ -372,9 +368,16 @@ pub const Renderer = struct {
         const MeshesToLoadLen: usize = self.MeshesToLoad.items.len;
         for (0..MeshesToLoadLen) |_| {
             if (std.time.microTimestamp() - st > max_us) break;
-            const mesh = self.MeshesToLoad.swapRemove(0); //swapremove might cause the bug with the holes if it reorders the meshes TODO fix using either a hashmaparray or a sorted array ordering
+            const mesh = self.MeshesToLoad.orderedRemove(0);
             defer FreeMesh(mesh, self.allocator);
-            const mesh_buffer_ids = self.LoadMesh(mesh);
+            self.ChunkRenderListLock.lockShared();
+            const ex = self.ChunkRenderList.get(mesh.Pos);
+            self.ChunkRenderListLock.unlockShared();
+            var oldtime: ?i64 = null;
+            if (ex) |m| {
+                oldtime = m.time;
+            }
+            const mesh_buffer_ids = self.LoadMesh(mesh, oldtime);
             {
                 self.ChunkRenderListLock.lock();
                 defer self.ChunkRenderListLock.unlock();
@@ -396,8 +399,8 @@ pub const Renderer = struct {
         if (mesh.TransperentFaces) |tfaces| allocator.free(tfaces);
     }
 
-    ///caller must free mesh, must be called from main thread
-    fn LoadMesh(self: *@This(), mesh: Mesher.Mesh) MeshBufferIDs {
+    ///caller must free mesh, must be called from main thread, creation time is to keep animation state the same when remeshing
+    fn LoadMesh(self: *@This(), mesh: Mesher.Mesh, CreationTime: ?i64) MeshBufferIDs {
         var NewMeshIDs: MeshBufferIDs = .{
             .vao = [2]?c_uint{ null, null },
             .vbo = [2]?c_uint{ null, null },
@@ -433,7 +436,7 @@ pub const Renderer = struct {
 
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
         gl.BindVertexArray(0);
-        NewMeshIDs.time = std.time.milliTimestamp();
+        NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
         return NewMeshIDs;
     }
 

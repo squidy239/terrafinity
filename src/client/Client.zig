@@ -113,7 +113,7 @@ pub fn main() !void {
 
     const playerEntity = try tempPlayer.MakeEntity(allocator);
 
-    for (0..1) |_| {
+    for (0..10_000) |_| {
         const tempCube: EntityTypes.Cube = .{
             .velocity = @splat(0),
             .bodyRotationAxis = @splat(0),

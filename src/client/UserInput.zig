@@ -3,6 +3,7 @@ const gl = @import("gl");
 const glfw = @import("zglfw");
 const ztracy = @import("ztracy");
 const Renderer = @import("Renderer.zig").Renderer;
+const World = @import("root").World;
 const zm = @import("zm");
 var render: *Renderer = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
@@ -92,12 +93,29 @@ pub fn processInput() !void {
     if (render.window.getKey(glfw.Key.r) == .press)
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }), true);
 
-    //if (render.window.getKey(glfw.Key.b) == .press)
-    //try render.world.GenStructure(@intFromFloat(render.player.pos), render, .chunkcube, null, null);
+    if (render.window.getKey(glfw.Key.b) == .press)
+        try render.pool.spawn(BuildStructTask, .{}, .Medium);
 
     if (render.window.getKey(glfw.Key.i) == .press)
         std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }))});
 }
+
+fn BuildStructTask() void {
+    render.world.PrintStructure(@intFromFloat(render.player.pos), render, GenCube, CubeState, 256, null, null) catch |err| {
+        std.debug.print("Error: {any}", .{err});
+    };
+}
+pub fn GenCube(state: anytype, genParams: anytype) ?World.Step {
+    var State: *CubeState = state;
+    const stage = State.stage;
+    State.stage += 1;
+    if (stage >= (genParams * genParams * genParams)) return null;
+    return World.Step{ .block = .Stone, .pos = .{ @divFloor(stage, genParams * genParams), @mod(@divFloor(stage, genParams), genParams), @mod(stage, genParams) } };
+}
+
+const CubeState = struct {
+    stage: i64 = 0,
+};
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;

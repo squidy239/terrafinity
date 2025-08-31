@@ -72,7 +72,7 @@ void main()
             FragColor = vec4(0.9, 0.9, 0.9, 1.0);
         }
     }
-    else if (blocktype == 1)
+    else if (blocktype == 1 || blocktype == 8)
     {
         if (gl_FragCoord.z < 0.999999) {
             FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + abs(position.y) + 1.0) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, abs(((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4), 1);
