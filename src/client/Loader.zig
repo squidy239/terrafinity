@@ -3,7 +3,6 @@ const root = @import("root");
 const SetThreadPriority = root.SetThreadPriority;
 const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
-const zudp = @import("zudp").Connection;
 const gl = @import("gl");
 const ztracy = @import("ztracy");
 
@@ -12,7 +11,7 @@ threadlocal var meshesToUnloadBufferPos: u16 = 0;
 threadlocal var chunksToUnloadBuffer: [8192][3]i32 = undefined;
 threadlocal var chunksToUnloadBufferPos: u16 = 0;
 ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
-pub fn ChunkLoaderThread(renderer: *Renderer, conn: ?zudp, intervel_ns: u64, pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, running: *std.atomic.Value(bool)) void {
+pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, running: *std.atomic.Value(bool)) void {
     _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
     while (running.load(.monotonic)) {
         posLock.lockShared();
@@ -23,13 +22,7 @@ pub fn ChunkLoaderThread(renderer: *Renderer, conn: ?zudp, intervel_ns: u64, pos
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const genDistance = [3]u32{ renderer.GenerateDistance[0].load(.seq_cst), renderer.GenerateDistance[1].load(.seq_cst), renderer.GenerateDistance[2].load(.seq_cst) };
         const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ 32, 32, 32 })));
-        if (conn) |connection| {
-            //multiplayer
-            _ = connection;
-        } else {
-            //singleplayer
-            LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
-        }
+        LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
         addChunkstoLoad.End();
     }
 }

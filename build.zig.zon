@@ -41,10 +41,6 @@
             .url = "git+https://github.com/castholm/zigglgen#744d8b6617a7eb8df15f5922faa002e0b5234025",
             .hash = "zigglgen-0.4.0-bmyqLXT4LQCQviz5TRTU14ntLCRUxLNTK0Us3v93jyxR",
         },
-        .zudp = .{
-            .url = "git+https://github.com/squidy239/zudp#b077a5b4014fa4ace5a26cf7ae191be83f8db47e",
-            .hash = "zudp-0.3.0-i2x3QEO6AAAUm1q__-SuiGj0l725Uqdv1fqUiSjgX4Ua",
-        },
         .obj = .{
             .url = "git+https://github.com/chip2n/zig-obj.git#c49e1575b267aecaa5ebf29c9ba456690ebd2407",
             .hash = "obj-3.0.1-v8OfiujLAABIhb_JGPB7s_4Tc4tkelEazCeOzOMjXV4A",

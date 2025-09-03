@@ -2,6 +2,7 @@ const Block = @import("Block").Blocks;
 const ztracy = @import("ztracy");
 const Noise = @import("fastnoise.zig");
 const Cache = @import("Cache").Cache;
+const Interpolation = @import("Interpolation");
 const std = @import("std");
 const ChunkSize = 32;
 
@@ -50,11 +51,46 @@ pub const Chunk = struct {
                     const block_height = (Pos[1] * ChunkSize) + @as(i32, @intCast(c));
                     const block = if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(&rand, @as(f32, @floatFromInt(terrain_height)) / thamount, block_height, SeaLevel) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
                     chunk[x][c][z] = block;
+
                     if (LastBlock != null and LastBlock != block) isOneBlock = false;
                     LastBlock = block;
                 }
             }
         }
+
+        if (!(isOneBlock and LastBlock == Block.Air)) {
+            var grid: [4][4][4]f32 = undefined; //TODO make threadlocal var
+            const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
+
+            // Sample at 4x4x4 points across the chunk area
+            for (0..4) |x| {
+                for (0..4) |y| {
+                    for (0..4) |z| {
+                        const sample_offset = @Vector(3, f32){ @as(f32, @floatFromInt(x)) * 32.0 / 3.0, @as(f32, @floatFromInt(y)) * 32.0 / 3.0, @as(f32, @floatFromInt(z)) * 32.0 / 3.0 } / @Vector(3, f32){ 32, 32, 32 };
+                        const pos = floatPos + sample_offset;
+                        grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
+                    }
+                }
+            }
+            for (0..ChunkSize) |x| {
+                for (0..ChunkSize) |y| {
+                    for (0..ChunkSize) |z| {
+                        // Trilinear interpolation coordinates - map [0, ChunkSize-1] to [0, 1]
+                        const interp_x = @as(f32, @floatFromInt(x)) / 31;
+                        const interp_y = @as(f32, @floatFromInt(y)) / 31;
+                        const interp_z = @as(f32, @floatFromInt(z)) / 31;
+                        const n = Interpolation.tricubicNaturalSplineInterpolate(f32, grid, interp_x, interp_y, interp_z);
+                        if (n > 0.4) {
+                            chunk[x][y][z] = .Air;
+                            if (LastBlock != null and LastBlock != .Air) isOneBlock = false;
+                            LastBlock = .Air;
+                        }
+                    }
+                }
+            }
+        }
+        //
+        //TODO caves (maybe tricubic interpolated 3d noise?)
         gen.End();
         if (Pos[0] == 0) {}
         const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);
@@ -247,6 +283,7 @@ pub const Chunk = struct {
 
     pub const GenParams = struct {
         TerrainNoise: Noise.Noise(f32),
+        CaveNoise: Noise.Noise(f32),
         terrainmin: i32,
         terrainmax: i32,
         seed: u64,

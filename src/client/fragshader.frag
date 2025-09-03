@@ -121,7 +121,7 @@ void main()
     vec3 lightDir = normalize(sunpos - fragpos);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
-    vec4 result = vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
+    vec4 result = FragColor; //vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
     float fogDistance = gl_FragCoord.z / gl_FragCoord.w;
 
     float fogAmount = fogFactorExp2(fogDistance, fogDensity); //fog density

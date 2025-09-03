@@ -91,12 +91,15 @@ pub fn build(b: *std.Build) void {
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
+    const Interpolation = b.addModule("Interpolation", .{ .root_source_file = b.path("src/libs/Interpolation.zig") });
+    exe.root_module.addImport("Interpolation", Interpolation);
+
     const Cache = b.addModule("Cache", .{ .root_source_file = b.path("src/libs/Cache.zig"), .imports = &.{
         .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
     } });
     exe.root_module.addImport("Cache", Cache);
 
-    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{ .{ .name = "Cache", .module = Cache }, .{ .name = "Block", .module = Block }, .{
+    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{ .{ .name = "Cache", .module = Cache }, .{ .name = "Block", .module = Block }, .{ .name = "Interpolation", .module = Interpolation }, .{
         .name = "ztracy",
         .module = ztracy.module("root"),
     } } });
@@ -104,9 +107,6 @@ pub fn build(b: *std.Build) void {
 
     const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
     exe.root_module.addImport("ThreadPriority", ThreadPriority);
-
-    const Requests = b.addModule("Requests", .{ .root_source_file = b.path("src/protocol/Requests.zig"), .imports = &.{ .{ .name = "Entitys", .module = Entitys }, .{ .name = "Chunk", .module = Chunk } } });
-    exe.root_module.addImport("Requests", Requests);
 
     const world_module = b.addModule("World", .{
         .root_source_file = b.path("src/world/World.zig"),
@@ -122,21 +122,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zm", zm.module("zm"));
-
-    const zudp = b.dependency("zudp", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zudp", zudp.module("zudp"));
-
-    const Network = b.addModule("Network", .{
-        .root_source_file = b.path("src/protocol/Network.zig"),
-        .imports = &.{
-            .{ .name = "Requests", .module = Requests },
-            .{ .name = "zudp", .module = zudp.module("zudp") },
-        },
-    });
-    exe.root_module.addImport("Network", Network);
 
     const zglfw = b.dependency("zglfw", .{
         .optimize = std.builtin.OptimizeMode.ReleaseSafe,

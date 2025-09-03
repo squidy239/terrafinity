@@ -93,9 +93,9 @@ pub const Renderer = struct {
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(30), std.atomic.Value(u32).init(30), std.atomic.Value(u32).init(30) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(32), std.atomic.Value(u32).init(32), std.atomic.Value(u32).init(32) }, //should be 2 or over gendistance
-            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(32), std.atomic.Value(u32).init(32), std.atomic.Value(u32).init(32) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
+            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
@@ -254,7 +254,7 @@ pub const Renderer = struct {
         const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
         const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-        gl.Uniform1f(self.uniforms.fogDensity, 0.001 + @as(f32, @floatCast(playerPos[1] / 800000)));
+        gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
         gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         self.ChunkRenderListLock.lockShared();
@@ -347,7 +347,7 @@ pub const Renderer = struct {
         const playerPos = self.player.pos;
         self.playerLock.unlockShared();
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
-        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos)); //TODO fix err happens here when playerPos gets corrupted: integer part of floating point value out of bounds
         if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst) + 2), @intCast(self.GenerateDistance[1].load(.seq_cst) + 2), @intCast(self.GenerateDistance[2].load(.seq_cst) + 2) })) {
             self.AddChunkToRender(Pos, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
         } else {

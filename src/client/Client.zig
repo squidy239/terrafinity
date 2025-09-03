@@ -86,14 +86,21 @@ pub fn main() !void {
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -256,
-            .terrainmax = 1024,
+            .terrainmax = 256,
             .seed = seed,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
                 .octaves = 16,
                 .noise_type = .value,
-                .frequency = 0.02,
+                .frequency = 0.005,
+            },
+            .CaveNoise = .{
+                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
+                .fractal_type = .none,
+                .octaves = 3,
+                .noise_type = .perlin,
+                .frequency = 0.5,
             },
         },
     };
@@ -130,9 +137,10 @@ pub fn main() !void {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
+
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
-    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, null, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
+    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
 
     defer {
