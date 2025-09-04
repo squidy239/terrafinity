@@ -82,7 +82,7 @@ pub const Chunk = struct {
 
             const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
             defer inter.End();
-            var int = Interpolation.interp.init(grid);
+            var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
             var xyz = @Vector(3, f32){ 0, 0, 0 };
             for (0..ChunkSize) |x| {
                 xyz[0] += 1;
