@@ -25,6 +25,9 @@ pub const Function = enum(u8) {
 
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
+var temp2D: [4][4]f32 = undefined;
+var valuesY: [4][4]f32 = undefined;
+var valuesX2d: [16][4]f32 = undefined;
 pub const Chunk = struct {
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
@@ -59,9 +62,12 @@ pub const Chunk = struct {
         }
 
         if (!(isOneBlock and LastBlock == Block.Air)) {
+            const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
+            defer caves.End();
             var grid: [4][4][4]f32 = undefined; //TODO make threadlocal var
             const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
 
+            const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
             // Sample at 4x4x4 points across the chunk area
             for (0..4) |x| {
                 for (0..4) |y| {
@@ -72,14 +78,23 @@ pub const Chunk = struct {
                     }
                 }
             }
+            caveNoise.End();
+
+            const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
+            defer inter.End();
+            var int = Interpolation.interp.init(grid);
+            var xyz = @Vector(3, f32){ 0, 0, 0 };
             for (0..ChunkSize) |x| {
+                xyz[0] += 1;
+                xyz[1] = 0;
                 for (0..ChunkSize) |y| {
+                    xyz[1] += 1;
+                    xyz[2] = 0;
                     for (0..ChunkSize) |z| {
+                        xyz[2] += 1;
                         // Trilinear interpolation coordinates - map [0, ChunkSize-1] to [0, 1]
-                        const interp_x = @as(f32, @floatFromInt(x)) / 31;
-                        const interp_y = @as(f32, @floatFromInt(y)) / 31;
-                        const interp_z = @as(f32, @floatFromInt(z)) / 31;
-                        const n = Interpolation.tricubicNaturalSplineInterpolate(f32, grid, interp_x, interp_y, interp_z);
+                        const interp = xyz / comptime @as(@Vector(3, f32), @splat(31.0));
+                        const n = int.sample(interp[0], interp[1], interp[2]);
                         if (n > 0.4) {
                             chunk[x][y][z] = .Air;
                             if (LastBlock != null and LastBlock != .Air) isOneBlock = false;
