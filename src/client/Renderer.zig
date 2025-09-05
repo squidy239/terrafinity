@@ -84,7 +84,7 @@ pub const Renderer = struct {
             .indecies = undefined,
             .shaderprogram = undefined,
             .entityshaderprogram = undefined,
-            .MeshesToLoad = std.ArrayList(Mesher.Mesh).init(allocator),
+            .MeshesToLoad = .{},
             .MeshesToLoadLock = .{},
             .uniforms = undefined,
             .player = player,
@@ -117,8 +117,8 @@ pub const Renderer = struct {
         var it = self.ChunkRenderList.iterator();
         while (it.next()) |mesh| {
             inline for (0..2) |i| {
-                if (mesh.value_ptr.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
-                if (mesh.value_ptr.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));
+                if (mesh.value_ptr.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
+                if (mesh.value_ptr.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
             }
         }
         glfw.terminate();
@@ -128,7 +128,7 @@ pub const Renderer = struct {
         for (self.MeshesToLoad.items) |mesh| {
             FreeMesh(mesh, self.allocator);
         }
-        self.MeshesToLoad.deinit();
+        self.MeshesToLoad.deinit(self.allocator);
         std.debug.print("stopped renderer\n", .{});
     }
     fn InitWindowAndProcs(self: *@This()) !void {
@@ -337,7 +337,7 @@ pub const Renderer = struct {
         if (mesh) |m| {
             self.MeshesToLoadLock.lock();
             defer self.MeshesToLoadLock.unlock();
-            try self.MeshesToLoad.append(m);
+            try self.MeshesToLoad.append(self.allocator, m);
         }
     }
 
@@ -385,8 +385,8 @@ pub const Renderer = struct {
                 if (oldChunk) |old_mesh| {
                     //std.debug.print("remeshed chunk at pos:{d}\n", .{mesh.Pos});
                     inline for (0..2) |i| {
-                        if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
-                        if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));
+                        if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
+                        if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
                     }
                 }
             }

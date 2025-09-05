@@ -141,7 +141,7 @@ pub fn TickEntitiesThread(world: *World, interval_ns: u64, running: *std.atomic.
         var tasksComplete: [enbktamount]bool = @splat(false);
         for (0..enbktamount) |bucket| {
             //TickEntitiesBucketTask(world, b);
-            world.threadPool.spawn(TickEntitiesBucketTask, .{ world, running, &tasksComplete[bucket], bucket }, .Medium) catch std.debug.panic("error adding task to pool", .{});
+            world.threadPool.spawn(TickEntitiesBucketTask, .{ world, running, &tasksComplete[bucket], bucket }, .High) catch std.debug.panic("error adding task to pool", .{});
         }
         AddEntitiesToTick.End();
         const WaitingForTasksToComplete = ztracy.ZoneNC(@src(), "WaitingForTasksToComplete", 2344326);

@@ -60,7 +60,7 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
                 if (!loading and (!loaded or (renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated)) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
-                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Low) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
+                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                 }
                 z += 1;
             }
@@ -118,8 +118,8 @@ pub fn UnloadMeshes(renderer: *Renderer, meshDistance: [3]u32, playerChunkPos: @
         for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |mesh| {
             //std.debug.print("mesh:{any}\n", .{mesh});
             inline for (0..2) |i| {
-                if (mesh.vbo[i]) |vbo| gl.DeleteBuffers(1, @constCast(@ptrCast(&vbo)));
-                if (mesh.vao[i]) |vao| gl.DeleteVertexArrays(1, @constCast(@ptrCast(&vao)));
+                if (mesh.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
+                if (mesh.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
             }
         }
         meshesToUnloadBufferPos = 0;

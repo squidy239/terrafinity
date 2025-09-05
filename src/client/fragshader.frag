@@ -80,19 +80,17 @@ void main()
     float cdfs = cos(pow(coordss.x, 2) + pow(coordss.y, 2) + pow(coordss.z, 2));
     if (blocktype == 3)
     {
-        if (position.y < 1000) {
-            float v = abs((rand(vec2(round(coordss.x * 16) / 16 / round(coordss.y * 16) / 16, round(coordss.z * 16) / 16))));
-            FragColor = vec4((cdfs - 0.0001 * sscale * abs(position.y)) - v, (cdfs + 0.0001 * sscale * abs(position.y)) - v, (cdfs + 0.0001 * sscale * abs(position.y)) - v, 1);
-        }
-        else {
-            FragColor = vec4(0.9, 0.9, 0.9, 1.0);
-        }
+        float tv = round(max(min(16, 16 * ((1 - gl_FragCoord.z) * 100)), 2));
+        float v = abs((rand(vec2(round(coordss.x * tv) / tv / round(coordss.y * tv) / tv, round(coordss.z * tv) / tv))));
+        FragColor = vec4((cdfs - 0.0001 * sscale * position.y) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, 1);
     }
     else if (blocktype == 4)
     {
-        if (gl_FragCoord.z < 0.999999) {
-            FragColor = vec4(0, ((rand(vec2((round(coordss.x * 8) / 8 + abs(position.y) + 1.0) / (round((coordss.y + 0.1) * 8) / 8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, abs(((rand(vec2(round(coordss.x * 4) / 4 + abs(position.y) / round(coordss.y * 4) / 4, abs(position.x) * abs(position.z) / round(coordss.z * 4) / 4) / 16))) - 0.4), 1);
-        } else FragColor = vec4(0.0, 0.7, 0.2, 1.0);
+        float tv16 = round(max(min(16, 16 * ((1 - gl_FragCoord.z) * 100)), 2));
+        float tv8 = round(max(min(8, 8 * ((1 - gl_FragCoord.z) * 100)), 2));
+        float tv4 = round(max(min(4, 4 * ((1 - gl_FragCoord.z) * 100)), 2));
+
+        FragColor = vec4(0, ((rand(vec2((round(coordss.x * tv8) / tv8 + abs(position.y) + 1.0) / (round((coordss.y + 0.1) * tv8) / tv8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * tv16) / tv16) / tv16))) + 0.2, abs(((rand(vec2(round(coordss.x * tv4) / tv4 + abs(position.y) / round(coordss.y * tv4) / tv4, abs(position.x) * abs(position.z) / round(coordss.z * tv4) / tv4) / tv16))) - 0.4), 1);
     }
     else if (blocktype == 2)
     {

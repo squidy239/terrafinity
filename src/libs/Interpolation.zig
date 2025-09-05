@@ -96,7 +96,6 @@ fn tricubicNaturalSplineInterpolateFast(interp: *const NaturalCubicInterpolator3
     const coeff = computeNaturalCubicCoeffs(f32, yresult);
     return splineEval(f32, yresult, coeff, z);
 }
-
 /// Original functions for compatibility
 pub fn computeNaturalCubicCoeffs(Type: type, values: [4]Type) [4]Type {
     var m: [4]Type = .{ 0, 0, 0, 0 }; // second derivatives, m0 = m3 = 0 (natural boundary)
@@ -176,16 +175,17 @@ test "speed" {
     grid[0][2][3] = 43.0;
     var st = std.time.nanoTimestamp();
     var a: f32 = 0.0;
-    const it = 32 * 32 * 32 * 32;
+    const it = 8;
     // var temp2D: [4][4]f32 = undefined;
     ////  var valuesY: [4][4]f32 = undefined;
     //   var valuesX2d: [16][4]f32 = undefined;
     for (0..it) |_| {
-        a += tricubicNaturalSplineInterpolate(f32, grid, 0, 0, 0);
+        //  a += trilinearInterpolate(f32, &grid, 0, 0, 0);
     }
+    a += @reduce(.Add, trilinearInterpolateBatch(it, f32, grid, @splat(@Vector(3, f32){ 0, 0, 0 })));
     var et = std.time.nanoTimestamp();
     const elapsed1 = et - st;
-    std.debug.print("Elapsed time: {d} us, a: {d}\n", .{ @as(f128, @floatFromInt(elapsed1)) / std.time.ns_per_us, a });
+    std.debug.print("trilinearInterpolate Elapsed time: {d} us, a: {d}\n", .{ @as(f128, @floatFromInt(elapsed1)) / std.time.ns_per_us, a });
     rand = std.Random.DefaultPrng.init(0);
     grid[0][2][3] = 43.0;
     st = std.time.nanoTimestamp();
@@ -202,4 +202,127 @@ test "speed" {
     const elapsed2 = et - st;
     std.debug.print("new Elapsed time: {d} us, a: {d}\n", .{ @as(f128, @floatFromInt(elapsed2)) / std.time.ns_per_us, a });
     std.debug.print("speed increased by: {d} times\n", .{@as(f128, @floatFromInt(elapsed1)) / @as(f128, @floatFromInt(elapsed2))});
+}
+pub fn trilinearInterpolate(
+    comptime Type: type,
+    grid: *[4][4][4]Type,
+    xyz: @Vector(3, Type),
+) Type {
+    // Scale from [0,1] to [0,3]
+    const gx = xyz[0] * 3.0;
+    const gy = xyz[1] * 3.0;
+    const gz = xyz[2] * 3.0;
+
+    // Cube indices [0..2]
+    const i: usize = @intFromFloat(@floor(@min(gx, 2.9999)));
+    const j: usize = @intFromFloat(@floor(@min(gy, 2.9999)));
+    const k: usize = @intFromFloat(@floor(@min(gz, 2.9999)));
+
+    // Local position inside cube
+    const tx = gx - @as(Type, @floatFromInt(i));
+    const ty = gy - @as(Type, @floatFromInt(j));
+    const tz = gz - @as(Type, @floatFromInt(k));
+
+    // Interpolation weights (precompute tensor product)
+    const wx: @Vector(2, Type) = .{ 1.0 - tx, tx };
+    const wy: @Vector(2, Type) = .{ 1.0 - ty, ty };
+    const wz: @Vector(2, Type) = .{ 1.0 - tz, tz };
+
+    // Gather 8 cube corners into SIMD vector
+    const corners: @Vector(8, Type) = .{
+        grid[i][j][k],
+        grid[i + 1][j][k],
+        grid[i][j + 1][k],
+        grid[i + 1][j + 1][k],
+        grid[i][j][k + 1],
+        grid[i + 1][j][k + 1],
+        grid[i][j + 1][k + 1],
+        grid[i + 1][j + 1][k + 1],
+    };
+
+    // SIMD weights (tensor product expanded directly)
+    const weights: @Vector(8, Type) = .{
+        wx[0] * wy[0] * wz[0],
+        wx[1] * wy[0] * wz[0],
+        wx[0] * wy[1] * wz[0],
+        wx[1] * wy[1] * wz[0],
+        wx[0] * wy[0] * wz[1],
+        wx[1] * wy[0] * wz[1],
+        wx[0] * wy[1] * wz[1],
+        wx[1] * wy[1] * wz[1],
+    };
+
+    // Final interpolation = dot product
+    return @reduce(.Add, corners * weights);
+}
+
+pub fn trilinearInterpolateBatch(
+    comptime N: usize,
+    comptime Type: type,
+    grid: [4][4][4]Type,
+    xs: [N]Type,
+    ys: [N]Type,
+    zs: [N]Type,
+) @Vector(N, Type) {
+    var out: [N]Type = undefined;
+
+    const one: Type = 1.0;
+    const three: Type = 3.0;
+    const max_index_f = 2.9999;
+
+    inline for (0..N) |idx| {
+        const x = xs[idx];
+        const y = ys[idx];
+        const z = zs[idx];
+
+        // scale into [0..3]
+        const gx = x * three;
+        const gy = y * three;
+        const gz = z * three;
+
+        // compute integer cube indices in [0..2]
+        const i: usize = @intFromFloat(@floor(@min(gx, @as(Type, max_index_f))));
+        const j: usize = @intFromFloat(@floor(@min(gy, @as(Type, max_index_f))));
+        const k: usize = @intFromFloat(@floor(@min(gz, @as(Type, max_index_f))));
+
+        // local coordinates [0,1]
+        const tx = gx - @as(Type, @floatFromInt(i));
+        const ty = gy - @as(Type, @floatFromInt(j));
+        const tz = gz - @as(Type, @floatFromInt(k));
+
+        // interpolation weights
+        const wx0 = one - tx;
+        const wx1 = tx;
+        const wy0 = one - ty;
+        const wy1 = ty;
+        const wz0 = one - tz;
+        const wz1 = tz;
+
+        const weights: @Vector(8, Type) = .{
+            wx0 * wy0 * wz0,
+            wx1 * wy0 * wz0,
+            wx0 * wy1 * wz0,
+            wx1 * wy1 * wz0,
+            wx0 * wy0 * wz1,
+            wx1 * wy0 * wz1,
+            wx0 * wy1 * wz1,
+            wx1 * wy1 * wz1,
+        };
+
+        const corners: @Vector(8, Type) = .{
+            grid[i][j][k],
+            grid[i + 1][j][k],
+            grid[i][j + 1][k],
+            grid[i + 1][j + 1][k],
+            grid[i][j][k + 1],
+            grid[i + 1][j][k + 1],
+            grid[i][j + 1][k + 1],
+            grid[i + 1][j + 1][k + 1],
+        };
+
+        // final dot product
+        out[idx] = @reduce(.Add, corners * weights);
+    }
+
+    return out;
 }

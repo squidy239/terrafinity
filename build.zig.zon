@@ -16,7 +16,7 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.14.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -30,12 +30,12 @@
             .hash = "zglfw-0.10.0-dev-zgVDNLyhIQCZR_rbIf7hnCKuifzcmPOLOQhd_hrqq8cl",
         },
         .zm = .{
-            .url = "git+https://github.com/griush/zm#27ee118800e6ee0804499d053a54100beb579bf3",
-            .hash = "zm-0.3.0-cLX-WY3PAABvjPwxqDx9GZkMixyyrlHueLZTxpGy3kLE",
+            .url = "git+https://github.com/griush/zm#b5d70485dfc78baa9251a06a844d860fd00e9bcf",
+            .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
         },
         .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#367f640f77dc2de45a116cdd7c390770141721d8",
-            .hash = "ztracy-0.14.0-dev-zHJSq1oQFwCAq2LhbqsBUmZAipMzsD8UfKL5Etc_OJMb",
+            .url = "git+https://github.com/kcbanner/ztracy#e154b2aa94ab5f9c719669e4ae93aa306404e0bd",
+            .hash = "ztracy-0.14.0-dev-zHJSqzXvGAAuqRWQmRE-PIlttg6GeKWmP__cC9qPYREI",
         },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen#744d8b6617a7eb8df15f5922faa002e0b5234025",

@@ -85,23 +85,24 @@ pub fn main() !void {
         .SpawnCenterPos = [3]i32{ 0, 0, 0 },
         .Rand = rand.random(),
         .GenParams = .{
-            .terrainmin = -256,
-            .terrainmax = 256,
+            .terrainmin = -1024,
+            .terrainmax = 1024,
             .seed = seed,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
                 .octaves = 16,
                 .noise_type = .value,
-                .frequency = 0.005,
+                .frequency = 0.01,
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .none,
-                .octaves = 3,
+                .fractal_type = .ping_pong,
+                .octaves = 16,
                 .noise_type = .perlin,
-                .frequency = 0.5,
+                .frequency = 0.05,
             },
+            .Cavesess = -0.6,
         },
     };
     const tempPlayer: EntityTypes.Player = .{
@@ -120,7 +121,7 @@ pub fn main() !void {
 
     const playerEntity = try tempPlayer.MakeEntity(allocator);
 
-    for (0..10_000) |_| {
+    for (0..0) |_| {
         const tempCube: EntityTypes.Cube = .{
             .velocity = @splat(0),
             .bodyRotationAxis = @splat(0),
