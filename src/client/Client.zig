@@ -172,10 +172,15 @@ pub fn main() !void {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
         try renderer.LoadMeshes(10_000_000);
-        const swapandpoll = ztracy.ZoneNC(@src(), "swapandpoll", 456564);
+        const glfinish = ztracy.ZoneNC(@src(), "glfinish", 0x00FF00);
+        gl.Finish();
+        glfinish.End();
+        const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
+        swap.End();
+        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
         glfw.pollEvents();
-        swapandpoll.End();
+        poll.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
         prossesinput.End();

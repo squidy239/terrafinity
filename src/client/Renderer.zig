@@ -154,7 +154,7 @@ pub const Renderer = struct {
         gl.makeProcTableCurrent(self.proc_table);
         const xz = self.window.getContentScale();
         gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
-        glfw.swapInterval(1);
+        glfw.swapInterval(0);
         gl.Enable(gl.DEPTH_TEST);
         gl.Enable(gl.CULL_FACE);
         gl.CullFace(gl.BACK);
@@ -335,7 +335,9 @@ pub const Renderer = struct {
         const mesh = try Mesher.Mesh.MeshFromChunks(Pos, (blocks), neighbor_faces, self.allocator);
         chunk.releaseAndUnlockShared();
         if (mesh) |m| {
+            const lock = ztracy.ZoneNC(@src(), "MeshesToLoadLock", 33522);
             self.MeshesToLoadLock.lock();
+            lock.End();
             defer self.MeshesToLoadLock.unlock();
             try self.MeshesToLoad.append(self.allocator, m);
         }

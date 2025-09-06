@@ -1,4 +1,4 @@
-//modified from the std thread pool
+//modified from the std thread pool, added prioritys nad switched from fila to fifo
 const std = @import("std");
 const builtin = @import("builtin");
 const Pool = @This();
@@ -6,7 +6,7 @@ const WaitGroup = std.Thread.WaitGroup;
 
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
-run_queue: [7]std.SinglyLinkedList = @splat(.{}),
+run_queue: [7]std.DoublyLinkedList = @splat(.{}),
 is_running: bool = true,
 allocator: std.mem.Allocator,
 threads: if (builtin.single_threaded) [0]std.Thread else []std.Thread,
@@ -19,7 +19,7 @@ ids: if (builtin.single_threaded) struct {
 
 const Runnable = struct {
     runFn: RunProto,
-    node: std.SinglyLinkedList.Node = .{},
+    node: std.DoublyLinkedList.Node = .{},
 };
 
 pub const Priority = enum(u4) {
@@ -153,7 +153,7 @@ pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args
             .wait_group = wait_group,
         };
 
-        pool.run_queue.prepend(&closure.runnable.node);
+        pool.run_queue.append(&closure.runnable.node);
         pool.mutex.unlock();
     }
 
@@ -216,7 +216,7 @@ pub fn spawnWgId(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, ar
             .wait_group = wait_group,
         };
 
-        pool.run_queue.prepend(&closure.runnable.node);
+        pool.run_queue.append(&closure.runnable.node);
         pool.mutex.unlock();
     }
 
@@ -259,7 +259,7 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype, priority: Prior
             .pool = pool,
         };
 
-        pool.run_queue[@intFromEnum(priority)].prepend(&closure.runnable.node);
+        pool.run_queue[@intFromEnum(priority)].append(&closure.runnable.node);
     }
 
     // Notify waiting threads outside the lock to try and keep the critical section small.
@@ -295,7 +295,7 @@ fn worker(pool: *Pool) void {
     if (id) |_| pool.ids.putAssumeCapacityNoClobber(std.Thread.getCurrentId(), {});
 
     while (true) {
-        var run_node: ?*std.SinglyLinkedList.Node = null;
+        var run_node: ?*std.DoublyLinkedList.Node = null;
 
         for (&pool.run_queue) |*queue| {
             if (queue.popFirst()) |node| {

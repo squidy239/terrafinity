@@ -127,11 +127,12 @@ void main() {
 
     vec3 vertexposition = coords * scale + ((pos * scale) + (chunkpos * 32.0));
 
-    float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
-
-    if (blocktype == 6) coords.y -= bouncingMod((p * t * speed), 0.4);
+    if (blocktype == 6) {
+        float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
+        coords.y -= bouncingMod((p * t * speed), 0.4);
+    }
     coordss = coords;
-    float animationMs = 2000;
+    float animationMs = 500;
     float animationSpeed = 0.25;
     coords.y -= ((animationMs - min(chunktime, animationMs)) * animationSpeed); //replace with pos.y for other aniamtion
     gl_Position = projview * vec4((coords * scale) + ((pos * scale) + (relativechunkpos)), 1);
