@@ -8,7 +8,7 @@ const zm = @import("zm");
 var render: *Renderer = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
-var lastmicrotime: i64 = undefined;
+var lastmicrotime: i64 = 0;
 
 pub fn init(ren: *Renderer) void {
     render = ren;
@@ -60,6 +60,7 @@ pub fn processInput() !void {
     var posAdjustment: @Vector(3, f64) = @splat(0);
     defer {
         render.playerLock.lock();
+        std.debug.assert(@reduce(.Or, posAdjustment == posAdjustment)); //posAdjustment is not NaN
         render.player.pos += posAdjustment;
         render.playerLock.unlock();
     }
@@ -71,10 +72,16 @@ pub fn processInput() !void {
         posAdjustment += cameraSpeed * render.cameraFront;
     if (render.window.getKey(glfw.Key.s) == .press)
         posAdjustment -= cameraSpeed * render.cameraFront;
-    if (render.window.getKey(glfw.Key.a) == .press)
-        posAdjustment -= zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
-    if (render.window.getKey(glfw.Key.d) == .press)
-        posAdjustment += zm.vec.normalize(zm.vec.cross(render.cameraFront, Renderer.cameraUp)) * cameraSpeed;
+    if (render.window.getKey(glfw.Key.a) == .press) {
+        const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
+        if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
+            posAdjustment -= zm.vec.normalize(cross) * cameraSpeed;
+    }
+    if (render.window.getKey(glfw.Key.d) == .press) {
+        const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
+        if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
+            posAdjustment += zm.vec.normalize(cross) * cameraSpeed;
+    }
     if (render.window.getMouseButton(glfw.MouseButton.left) == .press) {
         if (ts.CursorEscaped) {
             ts.CursorEscaped = false;
@@ -96,12 +103,20 @@ pub fn processInput() !void {
     if (render.window.getKey(glfw.Key.b) == .press)
         try render.pool.spawn(BuildStructTask, .{}, .Medium);
 
-    if (render.window.getKey(glfw.Key.i) == .press)
-        std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }))});
+    if (render.window.getKey(glfw.Key.i) == .press) {
+        render.playerLock.lockShared();
+        const playerPos = render.player.pos;
+        render.playerLock.unlockShared();
+        std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(playerPos)), @Vector(3, i32){ 32, 32, 32 }))});
+        std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
+    }
 }
 
 fn BuildStructTask() void {
-    render.world.PrintStructure(@intFromFloat(render.player.pos), render, GenCube, CubeState, 256, null, null) catch |err| {
+    render.playerLock.lockShared();
+    const playerPos = render.player.pos;
+    render.playerLock.unlockShared();
+    render.world.PrintStructure(@intFromFloat(playerPos), render, GenCube, CubeState, 256, null, null) catch |err| {
         std.debug.print("Error: {any}", .{err});
     };
 }

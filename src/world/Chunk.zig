@@ -35,7 +35,6 @@ pub const Chunk = struct {
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
-        //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
         const thamount: f32 = 1.0 / @as(f32, @floatFromInt(gen_params.terrainmax - gen_params.terrainmin));
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
@@ -83,16 +82,20 @@ pub const Chunk = struct {
             caveNoise.End();
 
             const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
-            defer inter.End();
+            defer inter.End(); //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
+
             //var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
             const oneD32: f32 = comptime 1.0 / 32.0;
             var zs: @Vector(32, f32) = undefined;
             for (0..32) |i| {
                 zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
             }
-            const cavesessvec: @Vector(ChunkSize, f32) = @splat(gen_params.Cavesess);
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
+                    const realY = (floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y));
+                    const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
+                    //std.debug.print("y: {d}, m:{d}\n", .{ -@min(-1, floatPos[1] + @as(f32, @floatFromInt(y))), m });
+                    const cavesessvec: @Vector(ChunkSize, f32) = @splat(gen_params.Cavesess + (m * 2));
                     const n = Interpolation.trilinearInterpolateBatch(32, f32, grid, @splat(@as(f32, @floatFromInt(x)) * oneD32), @splat(@as(f32, @floatFromInt(y)) * oneD32), zs);
                     const air = n < cavesessvec;
                     for (0..ChunkSize) |z| {
@@ -305,6 +308,8 @@ pub const Chunk = struct {
         terrainmin: i32,
         terrainmax: i32,
         Cavesess: f32,
+        CaveExpansionMax: f32,
+        CaveExpansionStart: f32,
         seed: u64,
     };
 };

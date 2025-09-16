@@ -53,6 +53,7 @@ pub const World = struct {
         const chunkPos = [2]i32{ @divFloor(pos[0], 32), @divFloor(pos[1], 32) };
         const posInChunk = [2]i32{ @mod(pos[0], 32), @mod(pos[1], 32) };
         const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 

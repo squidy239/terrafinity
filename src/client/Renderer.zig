@@ -79,7 +79,7 @@ pub const Renderer = struct {
             .world = world,
             .running = running,
             .mouseSensitivity = 0.2,
-            .cameraFront = @Vector(3, f64){ 0, 1, 0 },
+            .cameraFront = @Vector(3, f64){ 0.0001, -0.4, 0.001 },
             .facebuffer = undefined,
             .indecies = undefined,
             .shaderprogram = undefined,
@@ -178,7 +178,7 @@ pub const Renderer = struct {
         gl.AttachShader(shaderprogram, fragshader);
         gl.LinkProgram(shaderprogram);
         var linkstatus: c_int = undefined;
-        gl.GetProgramiv(shaderprogram, gl.LINK_STATUS, &linkstatus);
+        gl.GetProgramiv(shaderprogram, gl.LINK_STATUS, @ptrCast(&linkstatus));
         if (linkstatus == gl.FALSE) {
             var vsbuffer: [1000]u8 = undefined;
             var fsbuffer: [1000]u8 = undefined;
@@ -206,7 +206,7 @@ pub const Renderer = struct {
         gl.AttachShader(entityshaderprogram, entityfragshader);
         gl.LinkProgram(entityshaderprogram);
         var elinkstatus: c_int = undefined;
-        gl.GetProgramiv(entityshaderprogram, gl.LINK_STATUS, &elinkstatus);
+        gl.GetProgramiv(entityshaderprogram, gl.LINK_STATUS, @ptrCast(&elinkstatus));
         if (elinkstatus == gl.FALSE) {
             var vsbuffer: [1000]u8 = undefined;
             var fsbuffer: [1000]u8 = undefined;
@@ -281,7 +281,7 @@ pub const Renderer = struct {
                 //player height
                 gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - playerPos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - playerPos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - playerPos[2]));
                 //TODO frustrum cullling and LODs
-                gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, null, @intCast(buffer_ids.count[i]));
+                gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0, @intCast(buffer_ids.count[i]));
             }
         }
     }
@@ -344,13 +344,14 @@ pub const Renderer = struct {
     }
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
-    pub inline fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32) void {
+    pub fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32) void {
         self.playerLock.lockShared();
         const playerPos = self.player.pos;
         self.playerLock.unlockShared();
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
-        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos)); //TODO fix err happens here when playerPos gets corrupted: integer part of floating point value out of bounds
-        if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(self.GenerateDistance[0].load(.seq_cst) + 2), @intCast(self.GenerateDistance[1].load(.seq_cst) + 2), @intCast(self.GenerateDistance[2].load(.seq_cst) + 2) })) {
+        const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
+        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
             self.AddChunkToRender(Pos, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
         } else {
             _ = self.LoadingChunks.remove(Pos);
@@ -362,7 +363,7 @@ pub const Renderer = struct {
     }
     ///must be called on main thread
     pub fn LoadMeshes(self: *@This(), max_us: u32) !void {
-        const loadMeshes = ztracy.ZoneNC(@src(), "LoadMEshes", 156567756);
+        const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
         defer loadMeshes.End();
         if (!self.MeshesToLoadLock.tryLock()) return; //dont block the main thread
         defer self.MeshesToLoadLock.unlock();

@@ -38,21 +38,6 @@ const op = Network.Options{
     .rate_limit_bytes_second = null,
 };
 
-const Multyplayer = false;
-//TODO list
-//server world and server chunk load response
-//player log into server, verify client ip
-//player send all keyboard inputs to server at a configurable max rate, default maybie 144?
-//server sends back updated player position so no hacking, player visually moves client side but gets corrected if move is wrong
-//entitys
-//need to redo physecs completely, trace player path, configurable gravity and each gas or liquid has its own propertys (not just air)
-//finally do textures
-//new trees
-//AUTH server and fully functional multyplayer
-//blockdata(hashmap with blockpos as key)
-//GUI
-//website for game
-
 var running = std.atomic.Value(bool).init(true);
 
 pub fn main() !void {
@@ -91,18 +76,23 @@ pub fn main() !void {
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
-                .octaves = 16,
-                .noise_type = .value,
-                .frequency = 0.01,
+                .octaves = 12,
+                .noise_type = .perlin,
+                .frequency = 0.005,
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ping_pong,
-                .octaves = 16,
+                .octaves = 8,
+                .lacunarity = 2,
+                .ping_pong_strength = 2.0,
+                .gain = 0.5,
                 .noise_type = .perlin,
-                .frequency = 0.05,
+                .frequency = 0.03,
             },
-            .Cavesess = -0.6,
+            .CaveExpansionMax = 4000,
+            .CaveExpansionStart = undefined, //TODO
+            .Cavesess = -0.7,
         },
     };
     const tempPlayer: EntityTypes.Player = .{
@@ -118,7 +108,6 @@ pub fn main() !void {
         .hitboxmax = @Vector(3, f64){ 1, 0.2, 1 },
         .Velocity = @splat(0),
     };
-
     const playerEntity = try tempPlayer.MakeEntity(allocator);
 
     for (0..0) |_| {
@@ -138,7 +127,6 @@ pub fn main() !void {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
-
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });

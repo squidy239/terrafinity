@@ -82,7 +82,7 @@ void main()
     {
         float tv = round(max(min(16, 16 * ((1 - gl_FragCoord.z) * 100)), 2));
         float v = abs((rand(vec2(round(coordss.x * tv) / tv / round(coordss.y * tv) / tv, round(coordss.z * tv) / tv))));
-        FragColor = vec4((cdfs - 0.0001 * sscale * position.y) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, 1);
+        FragColor = vec4((cdfs - 0.0001 * sscale) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, 1);
     }
     else if (blocktype == 4)
     {

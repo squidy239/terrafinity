@@ -66,17 +66,17 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
             std.debug.assert(cc <= 2 * @max(distance[0], distance[2]));
             var y: i32 = -@as(i32, @intCast(distance[1]));
             while (y < distance[1]) {
-                const ChunkPos = [3]i32{ xz[0] + eyePosChunk[0], (y) + eyePosChunk[1], xz[1] + eyePosChunk[2] };
+                defer y += 1;
+                const ChunkPos = [3]i32{ xz[0] + eyePosChunk[0], y + eyePosChunk[1], xz[1] + eyePosChunk[2] };
                 const loading = renderer.LoadingChunks.contains(ChunkPos);
                 renderer.ChunkRenderListLock.lockShared();
                 const loaded = renderer.ChunkRenderList.contains(ChunkPos);
-                renderer.ChunkRenderListLock.unlock();
+                renderer.ChunkRenderListLock.unlockShared();
                 if (!loading and (!loaded or ((renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
                     renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                 }
-                y += 1;
             }
         }
     }
