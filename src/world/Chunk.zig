@@ -83,23 +83,32 @@ pub const Chunk = struct {
 
             const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
             defer inter.End(); //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
-
-            //var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
+            const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
+            var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
+            initinterp.End();
             const oneD32: f32 = comptime 1.0 / 32.0;
-            var zs: @Vector(32, f32) = undefined;
-            for (0..32) |i| {
+            comptime var zs: @Vector(32, f32) = undefined;
+            comptime for (0..32) |i| {
                 zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
-            }
-            for (0..ChunkSize) |x| {
+            };
+
+            const xs: @Vector(32, f32) = comptime zs;
+
+            const ys: @Vector(32, f32) = comptime zs;
+
+            @setEvalBranchQuota(32000);
+            inline for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
                     const realY = (floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y));
                     const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
                     //std.debug.print("y: {d}, m:{d}\n", .{ -@min(-1, floatPos[1] + @as(f32, @floatFromInt(y))), m });
-                    const cavesessvec: @Vector(ChunkSize, f32) = @splat(gen_params.Cavesess + (m * 2));
-                    const n = Interpolation.trilinearInterpolateBatch(32, f32, grid, @splat(@as(f32, @floatFromInt(x)) * oneD32), @splat(@as(f32, @floatFromInt(y)) * oneD32), zs);
-                    const air = n < cavesessvec;
-                    for (0..ChunkSize) |z| {
-                        if (air[z]) {
+                    const cavesess: f32 = (gen_params.Cavesess + (m * 2));
+                    //const n: @Vector(ChunkSize, f32) = Interpolation.trilinearInterpolateBatch(ChunkSize, f32, grid, @splat(xs[x]), @splat(ys[y]), zs);
+                    //const air = n < cavesessvec;
+                    inline for (0..ChunkSize) |z| {
+                        const n = int.sampleComptimeXZ(xs[x], ys[y], zs[z]);
+                        const isair = n < cavesess;
+                        if (isair) {
                             chunk[x][y][z] = .Air;
                             if (LastBlock != null and LastBlock != .Air) isOneBlock = false;
                             LastBlock = .Air;
@@ -187,8 +196,13 @@ pub const Chunk = struct {
         self.blocks = BlockEncoding{ .blocks = mem };
     }
 
-    inline fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: f32, SeaLevel: i32, rand: *std.Random) Block {
+    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: f32, SeaLevel: i32, rand: *std.Random) Block {
         return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount, block_height, SeaLevel) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
+    }
+
+    fn GetSurfaceBlockNoRand(block_height: i32, terrain_height: i32, thamount: f32, SeaLevel: i32) Block {
+        _ = thamount;
+        return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) Block.Grass else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
     }
     inline fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32) Block {
         const a = (rand.float(f32) + (heightPercent * 5)) / 6;
