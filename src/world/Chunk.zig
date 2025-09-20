@@ -51,8 +51,8 @@ pub const Chunk = struct {
         var block_height_vec: @Vector(ChunkSize, i32) = undefined;
         for (0..ChunkSize) |i| block_height_vec[i] = (Pos[1] * ChunkSize) + @as(i32, @intCast(i));
         for (heights, 0..) |row, x| {
-            for (row, 0..) |terrain_height, z| {
-                for (0..ChunkSize) |c| {
+            for (0..ChunkSize) |c| {
+                for (row, 0..) |terrain_height, z| {
                     const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamount, SeaLevel, &rand);
                     chunk[x][c][z] = block;
 

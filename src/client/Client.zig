@@ -51,19 +51,23 @@ pub fn main() !void {
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_TIME_CRITICAL);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
     const allocator = debug_allocator.allocator();
-    var sfa = std.heap.stackFallback(1000000, allocator);
-    var sfalloc = std.heap.ThreadSafeAllocator{ .child_allocator = sfa.get() };
-    const sfallocator = sfalloc.allocator();
+    var threadpool_allocator = std.heap.DebugAllocator(.{}){};
+    defer if (threadpool_allocator.deinit() == .leak) {
+        std.debug.panic("mem leaked", .{});
+    } else {
+        std.debug.print("no leaks\n", .{});
+    };
+    const threadpool_alloc = threadpool_allocator.allocator();
     const cpu_count = try std.Thread.getCpuCount();
     var pool: ThreadPool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = sfallocator });
+    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = threadpool_alloc });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-    const seed = 0; //rand.random().int(u64);
+    const seed = (2 << 63) - 1;
     std.log.info("using seed {d}\n", .{seed});
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 1024).init(sfallocator),
+        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 1024).init(allocator),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .SpawnRange = 0,

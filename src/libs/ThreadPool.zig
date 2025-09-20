@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
+const ztracy = @import("root").ztracy;
 
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
@@ -40,7 +41,7 @@ pub const Options = struct {
     track_ids: bool = false,
     stack_size: usize = std.Thread.SpawnConfig.default_stack_size,
 };
-
+///the allocator must be thread-safe
 pub fn init(pool: *Pool, options: Options) !void {
     const allocator = options.allocator;
 
@@ -129,11 +130,6 @@ pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args
             @call(.auto, func, closure.arguments);
             closure.wait_group.finish();
 
-            // The thread pool's allocator is protected by the mutex.
-            const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
-
             closure.pool.allocator.destroy(closure);
         }
     };
@@ -191,11 +187,6 @@ pub fn spawnWgId(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, ar
             @call(.auto, func, .{id.?} ++ closure.arguments);
             closure.wait_group.finish();
 
-            // The thread pool's allocator is protected by the mutex.
-            const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
-
             closure.pool.allocator.destroy(closure);
         }
     };
@@ -240,12 +231,9 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype, priority: Prior
             const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
             @call(.auto, func, closure.arguments);
 
-            // The thread pool's allocator is protected by the mutex.
-            const mutex = &closure.pool.mutex;
-            mutex.lock();
-            defer mutex.unlock();
-
+            const d = ztracy.ZoneNC(@src(), "threadpooldestroy", 423342423);
             closure.pool.allocator.destroy(closure);
+            d.End();
         }
     };
 
@@ -288,7 +276,10 @@ test spawn {
 }
 
 fn worker(pool: *Pool) void {
+    const l = ztracy.ZoneNC(@src(), "threadpoollock", 656756);
     pool.mutex.lock();
+    l.End();
+
     defer pool.mutex.unlock();
 
     const id: ?usize = if (pool.ids.count() > 0) @intCast(pool.ids.count()) else null;
@@ -307,7 +298,11 @@ fn worker(pool: *Pool) void {
         if (run_node) |node| {
             // Temporarily unlock the mutex in order to execute the run_node
             pool.mutex.unlock();
-            defer pool.mutex.lock();
+            defer {
+                const d = ztracy.ZoneNC(@src(), "threadpoollock2", 756567);
+                pool.mutex.lock();
+                d.End();
+            }
 
             const runnable: *Runnable = @fieldParentPtr("node", node);
             runnable.runFn(runnable, id);
