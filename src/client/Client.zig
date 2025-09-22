@@ -63,7 +63,7 @@ pub fn main() !void {
     var pool: ThreadPool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = threadpool_alloc });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-    const seed = (2 << 63) - 1;
+    const seed = 0;
     std.log.info("using seed {d}\n", .{seed});
     var MainWorld = World{
         .allocator = allocator,
@@ -78,6 +78,7 @@ pub fn main() !void {
             .terrainmin = -2048,
             .terrainmax = 2048,
             .seed = seed,
+            .SeaLeval = 0,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,

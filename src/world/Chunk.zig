@@ -35,7 +35,8 @@ pub const Chunk = struct {
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
-        const thamount: f32 = 1.0 / @as(f32, @floatFromInt(gen_params.terrainmax - gen_params.terrainmin));
+        const thamountup: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
+        const thamountdown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
         const heights = GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, gen_params, TerrainHeightCache);
@@ -45,7 +46,6 @@ pub const Chunk = struct {
         var rand = rng.random();
         var LastBlock: ?Block = null;
         var isOneBlock = true;
-        const SeaLevel: i32 = 0;
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
         var block_height_vec: @Vector(ChunkSize, i32) = undefined;
@@ -53,7 +53,7 @@ pub const Chunk = struct {
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamount, SeaLevel, &rand);
+                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamountup, thamountdown, gen_params.SeaLeval, &rand);
                     chunk[x][c][z] = block;
 
                     if (LastBlock != null and LastBlock != block) isOneBlock = false;
@@ -196,16 +196,13 @@ pub const Chunk = struct {
         self.blocks = BlockEncoding{ .blocks = mem };
     }
 
-    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: f32, SeaLevel: i32, rand: *std.Random) Block {
-        return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount, block_height, SeaLevel) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
+    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamountup: f32, thamountdown: f32, SeaLevel: i32, rand: *std.Random) Block {
+        return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(rand, if (terrain_height > SeaLevel) @as(f32, @floatFromInt(terrain_height)) * thamountup else @as(f32, @floatFromInt(terrain_height)) * thamountdown, block_height, SeaLevel) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
     }
 
-    fn GetSurfaceBlockNoRand(block_height: i32, terrain_height: i32, thamount: f32, SeaLevel: i32) Block {
-        _ = thamount;
-        return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) Block.Grass else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
-    }
     inline fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32) Block {
-        const a = (rand.float(f32) + (heightPercent * 5)) / 6;
+        // std.debug.print("hp: {d}", .{heightPercent});
+        const a = ((rand.float(f32) + (heightPercent * 5)) / 6);
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
@@ -321,6 +318,7 @@ pub const Chunk = struct {
         CaveNoise: Noise.Noise(f32),
         terrainmin: i32,
         terrainmax: i32,
+        SeaLeval: i32,
         Cavesess: f32,
         CaveExpansionMax: f32,
         CaveExpansionStart: f32,

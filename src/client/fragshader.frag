@@ -79,15 +79,10 @@ void main()
     vec3 lightDir = normalize(sunpos - fragpos);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
-    vec4 result = FragColor; //vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
-    float fogDistance = gl_FragCoord.z / gl_FragCoord.w;
-
-    float fogAmount = fogFactorExp2(fogDistance, fogDensity); //fog density
-    result = mix(result, skyColor, fogAmount);
 
     //  result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
     //if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
-
+    FragColor = vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
 }
