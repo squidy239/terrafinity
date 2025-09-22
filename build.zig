@@ -3,13 +3,10 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const runGame = true;
-    const clientservertoggle = true;
-    //std.debug.assert(!(isserver and isclient));
     const exe = b.addExecutable(.{
         .name = "voxelgame",
         .root_module = b.createModule(.{
-            .root_source_file = if (clientservertoggle and !runGame) b.path("src/server/Server.zig") else if (!clientservertoggle and !runGame) b.path("src/client/testClient.zig") else b.path("src/client/Client.zig"),
+            .root_source_file = b.path("src/client/Client.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -70,6 +67,13 @@ pub fn build(b: *std.Build) void {
         .profile = .core,
     });
     exe.root_module.addImport("gl", gl_bindings);
+
+    const zigimg_dependency = b.dependency("zigimg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
 
     const EntityTypes = b.addModule("EntityTypes", .{
         .root_source_file = b.path("src/world/EntityTypes.zig"),

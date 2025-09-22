@@ -33,7 +33,7 @@ pub const Chunk = struct {
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
         const thamount: f32 = 1.0 / @as(f32, @floatFromInt(gen_params.terrainmax - gen_params.terrainmin));
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
@@ -209,7 +209,7 @@ pub const Chunk = struct {
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
-    pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024)) ?[ChunkSize][ChunkSize]i32 {
+    pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) ?[ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeightsFromCache", 110029);
         defer gth.End();
         if (TerrainHeightCache.get(Pos)) |T| {
@@ -220,7 +220,7 @@ pub const Chunk = struct {
         return null;
     }
 
-    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 1024)) [ChunkSize][ChunkSize]i32 {
+    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
         _ = cacheHits.fetchAdd(1, .seq_cst);

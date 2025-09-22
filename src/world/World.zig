@@ -16,7 +16,7 @@ const ChunkSize = 32;
 pub const World = struct {
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    TerrainHeightCache: Cache([2]i32, [32][32]i32, 1024),
+    TerrainHeightCache: Cache([2]i32, [32][32]i32, 8192),
     SpawnRange: u32,
     SpawnCenterPos: [3]i32,
     Rand: std.Random,
@@ -123,36 +123,39 @@ pub const World = struct {
                         if (chunk.blocks.blocks[x][y][z] == .Grass) {
                             const treeChance: f64 = rand.float(f64);
                             if (treeChance < 0.00001) {
+                                const factor = (rand.float(f32) * 2) + 0.5;
                                 try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
-                                    .height = 200,
-                                    .base_radius = 15,
-                                    .main_branches = 20,
-                                    .branch_length = 50,
-                                    .canopy_radius = 50,
-                                    .num_roots = 15,
+                                    .height = @intFromFloat(100 * factor),
+                                    .base_radius = @intFromFloat(15 * factor),
+                                    .main_branches = 0,
+                                    .branch_length = 0,
+                                    .canopy_radius = @intFromFloat(30 * factor),
+                                    .num_roots = 0,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.95,
-                                    .root_length = 12,
+                                    .root_length = 0,
                                 }, chunk, Pos);
-                            } else if (treeChance < 0.00025) {
+                            } else if (treeChance < 0.00015) {
+                                const factor = rand.float(f32) + 0.5;
                                 try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
-                                    .height = 30,
-                                    .base_radius = 3,
-                                    .main_branches = 4,
-                                    .branch_length = 8,
-                                    .canopy_radius = 10,
+                                    .height = @intFromFloat(50 * factor),
+                                    .base_radius = @intFromFloat(6 * factor),
+                                    .main_branches = 0,
+                                    .branch_length = 0,
+                                    .canopy_radius = @intFromFloat(20 * factor),
                                     .num_roots = 6,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,
                                     .root_length = 3,
                                 }, chunk, Pos);
-                            } else if (treeChance < 0.0025) {
+                            } else if (treeChance < 0.0015) {
+                                const factor = rand.float(f32) + 0.5;
                                 try self.PrintStructure(((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, renderer, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
-                                    .height = 15,
-                                    .base_radius = 2,
-                                    .main_branches = 4,
-                                    .branch_length = 6,
-                                    .canopy_radius = 8,
+                                    .height = @intFromFloat(25 * factor),
+                                    .base_radius = @intFromFloat(@round(3 * factor)),
+                                    .main_branches = 0,
+                                    .branch_length = 0,
+                                    .canopy_radius = @intFromFloat(12 * factor),
                                     .num_roots = 4,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,

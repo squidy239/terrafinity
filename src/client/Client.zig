@@ -12,6 +12,7 @@ const Entity = @import("Entity").Entity;
 const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 const EntityTypes = @import("EntityTypes");
 pub const Chunk = @import("Chunk").Chunk;
+pub const Block = @import("Block").Blocks;
 pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
@@ -67,15 +68,15 @@ pub fn main() !void {
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 1024).init(allocator),
+        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 8192).init(allocator),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .SpawnRange = 0,
         .SpawnCenterPos = [3]i32{ 0, 0, 0 },
         .Rand = rand.random(),
         .GenParams = .{
-            .terrainmin = -1024,
-            .terrainmax = 1024,
+            .terrainmin = -2048,
+            .terrainmax = 2048,
             .seed = seed,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
@@ -181,7 +182,8 @@ pub fn main() !void {
         const playerPos = player.pos;
         playerEntity.lock.unlockShared();
         waitforlock.End();
-        //   std.log.info("pos:{d}, front:{d}\t\t\r", .{ playerPos, renderer.cameraFront }); //HUGE FPS hit for printing on windows
+        const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
+        std.debug.print("pos: x: {d} y: {d} z: {d}\t\t\r", .{ printpos[0], printpos[1], printpos[2] });
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
         const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };

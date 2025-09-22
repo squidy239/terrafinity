@@ -9,6 +9,7 @@ var render: *Renderer = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
 var lastmicrotime: i64 = 0;
+var lastfullscreentoggle: i64 = 0;
 
 pub fn init(ren: *Renderer) void {
     render = ren;
@@ -39,11 +40,13 @@ const KeyboardAction = enum(u8) {
 const ToggleSettings = struct {
     Fullscreen: bool,
     Sprinting: bool,
+    SuperSpeed: bool,
     CursorEscaped: bool,
 };
 var ts = ToggleSettings{
     .Fullscreen = false,
     .Sprinting = false,
+    .SuperSpeed = false,
     .CursorEscaped = true,
 };
 
@@ -64,9 +67,12 @@ pub fn processInput() !void {
         render.player.pos += posAdjustment;
         render.playerLock.unlock();
     }
-    var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.02, 0.02, 0.02 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
+    var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.002, 0.002, 0.002 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (ts.Sprinting) {
         cameraSpeed *= @splat(8);
+    }
+    if (ts.SuperSpeed) {
+        cameraSpeed *= @splat(32);
     }
     if (render.window.getKey(glfw.Key.w) == .press)
         posAdjustment += cameraSpeed * render.cameraFront;
@@ -88,6 +94,19 @@ pub fn processInput() !void {
             _ = try glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
         }
     }
+    if (render.window.getKey(glfw.Key.F11) == .press and std.time.milliTimestamp() - lastfullscreentoggle > 500) {
+        if (ts.Fullscreen) {
+            render.window.setMonitor(null, 0, 0, @intCast(render.screen_dimensions[0]), @intCast(render.screen_dimensions[1]), 0);
+            ts.Fullscreen = false;
+            lastfullscreentoggle = std.time.milliTimestamp();
+        } else {
+            const mon = glfw.getPrimaryMonitor().?;
+            const dim = try mon.getPhysicalSize();
+            render.window.setMonitor(mon, 0, 0, dim[0], dim[1], 0);
+            ts.Fullscreen = true;
+            lastfullscreentoggle = std.time.milliTimestamp();
+        }
+    }
     if (render.window.getKey(glfw.Key.escape) == .press or render.window.getKey(glfw.Key.left_super) == .press) {
         if (!ts.CursorEscaped) {
             ts.CursorEscaped = true;
@@ -97,6 +116,9 @@ pub fn processInput() !void {
     if (render.window.getKey(glfw.Key.left_control) == .press) {
         ts.Sprinting = true;
     } else ts.Sprinting = false;
+    if (render.window.getKey(glfw.Key.left_shift) == .press) {
+        ts.SuperSpeed = true;
+    } else ts.SuperSpeed = false;
     if (render.window.getKey(glfw.Key.r) == .press)
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }), true);
 

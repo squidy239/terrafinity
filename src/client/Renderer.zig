@@ -7,6 +7,7 @@ const gl = @import("gl");
 const glfw = @import("zglfw");
 const ThreadPool = @import("root").ThreadPool;
 const ztracy = @import("ztracy");
+const Textures = @import("textures.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
 const ChunkSize = 32;
@@ -52,12 +53,12 @@ pub const Renderer = struct {
     facebuffer: c_uint,
     player: *Player,
     playerLock: *std.Thread.RwLock,
-    //   eyePos: @Vector(3, f64), //x,y,z
     cameraFront: @Vector(3, f64),
     mouseSensitivity: f64,
     indecies: c_uint,
     entityshaderprogram: c_uint,
     shaderprogram: c_uint,
+    blockAtlasTextureId: c_uint,
     uniforms: UniformLocations,
     MeshesToLoad: std.ArrayList(Mesher.Mesh),
     LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
@@ -86,10 +87,10 @@ pub const Renderer = struct {
             .entityshaderprogram = undefined,
             .MeshesToLoad = .{},
             .MeshesToLoadLock = .{},
+            .blockAtlasTextureId = undefined,
             .uniforms = undefined,
             .player = player,
             .playerLock = playerLock,
-            //   .eyePos = eyepos,
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
@@ -105,10 +106,12 @@ pub const Renderer = struct {
         try renderer.CompileShaders();
         renderer.LoadFacebuffer();
         renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
+        renderer.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
         return renderer;
     }
     ///threadpool should be deinitualised before calling, dosent destroy window
     pub fn deinit(self: *@This()) void {
+        gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
         gl.DeleteProgram(self.shaderprogram);
@@ -250,9 +253,11 @@ pub const Renderer = struct {
     pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) void {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
+        gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
         const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(200 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
         gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -268,6 +273,7 @@ pub const Renderer = struct {
         inline for (0..2) |i| {
             //if (i == 1) gl.Disable(gl.CULL_FACE);
             //defer gl.Enable(gl.CULL_FACE);
+
             var it = self.ChunkRenderList.iterator();
             while (it.next()) |item| {
                 const buffer_ids = item.value_ptr;

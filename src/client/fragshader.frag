@@ -7,12 +7,11 @@ flat in vec3 position;
 flat in uint blocktype;
 flat in uint side;
 flat in float sscale;
+flat in uint blockArrayLayer;
 uniform vec4 skyColor;
 uniform float fogDensity;
-uniform sampler2D TextureAtlas;
-uniform uint AtlasHeight;
+uniform sampler2DArray TextureArray;
 uniform bool HeadUnderwater;
-
 out vec4 FragColor;
 
 float rand(vec2 co) {
@@ -75,45 +74,6 @@ void main()
         Normal = vec3(0.0, 0.0, 1.0);
     }
     texcoords = texcoords * 2;
-    vec4 texColor = texture(TextureAtlas, texcoords);
-    FragColor = texColor;
-    float cdfs = cos(pow(coordss.x, 2) + pow(coordss.y, 2) + pow(coordss.z, 2));
-    if (blocktype == 3)
-    {
-        float tv = round(max(min(16, 16 * ((1 - gl_FragCoord.z) * 100)), 2));
-        float v = abs((rand(vec2(round(coordss.x * tv) / tv / round(coordss.y * tv) / tv, round(coordss.z * tv) / tv))));
-        FragColor = vec4((cdfs - 0.0001 * sscale) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, (cdfs + 0.0001 * sscale * (position.y)) - v, 1);
-    }
-    else if (blocktype == 4)
-    {
-        float tv16 = round(max(min(16, 16 * ((1 - gl_FragCoord.z) * 100)), 2));
-        float tv8 = round(max(min(8, 8 * ((1 - gl_FragCoord.z) * 100)), 2));
-        float tv4 = round(max(min(4, 4 * ((1 - gl_FragCoord.z) * 100)), 2));
-
-        FragColor = vec4(0, ((rand(vec2((round(coordss.x * tv8) / tv8 + abs(position.y) + 1.0) / (round((coordss.y + 0.1) * tv8) / tv8) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * tv16) / tv16) / tv16))) + 0.2, abs(((rand(vec2(round(coordss.x * tv4) / tv4 + abs(position.y) / round(coordss.y * tv4) / tv4, abs(position.x) * abs(position.z) / round(coordss.z * tv4) / tv4) / tv16))) - 0.4), 1);
-    }
-    else if (blocktype == 2)
-    {
-        FragColor = vec4(cdfs + 0.2, cdfs - 0.2, cdfs - 0.5, 1);
-    }
-    else if (blocktype == 5)
-    {
-        float barkv = bouncingMod(bouncingMod(round(coordss.x * 8) / 8, 5) + bouncingMod(round(coordss.z * 8) / 8, 5), 1);
-        FragColor = vec4(0.4 * barkv, 0.2 * barkv, 0, 1);
-    }
-    else if (blocktype == 6)
-    {
-        FragColor = vec4(cdfs - 0.3, cdfs, cdfs + 0.3, 0.8);
-    }
-    else if (blocktype == 11)
-    {
-        FragColor = vec4(cdfs + 0.8, cdfs + 0.8, cdfs + 0.8, 1);
-    }
-    else if (blocktype == 8)
-    {
-        FragColor = vec4(0, ((rand(vec2((round(coordss.x * 16) / 16 + abs(position.y)) / (round((coordss.y) * 16) / 16) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) + 0.2, 0.1, 1 - round(((rand(vec2((round(coordss.x * 16) / 16 + abs(position.y)) / (round((coordss.y) * 16) / 16) + 0.2, abs(position.x) * abs(position.z) / round(coordss.z * 16) / 16) / 16))) - 0.4));
-    }
-
     vec3 lightColor = vec3(1.0, 1.0, 1.0);
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(sunpos - fragpos);
@@ -127,7 +87,7 @@ void main()
 
     //  result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
     //if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
-    FragColor = result;
+    FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
 
     if (FragColor.a < 0.01) discard;
 }

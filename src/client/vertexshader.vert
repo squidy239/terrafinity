@@ -10,6 +10,7 @@ uniform ivec3 chunkpos;
 uniform int chunktime;
 out vec3 blockpos;
 out vec3 coordss;
+flat out uint blockArrayLayer;
 flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
@@ -112,12 +113,34 @@ float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
+uint getArrayLayer(uint block) {
+    uint layer = 0;
+    switch (block) {
+        case 5:
+        layer = 5;
+        break;
+        case 4:
+        layer = 4;
+        break;
+        case 8:
+        layer = 8;
+        break;
+        case 3:
+        layer = 3;
+        break;
+    }
+
+    return layer;
+}
+
 void main() {
     uvec3 pos = DecodePosition(data);
     sscale = scale;
     position = ((chunkpos * 32) + ivec3(pos)) * scale;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
+    uint invisibleBlockAmount = 1;
+    blockArrayLayer = blocktype - invisibleBlockAmount;
     vec3 coords = rotateVertex(side, incoords);
     fragpos = vec3((pos * scale) + (coords * scale) + (chunkpos * 32 * scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
