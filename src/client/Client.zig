@@ -75,16 +75,24 @@ pub fn main() !void {
         .SpawnCenterPos = [3]i32{ 0, 0, 0 },
         .Rand = rand.random(),
         .GenParams = .{
-            .terrainmin = -2048,
-            .terrainmax = 2048,
+            .terrainmin = -1024,
+            .terrainmax = 1024,
             .seed = seed,
             .SeaLeval = 0,
+            .terrainblockRandomness = 0.125,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
                 .frequency = 0.005,
+            },
+            .terrainNoiseBalance = 0.0, //0 is TerrainNoise, 1 is LargeTerrainNoise
+            .LargeTerrainNoise = .{
+                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
+                .fractal_type = .none,
+                .noise_type = .perlin,
+                .frequency = 0.02,
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),

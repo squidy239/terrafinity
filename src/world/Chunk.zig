@@ -37,6 +37,7 @@ pub const Chunk = struct {
         //TODO SIMD perlin for HUGE speed increce
         const thamountup: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const thamountdown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
+        const thamounts: [2]f32 = .{ thamountup, thamountdown };
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
         const heights = GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, gen_params, TerrainHeightCache);
@@ -53,7 +54,7 @@ pub const Chunk = struct {
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamountup, thamountdown, gen_params.SeaLeval, &rand);
+                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamounts, gen_params.SeaLeval, &rand, gen_params.terrainblockRandomness);
                     chunk[x][c][z] = block;
 
                     if (LastBlock != null and LastBlock != block) isOneBlock = false;
@@ -196,13 +197,24 @@ pub const Chunk = struct {
         self.blocks = BlockEncoding{ .blocks = mem };
     }
 
-    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamountup: f32, thamountdown: f32, SeaLevel: i32, rand: *std.Random) Block {
-        return if (block_height < terrain_height - 5) Block.Stone else if (block_height < terrain_height) Block.Dirt else if (block_height == terrain_height) RandGround(rand, if (terrain_height > SeaLevel) @as(f32, @floatFromInt(terrain_height)) * thamountup else @as(f32, @floatFromInt(terrain_height)) * thamountdown, block_height, SeaLevel) else if (block_height > terrain_height and block_height < SeaLevel) Block.Water else Block.Air;
+    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32) Block {
+        if (block_height < terrain_height - 5) {
+            return Block.Stone;
+        } else if (block_height < terrain_height) {
+            return Block.Dirt;
+        } else if (block_height == terrain_height) {
+            return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height > SeaLevel)], block_height, SeaLevel, blockRandomness);
+        } else if (block_height > terrain_height and block_height < SeaLevel) {
+            return Block.Water;
+        } else {
+            return Block.Air;
+        }
     }
 
-    inline fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32) Block {
+    fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32) Block {
         // std.debug.print("hp: {d}", .{heightPercent});
-        const a = ((rand.float(f32) + (heightPercent * 5)) / 6);
+        //
+        const a = std.math.lerp(heightPercent, rand.float(f32), blockRandomness);
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
     }
 
@@ -220,7 +232,6 @@ pub const Chunk = struct {
     pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
-        _ = cacheHits.fetchAdd(1, .seq_cst);
         if (GetHeightsFromCache(Pos, TerrainHeightCache)) |cachedHeight| return cachedHeight;
         const generatedHeights = GenTerrainHeight(params, Pos);
         TerrainHeightCache.put(Pos, generatedHeights) catch |err| std.debug.panic("{any}\n", .{err});
@@ -231,16 +242,25 @@ pub const Chunk = struct {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
         const floatpos = @Vector(2, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]) };
+        const d32: f32 = comptime 1.0 / 32.0;
         var height: [ChunkSize][ChunkSize]i32 = undefined;
+        const floatmin: f32 = @floatFromInt(params.terrainmin);
+        const floatmax: f32 = @floatFromInt(params.terrainmax);
+        const floatBounds = @Vector(2, f32){ floatmin, floatmax };
         for (0..ChunkSize) |ux| {
-            const x: f32 = (@as(f32, @floatFromInt(ux)) / 32) + floatpos[0];
+            const x: f32 = (@as(f32, @floatFromInt(ux)) * d32) + floatpos[0];
             for (0..ChunkSize) |uz| {
-                const z: f32 = (@as(f32, @floatFromInt(uz)) / 32) + floatpos[1];
-                height[ux][uz] = params.TerrainNoise.genNoise2DRange(x, z, i32, params.terrainmin, params.terrainmax);
+                const z: f32 = (@as(f32, @floatFromInt(uz)) * d32) + floatpos[1];
+                const terrainNoise = params.TerrainNoise.genNoise2D(x, z);
+                const largeterrainNoise = params.LargeTerrainNoise.genNoise2D(x, z);
+
+                const noise = std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
+                //uses lower or upper terrain height bound depending on if noise is less or greater than 0
+                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise < 0)]));
+                height[ux][uz] = block_height;
             }
         }
         _ = cacheMisses.fetchAdd(1, .seq_cst);
-        _ = cacheHits.fetchSub(1, .seq_cst);
         return height;
     }
 
@@ -314,7 +334,10 @@ pub const Chunk = struct {
     }
 
     pub const GenParams = struct {
+        terrainblockRandomness: f32, //must be from 0 to 1
         TerrainNoise: Noise.Noise(f32),
+        terrainNoiseBalance: f32, //from 0 to 1, 0 is terrainnoise 1 is largeterrainnoise
+        LargeTerrainNoise: Noise.Noise(f32),
         CaveNoise: Noise.Noise(f32),
         terrainmin: i32,
         terrainmax: i32,
