@@ -40,7 +40,7 @@ pub fn main() !void {
     } else {
         std.debug.print("no leaks\n", .{});
     };
-    const prioritySet = SetThreadPriority(.THREAD_PRIORITY_TIME_CRITICAL);
+    const prioritySet = SetThreadPriority(.THREAD_PRIORITY_REALTIME);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
     const allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else main_debug_allocator.allocator();
     const secondary_allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else secondary_debug_allocator.allocator();

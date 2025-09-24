@@ -383,11 +383,12 @@ pub const Renderer = struct {
     pub fn LoadMeshes(self: *@This(), max_us: u32) !void {
         const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
         defer loadMeshes.End();
-        if (!self.MeshesToLoadLock.tryLock()) return; //dont block the main thread
-        defer self.MeshesToLoadLock.unlock();
         const st = std.time.microTimestamp();
-        const MeshesToLoadLen: usize = self.MeshesToLoad.items.len;
-        for (0..MeshesToLoadLen) |_| {
+        var amount: u64 = 0;
+        while (amount < getLen(self.MeshesToLoad, &self.MeshesToLoadLock)) {
+            defer amount += 1;
+            self.MeshesToLoadLock.lock();
+            defer self.MeshesToLoadLock.unlock();
             if (std.time.microTimestamp() - st > max_us) break;
             const mesh = self.MeshesToLoad.orderedRemove(0);
             defer FreeMesh(mesh, self.allocator);
@@ -414,6 +415,12 @@ pub const Renderer = struct {
             }
             _ = self.LoadingChunks.remove(mesh.Pos);
         }
+    }
+
+    fn getLen(arraylist: anytype, lock: *std.Thread.RwLock) usize {
+        lock.lockShared();
+        defer lock.unlockShared();
+        return arraylist.items.len;
     }
 
     pub fn FreeMesh(mesh: Mesher.Mesh, allocator: std.mem.Allocator) void {

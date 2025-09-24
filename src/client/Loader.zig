@@ -28,7 +28,7 @@ pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3,
 }
 
 pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
-    _ = SetThreadPriority(.THREAD_PRIORITY_LOWEST);
+    _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
     while (running.load(.monotonic)) {
         posLock.lockShared();
         const playerPos = pos.*;
@@ -158,8 +158,7 @@ fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3
     for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
         try world.UnloadChunk(Pos);
     }
-    if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks\n", .{chunksToUnloadBufferPos});
-    std.debug.print("{d} chunks loaded\n", .{chunks});
+    //if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{chunksToUnloadBufferPos, chunks});
     chunksToUnloadBufferPos = 0;
 }
 
