@@ -15,8 +15,24 @@ flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
 flat out float sscale;
-flat out vec3 position;
 flat out uint blocktype;
+
+const vec3 offset[6] = vec3[6](
+        vec3(0.5, 0.0, 0.0), // +X
+        vec3(-0.5, 0.0, 0.0), // -X
+        vec3(0.0, 0.5, 0.0), // +Y
+        vec3(0.0, -0.5, 0.0), // -Y
+        vec3(0.0, 0.0, 0.5), // +Z
+        vec3(0.0, 0.0, -0.5) // -Z
+    );
+const vec3 offsetmul[6] = vec3[6](
+        vec3(0, 1.0, 1.0), // +X
+        vec3(0, 1.0, 1.0), // -X
+        vec3(1.0, 0.0, 1.0), // +Y
+        vec3(1.0, 0.0, 1.0), // -Y
+        vec3(1.0, 1.0, 0), // +Z
+        vec3(1.0, 1.0, -0) // -Z
+    );
 
 float bouncingMod(float x, float n) {
     // Make x positive
@@ -85,26 +101,8 @@ vec3 rotateVertex(uint side, vec3 coords) {
     coords += vec3(0.5);
 
     // Offset to position each face at the correct distance from the origin
-    switch (side) {
-        case 1:
-        coords.x = -0.5; // -X face
-        break;
-        case 0:
-        coords.x = 0.5; // +X face
-        break;
-        case 3:
-        coords.y = -0.5; // -Y face
-        break;
-        case 2:
-        coords.y = 0.5; // +Y face
-        break;
-        case 5:
-        coords.z = -0.5; // -Z face
-        break;
-        case 4:
-        coords.z = 0.5; // +Z face
-        break;
-    }
+    coords *= offsetmul[side];
+    coords += offset[side];
 
     return coords;
 }
@@ -113,30 +111,9 @@ float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
-uint getArrayLayer(uint block) {
-    uint layer = 0;
-    switch (block) {
-        case 5:
-        layer = 5;
-        break;
-        case 4:
-        layer = 4;
-        break;
-        case 8:
-        layer = 8;
-        break;
-        case 3:
-        layer = 3;
-        break;
-    }
-
-    return layer;
-}
-
 void main() {
     uvec3 pos = DecodePosition(data);
     sscale = scale;
-    position = ((chunkpos * 32) + ivec3(pos)) * scale;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     uint invisibleBlockAmount = 1;

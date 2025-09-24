@@ -16,13 +16,6 @@ pub const Genstate = enum(u8) {
     StructuresGenerated,
 };
 
-pub const Function = enum(u8) {
-    GenerateStructures,
-    GenerateStructuresHH,
-    LoadChunk,
-    GenChunk,
-};
-
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
 var temp2D: [4][4]f32 = undefined;
@@ -203,7 +196,7 @@ pub const Chunk = struct {
         } else if (block_height < terrain_height) {
             return Block.Dirt;
         } else if (block_height == terrain_height) {
-            return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height > SeaLevel)], block_height, SeaLevel, blockRandomness);
+            return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height < SeaLevel)], block_height, SeaLevel, blockRandomness);
         } else if (block_height > terrain_height and block_height < SeaLevel) {
             return Block.Water;
         } else {
@@ -215,7 +208,7 @@ pub const Chunk = struct {
         // std.debug.print("hp: {d}", .{heightPercent});
         //
         const a = std.math.lerp(heightPercent, rand.float(f32), blockRandomness);
-        return if (block_height < seaLevel) Block.Dirt else if (a < 0.6) Block.Grass else if (a < 0.7) Block.Dirt else if (a < 0.8) Block.Stone else Block.Snow;
+        return if (block_height < seaLevel) Block.Dirt else if (a < 0.4) Block.Grass else if (a < 0.5) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
     }
 
     pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) ?[ChunkSize][ChunkSize]i32 {
@@ -256,7 +249,7 @@ pub const Chunk = struct {
 
                 const noise = std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
-                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise < 0)]));
+                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise > 0)]));
                 height[ux][uz] = block_height;
             }
         }

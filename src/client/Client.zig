@@ -1,26 +1,25 @@
 const std = @import("std");
-const zudp = @import("zudp").Connection;
-const Network = @import("Network");
-const Requests = @import("Requests");
-pub const zm = @import("zm");
+const builtin = @import("builtin");
+
+pub const Block = @import("Block").Blocks;
+const Cache = @import("Cache").Cache;
+pub const Chunk = @import("Chunk").Chunk;
+pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const Entity = @import("Entity").Entity;
+const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
 const glfw = @import("zglfw");
-pub const ztracy = @import("ztracy");
-pub const World = @import("World").World;
-pub const Renderer = @import("Renderer.zig").Renderer;
-const Entity = @import("Entity").Entity;
-const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
-const EntityTypes = @import("EntityTypes");
-pub const Chunk = @import("Chunk").Chunk;
-pub const Block = @import("Block").Blocks;
-pub const ThreadPool = @import("ThreadPool");
-pub const Loader = @import("Loader.zig");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
-const builtin = @import("builtin");
-const root = @import("root"); //TODO fix messy import system with root.Loader etc
+pub const ThreadPool = @import("ThreadPool");
+const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
+pub const World = @import("World").World;
+pub const zm = @import("zm");
+pub const ztracy = @import("ztracy");
+
+pub const Loader = @import("Loader.zig");
+pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
-pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Cache = @import("Cache").Cache;
+
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
 var cameraFront = @Vector(3, f64){ 0, 1, 0 };
@@ -30,38 +29,24 @@ var yaw: f64 = 1;
 var height: u32 = 800;
 var width: u32 = 600;
 
-const op = Network.Options{
-    .verify = true,
-    .compress_sizel1 = 128,
-    .compress_sizel2 = 511,
-    .compress_sizel3 = 2047,
-    .datasplitsize = 512,
-    .rate_limit_bytes_second = null,
-};
-
 var running = std.atomic.Value(bool).init(true);
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
-    var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    defer if (debug_allocator.deinit() == .leak) {
+    var main_debug_allocator = std.heap.DebugAllocator(.{}).init;
+    var secondary_debug_allocator = std.heap.DebugAllocator(.{}).init;
+    defer if (main_debug_allocator.deinit() == .leak or secondary_debug_allocator.deinit() == .leak) {
         std.debug.panic("mem leaked", .{});
     } else {
         std.debug.print("no leaks\n", .{});
     };
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_TIME_CRITICAL);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
-    const allocator = debug_allocator.allocator();
-    var threadpool_allocator = std.heap.DebugAllocator(.{}){};
-    defer if (threadpool_allocator.deinit() == .leak) {
-        std.debug.panic("mem leaked", .{});
-    } else {
-        std.debug.print("no leaks\n", .{});
-    };
-    const threadpool_alloc = threadpool_allocator.allocator();
+    const allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else main_debug_allocator.allocator();
+    const secondary_allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else secondary_debug_allocator.allocator();
     const cpu_count = try std.Thread.getCpuCount();
     var pool: ThreadPool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = threadpool_alloc });
+    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
     std.log.info("using seed {d}\n", .{seed});
@@ -72,7 +57,7 @@ pub fn main() !void {
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
         .SpawnRange = 0,
-        .SpawnCenterPos = [3]i32{ 0, 0, 0 },
+        .SpawnCenterPos = [3]i32{ 5333, 0, -5333 },
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -1024,
@@ -85,14 +70,15 @@ pub fn main() !void {
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
-                .frequency = 0.005,
+                .frequency = 0.03,
             },
-            .terrainNoiseBalance = 0.0, //0 is TerrainNoise, 1 is LargeTerrainNoise
+            .terrainNoiseBalance = 0.5, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .none,
-                .noise_type = .perlin,
-                .frequency = 0.02,
+                .fractal_type = .ping_pong,
+                .octaves = 1,
+                .noise_type = .value_cubic,
+                .frequency = 0.005,
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
@@ -114,7 +100,7 @@ pub fn main() !void {
         .player_name = .fromString("squid"),
         .gameMode = .Spectator,
         .OnGround = false,
-        .pos = MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 100, 0 },
+        .pos = MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
         .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
         .headRotationAxis = @Vector(2, f16){ 0, 0 },
         .armSwings = [2]f16{ 0, 0 }, //right,left
@@ -191,12 +177,10 @@ pub fn main() !void {
         const playerPos = player.pos;
         playerEntity.lock.unlockShared();
         waitforlock.End();
-        const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        std.debug.print("pos: x: {d} y: {d} z: {d}\t\t\r", .{ printpos[0], printpos[1], printpos[2] });
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
         const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-        const skyColor = mix(blueSky, greySky, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096))));
+        const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
         const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
         gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
         gl.Clear(gl.COLOR_BUFFER_BIT);
@@ -205,7 +189,7 @@ pub fn main() !void {
         gl.UseProgram(renderer.shaderprogram);
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        renderer.DrawChunks(playerPos, skyColor);
+        const drawn = renderer.DrawChunks(playerPos, skyColor);
         drawChunks.End();
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
@@ -215,6 +199,8 @@ pub fn main() !void {
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         Loader.UnloadMeshes(&renderer, meshDistance, playerChunkPos);
+        const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
+        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1] });
         st = std.time.nanoTimestamp();
     }
 }
@@ -229,10 +215,4 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
         cameraPos.* -= zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
     if (window.getKey(glfw.Key.d) == .press)
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
-}
-
-fn mix(start: @Vector(4, f32), end: @Vector(4, f32), interpValue: f32) @Vector(4, f32) {
-    const iv: @Vector(4, f32) = @splat(interpValue);
-    const ones: @Vector(4, f32) = comptime @splat(1);
-    return start * (ones - iv) + end * iv;
 }

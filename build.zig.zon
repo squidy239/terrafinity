@@ -34,20 +34,20 @@
             .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
         },
         .ztracy = .{
-            .url = "git+https://github.com/kcbanner/ztracy#e154b2aa94ab5f9c719669e4ae93aa306404e0bd",
-            .hash = "ztracy-0.14.0-dev-zHJSqzXvGAAuqRWQmRE-PIlttg6GeKWmP__cC9qPYREI",
+            .url = "git+https://github.com/kcbanner/ztracy#c26d8504f93b9b3029da10ea1db34b2bd10b1f6c",
+            .hash = "ztracy-0.14.0-dev-zHJSq8SJGAB2yxA4nVsY8R_x3sI4aXxmKeCBUXwJcY-r",
         },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen#a1e969b3e35818785fab0373124f50463793b28a",
             .hash = "zigglgen-0.4.0-bmyqLQGMLwA0EPVmSm-Nc6Olb84zBzvwMjguxwKYLf1S",
         },
         .obj = .{
-            .url = "git+https://github.com/chip2n/zig-obj.git#c49e1575b267aecaa5ebf29c9ba456690ebd2407",
-            .hash = "obj-3.0.1-v8OfiujLAABIhb_JGPB7s_4Tc4tkelEazCeOzOMjXV4A",
+            .url = "git+https://github.com/chip2n/zig-obj.git#47410383c81d24454e370ffadc0980af7abea522",
+            .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
         },
         .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg.git#d7b7ab0ba0899643831ef042bd73289510b39906",
-            .hash = "zigimg-0.1.0-8_eo2vHnEwCIVW34Q14Ec-xUlzIoVg86-7FU2ypPtxms",
+            .url = "git+https://github.com/zigimg/zigimg.git#362cdd6bce109f7bc674be134cddd378f52da5d4",
+            .hash = "zigimg-0.1.0-8_eo2jNrFQD4mu3EAUkfQRmCkyfprdIXc8JQ6uyxhjSQ",
         },
     },
 

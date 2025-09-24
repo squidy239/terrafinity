@@ -122,8 +122,10 @@ pub const Renderer = struct {
             inline for (0..2) |i| {
                 if (mesh.value_ptr.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
                 if (mesh.value_ptr.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
+                if (mesh.value_ptr.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
             }
         }
+        self.ChunkRenderListLock.unlock();
         glfw.terminate();
         self.ChunkRenderList.deinit();
         self.LoadingChunks.deinit();
@@ -136,6 +138,7 @@ pub const Renderer = struct {
     }
     fn InitWindowAndProcs(self: *@This()) !void {
         try glfw.init();
+        std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});
         const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
         for (gl_versions) |version| {
             std.log.info("trying OpenGL version {d}.{d}\n", .{ version[0], version[1] });
@@ -145,7 +148,7 @@ pub const Renderer = struct {
             glfw.windowHint(.client_api, .opengl_api);
             glfw.windowHint(.doublebuffer, true);
             glfw.windowHint(.samples, 4);
-            self.window = try glfw.Window.create(800, 600, "voxelgame", null);
+            self.window = glfw.Window.create(800, 600, "voxelgame", null) catch continue;
             glfw.makeContextCurrent(self.window);
             if (self.proc_table.init(glfw.getProcAddress)) {
                 std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });
@@ -250,14 +253,16 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
 
-    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) void {
+    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) [2]u64 {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 100), 360)))));
+        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 10), 360)))));
         const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
+        const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist));
+        const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
         gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
         gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -267,29 +272,36 @@ pub const Renderer = struct {
 
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         var drawnchunks: u64 = 0;
+        var torenderchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
-        gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp)); //bool
-
+        gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
+        const frustrum = Frustum.extractFrustumPlanes(projview);
         inline for (0..2) |i| {
-            //if (i == 1) gl.Disable(gl.CULL_FACE);
-            //defer gl.Enable(gl.CULL_FACE);
+            if (i == 1) gl.Disable(gl.CULL_FACE);
+            defer gl.Enable(gl.CULL_FACE);
 
             var it = self.ChunkRenderList.iterator();
             while (it.next()) |item| {
+                torenderchunks += 1;
                 const buffer_ids = item.value_ptr;
-                const Pos = item.key_ptr.*;
+                const Pos: @Vector(3, i32) = item.key_ptr.*;
+                const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
+                const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
+                const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+                if (!cull) continue;
                 gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                 drawnchunks += 1;
                 const tr = millitimestamp - buffer_ids.time;
                 gl.Uniform1f(self.uniforms.scalelocation, buffer_ids.scale);
                 gl.Uniform1i(self.uniforms.tlocation, @intCast(tr));
                 gl.Uniform3i(self.uniforms.chunkposlocation, Pos[0], Pos[1], Pos[2]);
-                //player height
-                gl.Uniform3f(self.uniforms.relativechunkposlocation, @floatCast((@as(f64, @floatFromInt(Pos[0])) * buffer_ids.scale * ChunkSize) - playerPos[0]), @floatCast((@as(f64, @floatFromInt(Pos[1])) * buffer_ids.scale * ChunkSize) - playerPos[1]), @floatCast((@as(f64, @floatFromInt(Pos[2])) * buffer_ids.scale * ChunkSize) - playerPos[2]));
-                //TODO frustrum cullling and LODs
-                gl.DrawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0, @intCast(buffer_ids.count[i]));
+                gl.Uniform3f(self.uniforms.relativechunkposlocation, relativeChunkPos[0], relativeChunkPos[1], relativeChunkPos[2]);
+
+                gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
+                gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
             }
         }
+        return [2]u64{ drawnchunks, torenderchunks };
     }
 
     pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64)) void {
@@ -396,6 +408,7 @@ pub const Renderer = struct {
                     inline for (0..2) |i| {
                         if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
                         if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
+                        if (old_mesh.value.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
                     }
                 }
             }
@@ -415,6 +428,7 @@ pub const Renderer = struct {
             .vbo = [2]?c_uint{ null, null },
             .count = [2]u32{ 0, 0 },
             .scale = 1,
+            .drawCommand = [2]?c_uint{ null, null },
             .pos = mesh.Pos,
             .time = 0,
         };
@@ -440,6 +454,18 @@ pub const Renderer = struct {
                 gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
                 gl.EnableVertexAttribArray(1);
                 gl.VertexAttribDivisor(1, 1);
+                var indirectBuff: c_uint = undefined;
+                gl.GenBuffers(1, @ptrCast(&indirectBuff));
+                gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, indirectBuff);
+                const IndirectCommand: DrawElementsIndirectCommand = .{
+                    .count = 6,
+                    .baseInstance = 0,
+                    .baseVertex = 0,
+                    .firstIndex = 0,
+                    .instanceCount = @intCast(NewMeshIDs.count[i]),
+                };
+                gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
+                NewMeshIDs.drawCommand[i] = indirectBuff;
             }
         }
 
@@ -453,8 +479,107 @@ pub const Renderer = struct {
         time: i64,
         vbo: [2]?c_uint,
         vao: [2]?c_uint,
+        drawCommand: [2]?c_uint,
         pos: [3]i32,
         count: [2]u32,
         scale: f32,
     };
+
+    const DrawElementsIndirectCommand = packed struct {
+        count: c_uint,
+        instanceCount: c_uint,
+        firstIndex: c_uint,
+        baseVertex: c_uint,
+        baseInstance: c_uint,
+    };
+};
+
+const Frustum = struct {
+    frus: [6]@Vector(4, f64),
+
+    pub const Box = struct {
+        min: @Vector(3, f64),
+        max: @Vector(3, f64),
+    };
+
+    fn extractFrustumPlanes(mat: @Vector(16, f64)) Frustum {
+        // zm row-major
+        const m00 = mat[0];
+        const m01 = mat[1];
+        const m02 = mat[2];
+        const m03 = mat[3];
+        const m10 = mat[4];
+        const m11 = mat[5];
+        const m12 = mat[6];
+        const m13 = mat[7];
+        const m20 = mat[8];
+        const m21 = mat[9];
+        const m22 = mat[10];
+        const m23 = mat[11];
+        const m30 = mat[12];
+        const m31 = mat[13];
+        const m32 = mat[14];
+        const m33 = mat[15];
+
+        var planes: [6]@Vector(4, f64) = undefined;
+
+        planes[0] = @Vector(4, f64){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
+        planes[1] = @Vector(4, f64){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
+        planes[2] = @Vector(4, f64){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
+        planes[3] = @Vector(4, f64){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
+        planes[4] = @Vector(4, f64){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
+        planes[5] = @Vector(4, f64){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
+
+        // Normalize planes
+        for (0..6) |i| {
+            const n = @Vector(3, f64){ planes[i][0], planes[i][1], planes[i][2] };
+            const len = @sqrt(zm.vec.dot(n, n));
+            planes[i] /= @splat(len);
+        }
+
+        return Frustum{ .frus = planes };
+    }
+
+    fn getPlane(self: *const Frustum, plane_index: usize) @Vector(4, f64) {
+        return self.frus[plane_index];
+    }
+
+    pub fn boxInFrustum(self: *const @This(), box: Box) bool {
+        // Check box against each of the 6 frustum planes
+        for (0..6) |i| {
+            var out: u32 = 0;
+            const plane = self.getPlane(i);
+
+            // Test all 8 corners of the box against this plane
+            // Corner 1: min.x, min.y, min.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 2: max.x, min.y, min.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 3: min.x, max.y, min.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 4: max.x, max.y, min.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 5: min.x, min.y, max.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 6: max.x, min.y, max.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 7: min.x, max.y, max.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            // Corner 8: max.x, max.y, max.z
+            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+
+            // If all 8 corners are outside this plane, the box is completely outside the frustum
+            if (out == 8) return false;
+        }
+
+        return true;
+    }
+
+    pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f64), radius: f64) bool {
+        for (self.frus) |plane| {
+            const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
+            if (dist < -radius) return false;
+        }
+        return true;
+    }
 };

@@ -49,7 +49,7 @@ pub const World = struct {
     }
 
     pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
-        const pos = [2]i32{ self.Rand.intRangeAtMost(i32, self.SpawnCenterPos[0] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.Rand.intRangeAtMost(i32, self.SpawnCenterPos[2] - @as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
+        const pos = @Vector(2, i32){ self.SpawnCenterPos[0], self.SpawnCenterPos[2] } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
         const chunkPos = [2]i32{ @divFloor(pos[0], 32), @divFloor(pos[1], 32) };
         const posInChunk = [2]i32{ @mod(pos[0], 32), @mod(pos[1], 32) };
         const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
@@ -308,18 +308,17 @@ pub const World = struct {
                 self.allocator.destroy(c.*);
             }
         }
-        self.Chunks.deinit();
         const enbktamount = self.Entitys.buckets.len;
         for (0..enbktamount) |b| {
             self.Entitys.buckets[b].lock.lock();
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                //  std.debug.print("freed: {any}\n", .{c.*.*});
                 c.*.fullfree(self.allocator);
             }
         }
         self.Entitys.deinit();
         self.TerrainHeightCache.deinit();
+        self.Chunks.deinit();
     }
 };

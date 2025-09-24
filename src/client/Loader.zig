@@ -142,11 +142,13 @@ fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
     const bktamount = world.Chunks.buckets.len;
+    var chunks: u64 = 0;
     for (0..bktamount) |b| {
         world.Chunks.buckets[b].lock.lockShared();
         var it = world.Chunks.buckets[b].hash_map.iterator();
         defer world.Chunks.buckets[b].lock.unlockShared();
         while (it.next()) |c| {
+            chunks += 1;
             if (chunksToUnloadBufferPos < chunksToUnloadBuffer.len and outOfSquareRange(c.key_ptr.* - playerChunkPos, [3]i32{ @intCast(loadDistance[0]), @intCast(loadDistance[1]), @intCast(loadDistance[2]) })) {
                 chunksToUnloadBuffer[chunksToUnloadBufferPos] = c.key_ptr.*;
                 chunksToUnloadBufferPos += 1;
@@ -156,7 +158,8 @@ fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3
     for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
         try world.UnloadChunk(Pos);
     }
-    //  if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks\n", .{chunksToUnloadBufferPos});
+    if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks\n", .{chunksToUnloadBufferPos});
+    std.debug.print("{d} chunks loaded\n", .{chunks});
     chunksToUnloadBufferPos = 0;
 }
 
@@ -185,6 +188,7 @@ pub fn UnloadMeshes(renderer: *Renderer, meshDistance: [3]u32, playerChunkPos: @
             inline for (0..2) |i| {
                 if (mesh.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
                 if (mesh.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
+                if (mesh.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
             }
         }
         meshesToUnloadBufferPos = 0;

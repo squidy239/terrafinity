@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
 
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
-        .version = .@"4.1",
+        .version = .@"4.6",
         .profile = .core,
     });
     exe.root_module.addImport("gl", gl_bindings);
@@ -128,7 +128,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("zm", zm.module("zm"));
 
     const zglfw = b.dependency("zglfw", .{
-        .optimize = std.builtin.OptimizeMode.ReleaseSafe,
+        .target = target,
+        .optimize = optimize,
     });
     exe.root_module.addImport("zglfw", zglfw.module("root"));
 

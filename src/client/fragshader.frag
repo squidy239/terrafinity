@@ -3,7 +3,6 @@
 in vec3 coordss;
 in vec3 fragpos;
 flat in vec3 sunpos;
-flat in vec3 position;
 flat in uint blocktype;
 flat in uint side;
 flat in float sscale;

@@ -8,11 +8,11 @@ const ChunkSize = 32;
 
 pub const FaceRotation = enum(u4) {
     xPlus = 0,
-    xMunus = 1,
+    xMinus = 1,
     yPlus = 2,
-    yMunus = 3,
+    yMinus = 3,
     zPlus = 4,
-    zMunus = 5,
+    zMinus = 5,
     diagonalPlus = 6,
     diagonalMinus = 7,
 };
@@ -25,15 +25,12 @@ pub const Face = packed struct(u64) {
     isGreedy: bool,
     height: i6,
     width: i6,
-    //  unused_bool: bool,
     BlockType: Block,
     _: u12,
 };
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
-//threadlocal var neighboring_blocks: [6]Block = undefined;
-//threadlocal var neighboring_blocks_transparent: @Vector(6, bool) = undefined;
 
 pub const Mesh = struct {
     faces: ?[]const Face,

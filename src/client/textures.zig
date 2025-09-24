@@ -13,7 +13,7 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
     var textureArray = try allocator.alloc(zigimg.Image, texture_count);
     defer {
         for (textureArray) |*img| {
-            img.deinit();
+            img.deinit(allocator);
         }
         allocator.free(textureArray);
     }
@@ -26,7 +26,7 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
                 if (image.kind == .file and ((std.mem.indexOf(u8, image.name, keyword) != null))) {
                     std.debug.assert(i < texture_count);
                     var loadedImg = try zigimg.Image.fromFile(allocator, try textures_path.openFile(image.name, .{}), &read_buffer);
-                    try loadedImg.convert(.rgba32);
+                    try loadedImg.convert(allocator, .rgba32);
                     std.debug.assert(loadedImg.width == resolution[0] and loadedImg.height == resolution[1]);
                     const blockName = image.name[0 .. std.mem.indexOfScalar(u8, image.name, '.') orelse image.name.len];
                     const blockType = std.meta.stringToEnum(Block, blockName);
@@ -100,7 +100,8 @@ fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
 fn getResolution(texture: std.fs.File) ![2]usize {
     var fbuf: [1000000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fbuf);
-    var img = try zigimg.Image.fromFile(fba.allocator(), texture, &read_buffer);
-    defer img.deinit();
+    const alloc = fba.allocator();
+    var img = try zigimg.Image.fromFile(alloc, texture, &read_buffer);
+    defer img.deinit(alloc);
     return [2]usize{ img.width, img.height };
 }

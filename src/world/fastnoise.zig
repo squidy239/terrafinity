@@ -126,7 +126,8 @@ pub const DomainWarpType = enum {
 /// the regard that that they do not modify the internal state of the generator.
 /// Configuration of the generator is done via the struct's fields, which are intended
 /// to be modified directly as-needed.
-pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is specified
+pub fn Noise(comptime Float: type) type {
+    // Compile-error if a non-float is specified
     switch (@typeInfo(Float)) {
         .float => |f| switch (f.bits) {
             32, 64 => {},
@@ -215,6 +216,7 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             var ox = x;
             var oy = y;
             self.transformNoiseCoordinate2D(&ox, &oy);
+
             return switch (self.fractal_type) {
                 .fbm => self.genFractalFBm2D(ox, oy),
                 .ridged => self.genFractalRidged2D(ox, oy),
@@ -230,8 +232,8 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise2D(x, y))));
             return switch (@typeInfo(T)) {
-                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
-                .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
+                .Int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .Float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -240,12 +242,12 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
         /// The return value is mapped to the range of the specified numeric type.
         pub fn genNoise2DAsType(self: *const State, x: Float, y: Float, comptime T: type) T {
             return switch (@typeInfo(T)) {
-                .int => {
+                .Int => {
                     const min = comptime std.math.minInt(T);
                     const max = comptime std.math.maxInt(T);
                     return genNoise2DRange(self, x, y, T, min, max);
                 },
-                .float => @floatCast(genNoise2D(self, x, y)),
+                .Float => @floatCast(genNoise2D(self, x, y)),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -285,8 +287,8 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise3D(x, y, z))));
             return switch (@typeInfo(T)) {
-                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
-                .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
+                .Int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .Float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -295,12 +297,12 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
         /// The return value is mapped to the range of the specified numeric type.
         pub fn genNoise3DAsType(self: *const State, x: Float, y: Float, z: Float, comptime T: type) T {
             return switch (@typeInfo(T)) {
-                .int => {
+                .Int => {
                     const min = comptime std.math.minInt(T);
                     const max = comptime std.math.maxInt(T);
                     return genNoise3DRange(self, x, y, z, T, min, max);
                 },
-                .float => @floatCast(genNoise3D(self, x, y, z)),
+                .Float => @floatCast(genNoise3D(self, x, y, z)),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -360,11 +362,11 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
         // Utilities
 
         inline fn fastFloor(f: Float) i32 {
-            return @intFromFloat(@floor(f));
+            return @intFromFloat(if (f >= 0) f else f - 1);
         }
 
         inline fn fastRound(f: Float) i32 {
-            return @intFromFloat(@round(f));
+            return @intFromFloat(if (f >= 0) f + 0.5 else f - 0.5);
         }
 
         inline fn lerp(a: Float, b: Float, t: Float) Float {
@@ -619,6 +621,7 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             var sum: Float = 0;
             var vec = Vec4{ x, y, state.calculateFractalBounding(), 0 };
             const mul = Vec4{ state.lacunarity, state.lacunarity, state.gain, 0 };
+
             for (0..state.octaves) |i| {
                 const noise = @abs(state.genNoiseSingle2D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1]));
                 sum += (noise * -2.0 + 1.0) * vec[2];
@@ -1056,8 +1059,10 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             y0 *%= prime_y;
             const x1 = x0 +% prime_x;
             const y1 = y0 +% prime_y;
+
             const xf0: Float = lerp(gradCoord2D(seed, x0, y0, xd0, yd0), gradCoord2D(seed, x1, y0, xd1, yd0), xs);
             const xf1: Float = lerp(gradCoord2D(seed, x0, y1, xd0, yd1), gradCoord2D(seed, x1, y1, xd1, yd1), xs);
+
             return lerp(xf0, xf1, ys) * 1.4247691104677813;
         }
 
@@ -1158,11 +1163,12 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
             j *%= prime_y;
             k *%= prime_z;
 
+            var l: usize = 0;
             var value: Float = 0;
             var a: Float = (0.6 - x0 * x0) - (y0 * y0 + z0 * z0);
             var seed_value = seed;
 
-            inline for (0..2) |_| {
+            while (true) : (l += 1) {
                 const xNSignf = @as(Float, @floatFromInt(xNSign));
                 const yNSignf = @as(Float, @floatFromInt(yNSign));
                 const zNSignf = @as(Float, @floatFromInt(zNSign));
@@ -1191,6 +1197,8 @@ pub fn Noise(comptime Float: type) type { // Compile-error if a non-float is spe
                 }
 
                 if (b > 0) value += (b * b) * (b * b) * gradCoord3D(seed_value, ii, jj, kk, x1, y1, z1);
+
+                if (l == 1) break;
 
                 ax0 = 0.5 - ax0;
                 ay0 = 0.5 - ay0;
@@ -1905,11 +1913,11 @@ test "reference all" {
 test "range of all 2D noise/fractal combinations" {
     const size = 768;
     var noise = Noise(f32){};
-    @setEvalBranchQuota(9999);
 
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
 
+        @setEvalBranchQuota(size * size);
         inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
             noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
             for (0..size * size) |i| {
@@ -1927,6 +1935,7 @@ test "range of all 3D noise/fractal combinations" {
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
 
+        @setEvalBranchQuota(size * size * size);
         inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
             noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
             for (0..size) |z| for (0..size) |y| for (0..size) |x| {
