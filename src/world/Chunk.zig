@@ -180,14 +180,22 @@ pub const Chunk = struct {
 
         return result;
     }
-    ///caller must hold lock and a ref
-    pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator) !void {
-        if (self.blocks != .oneBlock) return error.InvalidState;
+    //returns true if the chunk was converted to blocks, false if it was already blocks
+    pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator, comptime lock: bool) !bool {
+        const toblocks = ztracy.ZoneNC(@src(), "toblocks", 645);
+        defer toblocks.End();
+        self.add_ref();
+        defer self.release();
+        if (lock) self.lock.lock();
+        defer if (lock) self.lock.unlock();
+        if (self.blocks != .oneBlock) return false;
         var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         @memset(&blocks, @splat(@splat(self.blocks.oneBlock)));
         const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
         mem.* = blocks;
+        std.debug.assert(self.blocks != .blocks);
         self.blocks = BlockEncoding{ .blocks = mem };
+        return true;
     }
 
     fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32) Block {

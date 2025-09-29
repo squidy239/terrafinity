@@ -5,12 +5,10 @@ in vec3 fragpos;
 flat in vec3 sunpos;
 flat in uint blocktype;
 flat in uint side;
-flat in float sscale;
 flat in uint blockArrayLayer;
-uniform vec4 skyColor;
+//uniform vec4 skyColor;
 uniform float fogDensity;
 uniform sampler2DArray TextureArray;
-uniform bool HeadUnderwater;
 out vec4 FragColor;
 
 float rand(vec2 co) {

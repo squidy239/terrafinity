@@ -136,6 +136,7 @@ pub fn main() !void {
         std.debug.print("started closing\n", .{});
         renderer.window.destroy();
         running.store(false, .monotonic);
+        UserInput.deinit();
         updateEntitiesThread.join();
         std.debug.print("entity update thread stopped\n", .{});
         loaderThread.join();
@@ -151,18 +152,19 @@ pub fn main() !void {
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
     }
-    UserInput.init(&renderer);
 
+    try UserInput.init(&renderer);
     _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     var st = std.time.nanoTimestamp();
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
-        try renderer.LoadMeshes(10_000_000);
-        const glfinish = ztracy.ZoneNC(@src(), "glfinish", 0x00FF00);
-        gl.Finish();
-        glfinish.End();
+        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
+            std.debug.panic("Failed to create GL sync object\n", .{});
+            return error.FailedToCreateGLSync;
+        };
+        const meshesLoaded = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
@@ -200,7 +202,7 @@ pub fn main() !void {
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         Loader.UnloadMeshes(&renderer, meshDistance, playerChunkPos);
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1] });
+        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn, {d} meshes loaded\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1], meshesLoaded });
         st = std.time.nanoTimestamp();
     }
 }

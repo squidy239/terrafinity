@@ -19,8 +19,9 @@ const UniformLocations = struct {
     relativeEntityposlocation: c_int,
     EntityRotationlocation: c_int,
     chunkposlocation: c_int,
-    tlocation: c_int,
+    creationlocation: c_int,
     sunlocation: c_int,
+    playerposlocation: c_int,
     fogDensity: c_int,
     scalelocation: c_int,
     skyColor: c_int,
@@ -34,7 +35,8 @@ const UniformLocations = struct {
             .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
             .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
             .chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos"),
-            .tlocation = gl.GetUniformLocation(shaderprogram, "chunktime"),
+            .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
+            .creationlocation = gl.GetUniformLocation(shaderprogram, "creationTime"),
             .sunlocation = gl.GetUniformLocation(shaderprogram, "sunpos"),
             .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
@@ -137,6 +139,7 @@ pub const Renderer = struct {
         std.debug.print("stopped renderer\n", .{});
     }
     fn InitWindowAndProcs(self: *@This()) !void {
+        //try glfw.initHint(.platform, glfw.Platform.x11);
         try glfw.init();
         std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});
         const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
@@ -275,6 +278,7 @@ pub const Renderer = struct {
         var torenderchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
         gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
+        gl.Uniform3f(self.uniforms.playerposlocation, @floatCast(playerPos[0]), @floatCast(playerPos[1]), @floatCast(playerPos[2]));
         const frustrum = Frustum.extractFrustumPlanes(projview);
         inline for (0..2) |i| {
             if (i == 1) gl.Disable(gl.CULL_FACE);
@@ -289,14 +293,9 @@ pub const Renderer = struct {
                 const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
                 const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
                 if (!cull) continue;
-                gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                 drawnchunks += 1;
-                const tr = millitimestamp - buffer_ids.time;
-                gl.Uniform1f(self.uniforms.scalelocation, buffer_ids.scale);
-                gl.Uniform1i(self.uniforms.tlocation, @intCast(tr));
-                gl.Uniform3i(self.uniforms.chunkposlocation, Pos[0], Pos[1], Pos[2]);
-                gl.Uniform3f(self.uniforms.relativechunkposlocation, relativeChunkPos[0], relativeChunkPos[1], relativeChunkPos[2]);
-
+                gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
+                gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
                 gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
                 gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
             }
@@ -380,17 +379,25 @@ pub const Renderer = struct {
         return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(Pos))) > range);
     }
     ///must be called on main thread
-    pub fn LoadMeshes(self: *@This(), max_us: u32) !void {
+    pub fn LoadMeshes(self: *@This(), glSync: *gl.sync, min_us: u32, max_us: u32) !u64 {
         const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
         var amount: u64 = 0;
-        while (amount < getLen(self.MeshesToLoad, &self.MeshesToLoadLock)) {
+        outer: while (true) {
             defer amount += 1;
-            self.MeshesToLoadLock.lock();
-            defer self.MeshesToLoadLock.unlock();
-            if (std.time.microTimestamp() - st > max_us) break;
-            const mesh = self.MeshesToLoad.orderedRemove(0);
+            var syncStatus: c_int = undefined;
+            gl.GetSynciv(glSync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus));
+            if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
+            while (!self.MeshesToLoadLock.tryLock()) {
+                if (!(std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us))) break :outer;
+            }
+            if (amount >= self.MeshesToLoad.items.len) {
+                self.MeshesToLoadLock.unlock();
+                break;
+            }
+            const mesh = self.MeshesToLoad.orderedRemove(0); //TODO make hashmap or array without duplicates and switch to swapremove
+            self.MeshesToLoadLock.unlock();
             defer FreeMesh(mesh, self.allocator);
             self.ChunkRenderListLock.lockShared();
             const ex = self.ChunkRenderList.get(mesh.Pos);
@@ -415,6 +422,7 @@ pub const Renderer = struct {
             }
             _ = self.LoadingChunks.remove(mesh.Pos);
         }
+        return amount;
     }
 
     fn getLen(arraylist: anytype, lock: *std.Thread.RwLock) usize {
@@ -436,6 +444,7 @@ pub const Renderer = struct {
             .count = [2]u32{ 0, 0 },
             .scale = 1,
             .drawCommand = [2]?c_uint{ null, null },
+            .UBO = undefined,
             .pos = mesh.Pos,
             .time = 0,
         };
@@ -472,13 +481,23 @@ pub const Renderer = struct {
                     .instanceCount = @intCast(NewMeshIDs.count[i]),
                 };
                 gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
+
+                gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
+                gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
+                const UniformBuffer = UBO{
+                    .chunkPos = mesh.Pos,
+                    .scale = 1,
+                    .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
+                    ._0 = undefined,
+                };
+                gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
                 NewMeshIDs.drawCommand[i] = indirectBuff;
             }
         }
+        NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
 
         gl.BindBuffer(gl.ARRAY_BUFFER, 0);
         gl.BindVertexArray(0);
-        NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
         return NewMeshIDs;
     }
 
@@ -487,6 +506,7 @@ pub const Renderer = struct {
         vbo: [2]?c_uint,
         vao: [2]?c_uint,
         drawCommand: [2]?c_uint,
+        UBO: c_uint,
         pos: [3]i32,
         count: [2]u32,
         scale: f32,
@@ -498,6 +518,13 @@ pub const Renderer = struct {
         firstIndex: c_uint,
         baseVertex: c_uint,
         baseInstance: c_uint,
+    };
+
+    pub const UBO = packed struct {
+        scale: f32,
+        _0: u32,
+        creationTime: f64,
+        chunkPos: @Vector(3, i32),
     };
 };
 

@@ -1,21 +1,22 @@
-#version 410 core
+#version 460 core
 layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
-uniform float scale;
 uniform mat4 sunrot;
+uniform vec3 playerPos;
 uniform double time;
-uniform vec3 relativechunkpos;
-uniform ivec3 chunkpos;
-uniform int chunktime;
-out vec3 blockpos;
 out vec3 coordss;
 flat out uint blockArrayLayer;
 flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
-flat out float sscale;
 flat out uint blocktype;
+
+layout(std140, binding = 0) uniform UBO {
+    float scale;
+    double creationTime;
+    ivec4 chunkPos;
+};
 
 const vec3 offset[6] = vec3[6](
         vec3(0.5, 0.0, 0.0), // +X
@@ -113,19 +114,18 @@ float rand(vec2 co) {
 
 void main() {
     uvec3 pos = DecodePosition(data);
-    sscale = scale;
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     uint invisibleBlockAmount = 1;
     blockArrayLayer = blocktype - invisibleBlockAmount;
     vec3 coords = rotateVertex(side, incoords);
-    fragpos = vec3((pos * scale) + (coords * scale) + (chunkpos * 32 * scale));
+    fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * 32.0 * scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 
     float speed = 2000.0;
     float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
 
-    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkpos * 32.0));
+    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkPos.xyz * 32.0 * scale));
 
     if (blocktype == 6) {
         float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
@@ -134,6 +134,8 @@ void main() {
     coordss = coords;
     float animationMs = 500;
     float animationSpeed = 0.25;
+    float chunktime = float(time - creationTime);
+    vec3 relativeChunkPos = (chunkPos.xyz * 32.0 * scale) - playerPos;
     coords.y -= ((animationMs - min(chunktime, animationMs)) * animationSpeed); //replace with pos.y for other aniamtion
-    gl_Position = projview * vec4((coords * scale) + ((pos * scale) + (relativechunkpos)), 1);
+    gl_Position = projview * vec4((coords * scale) + ((pos * scale) + (relativeChunkPos)), 1);
 }

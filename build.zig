@@ -50,11 +50,13 @@ pub fn build(b: *std.Build) void {
     //    exe.root_module.addImport("cache", cache.module("cache"));
     var Entitys = b.addModule("Entity", .{
         .root_source_file = b.path("src/world/Entity.zig"),
+        .optimize = optimize,
     });
     exe.root_module.addImport("Entity", Entitys);
 
     const ThreadPool = b.addModule("ThreadPool", .{
         .root_source_file = b.path("src/libs/ThreadPool.zig"),
+        .optimize = optimize,
     });
     exe.root_module.addImport("ThreadPool", ThreadPool);
 
@@ -77,6 +79,7 @@ pub fn build(b: *std.Build) void {
 
     const EntityTypes = b.addModule("EntityTypes", .{
         .root_source_file = b.path("src/world/EntityTypes.zig"),
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "Entity", .module = Entitys },
             .{ .name = "obj", .module = obj_mod },
@@ -89,24 +92,41 @@ pub fn build(b: *std.Build) void {
 
     const Block = b.addModule("Block", .{
         .root_source_file = b.path("src/world/Blocks.zig"),
+        .optimize = optimize,
     });
     exe.root_module.addImport("Block", Block);
 
-    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{ .root_source_file = b.path("src/libs/ConcurrentHashMap.zig") });
+    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
+        .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
+        .optimize = optimize,
+    });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
     const Interpolation = b.addModule("Interpolation", .{ .root_source_file = b.path("src/libs/Interpolation.zig") });
     exe.root_module.addImport("Interpolation", Interpolation);
 
-    const Cache = b.addModule("Cache", .{ .root_source_file = b.path("src/libs/Cache.zig"), .imports = &.{
-        .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
-    } });
+    const Cache = b.addModule(
+        "Cache",
+        .{
+            .root_source_file = b.path("src/libs/Cache.zig"),
+            .imports = &.{
+                .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
+            },
+            .optimize = optimize,
+        },
+    );
     exe.root_module.addImport("Cache", Cache);
 
-    const Chunk = b.addModule("Chunk", .{ .root_source_file = b.path("src/world/Chunk.zig"), .imports = &.{ .{ .name = "Cache", .module = Cache }, .{ .name = "Block", .module = Block }, .{ .name = "Interpolation", .module = Interpolation }, .{
-        .name = "ztracy",
-        .module = ztracy.module("root"),
-    } } });
+    const Chunk = b.addModule("Chunk", .{
+        .root_source_file = b.path("src/world/Chunk.zig"),
+        .imports = &.{
+            .{ .name = "Cache", .module = Cache }, .{ .name = "Block", .module = Block }, .{ .name = "Interpolation", .module = Interpolation }, .{
+                .name = "ztracy",
+                .module = ztracy.module("root"),
+            },
+        },
+        .optimize = optimize,
+    });
     exe.root_module.addImport("Chunk", Chunk);
 
     const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
@@ -118,6 +138,7 @@ pub fn build(b: *std.Build) void {
             .name = "ztracy",
             .module = ztracy.module("root"),
         } },
+        .optimize = optimize,
     });
     exe.root_module.addImport("World", world_module);
 

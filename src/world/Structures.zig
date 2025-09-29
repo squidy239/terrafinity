@@ -1,6 +1,7 @@
 const std = @import("std");
-const Step = @import("World.zig").World.Step;
+const Step = @import("World.zig").World.WorldEditor.Step;
 const Block = @import("World.zig").Block;
+const WorldEditor = @import("World.zig").World.WorldEditor;
 
 //many structures are made with AI
 // In Structures.zig

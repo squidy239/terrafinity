@@ -76,10 +76,12 @@ pub const Mesh = struct {
                                 };
                                 if (!block.Transperent()) {
                                     @branchHint(.likely);
+                                    std.debug.assert(pos < faceBuffer.len);
                                     faceBuffer[pos] = face;
                                     pos += 1;
                                 } else if (block != b) {
                                     @branchHint(.unlikely);
+                                    std.debug.assert(Tpos < TransparentfaceBuffer.len);
                                     TransparentfaceBuffer[Tpos] = face;
                                     Tpos += 1;
                                 }

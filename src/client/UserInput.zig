@@ -6,16 +6,29 @@ const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
 const zm = @import("zm");
 var render: *Renderer = undefined;
+var worldEditor: World.WorldEditor = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
+var benchmarkStartTime: i64 = 0;
+var stackfallback: std.heap.StackFallbackAllocator(500_000) = undefined;
+var sfa: std.mem.Allocator = undefined;
 
-pub fn init(ren: *Renderer) void {
+pub fn init(ren: *Renderer) !void {
     render = ren;
+    stackfallback = std.heap.StackFallbackAllocator(500_000){ .fallback_allocator = ren.allocator, .buffer = undefined, .fixed_buffer_allocator = undefined };
+    sfa = stackfallback.get();
+    worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
     isinit = true;
 }
+
+pub fn deinit() void {
+    _ = worldEditor.deinit();
+    isinit = false;
+}
+
 const KeyboardKey = enum(u7) {
     W,
     A,
@@ -42,12 +55,14 @@ const ToggleSettings = struct {
     Sprinting: bool,
     SuperSpeed: bool,
     CursorEscaped: bool,
+    Benchmark: bool,
 };
 var ts = ToggleSettings{
     .Fullscreen = false,
     .Sprinting = false,
     .SuperSpeed = false,
     .CursorEscaped = true,
+    .Benchmark = false,
 };
 
 const PlayerInput = struct { //server  will have a max deltatime
@@ -122,8 +137,18 @@ pub fn processInput() !void {
     if (render.window.getKey(glfw.Key.r) == .press)
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }), true);
 
-    if (render.window.getKey(glfw.Key.b) == .press)
-        try render.pool.spawn(BuildStructTask, .{}, .Medium);
+    if (render.window.getKey(glfw.Key.b) == .press) {
+        defer _ = worldEditor.clear();
+        // try worldEditor.PlaceBlock(.{ .block = .Stone, .pos = @as(@Vector(3, i64), @intFromFloat(render.player.pos)) });
+
+        for (0..512) |x| {
+            for (0..512) |y| {
+                for (0..512) |z| {
+                    try worldEditor.PlaceBlock(.{ .block = .Stone, .pos = @as(@Vector(3, i64), @intFromFloat(render.player.pos)) + @Vector(3, i64){ @intCast(x), @intCast(y), @intCast(z) } });
+                }
+            }
+        }
+    }
 
     if (render.window.getKey(glfw.Key.i) == .press) {
         render.playerLock.lockShared();
@@ -131,6 +156,29 @@ pub fn processInput() !void {
         render.playerLock.unlockShared();
         std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(playerPos)), @Vector(3, i32){ 32, 32, 32 }))});
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
+        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
+        _ = worldEditor.clear();
+    }
+    if (render.window.getKey(glfw.Key.p) == .press) {
+        ts.Benchmark = true;
+        benchmarkStartTime = std.time.microTimestamp();
+    }
+    if (ts.Benchmark) {
+        render.playerLock.lock();
+        var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
+        const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
+        t *= ((t * speedUpFactor));
+        render.player.pos = render.world.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.SpawnCenterPos[0] + t), @intFromFloat(render.world.SpawnCenterPos[2]) })), 0.0 };
+        const pos = render.player.pos;
+        render.playerLock.unlock();
+        const chpos: @Vector(3, i32) = @intFromFloat(pos / @as(@Vector(3, f64), @splat(32)));
+        if (render.world.Chunks.get(chpos) == null) {
+            std.debug.print("benchmark finished, reached: {d}\n", .{(t)});
+            ts.Benchmark = false;
+        }
+    }
+    if (render.window.getKey(glfw.Key.end) == .press) {
+        ts.Benchmark = false;
     }
 }
 
