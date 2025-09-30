@@ -61,9 +61,9 @@ pub const Renderer = struct {
     entityshaderprogram: c_uint,
     shaderprogram: c_uint,
     blockAtlasTextureId: c_uint,
+    LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
     uniforms: UniformLocations,
     MeshesToLoad: std.ArrayList(Mesher.Mesh),
-    LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
     MeshesToLoadLock: std.Thread.RwLock,
     ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
     ChunkRenderListLock: std.Thread.RwLock,
@@ -93,9 +93,9 @@ pub const Renderer = struct {
             .uniforms = undefined,
             .player = player,
             .playerLock = playerLock,
-            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
+            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
             .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
             .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
@@ -328,14 +328,14 @@ pub const Renderer = struct {
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
-        const chunk = self.world.LoadChunk(Pos, self, genStructures);
+        const chunk = try self.world.LoadChunk(Pos, self, genStructures);
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, self, false)).extractFace(.xMinus, true),
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, self, false)).extractFace(.xPlus, true),
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, self, false)).extractFace(.yMinus, true),
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, self, false)).extractFace(.yPlus, true),
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, self, false)).extractFace(.zMinus, true),
-            (self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, self, false)).extractFace(.xMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, self, false)).extractFace(.xPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, self, false)).extractFace(.yMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, self, false)).extractFace(.yPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, self, false)).extractFace(.zMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         chunk.lock.lockShared();

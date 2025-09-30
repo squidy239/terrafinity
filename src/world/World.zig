@@ -80,27 +80,26 @@ pub const World = struct {
         }
     }
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: [3]i32, renderer: ?*Renderer, structures: bool) *Chunk {
+    pub fn LoadChunk(self: *@This(), Pos: [3]i32, renderer: ?*Renderer, structures: bool) !*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
-            const ch = Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.GenParams, self.allocator) catch std.debug.panic("err", .{});
+            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.GenParams, self.allocator);
             const ad = ztracy.ZoneNC(@src(), "allocChunkStruct", 234313);
-            var chunkptr: *Chunk = self.allocator.create(Chunk) catch std.debug.panic("err", .{});
+            var chunkptr: *Chunk = try self.allocator.create(Chunk);
             ad.End();
             chunkptr.* = ch;
             if (structures) {
-                GenerateStructures(self, chunkptr, Pos, renderer) catch std.debug.panic("err", .{});
+                try GenerateStructures(self, chunkptr, Pos, renderer);
                 std.debug.assert(chunkptr.genstate.load(.seq_cst) == .StructuresGenerated);
             }
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
-            const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch std.debug.panic("err", .{}); //duplacate can happen with 2 simultanius loads, both detect no chunk in hashmap
+            const existing = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr);
             //chptr is in hashmap past this point
             if (existing) |d| {
-                @branchHint(.unlikely);
-                // chunkptr.lock.unlock();
+                //std.debug.print("miss\n", .{});
                 chunkptr.release(); //ref was added before putting
                 _ = chunkptr.free(self.allocator);
                 self.allocator.destroy(chunkptr);
@@ -109,7 +108,7 @@ pub const World = struct {
             return chunkptr;
         } else {
             if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
-                GenerateStructures(self, chunk.?, Pos, renderer) catch std.debug.panic("err", .{});
+                try GenerateStructures(self, chunk.?, Pos, renderer);
             }
             return chunk.?;
         }
@@ -138,7 +137,8 @@ pub const World = struct {
                             if (treeChance < 0.00001) {
                                 structuresGenerated += 1;
                                 const factor = (rand.float(f32) * 2) + 0.5;
-                                try PrintStructure(&worldEditor, ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(100 * factor),
                                     .base_radius = @intFromFloat(15 * factor),
                                     .main_branches = 0,
@@ -149,10 +149,12 @@ pub const World = struct {
                                     .branch_start_height_factor = 0.95,
                                     .root_length = 0,
                                 });
+                                worldEditor.empty(); //TODO fix crashes if this is .clear()
                             } else if (treeChance < 0.00015) {
                                 structuresGenerated += 1;
                                 const factor = rand.float(f32) + 0.5;
-                                try PrintStructure(&worldEditor, ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(50 * factor),
                                     .base_radius = @intFromFloat(6 * factor),
                                     .main_branches = 0,
@@ -163,10 +165,12 @@ pub const World = struct {
                                     .branch_start_height_factor = 0.90,
                                     .root_length = 3,
                                 });
+                                worldEditor.empty();
                             } else if (treeChance < 0.0015) {
                                 structuresGenerated += 1;
                                 const factor = rand.float(f32) + 0.5;
-                                try PrintStructure(&worldEditor, ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) }, Structures.GenGiantTree, Structures.GiantTreeState, Structures.GiantTreeGenParams{
+                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(25 * factor),
                                     .base_radius = @intFromFloat(@round(3 * factor)),
                                     .main_branches = 0,
@@ -177,6 +181,7 @@ pub const World = struct {
                                     .branch_start_height_factor = 0.90,
                                     .root_length = 2,
                                 });
+                                worldEditor.empty();
                             }
                         }
                     }
@@ -253,6 +258,15 @@ pub const World = struct {
             self.chunkMap.deinit();
             return remeshed;
         }
+        ///unlocks main cached chunk
+        pub fn empty(self: *@This()) void {
+            if (self.chunkLock != null) {
+                self.chunkLock.?.unlock();
+                self.chunkLock = null;
+            }
+            self.chunk = null;
+            self.lastchunkpos = null;
+        }
 
         ///must be called after a series of actions to update renderer and empty chunk cache, returns amount remeshed
         pub fn clear(self: *@This()) usize {
@@ -299,6 +313,9 @@ pub const World = struct {
             return remeshed;
         }
 
+        fn LoadChunkNoErr(self: *World, Pos: [3]i32, renderer: ?*Renderer, structures: bool) ?*Chunk {
+            return LoadChunk(self, Pos, renderer, structures) catch |err| std.debug.panic("err: {any}", .{err});
+        }
         pub fn PlaceBlock(self: *@This(), step: Step) !void {
             const nextblockpos = step.pos;
             const nextchunk: @Vector(3, i32) = @intCast(@divFloor(nextblockpos, @Vector(3, i64){ 32, 32, 32 }));
@@ -310,7 +327,7 @@ pub const World = struct {
                 }
                 self.chunk = self.chunkMap.get(nextchunk);
                 if (self.chunk == null) {
-                    self.chunk = self.world.LoadChunk(nextchunk, null, false);
+                    self.chunk = LoadChunkNoErr(self.world, nextchunk, null, false);
                     self.chunk.?.lock.lockShared();
                     const blockEncoding = self.chunk.?.blocks;
                     self.chunk.?.lock.unlockShared();
@@ -345,7 +362,7 @@ pub const World = struct {
                 }
                 self.chunk = self.chunkMap.get(nextchunk);
                 if (self.chunk == null) {
-                    self.chunk = self.world.LoadChunk(nextchunk, null, false);
+                    self.chunk = LoadChunkNoErr(self.world, nextchunk, null, false);
                     try self.chunkMap.put(nextchunk, self.chunk.?);
                 }
                 if (self.chunk != null) {

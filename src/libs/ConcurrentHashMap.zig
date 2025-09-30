@@ -71,6 +71,14 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             try self.buckets[bucket_index].put(key, value);
         }
 
+        pub fn increment(self: *Self, key: K, amount: i32) !void {
+            //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
+            //defer hashput.End();
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            try self.buckets[bucket_index].increment(key, amount);
+        }
+
         pub fn fetchPut(self: *Self, key: K, value: V) !?V {
             //const hashput = ztracy.ZoneNC(@src(), "hashput", 0x9692d);
             //defer hashput.End();
@@ -210,6 +218,13 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             //bktlock.End();
             defer self.lock.unlock();
             try self.hash_map.put(key, value);
+        }
+
+        pub fn increment(self: *Self, key: K, amount: i32) !void {
+            self.lock.lock();
+            defer self.lock.unlock();
+            const k: i32 = self.hash_map.get(key) orelse 0;
+            try self.hash_map.put(key, k + amount);
         }
 
         pub fn remove(self: *Self, key: K) bool {
