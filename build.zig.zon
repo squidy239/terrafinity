@@ -34,8 +34,8 @@
             .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
         },
         .ztracy = .{
-            .url = "git+https://github.com/kcbanner/ztracy#c26d8504f93b9b3029da10ea1db34b2bd10b1f6c",
-            .hash = "ztracy-0.14.0-dev-zHJSq8SJGAB2yxA4nVsY8R_x3sI4aXxmKeCBUXwJcY-r",
+            .url = "git+https://github.com/zig-gamedev/ztracy#3cc6a4a1502fdea2e4d3869099e39d9c5e8b98a5",
+            .hash = "ztracy-0.14.0-dev-zHJSq8SJGADr475eGiGJzmX_-P5sDoU564IQSVfZxmYC",
         },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen#a1e969b3e35818785fab0373124f50463793b28a",
@@ -46,8 +46,8 @@
             .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
         },
         .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg.git#362cdd6bce109f7bc674be134cddd378f52da5d4",
-            .hash = "zigimg-0.1.0-8_eo2jNrFQD4mu3EAUkfQRmCkyfprdIXc8JQ6uyxhjSQ",
+            .url = "git+https://github.com/zigimg/zigimg.git#d7717b3617d58160635623fe86d4bf86065498e0",
+            .hash = "zigimg-0.1.0-8_eo2vBrFQAvZmO9NzDP85_qC5JFksuMdyI_KMMEr4bq",
         },
     },
 

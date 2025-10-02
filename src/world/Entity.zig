@@ -140,7 +140,6 @@ pub fn TickEntitiesThread(world: *World, interval_ns: u64, running: *std.atomic.
         const enbktamount = world.Entitys.buckets.len;
         var tasksComplete: [enbktamount]bool = @splat(false);
         for (0..enbktamount) |bucket| {
-            //TickEntitiesBucketTask(world, b);
             world.threadPool.spawn(TickEntitiesBucketTask, .{ world, running, &tasksComplete[bucket], bucket }, .High) catch std.debug.panic("error adding task to pool", .{});
         }
         AddEntitiesToTick.End();

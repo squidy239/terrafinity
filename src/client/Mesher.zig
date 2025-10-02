@@ -62,7 +62,6 @@ pub const Mesh = struct {
                         };
                         inline for (neighboring_blocks, 0..) |b, i| {
                             if (b.Transperent()) {
-                                @branchHint(.unlikely);
                                 const face = Face{
                                     .BlockType = block,
                                     .isGreedy = false,
@@ -75,12 +74,10 @@ pub const Mesh = struct {
                                     ._ = undefined,
                                 };
                                 if (!block.Transperent()) {
-                                    @branchHint(.likely);
                                     std.debug.assert(pos < faceBuffer.len);
                                     faceBuffer[pos] = face;
                                     pos += 1;
                                 } else if (block != b) {
-                                    @branchHint(.unlikely);
                                     std.debug.assert(Tpos < TransparentfaceBuffer.len);
                                     TransparentfaceBuffer[Tpos] = face;
                                     Tpos += 1;

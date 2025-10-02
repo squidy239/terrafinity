@@ -4,19 +4,16 @@ const builtin = @import("builtin");
 const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
 const ztracy = @import("root").ztracy;
+const ConcurrentQueue = @import("ConcurrentQueue");
 
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
-run_queue: [7]std.DoublyLinkedList = @splat(.{}),
-is_running: bool = true,
+run_queue: [7]ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false) = undefined,
+is_running: std.atomic.Value(bool) = .init(true),
 allocator: std.mem.Allocator,
 threads: if (builtin.single_threaded) [0]std.Thread else []std.Thread,
-ids: if (builtin.single_threaded) struct {
-    inline fn deinit(_: @This(), _: std.mem.Allocator) void {}
-    fn getIndex(_: @This(), _: std.Thread.Id) usize {
-        return 0;
-    }
-} else std.AutoArrayHashMapUnmanaged(std.Thread.Id, void),
+isempty: std.Thread.Condition = .{},
+isemptymutex: std.Thread.Mutex = .{},
 
 const Runnable = struct {
     runFn: RunProto,
@@ -33,12 +30,11 @@ pub const Priority = enum(u4) {
     ExtremelyLow = 6,
 };
 
-const RunProto = *const fn (*Runnable, id: ?usize) void;
+const RunProto = *const fn (*Runnable) void;
 
 pub const Options = struct {
     allocator: std.mem.Allocator,
     n_jobs: ?usize = null,
-    track_ids: bool = false,
     stack_size: usize = std.Thread.SpawnConfig.default_stack_size,
 };
 ///the allocator must be thread-safe
@@ -48,18 +44,17 @@ pub fn init(pool: *Pool, options: Options) !void {
     pool.* = .{
         .allocator = allocator,
         .threads = if (builtin.single_threaded) .{} else &.{},
-        .ids = .{},
+        .run_queue = undefined,
     };
 
+    for (&pool.run_queue) |*q| {
+        q.* = try ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false).init(allocator);
+    }
     if (builtin.single_threaded) {
         return;
     }
 
     const thread_count = options.n_jobs orelse @max(1, std.Thread.getCpuCount() catch 1);
-    if (options.track_ids) {
-        try pool.ids.ensureTotalCapacity(allocator, 1 + thread_count);
-        pool.ids.putAssumeCapacityNoClobber(std.Thread.getCurrentId(), {});
-    }
 
     // kill and join any threads we spawned and free memory on error.
     pool.threads = try allocator.alloc(std.Thread, thread_count);
@@ -77,7 +72,18 @@ pub fn init(pool: *Pool, options: Options) !void {
 
 pub fn deinit(pool: *Pool) void {
     pool.join(pool.threads.len); // kill and join all threads.
-    pool.ids.deinit(pool.allocator);
+    for (&pool.run_queue) |*q| {
+        for (&q.fragments, 0..) |*fragment, i| { //strict ordering is disabled so it has to be manually emptied
+            q.fragmentLocks[i].lock();
+            defer q.fragmentLocks[i].unlock();
+            while (fragment.popFirst()) |runnable| { //make sure all tasks are completed
+                const datanode: *@TypeOf(pool.run_queue[i]).Node = @fieldParentPtr("node", runnable);
+                datanode.data.runFn(datanode.data);
+                q.allocators[i].destroy(datanode);
+            }
+        }
+        q.deinit(true);
+    }
     pool.* = undefined;
 }
 
@@ -87,132 +93,20 @@ fn join(pool: *Pool, spawned: usize) void {
     }
 
     {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
-
         // ensure future worker threads exit the dequeue loop
-        pool.is_running = false;
+        pool.is_running.store(false, .monotonic);
     }
 
     // wake up any sleeping threads (this can be done outside the mutex)
     // then wait for all the threads we know are spawned to complete.
-    pool.cond.broadcast();
+
+    pool.isempty.broadcast();
+
     for (pool.threads[0..spawned]) |thread| {
         thread.join();
     }
 
     pool.allocator.free(pool.threads);
-}
-
-/// Runs `func` in the thread pool, calling `WaitGroup.start` beforehand, and
-/// `WaitGroup.finish` after it returns.
-///
-/// In the case that queuing the function call fails to allocate memory, or the
-/// target is single-threaded, the function is called directly.
-pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args: anytype) void {
-    wait_group.start();
-
-    if (builtin.single_threaded) {
-        @call(.auto, func, args);
-        wait_group.finish();
-        return;
-    }
-
-    const Args = @TypeOf(args);
-    const Closure = struct {
-        arguments: Args,
-        pool: *Pool,
-        runnable: Runnable = .{ .runFn = runFn },
-        wait_group: *WaitGroup,
-
-        fn runFn(runnable: *Runnable, _: ?usize) void {
-            const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
-            @call(.auto, func, closure.arguments);
-            closure.wait_group.finish();
-
-            closure.pool.allocator.destroy(closure);
-        }
-    };
-
-    {
-        pool.mutex.lock();
-
-        const closure = pool.allocator.create(Closure) catch {
-            pool.mutex.unlock();
-            @call(.auto, func, args);
-            wait_group.finish();
-            return;
-        };
-        closure.* = .{
-            .arguments = args,
-            .pool = pool,
-            .wait_group = wait_group,
-        };
-
-        pool.run_queue.append(&closure.runnable.node);
-        pool.mutex.unlock();
-    }
-
-    // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
-}
-
-/// Runs `func` in the thread pool, calling `WaitGroup.start` beforehand, and
-/// `WaitGroup.finish` after it returns.
-///
-/// The first argument passed to `func` is a dense `usize` thread id, the rest
-/// of the arguments are passed from `args`. Requires the pool to have been
-/// initialized with `.track_ids = true`.
-///
-/// In the case that queuing the function call fails to allocate memory, or the
-/// target is single-threaded, the function is called directly.
-pub fn spawnWgId(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args: anytype) void {
-    wait_group.start();
-
-    if (builtin.single_threaded) {
-        @call(.auto, func, .{0} ++ args);
-        wait_group.finish();
-        return;
-    }
-
-    const Args = @TypeOf(args);
-    const Closure = struct {
-        arguments: Args,
-        pool: *Pool,
-        runnable: Runnable = .{ .runFn = runFn },
-        wait_group: *WaitGroup,
-
-        fn runFn(runnable: *Runnable, id: ?usize) void {
-            const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
-            @call(.auto, func, .{id.?} ++ closure.arguments);
-            closure.wait_group.finish();
-
-            closure.pool.allocator.destroy(closure);
-        }
-    };
-
-    {
-        pool.mutex.lock();
-
-        const closure = pool.allocator.create(Closure) catch {
-            const id: ?usize = pool.ids.getIndex(std.Thread.getCurrentId());
-            pool.mutex.unlock();
-            @call(.auto, func, .{id.?} ++ args);
-            wait_group.finish();
-            return;
-        };
-        closure.* = .{
-            .arguments = args,
-            .pool = pool,
-            .wait_group = wait_group,
-        };
-
-        pool.run_queue.append(&closure.runnable.node);
-        pool.mutex.unlock();
-    }
-
-    // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
 }
 
 pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype, priority: Priority) !void {
@@ -227,31 +121,53 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype, priority: Prior
         pool: *Pool,
         runnable: Runnable = .{ .runFn = runFn },
 
-        fn runFn(runnable: *Runnable, _: ?usize) void {
+        fn runFn(runnable: *Runnable) void {
             const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
             @call(.auto, func, closure.arguments);
-
             const d = ztracy.ZoneNC(@src(), "threadpooldestroy", 423342423);
             closure.pool.allocator.destroy(closure);
             d.End();
         }
     };
 
-    {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+    const closure = try pool.allocator.create(Closure);
+    closure.* = .{
+        .arguments = args,
+        .pool = pool,
+    };
 
-        const closure = try pool.allocator.create(Closure);
-        closure.* = .{
-            .arguments = args,
-            .pool = pool,
-        };
+    _ = try pool.run_queue[@intFromEnum(priority)].append(&closure.runnable);
+    pool.isempty.signal();
+}
 
-        pool.run_queue[@intFromEnum(priority)].append(&closure.runnable.node);
+fn worker(pool: *Pool) void {
+    while (true) {
+        var run: ?*Runnable = null;
+
+        for (&pool.run_queue) |*queue| {
+            if (queue.popFirst()) |node| {
+                run = node;
+                break;
+            }
+        }
+
+        if (run) |runnable| {
+            runnable.runFn(runnable);
+        } else if (pool.is_running.load(.monotonic)) {
+            pool.isemptymutex.lock();
+            if (pool.is_running.load(.monotonic)) {
+                pool.isempty.wait(&pool.isemptymutex);
+            }
+            pool.isemptymutex.unlock();
+        }
+        if (run == null and !pool.is_running.load(.monotonic)) {
+            break;
+        } else run = null;
     }
+}
 
-    // Notify waiting threads outside the lock to try and keep the critical section small.
-    pool.cond.signal();
+pub fn getIdCount(pool: *Pool) usize {
+    return @intCast(1 + pool.threads.len);
 }
 
 test spawn {
@@ -273,69 +189,4 @@ test spawn {
     }
 
     try std.testing.expectEqual(true, completed);
-}
-
-fn worker(pool: *Pool) void {
-    const l = ztracy.ZoneNC(@src(), "threadpoollock", 656756);
-    pool.mutex.lock();
-    l.End();
-
-    defer pool.mutex.unlock();
-
-    const id: ?usize = if (pool.ids.count() > 0) @intCast(pool.ids.count()) else null;
-    if (id) |_| pool.ids.putAssumeCapacityNoClobber(std.Thread.getCurrentId(), {});
-
-    while (true) {
-        var run_node: ?*std.DoublyLinkedList.Node = null;
-
-        for (&pool.run_queue) |*queue| {
-            if (queue.popFirst()) |node| {
-                run_node = node;
-                break;
-            }
-        }
-
-        if (run_node) |node| {
-            // Temporarily unlock the mutex in order to execute the run_node
-            pool.mutex.unlock();
-            defer {
-                const d = ztracy.ZoneNC(@src(), "threadpoollock2", 756567);
-                pool.mutex.lock();
-                d.End();
-            }
-
-            const runnable: *Runnable = @fieldParentPtr("node", node);
-            runnable.runFn(runnable, id);
-        } else {
-            // Stop executing instead of waiting if the thread pool is no longer running.
-            if (pool.is_running) {
-                pool.cond.wait(&pool.mutex);
-            } else {
-                break;
-            }
-        }
-    }
-}
-
-pub fn waitAndWork(pool: *Pool, wait_group: *WaitGroup) void {
-    var id: ?usize = null;
-
-    while (!wait_group.isDone()) {
-        pool.mutex.lock();
-        if (pool.run_queue.popFirst()) |run_node| {
-            id = id orelse pool.ids.getIndex(std.Thread.getCurrentId());
-            pool.mutex.unlock();
-            const runnable: *Runnable = @fieldParentPtr("node", run_node);
-            runnable.runFn(runnable, id);
-            continue;
-        }
-
-        pool.mutex.unlock();
-        wait_group.wait();
-        return;
-    }
-}
-
-pub fn getIdCount(pool: *Pool) usize {
-    return @intCast(1 + pool.threads.len);
 }

@@ -44,7 +44,7 @@ pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(
     }
 }
 ///loads chunks from top to bottom and in a spiral on a y level
-fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3]u32) void {
+fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3]u32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
@@ -53,8 +53,7 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
     //defer std.debug.print("amount_tested: {d}\n", .{amount_tested});
 
     while (true) {
-        if (amount_tested >= 4 * distance[0] * distance[2]) { //*4 because loaddistance is distance from the player, not a full square
-            // std.debug.print("xz,: {any}, m: {any}, amount_loaded: {d}, amount_tested: {d}, distance: {any}\n", .{ xz, Move(xz, &c), amount_loaded, amount_tested, distance });
+        if (amount_tested >= 4 * distance[0] * distance[2]) { //* 4 because loaddistance is distance from the player, not a full square
             break;
         }
 
@@ -68,11 +67,13 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
             while (y < distance[1]) {
                 defer y += 1;
                 const ChunkPos = [3]i32{ xz[0] + eyePosChunk[0], y + eyePosChunk[1], xz[1] + eyePosChunk[2] };
-                const loading = renderer.LoadingChunks.contains(ChunkPos);
+                if (renderer.LoadingChunks.contains(ChunkPos)) {
+                    continue;
+                }
                 renderer.ChunkRenderListLock.lockShared();
                 const loaded = renderer.ChunkRenderList.contains(ChunkPos);
                 renderer.ChunkRenderListLock.unlockShared();
-                if (!loading and (!loaded or ((renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
+                if ((!loaded or ((renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
                     renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});

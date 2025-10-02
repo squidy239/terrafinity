@@ -8,6 +8,7 @@ pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
+pub const ConcurrentQueue = @import("ConcurrentQueue");
 const glfw = @import("zglfw");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");

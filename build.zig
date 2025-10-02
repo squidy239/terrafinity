@@ -53,11 +53,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("Entity", Entitys);
-
-    const ThreadPool = b.addModule("ThreadPool", .{
-        .root_source_file = b.path("src/libs/ThreadPool.zig"),
+    const ConcurrentQueue = b.addModule("ConcurrentQueue", .{
+        .root_source_file = b.path("src/libs/ConcurrentQueue.zig"),
         .optimize = optimize,
+        .imports = &.{.{ .name = "ztracy", .module = ztracy.module("root") }},
     });
+    exe.root_module.addImport("ConcurrentQueue", ConcurrentQueue);
+
+    const ThreadPool = b.addModule("ThreadPool", .{ .root_source_file = b.path("src/libs/ThreadPool.zig"), .optimize = optimize, .imports = &.{
+        .{ .name = "ConcurrentQueue", .module = ConcurrentQueue },
+    } });
     exe.root_module.addImport("ThreadPool", ThreadPool);
 
     const obj_mod = b.dependency("obj", .{ .target = target, .optimize = optimize }).module("obj");

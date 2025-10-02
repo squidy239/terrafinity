@@ -7,7 +7,9 @@ const gl = @import("gl");
 const glfw = @import("zglfw");
 const ThreadPool = @import("root").ThreadPool;
 const ztracy = @import("ztracy");
+const builtin = @import("builtin");
 const Textures = @import("textures.zig");
+const ConcurrentQueue = @import("root").ConcurrentQueue;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
 const ChunkSize = 32;
@@ -18,12 +20,9 @@ const UniformLocations = struct {
     relativechunkposlocation: c_int,
     relativeEntityposlocation: c_int,
     EntityRotationlocation: c_int,
-    chunkposlocation: c_int,
-    creationlocation: c_int,
     sunlocation: c_int,
     playerposlocation: c_int,
     fogDensity: c_int,
-    scalelocation: c_int,
     skyColor: c_int,
     timelocation: c_int,
 
@@ -34,13 +33,10 @@ const UniformLocations = struct {
             .relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos"),
             .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
             .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
-            .chunkposlocation = gl.GetUniformLocation(shaderprogram, "chunkpos"),
             .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
-            .creationlocation = gl.GetUniformLocation(shaderprogram, "creationTime"),
             .sunlocation = gl.GetUniformLocation(shaderprogram, "sunpos"),
             .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
-            .scalelocation = gl.GetUniformLocation(shaderprogram, "scale"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
         };
     }
@@ -63,8 +59,7 @@ pub const Renderer = struct {
     blockAtlasTextureId: c_uint,
     LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
     uniforms: UniformLocations,
-    MeshesToLoad: std.ArrayList(Mesher.Mesh),
-    MeshesToLoadLock: std.Thread.RwLock,
+    MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
     ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
     ChunkRenderListLock: std.Thread.RwLock,
     MeshDistance: [3]std.atomic.Value(u32),
@@ -76,6 +71,11 @@ pub const Renderer = struct {
 
     ///must be called on main thread
     pub fn Init(pool: *ThreadPool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
+        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 30, 20 }; //x,y
+        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 32, 22 }; //x,y
+        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 32, 22 }; //x,y
+
+        std.debug.assert((GenDist[0] + 2) <= MeshDist[0] and (GenDist[1] + 2) <= MeshDist[1]);
         var renderer = @This(){
             .allocator = allocator,
             .pool = pool,
@@ -87,8 +87,7 @@ pub const Renderer = struct {
             .indecies = undefined,
             .shaderprogram = undefined,
             .entityshaderprogram = undefined,
-            .MeshesToLoad = .{},
-            .MeshesToLoadLock = .{},
+            .MeshesToLoad = try .init(allocator),
             .blockAtlasTextureId = undefined,
             .uniforms = undefined,
             .player = player,
@@ -96,9 +95,9 @@ pub const Renderer = struct {
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20), std.atomic.Value(u32).init(20) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //should be 2 or over gendistance
-            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22), std.atomic.Value(u32).init(22) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) }, //should be 2 or over gendistance
+            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
@@ -131,11 +130,10 @@ pub const Renderer = struct {
         glfw.terminate();
         self.ChunkRenderList.deinit();
         self.LoadingChunks.deinit();
-        self.MeshesToLoadLock.lock();
-        for (self.MeshesToLoad.items) |mesh| {
+        while (self.MeshesToLoad.popFirst()) |mesh| {
             FreeMesh(mesh, self.allocator);
         }
-        self.MeshesToLoad.deinit(self.allocator);
+        self.MeshesToLoad.deinit(true);
         std.debug.print("stopped renderer\n", .{});
     }
     fn InitWindowAndProcs(self: *@This()) !void {
@@ -352,11 +350,7 @@ pub const Renderer = struct {
         const mesh = try Mesher.Mesh.MeshFromChunks(Pos, (blocks), neighbor_faces, self.allocator);
         chunk.releaseAndUnlockShared();
         if (mesh) |m| {
-            const lock = ztracy.ZoneNC(@src(), "MeshesToLoadLock", 33522);
-            self.MeshesToLoadLock.lock();
-            lock.End();
-            defer self.MeshesToLoadLock.unlock();
-            try self.MeshesToLoad.append(self.allocator, m);
+            _ = try self.MeshesToLoad.append(m);
         }
     }
 
@@ -384,24 +378,16 @@ pub const Renderer = struct {
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
         var amount: u64 = 0;
-        outer: while (true) {
-            defer amount += 1;
+        while (true) {
             var syncStatus: c_int = undefined;
             gl.GetSynciv(glSync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus));
             if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
-            while (!self.MeshesToLoadLock.tryLock()) {
-                if (!(std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us))) break :outer;
-            }
-            if (amount >= self.MeshesToLoad.items.len) {
-                self.MeshesToLoadLock.unlock();
-                break;
-            }
-            const mesh = self.MeshesToLoad.orderedRemove(0); //TODO make hashmap or array without duplicates and switch to swapremove
-            self.MeshesToLoadLock.unlock();
+            const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);
             self.ChunkRenderListLock.lockShared();
             const ex = self.ChunkRenderList.get(mesh.Pos);
             self.ChunkRenderListLock.unlockShared();
+            defer amount += 1;
             var oldtime: ?i64 = null;
             if (ex) |m| {
                 oldtime = m.time;
@@ -574,33 +560,29 @@ const Frustum = struct {
         return Frustum{ .frus = planes };
     }
 
-    fn getPlane(self: *const Frustum, plane_index: usize) @Vector(4, f64) {
-        return self.frus[plane_index];
-    }
-
     pub fn boxInFrustum(self: *const @This(), box: Box) bool {
         // Check box against each of the 6 frustum planes
-        for (0..6) |i| {
+        inline for (0..6) |i| {
             var out: u32 = 0;
-            const plane = self.getPlane(i);
+            const plane = self.frus[i];
 
             // Test all 8 corners of the box against this plane
             // Corner 1: min.x, min.y, min.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
             // Corner 2: max.x, min.y, min.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
             // Corner 3: min.x, max.y, min.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
             // Corner 4: max.x, max.y, min.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
             // Corner 5: min.x, min.y, max.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
             // Corner 6: max.x, min.y, max.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
             // Corner 7: min.x, max.y, max.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
             // Corner 8: max.x, max.y, max.z
-            out += if (zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0) 1 else 0;
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
 
             // If all 8 corners are outside this plane, the box is completely outside the frustum
             if (out == 8) return false;

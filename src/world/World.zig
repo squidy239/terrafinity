@@ -133,7 +133,6 @@ pub const World = struct {
                     for (0..ChunkSize) |y| {
                         if (chunk.blocks.blocks[x][y][z] == .Grass) {
                             const treeChance: f64 = rand.float(f64);
-
                             if (treeChance < 0.00001) {
                                 structuresGenerated += 1;
                                 const factor = (rand.float(f32) * 2) + 0.5;
@@ -149,7 +148,7 @@ pub const World = struct {
                                     .branch_start_height_factor = 0.95,
                                     .root_length = 0,
                                 });
-                                worldEditor.empty(); //TODO fix crashes if this is .clear()
+                                worldEditor.empty();
                             } else if (treeChance < 0.00015) {
                                 structuresGenerated += 1;
                                 const factor = rand.float(f32) + 0.5;
@@ -227,7 +226,7 @@ pub const World = struct {
         renderer: ?*Renderer,
         world: *World,
         allocator: std.mem.Allocator,
-        ///allocator only makes temporary allocations, stackfallbackallocator should be used. mainchunk must not be locked
+        ///allocator only makes temporary allocations, stackfallbackallocator should be used if clear is not called. mainchunk must not be locked
         pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, allocator: std.mem.Allocator) !@This() {
             const initworld = ztracy.ZoneNC(@src(), "initEditor", 45453);
             defer initworld.End();
@@ -268,7 +267,8 @@ pub const World = struct {
             self.lastchunkpos = null;
         }
 
-        ///must be called after a series of actions to update renderer and empty chunk cache, returns amount remeshed
+        ///must be called after a series of actions to update renderer and empty chunk cache, returns amount remeshed.
+        /// if StackFallbackAllocator is used, the WorldEditor should not be used after this call.
         pub fn clear(self: *@This()) usize {
             const clearworld = ztracy.ZoneNC(@src(), "clearEditor", 67556);
             defer clearworld.End();

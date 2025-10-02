@@ -12,13 +12,9 @@ var isinit = false;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
-var stackfallback: std.heap.StackFallbackAllocator(500_000) = undefined;
-var sfa: std.mem.Allocator = undefined;
 
 pub fn init(ren: *Renderer) !void {
     render = ren;
-    stackfallback = std.heap.StackFallbackAllocator(500_000){ .fallback_allocator = ren.allocator, .buffer = undefined, .fixed_buffer_allocator = undefined };
-    sfa = stackfallback.get();
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
     isinit = true;
@@ -29,27 +25,6 @@ pub fn deinit() void {
     isinit = false;
 }
 
-const KeyboardKey = enum(u7) {
-    W,
-    A,
-    S,
-    D,
-    CTRL,
-    SPACE,
-    SHIFT,
-    G,
-};
-
-const KeyboardAction = enum(u8) {
-    Forward,
-    Right,
-    Back,
-    Left,
-    CTRL,
-    JUMP,
-    SHIFT,
-    G,
-};
 const ToggleSettings = struct {
     Fullscreen: bool,
     Sprinting: bool,
@@ -63,11 +38,6 @@ var ts = ToggleSettings{
     .SuperSpeed = false,
     .CursorEscaped = true,
     .Benchmark = false,
-};
-
-const PlayerInput = struct { //server  will have a max deltatime
-    microTimestamp: i64,
-    keyToggled: KeyboardAction, //TODO figure out best format so send inputs, only ones changed or all each frame
 };
 
 pub fn processInput() !void {
@@ -154,7 +124,8 @@ pub fn processInput() !void {
         render.playerLock.lockShared();
         const playerPos = render.player.pos;
         render.playerLock.unlockShared();
-        std.debug.print("inspected: {any}", .{render.world.Chunks.get(@divFloor(@as(@Vector(3, i32), @intFromFloat(playerPos)), @Vector(3, i32){ 32, 32, 32 }))});
+        const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(32))));
+        std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
         _ = worldEditor.clear();
@@ -168,12 +139,13 @@ pub fn processInput() !void {
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
-        render.player.pos = render.world.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.SpawnCenterPos[0] + t), @intFromFloat(render.world.SpawnCenterPos[2]) })), 0.0 };
+        render.player.pos = std.math.lerp(render.player.pos, render.world.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.SpawnCenterPos[0] + t), @intFromFloat(render.world.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = render.player.pos;
         render.playerLock.unlock();
-        const chpos: @Vector(3, i32) = @intFromFloat(pos / @as(@Vector(3, f64), @splat(32)));
+        const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(32))));
         if (render.world.Chunks.get(chpos) == null) {
-            std.debug.print("benchmark finished, reached: {d}\n", .{(t)});
+            std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
+            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), render.world.Chunks.get(chpos) });
             ts.Benchmark = false;
         }
     }
