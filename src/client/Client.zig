@@ -54,9 +54,9 @@ pub fn main() !void {
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 8192).init(allocator),
-        .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 8192).init(secondary_allocator),
+        .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
+        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .SpawnRange = 0,
         .SpawnCenterPos = [3]i32{ 5333, 0, -5333 },
         .Rand = rand.random(),
@@ -161,14 +161,7 @@ pub fn main() !void {
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
-        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
-            std.debug.panic("Failed to create GL sync object\n", .{});
-            return error.FailedToCreateGLSync;
-        };
-        const meshesLoaded = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
-        const swap = ztracy.ZoneNC(@src(), "swap", 456564);
-        renderer.window.swapBuffers();
-        swap.End();
+
         const poll = ztracy.ZoneNC(@src(), "poll", 456564);
         glfw.pollEvents();
         poll.End();
@@ -201,10 +194,22 @@ pub fn main() !void {
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-        Loader.UnloadMeshes(&renderer, meshDistance, playerChunkPos);
+        const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
+        renderer.UnloadMeshes(meshDistance, playerChunkPos);
+        unloadMeshes.End();
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn, {d} meshes loaded\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1], meshesLoaded });
         st = std.time.nanoTimestamp();
+        const glCreateSync = ztracy.ZoneNC(@src(), "glCreateSync", 34545);
+        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
+            std.debug.panic("Failed to create GL sync object\n", .{});
+            return error.FailedToCreateGLSync;
+        };
+        glCreateSync.End();
+        const meshesLoaded = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn, {d} meshes loaded\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1], meshesLoaded });
+        const swap = ztracy.ZoneNC(@src(), "swap", 456564);
+        renderer.window.swapBuffers();
+        swap.End();
     }
 }
 

@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
     //       .target = target,
     //       .optimize = optimize,
     // });
+    const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
+    exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
     //    exe.root_module.addImport("cache", cache.module("cache"));
     var Entitys = b.addModule("Entity", .{
@@ -62,6 +64,7 @@ pub fn build(b: *std.Build) void {
 
     const ThreadPool = b.addModule("ThreadPool", .{ .root_source_file = b.path("src/libs/ThreadPool.zig"), .optimize = optimize, .imports = &.{
         .{ .name = "ConcurrentQueue", .module = ConcurrentQueue },
+        .{ .name = "ThreadPriority", .module = ThreadPriority },
     } });
     exe.root_module.addImport("ThreadPool", ThreadPool);
 
@@ -104,6 +107,7 @@ pub fn build(b: *std.Build) void {
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
         .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
         .optimize = optimize,
+        .imports = &.{.{ .name = "ztracy", .module = ztracy.module("root") }},
     });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
@@ -133,9 +137,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("Chunk", Chunk);
-
-    const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
-    exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
     const world_module = b.addModule("World", .{
         .root_source_file = b.path("src/world/World.zig"),

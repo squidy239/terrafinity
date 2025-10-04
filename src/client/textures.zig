@@ -2,7 +2,7 @@ const std = @import("std");
 const zigimg = @import("zigimg");
 const gl = @import("gl");
 const Block = @import("root").Block;
-threadlocal var read_buffer: [1000000]u8 = undefined;
+threadlocal var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
 ///must be run in a valid opengl context
 pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
@@ -57,8 +57,8 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, gltexarrayid);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(texture_count), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     for (0..texture_count) |itt| {

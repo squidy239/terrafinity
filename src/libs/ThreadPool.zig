@@ -5,7 +5,7 @@ const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
 const ztracy = @import("root").ztracy;
 const ConcurrentQueue = @import("ConcurrentQueue");
-
+const ThreadPriority = @import("ThreadPriority");
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
 run_queue: [7]ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false) = undefined,
@@ -153,6 +153,9 @@ fn worker(pool: *Pool) void {
 
         if (run) |runnable| {
             runnable.runFn(runnable);
+            const y = ztracy.ZoneNC(@src(), "threadYield", 423342423);
+            std.Thread.yield() catch {};
+            y.End();
         } else if (pool.is_running.load(.monotonic)) {
             pool.isemptymutex.lock();
             if (pool.is_running.load(.monotonic)) {

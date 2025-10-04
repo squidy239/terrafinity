@@ -1,5 +1,6 @@
 const std = @import("std");
 
+//TODO make concurrent version with no allocations beyond the initialisation
 pub fn Cache(comptime K: type, comptime V: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();

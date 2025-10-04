@@ -126,7 +126,6 @@ pub const Renderer = struct {
                 if (mesh.value_ptr.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
             }
         }
-        self.ChunkRenderListLock.unlock();
         glfw.terminate();
         self.ChunkRenderList.deinit();
         self.LoadingChunks.deinit();
@@ -336,7 +335,9 @@ pub const Renderer = struct {
             (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
+        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
         chunk.lock.lockShared();
+        lock.End();
         switch (chunk.blocks) {
             .blocks => blocks = chunk.blocks.blocks,
             .oneBlock => {
@@ -347,13 +348,45 @@ pub const Renderer = struct {
             },
         }
         exbl.End();
-        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, (blocks), neighbor_faces, self.allocator);
+        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.allocator);
         chunk.releaseAndUnlockShared();
-        if (mesh) |m| {
-            _ = try self.MeshesToLoad.append(m);
+        if (mesh) |m| _ = try self.MeshesToLoad.append(m);
+    }
+    threadlocal var meshesToUnloadBuffer: [1024]Renderer.MeshBufferIDs = undefined;
+    threadlocal var meshesToUnloadBufferPos: u16 = 0;
+    pub fn UnloadMeshes(renderer: *@This(), meshDistance: [3]u32, playerChunkPos: @Vector(3, i32)) void {
+        {
+            renderer.ChunkRenderListLock.lockShared();
+            defer renderer.ChunkRenderListLock.unlockShared();
+            renderer.ChunkRenderList.lockPointers();
+            defer renderer.ChunkRenderList.unlockPointers();
+            const values = renderer.ChunkRenderList.values();
+            for (values) |mesh| {
+                if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(mesh.pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
+                    meshesToUnloadBuffer[meshesToUnloadBufferPos] = mesh;
+                    meshesToUnloadBufferPos += 1;
+                }
+            }
+        }
+        if (meshesToUnloadBufferPos > 0) {
+            if (!renderer.ChunkRenderListLock.tryLock()) {
+                return;
+            }
+            for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |mesh| {
+                _ = renderer.ChunkRenderList.swapRemove(mesh.pos);
+            }
+            renderer.ChunkRenderListLock.unlock();
+            for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |mesh| {
+                //std.debug.print("mesh:{any}\n", .{mesh});
+                inline for (0..2) |i| {
+                    if (mesh.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
+                    if (mesh.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
+                    if (mesh.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
+                }
+            }
+            meshesToUnloadBufferPos = 0;
         }
     }
-
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32) void {
         self.playerLock.lockShared();

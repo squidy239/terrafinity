@@ -37,7 +37,7 @@ pub const Mesh = struct {
     TransperentFaces: ?[]const Face,
     Pos: [3]i32,
     ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !?@This() {
+    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
@@ -62,24 +62,33 @@ pub const Mesh = struct {
                         };
                         inline for (neighboring_blocks, 0..) |b, i| {
                             if (b.Transperent()) {
-                                const face = Face{
-                                    .BlockType = block,
-                                    .isGreedy = false,
-                                    .height = 1,
-                                    .width = 1,
-                                    .rot = @enumFromInt(i),
-                                    .x = @intCast(x - 1),
-                                    .y = @intCast(y - 1),
-                                    .z = @intCast(z - 1),
-                                    ._ = undefined,
-                                };
                                 if (!block.Transperent()) {
                                     std.debug.assert(pos < faceBuffer.len);
-                                    faceBuffer[pos] = face;
+                                    faceBuffer[pos] = Face{
+                                        .BlockType = block,
+                                        .isGreedy = false,
+                                        .height = 1,
+                                        .width = 1,
+                                        .rot = @enumFromInt(i),
+                                        .x = @intCast(x - 1),
+                                        .y = @intCast(y - 1),
+                                        .z = @intCast(z - 1),
+                                        ._ = undefined,
+                                    };
                                     pos += 1;
                                 } else if (block != b) {
                                     std.debug.assert(Tpos < TransparentfaceBuffer.len);
-                                    TransparentfaceBuffer[Tpos] = face;
+                                    TransparentfaceBuffer[Tpos] = Face{
+                                        .BlockType = block,
+                                        .isGreedy = false,
+                                        .height = 1,
+                                        .width = 1,
+                                        .rot = @enumFromInt(i),
+                                        .x = @intCast(x - 1),
+                                        .y = @intCast(y - 1),
+                                        .z = @intCast(z - 1),
+                                        ._ = undefined,
+                                    };
                                     Tpos += 1;
                                 }
                             }
@@ -106,7 +115,7 @@ pub const Mesh = struct {
         if (self.TransperentFaces) |f| allocator.free(f);
     }
     ///x+,x-,y+,y-,z+,z-
-    fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: [6][ChunkSize][ChunkSize]Block) void {
+    fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block) void {
         const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
         defer gec.End();
 
@@ -163,5 +172,3 @@ pub const Mesh = struct {
         }
     }
 };
-
-pub const EntityMesh = struct {};

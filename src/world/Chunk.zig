@@ -18,9 +18,7 @@ pub const Genstate = enum(u8) {
 
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
-var temp2D: [4][4]f32 = undefined;
-var valuesY: [4][4]f32 = undefined;
-var valuesX2d: [16][4]f32 = undefined;
+
 pub const Chunk = struct {
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
@@ -141,29 +139,31 @@ pub const Chunk = struct {
         zMinus = 5,
     };
 
-    pub fn extractFace(self: *@This(), face: FaceRotation, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
+    pub fn extractFace(self: *@This(), comptime face: FaceRotation, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
         const ef = ztracy.ZoneNC(@src(), "ExtractFace", 9999);
         defer ef.End();
+        const aal = ztracy.ZoneNC(@src(), "AddAndLockShared", 654);
         self.addAndLockShared();
+        aal.End();
 
         defer {
             if (removeRef) self.release();
             self.releaseAndUnlockShared();
         }
+        const createCube = ztracy.ZoneNC(@src(), "CreateCube", 456456);
         // Determine dimensions of the resulting 2D array
         var cube: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var result: [ChunkSize][ChunkSize]Block = undefined;
+        createCube.End();
 
         switch (self.blocks) {
             .blocks => cube = self.blocks.blocks,
             .oneBlock => {
-                var dd: [ChunkSize][ChunkSize]Block = undefined;
-                @memset(&dd, @splat(self.blocks.oneBlock));
-                Tempcube = @splat((dd));
-                cube = &Tempcube;
+                const ob = ztracy.ZoneNC(@src(), "OneBlock", 756565);
+                defer ob.End();
+                return @splat(@splat(self.blocks.oneBlock));
             },
         }
-        var result: [ChunkSize][ChunkSize]Block = undefined;
 
         for (&result, 0..) |*row, i| {
             for (row, 0..) |*item, j| {
@@ -212,9 +212,31 @@ pub const Chunk = struct {
         }
     }
 
-    fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32) Block {
+    fn GetSurfaceBlock2(block_height: i32, terrain_height: i32, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32) Block {
+        const options = comptime [5]Block{ Block.Stone, Block.Dirt, Block.Null, Block.Water, Block.Air };
+        var num: usize = 0;
+        num += @intFromBool(!(block_height < terrain_height - 5));
+        num += @intFromBool(num == 1 and !(block_height < terrain_height));
+        num += @intFromBool(num == 2 and !(block_height == terrain_height));
+        num += @intFromBool(num == 3 and !(block_height > terrain_height and block_height < SeaLevel));
+        if (options[num] != Block.Null) {
+            @branchHint(.likely);
+            return options[num];
+        } else return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height < SeaLevel)], block_height, SeaLevel, blockRandomness);
+    }
+
+    fn RandGround2(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32) Block {
         // std.debug.print("hp: {d}", .{heightPercent});
-        //
+        const options = comptime [5]Block{ Block.Dirt, Block.Grass, Block.Dirt, Block.Stone, Block.Snow };
+        const a = std.math.lerp(heightPercent, rand.float(f32), blockRandomness);
+        var num: usize = 0;
+        num += @intFromBool(!(block_height < seaLevel));
+        num += @intFromBool(num == 1 and !(a < 0.4));
+        num += @intFromBool(num == 2 and !(a < 0.5));
+        num += @intFromBool(num == 3 and !(a < 0.6));
+        return options[num];
+    }
+    fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32) Block {
         const a = std.math.lerp(heightPercent, rand.float(f32), blockRandomness);
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.4) Block.Grass else if (a < 0.5) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
     }

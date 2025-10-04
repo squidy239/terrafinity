@@ -116,21 +116,23 @@ void main() {
     uvec3 pos = DecodePosition(data);
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
-    uint invisibleBlockAmount = 1;
+    uint invisibleBlockAmount = 2;
     blockArrayLayer = blocktype - invisibleBlockAmount;
     vec3 coords = rotateVertex(side, incoords);
     fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * 32.0 * scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 
     float speed = 2000.0;
+
     float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
 
     vec3 vertexposition = coords * scale + ((pos * scale) + (chunkPos.xyz * 32.0 * scale));
 
-    if (blocktype == 6) {
+    if (blocktype == 7) {
         float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
         coords.y -= bouncingMod((p * t * speed), 0.4);
     }
+
     coordss = coords;
     float animationMs = 500;
     float animationSpeed = 0.25;

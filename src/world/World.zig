@@ -30,7 +30,9 @@ pub const World = struct {
     pub fn UnloadEntity(self: *@This(), entityUUID: u128) !void {
         const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
         en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
+        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
         en.lock.lock();
+        lock.End();
         //TODO save entity to disk
         en.fullfree(self.allocator);
     }
@@ -67,13 +69,17 @@ pub const World = struct {
     pub fn TickEntitys(self: *@This()) !void {
         const bktamount = self.Entitys.buckets.len;
         for (0..bktamount) |b| {
+            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
             self.Entitys.buckets[b].lock.lockShared();
+            lock.End();
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
             defer self.Entitys.buckets[b].lock.unlockShared();
             while (it.next()) |entity| {
                 entity.*.ref_count.fetchAdd(1, .seq_cst);
                 defer entity.*.ref_count.fetchSub(1, .seq_cst);
+                const locke = ztracy.ZoneNC(@src(), "lockEntity", 2222111);
                 entity.*.lock.lock();
+                locke.End();
                 defer entity.*.lock.unlock();
                 entity.GetActive().update();
             }
@@ -113,7 +119,7 @@ pub const World = struct {
             return chunk.?;
         }
     }
-    threadlocal var stackfallback: std.heap.StackFallbackAllocator(500_000) = undefined;
+    //threadlocal var stackfallback: std.heap.StackFallbackAllocator(500_000) = undefined; TODO readd stackfallback correctly
     fn GenerateStructures(self: *@This(), chunk: *Chunk, Pos: [3]i32, renderer: ?*Renderer) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
@@ -122,9 +128,7 @@ pub const World = struct {
         const randomSeed = std.hash.Wyhash.hash(self.GenParams.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
-        stackfallback = std.heap.StackFallbackAllocator(500_000){ .fallback_allocator = self.allocator, .buffer = undefined, .fixed_buffer_allocator = undefined };
-        const sfa = stackfallback.get();
-        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, sfa);
+        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, self.allocator); //temporary allocation
         defer _ = worldEditor.deinit();
         var structuresGenerated: u32 = 0;
         if (chunk.blocks == .blocks) {
@@ -225,20 +229,20 @@ pub const World = struct {
         chunkLock: ?*std.Thread.RwLock, //if it is not null its locked
         renderer: ?*Renderer,
         world: *World,
-        allocator: std.mem.Allocator,
+        tempallocator: std.mem.Allocator,
         ///allocator only makes temporary allocations, stackfallbackallocator should be used if clear is not called. mainchunk must not be locked
-        pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, allocator: std.mem.Allocator) !@This() {
+        pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, tempallocator: std.mem.Allocator) !@This() {
             const initworld = ztracy.ZoneNC(@src(), "initEditor", 45453);
             defer initworld.End();
             var Editor = @This(){
                 .renderer = renderer,
-                .chunkMap = std.AutoArrayHashMap([3]i32, *Chunk).init(allocator),
+                .chunkMap = std.AutoArrayHashMap([3]i32, *Chunk).init(tempallocator),
                 .chunkLock = null,
                 .mainChunkPos = mainChunkPos,
                 .chunk = null,
                 .world = world,
                 .lastchunkpos = null,
-                .allocator = allocator,
+                .tempallocator = tempallocator,
             };
             if (mainChunk != null) {
                 mainChunk.?.add_ref();
@@ -328,7 +332,9 @@ pub const World = struct {
                 self.chunk = self.chunkMap.get(nextchunk);
                 if (self.chunk == null) {
                     self.chunk = LoadChunkNoErr(self.world, nextchunk, null, false);
+                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
                     self.chunk.?.lock.lockShared();
+                    lock.End();
                     const blockEncoding = self.chunk.?.blocks;
                     self.chunk.?.lock.unlockShared();
                     if (blockEncoding != .blocks) {
@@ -339,7 +345,9 @@ pub const World = struct {
                 if (self.chunk != null) {
                     std.debug.assert(self.chunkLock == null);
                     self.chunkLock = &self.chunk.?.lock;
+                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
                     self.chunkLock.?.lock();
+                    lock.End();
                 }
             }
             self.lastchunkpos = nextchunk;
@@ -368,7 +376,9 @@ pub const World = struct {
                 if (self.chunk != null) {
                     std.debug.assert(self.chunkLock == null);
                     self.chunkLock = &self.chunk.?.lock;
+                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
                     self.chunkLock.?.lock();
+                    lock.End();
                 }
             }
             self.lastchunkpos = nextchunk;
@@ -400,7 +410,9 @@ pub const World = struct {
         defer deinitWorld.End();
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
+            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
             self.Chunks.buckets[b].lock.lock();
+            lock.End();
             var it = self.Chunks.buckets[b].hash_map.valueIterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
@@ -410,7 +422,9 @@ pub const World = struct {
         }
         const enbktamount = self.Entitys.buckets.len;
         for (0..enbktamount) |b| {
+            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
             self.Entitys.buckets[b].lock.lock();
+            lock.End();
             var it = self.Entitys.buckets[b].hash_map.valueIterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
