@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .use_llvm = true,
+        //.use_llvm = true,
     });
 
     const options = .{
@@ -46,6 +46,14 @@ pub fn build(b: *std.Build) void {
     //       .target = target,
     //       .optimize = optimize,
     // });
+    //
+    const tt_mod = b.dependency("TrueType", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("TrueType", tt_mod.module("TrueType"));
+
     const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
     exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
@@ -54,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/world/Entity.zig"),
         .optimize = optimize,
     });
+
     exe.root_module.addImport("Entity", Entitys);
     const ConcurrentQueue = b.addModule("ConcurrentQueue", .{
         .root_source_file = b.path("src/libs/ConcurrentQueue.zig"),
@@ -84,6 +93,14 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
+
+    const gui = b.addModule("gui", .{
+        .root_source_file = b.path("src/libs/gui/gui.zig"),
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "TrueType", .module = tt_mod.module("TrueType") }, .{ .name = "gl", .module = gl_bindings } },
+    });
+
+    exe.root_module.addImport("gui", gui);
 
     const EntityTypes = b.addModule("EntityTypes", .{
         .root_source_file = b.path("src/world/EntityTypes.zig"),

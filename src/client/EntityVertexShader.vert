@@ -11,5 +11,5 @@ void main()
 {
     pos = aPos;
     WorldPosRelative = RelativePos;
-    gl_Position = ProjView * vec4(RelativePos + (aPos * vec3(1, 1, 1)), 1);
+    gl_Position = ProjView * vec4(RelativePos + (aPos), 1);
 }

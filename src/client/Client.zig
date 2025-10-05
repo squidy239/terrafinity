@@ -16,11 +16,10 @@ const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-
 pub const Loader = @import("Loader.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
-
+pub const gui = @import("gui");
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
 var cameraFront = @Vector(3, f64){ 0, 1, 0 };
@@ -158,16 +157,53 @@ pub fn main() !void {
     _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     var st = std.time.nanoTimestamp();
+    gui.init();
+    defer gui.deinit();
+
+    const options = gui.Element.Options{
+        .position = .{ .xPercent = 0.5, .yPercent = 0.0, .yPixels = 40 },
+        .size = .{ .widthPixels = 800, .heightPixels = 80 },
+        .Background = .{ .solid = .{ 0.0, 0.75, 0.5, 0.75 } },
+    };
+    const options2 = gui.Element.Options{
+        .position = .{ .xPercent = 0.9, .yPercent = 0.5 },
+        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
+        .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
+    };
+    const options3 = gui.Element.Options{
+        .position = .{ .xPercent = 0.7, .yPercent = 0.5 },
+        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
+        .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
+    };
+    const options4 = gui.Element.Options{
+        .position = .{ .xPercent = 0.5, .yPercent = 0.5 },
+        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
+        .Background = .{ .solid = .{ 0.0, 0.4, 0.4, 0.5 } },
+    };
+    const options5 = gui.Element.Options{
+        .position = .{ .xPercent = 0.3, .yPercent = 0.5 },
+        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
+        .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
+    };
+    const options6 = gui.Element.Options{
+        .position = .{ .xPercent = 0.1, .yPercent = 0.5 },
+        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
+        .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
+    };
+    var box = try gui.Element.create(allocator, renderer.screen_dimensions, options, &.{
+        try gui.Element.create(allocator, renderer.screen_dimensions, options2, null),
+        try gui.Element.create(allocator, renderer.screen_dimensions, options3, null),
+        try gui.Element.create(allocator, renderer.screen_dimensions, options4, null),
+        try gui.Element.create(allocator, renderer.screen_dimensions, options5, null),
+        try gui.Element.create(allocator, renderer.screen_dimensions, options6, null),
+    });
+    defer box.deinit();
+    box.init();
+    var boxchangetime: i64 = 0;
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
 
-        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
-        glfw.pollEvents();
-        poll.End();
-        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
-        try UserInput.processInput();
-        prossesinput.End();
         const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
         playerEntity.lock.lockShared();
         const playerPos = player.pos;
@@ -190,6 +226,11 @@ pub fn main() !void {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
         drawEntities.End();
+        if (glfw.getKey(renderer.window, .h) == .press and std.time.milliTimestamp() - boxchangetime > 200) {
+            box.options.Visible = !box.options.Visible;
+            boxchangetime = std.time.milliTimestamp();
+        }
+        box.Draw(renderer.screen_dimensions);
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
@@ -210,6 +251,12 @@ pub fn main() !void {
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
+        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
+        glfw.pollEvents();
+        poll.End();
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
+        try UserInput.processInput();
+        prossesinput.End();
     }
 }
 

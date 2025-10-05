@@ -136,7 +136,7 @@ pub const Renderer = struct {
         std.debug.print("stopped renderer\n", .{});
     }
     fn InitWindowAndProcs(self: *@This()) !void {
-        //try glfw.initHint(.platform, glfw.Platform.x11);
+        //try glfw.initHint(.platform, glfw.Platform.x11); //renderdoc wont work with wayland
         try glfw.init();
         std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});
         const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
@@ -317,7 +317,6 @@ pub const Renderer = struct {
                 try c.*.draw(playerPos, self);
             }
         }
-        gl.UseProgram(self.entityshaderprogram);
     }
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
