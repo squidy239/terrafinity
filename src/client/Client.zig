@@ -161,35 +161,46 @@ pub fn main() !void {
     defer gui.deinit();
 
     const options = gui.Element.Options{
-        .position = .{ .xPercent = 0.5, .yPercent = 0.0, .yPixels = 40 },
-        .size = .{ .widthPixels = 800, .heightPixels = 80 },
+        .position = .{ .xPercent = 0.5, .yPercent = 0.1 },
+        .size = .{ .widthPixels = 800, .heightPercent = 20 },
         .Background = .{ .solid = .{ 0.0, 0.75, 0.5, 0.75 } },
     };
     const options2 = gui.Element.Options{
         .position = .{ .xPercent = 0.9, .yPercent = 0.5 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
+        .onHover = OnHover,
+        .onDraw = DeflateElement,
     };
     const options3 = gui.Element.Options{
         .position = .{ .xPercent = 0.7, .yPercent = 0.5 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
+        .onHover = OnHover,
+        .onDraw = DeflateElement,
     };
     const options4 = gui.Element.Options{
         .position = .{ .xPercent = 0.5, .yPercent = 0.5 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.4, 0.4, 0.5 } },
+        .onHover = OnHover,
+        .onDraw = DeflateElement,
     };
     const options5 = gui.Element.Options{
         .position = .{ .xPercent = 0.3, .yPercent = 0.5 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
+        .onHover = OnHover,
+        .onDraw = DeflateElement,
     };
     const options6 = gui.Element.Options{
         .position = .{ .xPercent = 0.1, .yPercent = 0.5 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
+        .onHover = OnHover,
+        .onDraw = DeflateElement,
     };
+    //TODO make x and y percent actually percent
     var box = try gui.Element.create(allocator, renderer.screen_dimensions, options, &.{
         try gui.Element.create(allocator, renderer.screen_dimensions, options2, null),
         try gui.Element.create(allocator, renderer.screen_dimensions, options3, null),
@@ -218,6 +229,12 @@ pub fn main() !void {
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
         clear.End();
+        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
+        glfw.pollEvents();
+        poll.End();
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
+        try UserInput.processInput();
+        prossesinput.End();
         gl.UseProgram(renderer.shaderprogram);
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
@@ -230,7 +247,7 @@ pub fn main() !void {
             box.options.Visible = !box.options.Visible;
             boxchangetime = std.time.milliTimestamp();
         }
-        box.Draw(renderer.screen_dimensions);
+        box.Draw(renderer.screen_dimensions, renderer.window);
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
@@ -251,12 +268,6 @@ pub fn main() !void {
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
-        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
-        glfw.pollEvents();
-        poll.End();
-        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
-        try UserInput.processInput();
-        prossesinput.End();
     }
 }
 
@@ -270,4 +281,35 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
         cameraPos.* -= zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
     if (window.getKey(glfw.Key.d) == .press)
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
+}
+
+fn OnHover(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = mouse_pos;
+    if (!element.options.Visible) return;
+    if (toggle) {
+        if (window.getMouseButton(glfw.MouseButton.left) == .press) {
+            //  element.options.size.widthPixels = 1;
+            element.options.size.heightPixels += 16;
+            element.options.position.yPixels += 8;
+            element.update(element.screen_dimensions);
+        }
+    }
+}
+
+fn DeflateElement(element: *gui.Element, window: *glfw.Window) void {
+    if (!element.options.Visible) return;
+    const time = std.time.timestamp();
+    const eid = (element.options.position.xPercent * 10 * 0.5);
+    if (@rem(time, 5) == @as(i64, @intFromFloat((eid))) and window.getKey(glfw.Key.m) == .press) {
+        element.options.size.heightPixels += 2;
+        element.options.position.yPixels += 1;
+        element.update(element.screen_dimensions);
+    }
+    const wp = element.options.size.widthPixels;
+    const hp = element.options.size.heightPixels;
+    const yp = element.options.position.yPixels;
+    element.options.size.widthPixels = std.math.lerp(element.options.size.widthPixels, -10, 0.01);
+    element.options.size.heightPixels = std.math.lerp(element.options.size.heightPixels, -10, 0.001);
+    element.options.position.yPixels = std.math.lerp(element.options.position.yPixels, 0, 0.001);
+    if (wp != element.options.size.widthPixels or hp != element.options.size.heightPixels or yp != element.options.position.yPixels) element.update(element.screen_dimensions);
 }

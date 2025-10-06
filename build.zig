@@ -94,10 +94,20 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
 
+    const zglfw = b.dependency("zglfw", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zglfw", zglfw.module("root"));
+
     const gui = b.addModule("gui", .{
         .root_source_file = b.path("src/libs/gui/gui.zig"),
         .optimize = optimize,
-        .imports = &.{ .{ .name = "TrueType", .module = tt_mod.module("TrueType") }, .{ .name = "gl", .module = gl_bindings } },
+        .imports = &.{
+            .{ .name = "TrueType", .module = tt_mod.module("TrueType") },
+            .{ .name = "gl", .module = gl_bindings },
+            .{ .name = "glfw", .module = zglfw.module("root") },
+        },
     });
 
     exe.root_module.addImport("gui", gui);
@@ -170,12 +180,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zm", zm.module("zm"));
-
-    const zglfw = b.dependency("zglfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zglfw", zglfw.module("root"));
 
     if (target.result.os.tag != .emscripten) {
         exe.linkLibrary(zglfw.artifact("glfw"));

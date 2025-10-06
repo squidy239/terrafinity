@@ -1,6 +1,7 @@
 const std = @import("std");
 const TrueType = @import("TrueType");
 const gl = @import("gl");
+const glfw = @import("glfw");
 
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
@@ -16,13 +17,12 @@ pub const Element = struct {
     screen_dimensions: [2]u32,
     width: f32,
     height: f32,
-    pos: [2]f32,
+    pos: @Vector(2, f32),
     options: Options,
     children: ?[]Element,
     parent: ?*Element,
     isinit: bool = false,
-
-    ///a position on the screen, x and y can be between 0 and 1
+    ///a position on the screen, x and y can be between 0 and 100
     pub const Position = struct {
         xPercent: f32 = 0.0,
         yPercent: f32 = 0.0,
@@ -42,10 +42,20 @@ pub const Element = struct {
     };
 
     pub const Options = struct {
-        position: Position = .{ .xPercent = 0.5, .yPercent = 0.5 },
+        ///the position of the element. all units are added together
+        position: Position = .{ .xPercent = 50, .yPercent = 50 },
+        ///the size of the element. all units are added togethe
         size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
         Background: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
+        ///if this is false the element wont be drawn, but onHover and onDraw will still be called
         Visible: bool = true,
+        ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
+        ///last bool is false if it is being called after drawing so the options can be reset if needed
+        ///update must be called after any modifications to the element
+        onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
+        ///gets called before drawing before onHover
+        ///update must be called after any modifications to the element
+        onDraw: ?*const fn (*Element, *glfw.Window) void = null,
     };
     ///if the element has children InitChildren must be called after this. children are copied with the allocator
     pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, options: Options, children: ?[]const Element) !Element {
@@ -75,9 +85,24 @@ pub const Element = struct {
     }
 
     ///requires a valid opengl context
-    pub fn Draw(self: *@This(), screen_dimensions: [2]u32) void {
+    pub fn Draw(self: *@This(), screen_dimensions: [2]u32, window: *glfw.Window) void {
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
+        if (self.options.onDraw) |onDraw| onDraw(self, window);
+        const screen_dimensions_float = @Vector(2, f64){ @floatFromInt(screen_dimensions[0]), @floatFromInt(screen_dimensions[1]) };
+        var cursorPos = window.getCursorPos();
+        cursorPos[0] = @min(@max(cursorPos[0], 0), screen_dimensions_float[0]);
+        cursorPos[1] = @abs(screen_dimensions_float[1] - @min(@max(cursorPos[1], 0), screen_dimensions_float[1]));
+        cursorPos = @Vector(2, f64){ cursorPos[0] / (screen_dimensions_float[0]), cursorPos[1] / (screen_dimensions_float[1]) };
+        const bottomCorner = @Vector(2, f32){ self.pos[0] - (self.width * 0.5), self.pos[1] - (self.height * 0.5) };
+        const topCorner = @Vector(2, f32){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) };
+        const inBottom = bottomCorner[0] < cursorPos[0] and bottomCorner[1] < cursorPos[1];
+        const inTop = topCorner[0] > cursorPos[0] and topCorner[1] > cursorPos[1];
+
+        if (inBottom and inTop and self.options.onHover != null) {
+            self.options.onHover.?(self, cursorPos, window, true);
+            std.debug.print("inBox", .{});
+        }
         if (!self.options.Visible) return;
         gl.Disable(gl.CULL_FACE);
         gl.Disable(gl.DEPTH_TEST);
@@ -95,9 +120,12 @@ pub const Element = struct {
         if (screen_dimensions[0] != self.screen_dimensions[0] or screen_dimensions[1] != self.screen_dimensions[1]) {
             self.update(screen_dimensions);
         }
+        if (inBottom and inTop and self.options.onHover != null) {
+            self.options.onHover.?(self, cursorPos, window, false);
+        }
         if (self.children) |children| {
             for (children) |*child| {
-                child.Draw(screen_dimensions);
+                child.Draw(screen_dimensions, window);
             }
         }
     }
@@ -110,8 +138,8 @@ pub const Element = struct {
         var height: f32 = 0.0;
         height += self.options.size.heightPercent / 100.0;
 
-        var posx = self.options.position.xPercent;
-        var posy = self.options.position.yPercent;
+        var posx = self.options.position.xPercent; // / 100;
+        var posy = self.options.position.yPercent; // / 100;
         if (self.parent) |parent| {
             posx = NormilizeInRange(posx, 0, 1, parent.pos[0] - (parent.width * 0.5), parent.pos[0] + (parent.width * 0.5));
             posy = NormilizeInRange(posy, 0, 1, parent.pos[1] - (parent.height * 0.5), parent.pos[1] + (parent.height * 0.5));
