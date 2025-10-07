@@ -161,46 +161,46 @@ pub fn main() !void {
     defer gui.deinit();
 
     const options = gui.Element.Options{
-        .position = .{ .xPercent = 0.5, .yPercent = 0.1 },
+        .position = .{ .xPercent = 50, .yPercent = 10 },
         .size = .{ .widthPixels = 800, .heightPercent = 20 },
         .Background = .{ .solid = .{ 0.0, 0.75, 0.5, 0.75 } },
     };
     const options2 = gui.Element.Options{
-        .position = .{ .xPercent = 0.9, .yPercent = 0.5 },
+        .position = .{ .xPercent = 90, .yPercent = 50 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
     };
     const options3 = gui.Element.Options{
-        .position = .{ .xPercent = 0.7, .yPercent = 0.5 },
+        .position = .{ .xPercent = 70, .yPercent = 50 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
     };
     const options4 = gui.Element.Options{
-        .position = .{ .xPercent = 0.5, .yPercent = 0.5 },
+        .position = .{ .xPercent = 50, .yPercent = 50 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.4, 0.4, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
     };
     const options5 = gui.Element.Options{
-        .position = .{ .xPercent = 0.3, .yPercent = 0.5 },
+        .position = .{ .xPercent = 30, .yPercent = 50 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
     };
     const options6 = gui.Element.Options{
-        .position = .{ .xPercent = 0.1, .yPercent = 0.5 },
+        .position = .{ .xPercent = 10, .yPercent = 50 },
         .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
         .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
     };
-    //TODO make x and y percent actually percent
+
     var box = try gui.Element.create(allocator, renderer.screen_dimensions, options, &.{
         try gui.Element.create(allocator, renderer.screen_dimensions, options2, null),
         try gui.Element.create(allocator, renderer.screen_dimensions, options3, null),
@@ -229,12 +229,6 @@ pub fn main() !void {
         gl.Clear(gl.COLOR_BUFFER_BIT);
         gl.Clear(gl.DEPTH_BUFFER_BIT);
         clear.End();
-        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
-        glfw.pollEvents();
-        poll.End();
-        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
-        try UserInput.processInput();
-        prossesinput.End();
         gl.UseProgram(renderer.shaderprogram);
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
@@ -268,6 +262,12 @@ pub fn main() !void {
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
+        const poll = ztracy.ZoneNC(@src(), "poll", 456564);
+        glfw.pollEvents();
+        poll.End();
+        const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
+        try UserInput.processInput();
+        prossesinput.End();
     }
 }
 
