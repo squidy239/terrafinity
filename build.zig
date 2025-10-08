@@ -47,13 +47,25 @@ pub fn build(b: *std.Build) void {
     //       .optimize = optimize,
     // });
     //
-    const tt_mod = b.dependency("TrueType", .{
+    const stb_truetype_bindings = b.addTranslateC(.{
+        .root_source_file = b.path("src/libs/gui/stb_truetype.h"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
-    exe.root_module.addImport("TrueType", tt_mod.module("TrueType"));
-
+    const stb_truetype_object = b.addObject(.{
+        .name = "stb_truetype",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    stb_truetype_object.addCSourceFile(.{
+        .file = b.path("src/libs/gui/stb_truetype.c"),
+    });
+    exe.addObject(stb_truetype_object);
     const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
     exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
@@ -104,7 +116,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/libs/gui/gui.zig"),
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "TrueType", .module = tt_mod.module("TrueType") },
+            .{ .name = "TrueType", .module = stb_truetype_bindings.createModule() },
             .{ .name = "gl", .module = gl_bindings },
             .{ .name = "glfw", .module = zglfw.module("root") },
         },

@@ -1,8 +1,8 @@
 const std = @import("std");
-const TrueType = @import("TrueType");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zigimg = @import("root").zigimg;
+const text = @import("text.zig");
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
@@ -11,9 +11,6 @@ var vertexArray: c_uint = undefined;
 var elementBuffer: c_uint = undefined;
 var arrayBuffer: c_uint = undefined;
 var isinit: bool = false;
-///hashmap of diffrent fonts
-var fonts: ?std.AutoHashMap(u32, Font) = null;
-var fontID: u32 = 0;
 
 pub const Element = struct {
     allocator: std.mem.Allocator,
@@ -84,6 +81,7 @@ pub const Element = struct {
                 child.init();
             }
         }
+
         self.isinit = true;
     }
 
@@ -134,6 +132,7 @@ pub const Element = struct {
         if (inBottom and inTop and self.options.onHover != null) {
             self.options.onHover.?(self, cursorPos, window, false);
         }
+        //   text.RenderText(0, "hello world!", -1.0, 0.5, 0.005, [3]f32{ 1, 0, 0.4 }) catch |err| std.debug.panic("err: {any}\n", .{err});
         if (self.children) |children| {
             for (children) |*child| {
                 child.Draw(screen_dimensions, window);
@@ -148,7 +147,6 @@ pub const Element = struct {
 
         var height: f32 = 0.0;
         height += self.options.size.heightPercent / 100.0;
-
         var posx = self.options.position.xPercent / 100;
         var posy = self.options.position.yPercent / 100;
         if (self.parent) |parent| {
@@ -215,9 +213,10 @@ pub fn init() void {
     guiElementSizeLocation = gl.GetUniformLocation(shader_program, "size");
     guiElementColorLocation = gl.GetUniformLocation(shader_program, "color");
     LoadFacebuffer();
+    //  text.init();
 
+    //    _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
     isinit = true;
-    //_ = loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 64, std.heap.c_allocator) catch |err| std.debug.panic("error: {any}\n", .{err});
 }
 
 pub fn deinit() void {
@@ -263,52 +262,3 @@ fn NormilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype
         else => unreachable,
     }
 }
-
-///laods and saves a font. allocations must remain until gui is deinited
-fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allocator) !u32 {
-    std.debug.assert(isinit);
-    var font: Font = undefined; //TODO switch to using stb_truetype.h directly
-    font.font = try TrueType.load(fontBytes);
-    var buffer: std.ArrayList(u8) = .empty;
-    defer buffer.deinit(allocator);
-    const scale = font.font.scaleForPixelHeight(pixelHeight);
-    font.characters = .init(allocator);
-    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    std.log.debug("loading {d} glyphs...\n", .{font.font.glyphs_len});
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    for (0..font.font.glyphs_len) |index| {
-        buffer.clearRetainingCapacity();
-        const bitmap = font.font.glyphBitmap(allocator, &buffer, @enumFromInt(index), scale, scale) catch |err| switch (err) {
-            error.GlyphNotFound => {
-                continue;
-            },
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        var char: Character = .{
-            .bitmap = bitmap,
-            .texture = undefined,
-        };
-        gl.GenTextures(1, @ptrCast(&char.texture));
-        gl.BindTexture(gl.TEXTURE_2D, char.texture);
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, bitmap.width, bitmap.height, 0, gl.RED, gl.UNSIGNED_BYTE, @ptrCast(buffer.items));
-        std.debug.print("char: {any}\n", .{char});
-        try font.characters.put(@intCast(index), char);
-    }
-    if (fonts == null) fonts = std.AutoHashMap(u32, Font).init(allocator);
-    try fonts.?.put(fontID, font);
-    fontID += 1;
-    return fontID - 1; //-1 to get the id used
-}
-
-const Character = struct {
-    bitmap: TrueType.GlyphBitmap,
-    texture: c_uint,
-};
-
-const Font = struct {
-    font: TrueType,
-    characters: std.AutoHashMap(u32, Character),
-};
