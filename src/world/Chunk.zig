@@ -45,7 +45,7 @@ pub const Chunk = struct {
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamounts, gen_params.SeaLeval, &rand, gen_params.terrainblockRandomness);
+                    const block: Block = GetSurfaceBlock(block_height_vec[c], terrain_height, thamounts, gen_params.SeaLevel, &rand, gen_params.terrainblockRandomness);
                     chunk[x][c][z] = block;
 
                     if (LastBlock != null and LastBlock != block) isOneBlock = false;
@@ -364,7 +364,7 @@ pub const Chunk = struct {
         CaveNoise: Noise.Noise(f32),
         terrainmin: i32,
         terrainmax: i32,
-        SeaLeval: i32,
+        SeaLevel: i32,
         Cavesess: f32,
         CaveExpansionMax: f32,
         CaveExpansionStart: f32,

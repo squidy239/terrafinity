@@ -13,6 +13,7 @@ pub const GiantTreeGenParams = struct {
     root_length: u32,
     branch_start_height_factor: f32,
     top_radius_factor: f32,
+    canopy_density: f32,
 };
 
 fn getTaperedRadius(base_radius: u32, y: u32, height: u32, top_radius_factor: f32) u32 {
@@ -42,7 +43,7 @@ fn generateTrunk(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeG
     }
 }
 
-fn generateRoots(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeGenParams) !void {
+fn generateRoots(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeGenParams) !void { //TODO make trunk extend downwards so its not floating
     var root: u32 = 0;
     while (root < params.num_roots) : (root += 1) {
         const angle = @as(f32, @floatFromInt(root)) * 2.0 * std.math.pi / @as(f32, @floatFromInt(params.num_roots));
@@ -96,7 +97,7 @@ fn generateCanopy(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTree
                 // ellipsoid check
                 const inside = (dx * dx + dz * dz) / @as(f32, @floatFromInt(r_sq)) + (dy * dy) / @as(f32, @floatFromInt(r_y_sq)) <= 1.0;
 
-                if (inside and rng.float(f32) < 0.7) { // randomness for air gaps
+                if (inside and rng.float(f32) < params.canopy_density) { // randomness for air gaps
                     try editor.PlaceBlock(.{
                         .block = .Leaves,
                         .pos = .{ base[0] + x_off, center_y + y_off, base[2] + z_off },
@@ -107,7 +108,7 @@ fn generateCanopy(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTree
     }
 }
 
-pub fn PlaceGiantTree(editor: *WorldEditor, base: @Vector(3, i64), rng: std.Random, params: GiantTreeGenParams) !void {
+pub fn PlaceTree(editor: *WorldEditor, base: @Vector(3, i64), rng: std.Random, params: GiantTreeGenParams) !void {
     const trunk = ztracy.ZoneNC(@src(), "gentrunk", 6435);
     try generateTrunk(editor, base, params);
     trunk.End();

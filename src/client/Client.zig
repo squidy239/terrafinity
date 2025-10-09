@@ -61,16 +61,16 @@ pub fn main() !void {
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -1024,
-            .terrainmax = 1024,
+            .terrainmax = 5192,
             .seed = seed,
-            .SeaLeval = 0,
+            .SeaLevel = 0,
             .terrainblockRandomness = 0.125,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
-                .frequency = 0.03,
+                .frequency = 0.003,
             },
             .terrainNoiseBalance = 0.5, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{

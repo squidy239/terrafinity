@@ -140,8 +140,8 @@ pub const World = struct {
                             if (treeChance < 0.00001) {
                                 structuresGenerated += 1;
                                 const factor = (rand.float(f32) * 2) + 0.5;
-                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
+                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
+                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(100 * factor),
                                     .base_radius = @intFromFloat(15 * factor),
                                     .main_branches = 0,
@@ -151,13 +151,14 @@ pub const World = struct {
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.95,
                                     .root_length = 0,
+                                    .canopy_density = 0.9,
                                 });
                                 worldEditor.empty();
                             } else if (treeChance < 0.00015) {
                                 structuresGenerated += 1;
                                 const factor = rand.float(f32) + 0.5;
                                 const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
+                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(50 * factor),
                                     .base_radius = @intFromFloat(6 * factor),
                                     .main_branches = 0,
@@ -167,13 +168,14 @@ pub const World = struct {
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,
                                     .root_length = 3,
+                                    .canopy_density = 0.7,
                                 });
                                 worldEditor.empty();
                             } else if (treeChance < 0.0015) {
                                 structuresGenerated += 1;
                                 const factor = rand.float(f32) + 0.5;
                                 const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                                try Structures.PlaceGiantTree(&worldEditor, centerPos, rand, .{
+                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(25 * factor),
                                     .base_radius = @intFromFloat(@round(3 * factor)),
                                     .main_branches = 0,
@@ -183,6 +185,7 @@ pub const World = struct {
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,
                                     .root_length = 2,
+                                    .canopy_density = 0.7,
                                 });
                                 worldEditor.empty();
                             }

@@ -70,6 +70,7 @@ pub fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allo
     var font: Font = undefined;
     if (TrueType.stbtt_InitFont(&font.font, @ptrCast(fontBytes), 0) == 0) return error.FontLoading;
     const scale = TrueType.stbtt_ScaleForPixelHeight(&font.font, pixelHeight);
+    font.scale = scale;
     font.characters = .init(allocator);
     gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
     std.log.debug("font has {d} glyphs...\n", .{font.font.numGlyphs});
@@ -82,7 +83,11 @@ pub fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allo
         var height: c_int = undefined;
         var xoff: c_int = undefined;
         var yoff: c_int = undefined;
-
+        var cx1: c_int = undefined;
+        var cx2: c_int = undefined;
+        var cy1: c_int = undefined;
+        var cy2: c_int = undefined;
+        TrueType.stbtt_GetCodepointBitmapBox(&font.font, @intCast(index), scale, scale, &cx1, &cy1, &cx2, &cy2);
         const bitmap = TrueType.stbtt_GetCodepointBitmap(&font.font, scale, scale, @intCast(index), &width, &height, &xoff, &yoff);
         defer TrueType.stbtt_FreeBitmap(bitmap, null);
         const char: Character = .{
@@ -107,6 +112,13 @@ pub fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allo
     fontID += 1;
     return fontID - 1; //-1 to get the id used
 }
+pub fn loadFontAtlis(fontBytes: []const u8, atlasWidth: c_int, atlasHeight: c_int, alloctor: std.mem.Allocator) !u32 {
+    const pixels = try alloctor.alloc(u8, atlasHeight * atlasWidth);
+    defer alloctor.free(pixels);
+    _ = fontBytes;
+    var context: TrueType.stbtt_pack_context = undefined;
+    if (TrueType.stbtt_PackBegin(&context, @ptrCast(pixels), atlasWidth, atlasHeight, 0, 1, null) != 0) return error.Failed;
+}
 
 const Character = struct {
     width: c_int,
@@ -117,6 +129,7 @@ const Character = struct {
 };
 const Font = struct {
     font: TrueType.stbtt_fontinfo,
+    scale: f32,
     characters: std.AutoHashMap(u32, Character),
 };
 
@@ -129,10 +142,13 @@ pub fn RenderText(fontid: u32, text: []const u8, startx: f32, y: f32, scale: f32
     // iterate through all characters
     var x: f32 = startx;
     for (0..text.len) |i| {
+        var advanceWidth: c_int = undefined;
+        var leftSideBearing: c_int = undefined;
+        TrueType.stbtt_GetCodepointHMetrics(&font.font, text[i], @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
         //     const nextchar = if (i < text.len - 1) TrueType.stbtt_FindGlyphIndex(&font.font, @intCast(text[i + 1])) else null;
         const ch = font.characters.get(@intCast(text[i])) orelse return error.NoChar; //TODO UTF-8 and dont panic if char is not found
         const xpos: f32 = x + @as(f32, @floatFromInt(ch.xoff)) * scale;
-        const ypos: f32 = y - @as(f32, @floatFromInt((ch.height - ch.yoff))) * scale;
+        const ypos: f32 = y; //TODO real y pos
 
         const w: f32 = @as(f32, @floatFromInt(ch.width)) * scale;
         const h: f32 = @as(f32, @floatFromInt(ch.height)) * scale;
@@ -156,11 +172,8 @@ pub fn RenderText(fontid: u32, text: []const u8, startx: f32, y: f32, scale: f32
         // render quad
         gl.DrawArrays(gl.TRIANGLES, 0, 6);
         // now advance cursors for next glyph (note that advance is number of 1/64 pixels)
-        var advanceWidth: c_int = undefined;
-        var leftSideBearing: c_int = undefined;
-        TrueType.stbtt_GetCodepointHMetrics(&font.font, text[i], @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
         std.debug.print("adv: {any}\n", .{advanceWidth});
-        x += @as(f32, @floatFromInt(advanceWidth >> 4)) * scale; //TODO fix everything
+        x += @as(f32, @floatFromInt(advanceWidth)) * font.scale * scale; //TODO fix everything
 
     }
     gl.BindVertexArray(0);

@@ -132,7 +132,9 @@ pub const Element = struct {
         if (inBottom and inTop and self.options.onHover != null) {
             self.options.onHover.?(self, cursorPos, window, false);
         }
-        //   text.RenderText(0, "hello world!", -1.0, 0.5, 0.005, [3]f32{ 1, 0, 0.4 }) catch |err| std.debug.panic("err: {any}\n", .{err});
+        // var buf: [100]u8 = undefined;
+        //const p = std.fmt.bufPrint(&buf, "screen dimentions: {any}", .{screen_dimensions}) catch unreachable;
+        //text.RenderText(0, p, -1.0, 0.5, 0.0005, [3]f32{ 1, 0, 0.4 }) catch |err| std.debug.panic("err: {any}\n", .{err});
         if (self.children) |children| {
             for (children) |*child| {
                 child.Draw(screen_dimensions, window);
@@ -215,7 +217,7 @@ pub fn init() void {
     LoadFacebuffer();
     //  text.init();
 
-    //    _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
+    // _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
     isinit = true;
 }
 
