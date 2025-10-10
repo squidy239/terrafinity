@@ -56,20 +56,24 @@ pub const Element = struct {
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
+        ///text that will be in the center of the box, create() makes a copy of this when the element is created
+        text: ?[]u8 = null,
     };
     ///if the element has children InitChildren must be called after this. children are copied with the allocator
     pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, options: Options, children: ?[]const Element) !Element {
+        var newoptions = options;
+        newoptions.text = if(options.text) |oldtext| try allocator.dupe(u8, oldtext) else null;
         return Element{
             .allocator = allocator,
             .screen_dimensions = screen_dimensions,
             .width = undefined,
             .height = undefined,
             .pos = undefined,
-            .options = options,
+            .options = newoptions,
             .children = if (children != null) try allocator.dupe(Element, children.?) else null,
             .parent = null,
             .isinit = false,
-        };
+            };
     }
     //msut be called after creation on outermost element
     pub fn init(self: *@This()) void {
@@ -132,9 +136,8 @@ pub const Element = struct {
         if (inBottom and inTop and self.options.onHover != null) {
             self.options.onHover.?(self, cursorPos, window, false);
         }
-        // var buf: [100]u8 = undefined;
-        //const p = std.fmt.bufPrint(&buf, "screen dimentions: {any}", .{screen_dimensions}) catch unreachable;
-        //text.RenderText(0, p, -1.0, 0.5, 0.0005, [3]f32{ 1, 0, 0.4 }) catch |err| std.debug.panic("err: {any}\n", .{err});
+        if(self.options.text != null) text.RenderText(0, self.options.text.?, (self.pos[0]*2)-1, (self.pos[1]*2)-1, 0.0005, [3]f32{ 1, 0, 0.4 },screen_dimensions) catch |err| std.debug.panic("err: {any}\n", .{err});
+
         if (self.children) |children| {
             for (children) |*child| {
                 child.Draw(screen_dimensions, window);
@@ -174,6 +177,7 @@ pub const Element = struct {
             }
             self.allocator.free(children);
         }
+        if(self.options.text != null)self.allocator.free(self.options.text.?);
         self.children = null;
     }
 };
@@ -215,9 +219,9 @@ pub fn init() void {
     guiElementSizeLocation = gl.GetUniformLocation(shader_program, "size");
     guiElementColorLocation = gl.GetUniformLocation(shader_program, "color");
     LoadFacebuffer();
-    //  text.init();
+    text.init();
 
-    // _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
+    _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
     isinit = true;
 }
 
@@ -227,6 +231,7 @@ pub fn deinit() void {
     gl.DeleteBuffers(1, @ptrCast(&arrayBuffer));
     gl.DeleteBuffers(1, @ptrCast(&elementBuffer));
     gl.DeleteVertexArrays(1, @ptrCast(&vertexArray));
+    text.deinit();
     isinit = false;
 }
 

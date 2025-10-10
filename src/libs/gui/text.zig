@@ -52,6 +52,22 @@ pub fn init() void { //TODO deinit and unload font
     isinit = true;
 }
 
+pub fn deinit() void {
+    std.debug.assert(isinit);
+    var it = fonts.?.valueIterator();
+    while (it.next()) |font| {
+        var charit = font.characters.valueIterator();
+        while (charit.next()) |char| {
+            gl.DeleteTextures(1, @ptrCast(&char.texture));
+        }
+    }
+    gl.DeleteVertexArrays(1, @ptrCast(&vertexArray));
+    gl.DeleteBuffers(1, @ptrCast(&arrayBuffer));
+    gl.DeleteProgram(textShaderProgram);
+    fonts = null;
+    isinit = false;
+}
+
 fn LoadFacebuffer() void {
     gl.GenVertexArrays(1, @ptrCast(&vertexArray));
     gl.BindVertexArray(vertexArray);
@@ -96,6 +112,10 @@ pub fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allo
             .xoff = xoff,
             .yoff = yoff,
             .texture = undefined,
+            .x1 = cx1,
+            .x2 = cx2,
+            .y1 = cy1,
+            .y2 = cy2,
         };
         gl.GenTextures(1, @ptrCast(@constCast(&char.texture)));
         gl.BindTexture(gl.TEXTURE_2D, char.texture);
@@ -112,13 +132,7 @@ pub fn loadFont(fontBytes: []const u8, pixelHeight: f32, allocator: std.mem.Allo
     fontID += 1;
     return fontID - 1; //-1 to get the id used
 }
-pub fn loadFontAtlis(fontBytes: []const u8, atlasWidth: c_int, atlasHeight: c_int, alloctor: std.mem.Allocator) !u32 {
-    const pixels = try alloctor.alloc(u8, atlasHeight * atlasWidth);
-    defer alloctor.free(pixels);
-    _ = fontBytes;
-    var context: TrueType.stbtt_pack_context = undefined;
-    if (TrueType.stbtt_PackBegin(&context, @ptrCast(pixels), atlasWidth, atlasHeight, 0, 1, null) != 0) return error.Failed;
-}
+
 
 const Character = struct {
     width: c_int,
@@ -126,6 +140,10 @@ const Character = struct {
     xoff: c_int,
     yoff: c_int,
     texture: c_uint,
+    x1 : c_int,
+    x2 : c_int,
+    y1 : c_int,
+    y2 : c_int,
 };
 const Font = struct {
     font: TrueType.stbtt_fontinfo,
@@ -133,7 +151,7 @@ const Font = struct {
     characters: std.AutoHashMap(u32, Character),
 };
 
-pub fn RenderText(fontid: u32, text: []const u8, startx: f32, y: f32, scale: f32, color: [3]f32) !void {
+pub fn RenderText(fontid: u32, text: []const u8, startx: f32, starty: f32, scale: f32, color: [3]f32, screen_dimetions:[2]u32) !void {
     // activate corresponding render state
     gl.UseProgram(textShaderProgram);
     gl.Uniform3f(textColorLocation, color[0], color[1], color[2]);
@@ -141,17 +159,30 @@ pub fn RenderText(fontid: u32, text: []const u8, startx: f32, y: f32, scale: f32
     const font = fonts.?.get(fontid) orelse return error.NoFontFound;
     // iterate through all characters
     var x: f32 = startx;
+    var y: f32 = starty;
     for (0..text.len) |i| {
+        if(text[i] == '\n') {
+            x = startx;
+            y -= font.scale * scale * @as(f32, @floatFromInt(screen_dimetions[1]));
+            std.debug.print("y: {d}\n", .{y});
+            continue;
+        }
         var advanceWidth: c_int = undefined;
         var leftSideBearing: c_int = undefined;
         TrueType.stbtt_GetCodepointHMetrics(&font.font, text[i], @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
-        //     const nextchar = if (i < text.len - 1) TrueType.stbtt_FindGlyphIndex(&font.font, @intCast(text[i + 1])) else null;
-        const ch = font.characters.get(@intCast(text[i])) orelse return error.NoChar; //TODO UTF-8 and dont panic if char is not found
-        const xpos: f32 = x + @as(f32, @floatFromInt(ch.xoff)) * scale;
-        const ypos: f32 = y; //TODO real y pos
+        const ch = font.characters.get(@intCast(text[i])) orelse continue; 
+        const wh = @as(f32, @floatFromInt(screen_dimetions[0]))/@as(f32, @floatFromInt(screen_dimetions[1]));
+        const hw = @as(f32, @floatFromInt(screen_dimetions[1]))/@as(f32, @floatFromInt(screen_dimetions[0]));
 
-        const w: f32 = @as(f32, @floatFromInt(ch.width)) * scale;
-        const h: f32 = @as(f32, @floatFromInt(ch.height)) * scale;
+        const xpos: f32 = (x) + @as(f32, @floatFromInt(ch.xoff)) * scale;
+        const ypos: f32 = (y) - (@as(f32, @floatFromInt(ch.yoff  + ch.y2 - ch.y1)) * scale);// + @as(f32, @floatFromInt(ascent)) * scale; //TODO real y pos
+        
+        var w: f32 = @as(f32, @floatFromInt(ch.width)) * scale;
+        var h: f32 = @as(f32, @floatFromInt(ch.height)) * scale;
+        h *= wh;
+        w *= hw; //*= ((1 + hw)*0.5        
+        //std.debug.print("hw: {d}, char: {c}\n", .{ (@as(f32, @floatFromInt(ch.yoff)) * scale), text[i]});
+
         // update VBO for each character
         const vertices: [6][4]f32 = .{
             .{ xpos, ypos + h, 0.0, 0.0 },
@@ -172,8 +203,7 @@ pub fn RenderText(fontid: u32, text: []const u8, startx: f32, y: f32, scale: f32
         // render quad
         gl.DrawArrays(gl.TRIANGLES, 0, 6);
         // now advance cursors for next glyph (note that advance is number of 1/64 pixels)
-        std.debug.print("adv: {any}\n", .{advanceWidth});
-        x += @as(f32, @floatFromInt(advanceWidth)) * font.scale * scale; //TODO fix everything
+        x += @as(f32, @floatFromInt(advanceWidth)) * font.scale * scale * hw; //TODO fix everything
 
     }
     gl.BindVertexArray(0);

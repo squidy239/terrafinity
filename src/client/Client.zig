@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const Block = @import("Block").Blocks;
-const Cache = @import("Cache").Cache;
+pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("Chunk").Chunk;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("Entity").Entity;
@@ -199,8 +199,16 @@ pub fn main() !void {
         .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
         .onHover = OnHover,
         .onDraw = DeflateElement,
+        .text = @constCast("Hello World!"),
+    };
+    
+    const fpsoptions = gui.Element.Options{
+        .position = .{ .xPercent = 5, .yPercent = 95 },
+        .size = .{ .widthPercent = 10, .heightPercent = 5, },
+        .Background = .{ .solid = .{ 0.0, 0.0, 0.0, 0.0 } },
     };
 
+    
     var box = try gui.Element.create(allocator, renderer.screen_dimensions, options, &.{
         try gui.Element.create(allocator, renderer.screen_dimensions, options2, null),
         try gui.Element.create(allocator, renderer.screen_dimensions, options3, null),
@@ -208,13 +216,16 @@ pub fn main() !void {
         try gui.Element.create(allocator, renderer.screen_dimensions, options5, null),
         try gui.Element.create(allocator, renderer.screen_dimensions, options6, null),
     });
+    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, null);
+    defer fpsBox.deinit();
     defer box.deinit();
+    fpsBox.init();
     box.init();
     var boxchangetime: i64 = 0;
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
-
+        const frameStart = std.time.nanoTimestamp();
         const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
         playerEntity.lock.lockShared();
         const playerPos = player.pos;
@@ -242,6 +253,7 @@ pub fn main() !void {
             boxchangetime = std.time.milliTimestamp();
         }
         box.Draw(renderer.screen_dimensions, renderer.window);
+        fpsBox.Draw(renderer.screen_dimensions, renderer.window);
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
@@ -258,7 +270,7 @@ pub fn main() !void {
         };
         glCreateSync.End();
         const meshesLoaded = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
-        std.debug.print("pos: x: {d} y: {d} z: {d}, {d}/{d} chunks drawn, {d} meshes loaded\t\t\r", .{ printpos[0], printpos[1], printpos[2], drawn[0], drawn[1], meshesLoaded });
+        _ = meshesLoaded;
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
@@ -268,6 +280,11 @@ pub fn main() !void {
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
         prossesinput.End();
+        if(@rem(std.time.milliTimestamp(), 100) == 0) {
+            const fps = @round(std.time.ns_per_s / @as(f128,@floatFromInt(std.time.nanoTimestamp() - frameStart)));
+            const printText = try std.fmt.allocPrint(secondary_allocator,"pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn", .{ printpos[0], printpos[1], printpos[2],fps, drawn[0], drawn[1] });
+            if(fpsBox.options.text != null) secondary_allocator.free(fpsBox.options.text.?);
+            fpsBox.options.text = printText;}
     }
 }
 
