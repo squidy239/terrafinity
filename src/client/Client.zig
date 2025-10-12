@@ -157,71 +157,31 @@ pub fn main() !void {
     _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
     _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
     var st = std.time.nanoTimestamp();
-    gui.init();
+    gui.init(secondary_allocator);
     defer gui.deinit();
 
-    const options = gui.Element.Options{
-        .position = .{ .xPercent = 50, .yPercent = 10 },
-        .size = .{ .widthPixels = 800, .heightPercent = 20 },
-        .Background = .{ .solid = .{ 0.0, 0.75, 0.5, 0.75 } },
-    };
-    const options2 = gui.Element.Options{
-        .position = .{ .xPercent = 90, .yPercent = 50 },
-        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
-        .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
-        .onHover = OnHover,
-        .onDraw = DeflateElement,
-    };
-    const options3 = gui.Element.Options{
-        .position = .{ .xPercent = 70, .yPercent = 50 },
-        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
-        .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
-        .onHover = OnHover,
-        .onDraw = DeflateElement,
-    };
-    const options4 = gui.Element.Options{
-        .position = .{ .xPercent = 50, .yPercent = 50 },
-        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
-        .Background = .{ .solid = .{ 0.0, 0.4, 0.4, 0.5 } },
-        .onHover = OnHover,
-        .onDraw = DeflateElement,
-    };
-    const options5 = gui.Element.Options{
-        .position = .{ .xPercent = 30, .yPercent = 50 },
-        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
-        .Background = .{ .solid = .{ 0.0, 0.2, 0.6, 0.5 } },
-        .onHover = OnHover,
-        .onDraw = DeflateElement,
-    };
-    const options6 = gui.Element.Options{
-        .position = .{ .xPercent = 10, .yPercent = 50 },
-        .size = .{ .widthPercent = 20, .heightPercent = 100, .heightPixels = -10, .widthPixels = -10 },
-        .Background = .{ .solid = .{ 0.0, 0.0, 0.8, 0.5 } },
-        .onHover = OnHover,
-        .onDraw = DeflateElement,
-        .text = @constCast("Hello World!"),
-    };
-    
     const fpsoptions = gui.Element.Options{
-        .position = .{ .xPercent = 5, .yPercent = 95 },
-        .size = .{ .widthPercent = 10, .heightPercent = 5, },
-        .Background = .{ .solid = .{ 0.0, 0.0, 0.0, 0.0 } },
+        .position = .{ .xPercent = 50, .yPercent = 50 },
+        .size = .{
+            .widthPercent = 40,
+            .heightPercent = 20,
+        },
     };
 
-    
-    var box = try gui.Element.create(allocator, renderer.screen_dimensions, options, &.{
-        try gui.Element.create(allocator, renderer.screen_dimensions, options2, null),
-        try gui.Element.create(allocator, renderer.screen_dimensions, options3, null),
-        try gui.Element.create(allocator, renderer.screen_dimensions, options4, null),
-        try gui.Element.create(allocator, renderer.screen_dimensions, options5, null),
-        try gui.Element.create(allocator, renderer.screen_dimensions, options6, null),
-    });
-    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, null);
+    const fpsCreationOptions = gui.Element.CreationOptions{
+        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
+        .textOptions = .{
+            .text = "",
+            .scale = 0.0005,
+            .startPosition = .{
+                .xPercent = 0,
+                .yPercent = 65,
+            },
+        },
+    };
+    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, fpsCreationOptions, null);
     defer fpsBox.deinit();
-    defer box.deinit();
     fpsBox.init();
-    box.init();
-    var boxchangetime: i64 = 0;
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
@@ -248,11 +208,6 @@ pub fn main() !void {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
         drawEntities.End();
-        if (glfw.getKey(renderer.window, .h) == .press and std.time.milliTimestamp() - boxchangetime > 200) {
-            box.options.Visible = !box.options.Visible;
-            boxchangetime = std.time.milliTimestamp();
-        }
-        box.Draw(renderer.screen_dimensions, renderer.window);
         fpsBox.Draw(renderer.screen_dimensions, renderer.window);
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -280,11 +235,10 @@ pub fn main() !void {
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
         prossesinput.End();
-        if(@rem(std.time.milliTimestamp(), 100) == 0) {
-            const fps = @round(std.time.ns_per_s / @as(f128,@floatFromInt(std.time.nanoTimestamp() - frameStart)));
-            const printText = try std.fmt.allocPrint(secondary_allocator,"pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn", .{ printpos[0], printpos[1], printpos[2],fps, drawn[0], drawn[1] });
-            if(fpsBox.options.text != null) secondary_allocator.free(fpsBox.options.text.?);
-            fpsBox.options.text = printText;}
+        const fps = @round(std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1] });
+        defer secondary_allocator.free(printText);
+        try fpsBox.text.?.SetText(printText);
     }
 }
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zigimg = @import("root").zigimg;
-const text = @import("text.zig");
+pub const Text = @import("text.zig");
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
@@ -10,8 +10,8 @@ var guiElementColorLocation: c_int = undefined;
 var vertexArray: c_uint = undefined;
 var elementBuffer: c_uint = undefined;
 var arrayBuffer: c_uint = undefined;
+var defaultFont: Text.Font = undefined;
 var isinit: bool = false;
-
 pub const Element = struct {
     allocator: std.mem.Allocator,
     screen_dimensions: [2]u32,
@@ -19,6 +19,9 @@ pub const Element = struct {
     height: f32,
     pos: @Vector(2, f32),
     options: Options,
+    elementBackground: ElementBackground,
+    text: ?Text.Text,
+    textStartPosition: ?Position,
     children: ?[]Element,
     parent: ?*Element,
     isinit: bool = false,
@@ -40,13 +43,26 @@ pub const Element = struct {
     pub const ElementBackground = union(enum) {
         solid: @Vector(4, f32),
     };
+    pub const TextOptions = struct {
+        ///text that will be in the center of the box, create() makes a copy of this when the element is created
+        text: []const u8,
+        ///the color of the text if it exists
+        textColor: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
+        ///uses the default font if this is null
+        font: ?*Text.Font = null,
+        scale: f32,
+        startPosition: Position = .{ .xPercent = 0, .yPercent = 0 },
+    };
+    pub const CreationOptions = struct {
+        textOptions: ?TextOptions = null,
+        elementBackground: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
+    };
 
     pub const Options = struct {
         ///the position of the element. all units are added together
         position: Position = .{ .xPercent = 50, .yPercent = 50 },
         ///the size of the element. all units are added together
         size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
-        Background: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
         ///if this is false the element and its children will not be drawn and onHover and onDraw will not be called
         Visible: bool = true,
         ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
@@ -56,24 +72,36 @@ pub const Element = struct {
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
-        ///text that will be in the center of the box, create() makes a copy of this when the element is created
-        text: ?[]u8 = null,
     };
-    ///if the element has children InitChildren must be called after this. children are copied with the allocator
-    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, options: Options, children: ?[]const Element) !Element {
-        var newoptions = options;
-        newoptions.text = if(options.text) |oldtext| try allocator.dupe(u8, oldtext) else null;
+    ///the allocator must remain valid for the lifetime of the element
+    ///init must be called after creating the outermost Element
+    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, options: Options, creationOptions: CreationOptions, children: ?[]const Element) !Element {
+        var elementText: ?Text.Text = null;
+        if (creationOptions.textOptions != null) {
+            elementText = Text.Text{
+                .allocator = allocator,
+                .color = creationOptions.textOptions.?.textColor,
+                .font = creationOptions.textOptions.?.font orelse &defaultFont,
+                .text = try allocator.dupe(u8, creationOptions.textOptions.?.text),
+                .scale = creationOptions.textOptions.?.scale,
+                .startX = undefined, //these get set by textUpdate
+                .startY = undefined,
+            };
+        }
         return Element{
             .allocator = allocator,
             .screen_dimensions = screen_dimensions,
             .width = undefined,
             .height = undefined,
             .pos = undefined,
-            .options = newoptions,
+            .text = elementText,
+            .textStartPosition = if (creationOptions.textOptions == null) null else creationOptions.textOptions.?.startPosition,
+            .elementBackground = creationOptions.elementBackground,
+            .options = options,
             .children = if (children != null) try allocator.dupe(Element, children.?) else null,
             .parent = null,
             .isinit = false,
-            };
+        };
     }
     //msut be called after creation on outermost element
     pub fn init(self: *@This()) void {
@@ -95,7 +123,11 @@ pub const Element = struct {
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
         if (self.options.onDraw) |onDraw| onDraw(self, window);
+        if (screen_dimensions[0] != self.screen_dimensions[0] or screen_dimensions[1] != self.screen_dimensions[1]) {
+            self.update(screen_dimensions);
+        }
         const screen_dimensions_float = @Vector(2, f64){ @floatFromInt(screen_dimensions[0]), @floatFromInt(screen_dimensions[1]) };
+        //
         var cursorPos = window.getCursorPos();
         cursorPos[0] = @min(@max(cursorPos[0], 0), screen_dimensions_float[0]);
         cursorPos[1] = @abs(screen_dimensions_float[1] - @min(@max(cursorPos[1], 0), screen_dimensions_float[1]));
@@ -104,10 +136,11 @@ pub const Element = struct {
         const topCorner = @Vector(2, f32){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) };
         const inBottom = bottomCorner[0] < cursorPos[0] and bottomCorner[1] < cursorPos[1];
         const inTop = topCorner[0] > cursorPos[0] and topCorner[1] > cursorPos[1];
-
-        if (inBottom and inTop and self.options.onHover != null) {
+        const mouseOverElement: bool = inBottom and inTop and self.options.onHover != null;
+        if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, true);
         }
+        //
         const cf = gl.IsEnabled(gl.CULL_FACE) != 0;
         const dt = gl.IsEnabled(gl.DEPTH_TEST) != 0;
         const bl = gl.IsEnabled(gl.BLEND) != 0;
@@ -121,22 +154,24 @@ pub const Element = struct {
         defer if (dt) gl.Enable(gl.DEPTH_TEST);
         defer if (!bl) gl.Disable(gl.BLEND);
         defer if (blendSrc != gl.ONE_MINUS_SRC_ALPHA) gl.BlendFunc(gl.SRC_ALPHA, blendSrc);
+        //
         gl.UseProgram(guiShaderProgram);
         gl.BindVertexArray(vertexArray);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, elementBuffer);
         const glPos = [2]f32{ @mulAdd(f32, self.pos[0], 2, -1), @mulAdd(f32, self.pos[1], 2, -1) }; //convert the 0-1 coords to -1 to 1
         gl.Uniform2f(guiElementPositionLocation, glPos[0], glPos[1]);
         gl.Uniform2f(guiElementSizeLocation, self.width, self.height);
-        if (self.options.Background == .solid)
-            gl.Uniform4f(guiElementColorLocation, self.options.Background.solid[0], self.options.Background.solid[1], self.options.Background.solid[2], self.options.Background.solid[3]);
+        if (self.elementBackground == .solid)
+            gl.Uniform4f(guiElementColorLocation, self.elementBackground.solid[0], self.elementBackground.solid[1], self.elementBackground.solid[2], self.elementBackground.solid[3]);
         gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
-        if (screen_dimensions[0] != self.screen_dimensions[0] or screen_dimensions[1] != self.screen_dimensions[1]) {
-            self.update(screen_dimensions);
+
+        if (self.text != null) {
+            self.text.?.RenderText(screen_dimensions);
         }
-        if (inBottom and inTop and self.options.onHover != null) {
+        //if (self.options.text != null) text.RenderText(0, self.options.text.?, (self.pos[0] * 2) - 1, (self.pos[1] * 2) - 1, 0.0005, [3]f32{ 1, 0, 0.4 }, screen_dimensions) catch |err| std.debug.panic("err: {any}\n", .{err});
+        if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, false);
         }
-        if(self.options.text != null) text.RenderText(0, self.options.text.?, (self.pos[0]*2)-1, (self.pos[1]*2)-1, 0.0005, [3]f32{ 1, 0, 0.4 },screen_dimensions) catch |err| std.debug.panic("err: {any}\n", .{err});
 
         if (self.children) |children| {
             for (children) |*child| {
@@ -167,7 +202,27 @@ pub const Element = struct {
         self.width = width;
         self.height = height;
         self.pos = [2]f32{ posx, posy };
+        updateText(self, screen_dimensions);
     }
+
+    fn updateText(self: *@This(), screen_dimensions: [2]u32) void {
+        if (self.text == null or self.textStartPosition == null) return;
+        var startX = self.textStartPosition.?.xPercent / 100;
+        var startY = self.textStartPosition.?.yPercent / 100;
+
+        startX = NormilizeInRange(startX, 0, 1, self.pos[0] - (self.width * 0.5), self.pos[0] + (self.width * 0.5));
+        startY = NormilizeInRange(startY, 0, 1, self.pos[1] - (self.height * 0.5), self.pos[1] + (self.height * 0.5));
+
+        startX += (self.textStartPosition.?.xPixels / @as(f32, @floatFromInt(screen_dimensions[0])));
+        startY += (self.textStartPosition.?.yPixels / @as(f32, @floatFromInt(screen_dimensions[1])));
+
+        startX = (startX * 2) - 1;
+        startY = (startY * 2) - 1;
+
+        self.text.?.startX = startX;
+        self.text.?.startY = startY;
+    }
+
     ///frees element's children
     pub fn deinit(self: *@This()) void {
         std.debug.assert(self.isinit);
@@ -177,13 +232,13 @@ pub const Element = struct {
             }
             self.allocator.free(children);
         }
-        if(self.options.text != null)self.allocator.free(self.options.text.?);
+        if (self.text != null) self.text.?.free();
         self.children = null;
     }
 };
 
 ///requires a valid opengl context
-pub fn init() void {
+pub fn init(allocator: std.mem.Allocator) void {
     std.debug.assert(!isinit);
     const vertex_shader_source = @embedFile("GuiVertexShader.vert");
     const fragment_shader_source = @embedFile("GuiFragmentShader.frag");
@@ -219,9 +274,8 @@ pub fn init() void {
     guiElementSizeLocation = gl.GetUniformLocation(shader_program, "size");
     guiElementColorLocation = gl.GetUniformLocation(shader_program, "color");
     LoadFacebuffer();
-    text.init();
-
-    _ = text.loadFont(@embedFile("GoNotoCurrent-Regular.ttf"), 256, std.heap.c_allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
+    Text.init();
+    defaultFont = Text.Font.load(@embedFile("GoNotoCurrent-Regular.ttf"), 256, null, allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
     isinit = true;
 }
 
@@ -231,7 +285,7 @@ pub fn deinit() void {
     gl.DeleteBuffers(1, @ptrCast(&arrayBuffer));
     gl.DeleteBuffers(1, @ptrCast(&elementBuffer));
     gl.DeleteVertexArrays(1, @ptrCast(&vertexArray));
-    text.deinit();
+    defaultFont.deinit();
     isinit = false;
 }
 

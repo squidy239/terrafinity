@@ -87,7 +87,7 @@ pub const Chunk = struct {
             const xs: @Vector(32, f32) = comptime zs;
 
             const ys: @Vector(32, f32) = comptime zs;
-
+       //     const waterCaveSpacing = 10;
             @setEvalBranchQuota(32000);
             inline for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
@@ -98,8 +98,9 @@ pub const Chunk = struct {
                     //const n: @Vector(ChunkSize, f32) = Interpolation.trilinearInterpolateBatch(ChunkSize, f32, grid, @splat(xs[x]), @splat(ys[y]), zs);
                     //const air = n < cavesessvec;
                     inline for (0..ChunkSize) |z| {
+                        //const notHittingWater = (heights[x][z] < gen_params.SeaLevel - waterCaveSpacing);
                         const n = int.sampleComptimeXZ(xs[x], ys[y], zs[z]);
-                        const isair = n < cavesess;
+                        const isair = (n < cavesess);
                         if (isair) {
                             chunk[x][y][z] = .Air;
                             if (LastBlock != null and LastBlock != .Air) isOneBlock = false;
@@ -109,8 +110,6 @@ pub const Chunk = struct {
                 }
             }
         }
-        //
-        //TODO caves (maybe tricubic interpolated 3d noise?)
         gen.End();
         if (Pos[0] == 0) {}
         const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);

@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
         }),
         //.use_llvm = true,
     });
-
     const options = .{
         .enable_ztracy = b.option(
             bool,

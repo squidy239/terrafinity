@@ -147,7 +147,7 @@ pub const Renderer = struct {
             glfw.windowHint(.opengl_forward_compat, true);
             glfw.windowHint(.client_api, .opengl_api);
             glfw.windowHint(.doublebuffer, true);
-            glfw.windowHint(.samples, 4);
+            glfw.windowHint(.samples, 8);
             self.window = glfw.Window.create(800, 600, "voxelgame", null) catch continue;
             glfw.makeContextCurrent(self.window);
             if (self.proc_table.init(glfw.getProcAddress)) {
