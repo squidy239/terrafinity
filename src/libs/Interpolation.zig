@@ -43,7 +43,7 @@ pub const NaturalCubicInterpolator3D = struct {
 
     fn precomputeCoeffs(self: *Self, grid: [4][4][4]f32) void {
         var coeffs_x: [4][4][4][4]f32 = undefined;
-        var coeffs_x_vec: [16]@Vector(4, f32) = undefined;
+        var coeffs_x_vec: [16][4]f32 = undefined;
 
         // Precompute X-direction coefficients
         for (0..4) |y| {

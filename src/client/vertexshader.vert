@@ -11,7 +11,7 @@ flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
-
+const float ChunkSize = 32.0;
 layout(std140, binding = 0) uniform UBO {
     float scale;
     double creationTime;
@@ -119,14 +119,14 @@ void main() {
     uint invisibleBlockAmount = 2;
     blockArrayLayer = blocktype - invisibleBlockAmount;
     vec3 coords = rotateVertex(side, incoords);
-    fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * 32.0 * scale));
+    fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * ChunkSize * scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 
     float speed = 2000.0;
 
     float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
 
-    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkPos.xyz * 32.0 * scale));
+    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkPos.xyz * ChunkSize * scale));
 
     if (blocktype == 7) {
         float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
@@ -137,7 +137,7 @@ void main() {
     float animationMs = 500;
     float animationSpeed = 0.25;
     float chunktime = float(time - creationTime);
-    vec3 relativeChunkPos = (chunkPos.xyz * 32.0 * scale) - playerPos;
+    vec3 relativeChunkPos = (chunkPos.xyz * ChunkSize * scale) - playerPos;
     coords.y -= ((animationMs - min(chunktime, animationMs)) * animationSpeed); //replace with pos.y for other aniamtion
     gl_Position = projview * vec4((coords * scale) + ((pos * scale) + (relativeChunkPos)), 1);
 }

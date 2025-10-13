@@ -4,27 +4,27 @@ const Noise = @import("fastnoise.zig");
 const Cache = @import("Cache").Cache;
 const Interpolation = @import("Interpolation");
 const std = @import("std");
-const ChunkSize = 32;
 
-pub const BlockEncoding = union(enum) {
-    blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
-    oneBlock: Block,
-};
-
-pub const Genstate = enum(u8) {
-    TerrainGenerated,
-    StructuresGenerated,
-};
 
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
 
 pub const Chunk = struct {
+    pub const ChunkSize = 32;
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+    pub const BlockEncoding = union(enum) {
+        blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
+        oneBlock: Block,
+    };
+    
+    pub const Genstate = enum(u8) {
+        TerrainGenerated,
+        StructuresGenerated,
+    };
+    pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         //TODO SIMD perlin for HUGE speed increce
         const thamountup: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const thamountdown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
@@ -40,7 +40,7 @@ pub const Chunk = struct {
         var isOneBlock = true;
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
-        var block_height_vec: @Vector(ChunkSize, i32) = undefined;
+        var block_height_vec: [ChunkSize]i32 = undefined;
         for (0..ChunkSize) |i| block_height_vec[i] = (Pos[1] * ChunkSize) + @as(i32, @intCast(i));
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
@@ -65,7 +65,7 @@ pub const Chunk = struct {
             for (0..4) |x| {
                 for (0..4) |y| {
                     for (0..4) |z| {
-                        const sample_offset = @Vector(3, f32){ @as(f32, @floatFromInt(x)) * 32.0 / 3.0, @as(f32, @floatFromInt(y)) * 32.0 / 3.0, @as(f32, @floatFromInt(z)) * 32.0 / 3.0 } / @Vector(3, f32){ 32, 32, 32 };
+                        const sample_offset = @Vector(3, f32){ @as(f32, @floatFromInt(x)) * @as(comptime_float, ChunkSize) / 3.0, @as(f32, @floatFromInt(y)) * @as(comptime_float, ChunkSize) / 3.0, @as(f32, @floatFromInt(z)) * @as(comptime_float, ChunkSize) / 3.0 } / @Vector(3, f32){ ChunkSize, ChunkSize, ChunkSize };
                         const pos = floatPos + sample_offset;
                         grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
                     }
@@ -78,15 +78,15 @@ pub const Chunk = struct {
             const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
             var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
             initinterp.End();
-            const oneD32: f32 = comptime 1.0 / 32.0;
-            comptime var zs: @Vector(32, f32) = undefined;
-            comptime for (0..32) |i| {
+            const oneD32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
+            comptime var zs: @Vector(ChunkSize, f32) = undefined;
+            comptime for (0..ChunkSize) |i| {
                 zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
             };
 
-            const xs: @Vector(32, f32) = comptime zs;
+            const xs: @Vector(ChunkSize, f32) = comptime zs;
 
-            const ys: @Vector(32, f32) = comptime zs;
+            const ys: @Vector(ChunkSize, f32) = comptime zs;
        //     const waterCaveSpacing = 10;
             @setEvalBranchQuota(32000);
             inline for (0..ChunkSize) |x| {
@@ -240,7 +240,7 @@ pub const Chunk = struct {
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.4) Block.Grass else if (a < 0.5) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
     }
 
-    pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) ?[ChunkSize][ChunkSize]i32 {
+    pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192)) ?[ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeightsFromCache", 110029);
         defer gth.End();
         if (TerrainHeightCache.get(Pos)) |T| {
@@ -251,7 +251,7 @@ pub const Chunk = struct {
         return null;
     }
 
-    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [32][32]i32, 8192)) [ChunkSize][ChunkSize]i32 {
+    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192)) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
         if (GetHeightsFromCache(Pos, TerrainHeightCache)) |cachedHeight| return cachedHeight;
@@ -264,11 +264,11 @@ pub const Chunk = struct {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
         const floatpos = @Vector(2, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]) };
-        const d32: f32 = comptime 1.0 / 32.0;
+        const d32: f32 = comptime 1.0 / @as(comptime_float,ChunkSize);
         var height: [ChunkSize][ChunkSize]i32 = undefined;
         const floatmin: f32 = @floatFromInt(params.terrainmin);
         const floatmax: f32 = @floatFromInt(params.terrainmax);
-        const floatBounds = @Vector(2, f32){ floatmin, floatmax };
+        const floatBounds = [2]f32{floatmin, floatmax };
         for (0..ChunkSize) |ux| {
             const x: f32 = (@as(f32, @floatFromInt(ux)) * d32) + floatpos[0];
             for (0..ChunkSize) |uz| {

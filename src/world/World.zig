@@ -12,11 +12,11 @@ const ztracy = @import("ztracy");
 
 const Structures = @import("Structures.zig");
 
-const ChunkSize = 32;
+const ChunkSize = Chunk.ChunkSize;
 pub const World = struct {
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    TerrainHeightCache: Cache([2]i32, [32][32]i32, 8192),
+    TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192),
     SpawnRange: u32,
     SpawnCenterPos: @Vector(3, f64),
     Rand: std.Random,
@@ -52,16 +52,16 @@ pub const World = struct {
 
     pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.SpawnCenterPos[0]), @intFromFloat(self.SpawnCenterPos[2]) } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
-        const chunkPos = [2]i32{ @divFloor(pos[0], 32), @divFloor(pos[1], 32) };
-        const posInChunk = [2]i32{ @mod(pos[0], 32), @mod(pos[1], 32) };
+        const chunkPos = [2]i32{ @divFloor(pos[0], ChunkSize), @divFloor(pos[1], ChunkSize) };
+        const posInChunk = [2]i32{ @mod(pos[0], ChunkSize), @mod(pos[1], ChunkSize) };
         const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
     pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) i64 {
-        const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], 32)), @intCast(@divFloor(pos[1], 32)) };
-        const posInChunk = [2]i32{ @intCast(@mod(pos[0], 32)), @intCast(@mod(pos[1], 32)) };
+        const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
+        const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
         const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
@@ -325,8 +325,8 @@ pub const World = struct {
         }
         pub fn PlaceBlock(self: *@This(), step: Step) !void {
             const nextblockpos = step.pos;
-            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(nextblockpos, @Vector(3, i64){ 32, 32, 32 }));
-            const nextchunkblockpos = @mod(nextblockpos, @Vector(3, i64){ 32, 32, 32 });
+            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(nextblockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const nextchunkblockpos = @mod(nextblockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
             if (self.lastchunkpos == null or @reduce(.Or, self.lastchunkpos.? != nextchunk)) {
                 if (self.chunkLock != null) {
                     self.chunkLock.?.unlock();
@@ -364,8 +364,8 @@ pub const World = struct {
         }
 
         pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
-            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ 32, 32, 32 }));
-            const nextchunkblockpos = @mod(blockpos, @Vector(3, i64){ 32, 32, 32 });
+            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const nextchunkblockpos = @mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
             if (self.lastchunkpos == null or @reduce(.Or, self.lastchunkpos.? != nextchunk)) {
                 if (self.chunkLock != null) {
                     self.chunkLock.?.unlock();

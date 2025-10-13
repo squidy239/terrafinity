@@ -2,9 +2,10 @@ const std = @import("std");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const ztracy = @import("ztracy");
+const zm = @import("zm");
 const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
-const zm = @import("zm");
+const ChunkSize = @import("Chunk").Chunk.ChunkSize;
 var render: *Renderer = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
@@ -12,7 +13,6 @@ var isinit = false;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
-
 pub fn init(ren: *Renderer) !void {
     render = ren;
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
@@ -105,7 +105,7 @@ pub fn processInput() !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (render.window.getKey(glfw.Key.r) == .press)
-        try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ 32, 32, 32 }), true);
+        try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (render.window.getKey(glfw.Key.b) == .press) {
         defer _ = worldEditor.clear();
@@ -124,7 +124,7 @@ pub fn processInput() !void {
         render.playerLock.lockShared();
         const playerPos = render.player.pos;
         render.playerLock.unlockShared();
-        const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(32))));
+        const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
@@ -142,7 +142,7 @@ pub fn processInput() !void {
         render.player.pos = std.math.lerp(render.player.pos, render.world.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.SpawnCenterPos[0] + t), @intFromFloat(render.world.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = render.player.pos;
         render.playerLock.unlock();
-        const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(32))));
+        const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
         if (render.world.Chunks.get(chpos) == null) {
             std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
             std.debug.print("ended on: {any}, data: {any}", .{ (chpos), render.world.Chunks.get(chpos) });

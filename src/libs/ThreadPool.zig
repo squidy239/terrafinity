@@ -153,9 +153,6 @@ fn worker(pool: *Pool) void {
 
         if (run) |runnable| {
             runnable.runFn(runnable);
-            const y = ztracy.ZoneNC(@src(), "threadYield", 423342423);
-            std.Thread.yield() catch {};
-            y.End();
         } else if (pool.is_running.load(.monotonic)) {
             pool.isemptymutex.lock();
             if (pool.is_running.load(.monotonic)) {

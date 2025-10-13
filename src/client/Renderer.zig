@@ -1,5 +1,5 @@
 const std = @import("std");
-const Chunk = @import("Chunk");
+const Chunk = @import("Chunk").Chunk;
 const zm = @import("zm");
 const World = @import("World").World;
 const Mesher = @import("Mesher.zig");
@@ -12,7 +12,7 @@ const Textures = @import("textures.zig");
 const ConcurrentQueue = @import("root").ConcurrentQueue;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Block = @import("Block").Blocks;
-const ChunkSize = 32;
+const ChunkSize = Chunk.ChunkSize;
 const Player = @import("EntityTypes").Player;
 const UniformLocations = struct {
     projviewlocation: c_int,
@@ -391,7 +391,7 @@ pub const Renderer = struct {
         self.playerLock.lockShared();
         const playerPos = self.player.pos;
         self.playerLock.unlockShared();
-        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {

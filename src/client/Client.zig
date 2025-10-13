@@ -19,6 +19,7 @@ pub const ztracy = @import("ztracy");
 pub const Loader = @import("Loader.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
+const ChunkSize = Chunk.ChunkSize;
 pub const gui = @import("gui");
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -53,11 +54,11 @@ pub fn main() !void {
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([2]i32, [32][32]i32, 8192).init(secondary_allocator),
+        .TerrainHeightCache = try Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192).init(secondary_allocator),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .SpawnRange = 0,
-        .SpawnCenterPos = [3]i32{ 5333, 0, -5333 },
+        .SpawnCenterPos = [3]i32{ 0, 0, 0 },
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -1024,
@@ -211,7 +212,7 @@ pub fn main() !void {
         fpsBox.Draw(renderer.screen_dimensions, renderer.window);
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
-        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
         renderer.UnloadMeshes(meshDistance, playerChunkPos);
@@ -236,7 +237,7 @@ pub fn main() !void {
         try UserInput.processInput();
         prossesinput.End();
         const fps = @round(std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1] });
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1],MainWorld.Chunks.count()});
         defer secondary_allocator.free(printText);
         try fpsBox.text.?.SetText(printText);
     }

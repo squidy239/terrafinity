@@ -4,7 +4,7 @@ const Block = @import("Block").Blocks;
 const Obj = @import("obj");
 const ztracy = @import("ztracy");
 
-const ChunkSize = 32;
+const ChunkSize = Chunk.ChunkSize;
 
 pub const FaceRotation = enum(u4) {
     xPlus = 0,

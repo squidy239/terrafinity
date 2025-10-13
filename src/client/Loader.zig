@@ -5,6 +5,8 @@ const World = @import("World").World;
 const Renderer = @import("Renderer.zig").Renderer;
 const gl = @import("gl");
 const ztracy = @import("ztracy");
+const Chunk = @import("Chunk").Chunk;
+const ChunkSize = Chunk.ChunkSize;
 
 threadlocal var meshesToUnloadBuffer: [1024]Renderer.MeshBufferIDs = undefined;
 threadlocal var meshesToUnloadBufferPos: u16 = 0;
@@ -23,7 +25,7 @@ pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3,
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const genDistance = [3]u32{ renderer.GenerateDistance[0].load(.seq_cst), renderer.GenerateDistance[1].load(.seq_cst), renderer.GenerateDistance[2].load(.seq_cst) };
-        const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ 32, 32, 32 })));
+        const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ ChunkSize, ChunkSize, ChunkSize })));
         LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
         addChunkstoLoad.End();
     }
@@ -48,14 +50,23 @@ pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(
     }
 }
 ///loads chunks from top to bottom and in a spiral on a y level
-fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3]u32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+
+threadlocal var lastLoadPlayerChunkPos: ?@Vector(3, i32) = undefined;
+threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
+
+fn LoadChunksSingleplayer(renderer: *Renderer, playerChunkPos: @Vector(3, i32), distance: @Vector(3, u32)) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+    defer {lastLoadPlayerChunkPos = playerChunkPos; lastGenDistance = distance;}
+    if(lastLoadPlayerChunkPos != null and lastGenDistance != null){
+        if(@reduce(.And, lastLoadPlayerChunkPos.? == playerChunkPos) and @reduce(.And,lastGenDistance.? == distance))return;
+    }
+    
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
-
+    
     var xz: [2]i32 = .{ 0, 0 };
     var c: usize = 0;
     //defer std.debug.print("amount_tested: {d}\n", .{amount_tested});
-
+    
     while (true) {
         if (amount_tested >= 4 * distance[0] * distance[2]) { //* 4 because loaddistance is distance from the player, not a full square
             break;
@@ -70,7 +81,7 @@ fn LoadChunksSingleplayer(renderer: *Renderer, eyePosChunk: [3]i32, distance: [3
             var y: i32 = -@as(i32, @intCast(distance[1]));
             while (y < distance[1]) {
                 defer y += 1;
-                const ChunkPos = [3]i32{ xz[0] + eyePosChunk[0], y + eyePosChunk[1], xz[1] + eyePosChunk[2] };
+                const ChunkPos = [3]i32{ xz[0] + playerChunkPos[0], y + playerChunkPos[1], xz[1] + playerChunkPos[2] };
                 if (renderer.LoadingChunks.contains(ChunkPos)) {
                     continue;
                 }
@@ -145,9 +156,16 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     if (xz[0] == end[0] and xz[1] == end[1]) return false;
     return true;
 }
-fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3]u32) !void {
+threadlocal var lastPlayerChunkPos: ?@Vector(3, i32) = undefined;
+threadlocal var lastloadDistance: ?@Vector(3, u32) = undefined;
+threadlocal var bufferFull:bool = false;
+fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: @Vector(3, u32)) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
+    defer {lastPlayerChunkPos = playerChunkPos; lastloadDistance = loadDistance;}
+    if(lastPlayerChunkPos != null and lastPlayerChunkPos != null){
+        if(@reduce(.And, lastPlayerChunkPos.? == playerChunkPos) and @reduce(.And,lastloadDistance.? == loadDistance) and !bufferFull)return;
+    }
     const bktamount = world.Chunks.buckets.len;
     var chunks: u64 = 0;
     for (0..bktamount) |b| {
@@ -167,7 +185,8 @@ fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: [3
     for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
         try world.UnloadChunk(Pos);
     }
-    //if (chunksToUnloadBufferPos > 0) std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{chunksToUnloadBufferPos, chunks});
+    std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{chunksToUnloadBufferPos, chunks});
+    bufferFull = chunksToUnloadBufferPos == chunksToUnloadBuffer.len;
     chunksToUnloadBufferPos = 0;
 }
 

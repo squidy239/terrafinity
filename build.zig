@@ -95,6 +95,7 @@ pub fn build(b: *std.Build) void {
         .api = .gl,
         .version = .@"4.6",
         .profile = .core,
+        
     });
     exe.root_module.addImport("gl", gl_bindings);
 
@@ -195,7 +196,6 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag != .emscripten) {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
-
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -208,13 +208,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_check = exe;
 
-    // Any other code to define dependencies would
-    // probably be here.
-
-    // These two lines you might want to copy
-    // (make sure to rename 'exe_check')
-    const check = b.step("check", "Check if foo compiles");
-    check.dependOn(&exe_check.step);
+    const check = b.step("check", "Check if the game compiles");
+    check.dependOn(&exe.step);
 }
