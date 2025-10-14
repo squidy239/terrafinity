@@ -82,11 +82,18 @@ pub const Element = struct {
                 .allocator = allocator,
                 .color = creationOptions.textOptions.?.textColor,
                 .font = creationOptions.textOptions.?.font orelse &defaultFont,
-                .text = try allocator.dupe(u8, creationOptions.textOptions.?.text),
+                .text = null,
                 .scale = creationOptions.textOptions.?.scale,
-                .startX = undefined, //these get set by textUpdate
+                .startX = undefined, //these get set by updateText
                 .startY = undefined,
+                .vertexArray = null,
+                .arrayBuffer = null,
+                .oldScreenDimensions = null,
+                .textChanged = true,
+                .lineSpacing = 1.0,
             };
+            elementText.?.init();
+            try elementText.?.SetText(creationOptions.textOptions.?.text);
         }
         return Element{
             .allocator = allocator,
@@ -107,6 +114,7 @@ pub const Element = struct {
     pub fn init(self: *@This()) void {
         std.debug.assert(!self.isinit);
         self.update(self.screen_dimensions);
+        self.updateText(self.screen_dimensions);
         if (self.children) |children| {
             for (children) |*child| {
                 child.parent = self;
@@ -222,7 +230,6 @@ pub const Element = struct {
         self.text.?.startY = startY;
     }
 
-    ///frees element's children
     pub fn deinit(self: *@This()) void {
         std.debug.assert(self.isinit);
         if (self.children) |children| {
@@ -231,7 +238,7 @@ pub const Element = struct {
             }
             self.allocator.free(children);
         }
-        if (self.text != null) self.text.?.free();
+        if (self.text != null) self.text.?.deinit();
         self.children = null;
     }
 };

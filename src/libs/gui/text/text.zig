@@ -6,13 +6,12 @@ var isinit: bool = false;
 //
 var textShaderProgram: c_uint = undefined;
 var textColorLocation: c_int = undefined;
-var vertexArray: c_uint = undefined;
-var elementBuffer: c_uint = undefined;
-var arrayBuffer: c_uint = undefined;
+//var vertexArray: c_uint = undefined;
+//var arrayBuffer: c_uint = undefined;
 //
 
 ///requires a valid opengl context
-pub fn init() void { //TODO deinit and unload font
+pub fn init() void {
     std.debug.assert(!isinit);
     const vertex_shader_source = @embedFile("TextVertexShader.vert");
     const fragment_shader_source = @embedFile("TextFragmentShader.frag");
@@ -45,26 +44,22 @@ pub fn init() void { //TODO deinit and unload font
     textShaderProgram = shader_program;
 
     textColorLocation = gl.GetUniformLocation(shader_program, "textColor");
-    LoadFacebuffer();
 
     isinit = true;
 }
 
 pub fn deinit() void {
     std.debug.assert(isinit);
-    gl.DeleteVertexArrays(1, @ptrCast(&vertexArray));
-    gl.DeleteBuffers(1, @ptrCast(&arrayBuffer));
     gl.DeleteProgram(textShaderProgram);
     isinit = false;
 }
 
-fn LoadFacebuffer() void {
-    gl.GenVertexArrays(1, @ptrCast(&vertexArray));
-    gl.BindVertexArray(vertexArray);
+fn LoadFacebuffer(vertArray: *c_uint, arrayBuf: *c_uint) void {
+    gl.GenVertexArrays(1, @ptrCast(vertArray));
+    gl.BindVertexArray(vertArray.*);
 
-    gl.GenBuffers(1, @ptrCast(&arrayBuffer));
-    gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuffer);
-    gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * 6 * 2, null, gl.DYNAMIC_DRAW);
+    gl.GenBuffers(1, @ptrCast(arrayBuf));
+    gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuf.*);
 
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
@@ -81,7 +76,7 @@ pub const Font = struct {
         height: c_int,
         xoff: c_int,
         yoff: c_int,
-        texture: c_uint,
+        texture: ?c_uint,
         x1: c_int,
         x2: c_int,
         y1: c_int,
@@ -106,7 +101,7 @@ pub const Font = struct {
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         const defaultRange = [_][2]u32{
-            .{ 0, 256 },
+            .{ 32, 256 },
         };
         const ranges = loadRanges orelse defaultRange[0..];
         for (ranges) |range| {
@@ -119,37 +114,22 @@ pub const Font = struct {
     }
 
     pub fn LoadGlyph(self: *@This(), codepoint: c_int) !Character {
-        var width: c_int = undefined;
-        var height: c_int = undefined;
-        var xoff: c_int = undefined;
-        var yoff: c_int = undefined;
-        var cx1: c_int = undefined;
-        var cx2: c_int = undefined;
-        var cy1: c_int = undefined;
-        var cy2: c_int = undefined;
-        var advanceWidth: c_int = undefined;
-        var leftSideBearing: c_int = undefined;
+        var char: Character = undefined;
         const index = TrueType.stbtt_FindGlyphIndex(&self.font, @intCast(codepoint));
-        TrueType.stbtt_GetGlyphBitmapBox(&self.font, index, self.scale, self.scale, &cx1, &cy1, &cx2, &cy2);
-        TrueType.stbtt_GetGlyphHMetrics(&self.font, index, @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
-        const bitmap = TrueType.stbtt_GetGlyphBitmap(&self.font, self.scale, self.scale, index, &width, &height, &xoff, &yoff);
+        TrueType.stbtt_GetGlyphBitmapBox(&self.font, index, self.scale, self.scale, &char.x1, &char.y1, &char.x2, &char.y2);
+        TrueType.stbtt_GetGlyphHMetrics(&self.font, index, @ptrCast(&char.advanceWidth), @ptrCast(&char.leftSideBearing));
+        const bitmap = TrueType.stbtt_GetGlyphBitmap(&self.font, self.scale, self.scale, index, &char.width, &char.height, &char.xoff, &char.yoff);
         defer TrueType.stbtt_FreeBitmap(bitmap, null);
-        var char: Character = .{
-            .width = width,
-            .height = height,
-            .xoff = xoff,
-            .yoff = yoff,
-            .texture = undefined,
-            .x1 = cx1,
-            .x2 = cx2,
-            .y1 = cy1,
-            .y2 = cy2,
-            .advanceWidth = advanceWidth,
-            .leftSideBearing = leftSideBearing,
-        };
-        gl.GenTextures(1, @ptrCast(@constCast(&char.texture)));
-        gl.BindTexture(gl.TEXTURE_2D, char.texture);
-        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, bitmap);
+        if(char.width == 0 or char.height == 0) {
+            char.texture = null;
+            try self.characters.put(@intCast(codepoint), char);
+            return char;
+        }
+        var textureID:c_uint = undefined;
+        gl.GenTextures(1, @ptrCast(&textureID));
+        char.texture = textureID;
+        gl.BindTexture(gl.TEXTURE_2D, textureID);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, char.width, char.height, 0, gl.RED, gl.UNSIGNED_BYTE, bitmap);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -171,6 +151,7 @@ pub const Font = struct {
 };
 
 pub const Text = struct {
+    isinit: bool = false,
     allocator: std.mem.Allocator,
     font: *Font,
     color: [4]f32,
@@ -181,29 +162,97 @@ pub const Text = struct {
         relative: f32,
     },
     lineSpacing: f32 = 1.0,
-    ///text is UTF-8 encoded, must be owned by the Text's allocator
+    ///text is UTF-8 encoded, must ONLY be set by SetText
     text: ?[]u8,
     ///the Y position of the bottom of the first line of the text
     startY: f32,
     startX: f32,
-    ///copies the input text, TODO calculates line breaks
+    oldScreenDimensions: ?[2]u32,
+    textChanged:bool,
+    vertexArray: ?c_uint,
+    arrayBuffer: ?c_uint,
+    ///copies the input text
     pub fn SetText(self: *@This(), text: []const u8) !void {
+        std.debug.assert(self.isinit);
         const oldText = self.text;
         self.text = try self.allocator.dupe(u8, text);
         if (oldText != null) self.allocator.free(oldText.?);
+        std.debug.assert(self.vertexArray != null and self.arrayBuffer != null);
+        self.textChanged = true;
+    }
+    
+    //TODO fix text artifacts
+    
+    pub fn init(self: *@This()) void {
+        var arrBuff:c_uint = undefined;
+        var vertArr:c_uint = undefined;
+        LoadFacebuffer(@ptrCast(&vertArr), @ptrCast(&arrBuff));
+        self.vertexArray = vertArr;
+        self.arrayBuffer = arrBuff;
+        self.isinit = true;
     }
 
-    pub fn free(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
+        std.debug.assert(self.isinit);
+        defer self.isinit = false;
+        if(self.vertexArray != null) gl.DeleteVertexArrays(1, @ptrCast(&self.vertexArray.?));
+        if(self.arrayBuffer != null) gl.DeleteBuffers(1, @ptrCast(&self.arrayBuffer.?));
         self.allocator.free(self.text orelse return);
     }
 
     pub fn RenderText(self: *@This(), screen_dimensions: [2]u32) void {
+        std.debug.assert(self.isinit);
         const drawText = ztracy.ZoneNC(@src(), "DrawText", 24342);
         defer drawText.End();
         if (self.text == null) return;
         gl.UseProgram(textShaderProgram);
+        if(self.textChanged or self.oldScreenDimensions == null or !std.mem.eql(u32, &screen_dimensions, &self.oldScreenDimensions.?))CalculateText(self, screen_dimensions);
+        self.textChanged = false;
+        self.oldScreenDimensions = screen_dimensions;
         gl.Uniform4f(textColorLocation, self.color[0], self.color[1], self.color[2], self.color[3]);
-        gl.BindVertexArray(vertexArray);
+        const font = self.font;
+        std.debug.assert(font.fontisinit);
+
+        var textIter = std.unicode.Utf8Iterator{
+            .bytes = self.text.?,
+            .i = 0,
+        };
+        gl.BindVertexArray(self.vertexArray.?);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.arrayBuffer.?);
+        var index: usize = 0;
+        while (textIter.nextCodepoint()) |codepoint| {
+            defer index += 1;
+            const ch = font.characters.get(@intCast(codepoint)) orelse font.LoadGlyph(@intCast(codepoint)) catch |err| {
+                std.debug.panic("err loading charactor: {any}\n", .{err});
+            };
+            DrawCharacter(ch.texture orelse continue, index);
+        }
+        gl.BindVertexArray(0);
+        gl.BindTexture(gl.TEXTURE_2D, 0);
+    }
+
+    fn DrawCharacter(texture: c_uint, index:usize) void {
+        gl.BindTexture(gl.TEXTURE_2D, texture);
+        // render quad
+        gl.DrawArrays(gl.TRIANGLES, @intCast(index * 6),6);
+    }
+    
+    
+    pub fn CalculateText(self: *@This(), screen_dimensions: [2]u32) void {
+        std.debug.assert(self.isinit);
+        const calcText = ztracy.ZoneNC(@src(), "CalculateText", 24342);
+        defer calcText.End();
+        std.debug.assert(self.text != null);
+        var textIter = std.unicode.Utf8Iterator{
+            .bytes = self.text.?,
+            .i = 0,
+        };
+        var numChars: usize = 0;
+        while (textIter.nextCodepoint()) |_| numChars += 1;
+        gl.UseProgram(textShaderProgram);
+        gl.BindVertexArray(self.vertexArray.?);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.arrayBuffer.?);
+        gl.BufferData(gl.ARRAY_BUFFER,@intCast(@sizeOf([6][2]f32) * numChars), null,  gl.STATIC_DRAW);
         const font = self.font;
         std.debug.assert(font.fontisinit);
 
@@ -214,12 +263,10 @@ pub const Text = struct {
             .absolute => 0.01 * (self.scale.absolute / @as(f32, @floatFromInt(screen_dimensions[1]))),
             .relative => 0.0001 * self.scale.relative,
         };
-        var textIter = std.unicode.Utf8Iterator{
-            .bytes = self.text.?,
-            .i = 0,
-        };
-        
+        textIter.i = 0;//reset iterator to start
+        var index: usize = 0;
         while (textIter.nextCodepoint()) |codepoint| {
+            defer index += 1;
             const ch = font.characters.get(@intCast(codepoint)) orelse font.LoadGlyph(@intCast(codepoint)) catch |err| {
                 std.debug.panic("err loading charactor: {any}\n", .{err});
             };
@@ -251,14 +298,13 @@ pub const Text = struct {
             const next_codepoint = std.mem.bytesToValue(u21, textIter.peek(1));
             const kernAdvance = TrueType.stbtt_GetCodepointKernAdvance(&font.font, codepoint, next_codepoint);
 
-            DrawCharacter(xpos, ypos, w, h, ch.texture);
+            CalcCharacter(xpos, ypos, w, h, index);
             x += @as(f32, @floatFromInt(ch.advanceWidth + kernAdvance)) * font.scale * textScale * hw;
         }
         gl.BindVertexArray(0);
-        gl.BindTexture(gl.TEXTURE_2D, 0);
     }
 
-    fn DrawCharacter(xpos: f32, ypos: f32, w: f32, h: f32, texture: c_uint) void {
+    fn CalcCharacter(xpos: f32, ypos: f32, w: f32, h: f32, index:usize) void {
         const vertices: [6][2]f32 = .{
             .{ xpos, ypos + h},
             .{ xpos, ypos},
@@ -268,14 +314,9 @@ pub const Text = struct {
             .{ xpos + w, ypos},
             .{ xpos + w, ypos + h},
         };
-        
+                // render glyph texture over quad
 
-        // render glyph texture over quad
-        gl.BindTexture(gl.TEXTURE_2D, texture);
-        gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuffer);
-        gl.BufferSubData(gl.ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-        gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+        gl.BufferSubData(gl.ARRAY_BUFFER, @intCast(@sizeOf([6][2]f32) * index), @sizeOf(@TypeOf(vertices)), &vertices);
         // render quad
-        gl.DrawArrays(gl.TRIANGLES, 0, 6);
     }
 };
