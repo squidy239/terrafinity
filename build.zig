@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        //.use_llvm = true,
+      //  .use_llvm = true,
     });
     const options = .{
         .enable_ztracy = b.option(
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     // });
     //
     const stb_truetype_bindings = b.addTranslateC(.{
-        .root_source_file = b.path("src/libs/gui/stb_truetype.h"),
+        .root_source_file = b.path("src/libs/gui/text/stb_truetype.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     stb_truetype_object.addCSourceFile(.{
-        .file = b.path("src/libs/gui/stb_truetype.c"),
+        .file = b.path("src/libs/gui/text/stb_truetype.c"),
     });
     exe.addObject(stb_truetype_object);
     const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
@@ -95,7 +95,6 @@ pub fn build(b: *std.Build) void {
         .api = .gl,
         .version = .@"4.6",
         .profile = .core,
-        
     });
     exe.root_module.addImport("gl", gl_bindings);
 
@@ -207,7 +206,6 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-
 
     const check = b.step("check", "Check if the game compiles");
     check.dependOn(&exe.step);

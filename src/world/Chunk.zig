@@ -5,7 +5,6 @@ const Cache = @import("Cache").Cache;
 const Interpolation = @import("Interpolation");
 const std = @import("std");
 
-
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
 
@@ -19,7 +18,7 @@ pub const Chunk = struct {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         oneBlock: Block,
     };
-    
+
     pub const Genstate = enum(u8) {
         TerrainGenerated,
         StructuresGenerated,
@@ -87,7 +86,7 @@ pub const Chunk = struct {
             const xs: @Vector(ChunkSize, f32) = comptime zs;
 
             const ys: @Vector(ChunkSize, f32) = comptime zs;
-       //     const waterCaveSpacing = 10;
+            //     const waterCaveSpacing = 10;
             @setEvalBranchQuota(32000);
             inline for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
@@ -264,11 +263,11 @@ pub const Chunk = struct {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
         const floatpos = @Vector(2, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]) };
-        const d32: f32 = comptime 1.0 / @as(comptime_float,ChunkSize);
+        const d32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
         var height: [ChunkSize][ChunkSize]i32 = undefined;
         const floatmin: f32 = @floatFromInt(params.terrainmin);
         const floatmax: f32 = @floatFromInt(params.terrainmax);
-        const floatBounds = [2]f32{floatmin, floatmax };
+        const floatBounds = [2]f32{ floatmin, floatmax };
         for (0..ChunkSize) |ux| {
             const x: f32 = (@as(f32, @floatFromInt(ux)) * d32) + floatpos[0];
             for (0..ChunkSize) |uz| {

@@ -102,19 +102,19 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             const bucket_index = @mod(hash_code, bucketamount);
             return self.buckets[bucket_index].removemanuallock(key);
         }
-        
+
         pub fn count(self: *Self) usize {
             //const hashput = ztracy.ZoneNC(@src(), "count", 0x9692d);
             //defer hashput.End();
-            var totalcount:usize = 0;
-            for (&self.buckets)|*bucket|{
+            var totalcount: usize = 0;
+            for (&self.buckets) |*bucket| {
                 bucket.lock.lockShared();
                 defer bucket.lock.unlockShared();
                 totalcount += bucket.hash_map.count();
             }
             return totalcount;
         }
-        
+
         pub fn init(allocator: std.mem.Allocator) Self {
             var bkts: [bucketamount]Bucket(K, V, Context, maxloadpercentage) = undefined;
             for (0..bucketamount) |i| {

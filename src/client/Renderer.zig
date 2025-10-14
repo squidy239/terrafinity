@@ -71,11 +71,10 @@ pub const Renderer = struct {
 
     ///must be called on main thread
     pub fn Init(pool: *ThreadPool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
-        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 30, 20 }; //x,y
-        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 32, 22 }; //x,y
-        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 32, 22 }; //x,y
+        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
+        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
+        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
 
-        std.debug.assert((GenDist[0] + 2) <= MeshDist[0] and (GenDist[1] + 2) <= MeshDist[1]);
         var renderer = @This(){
             .allocator = allocator,
             .pool = pool,

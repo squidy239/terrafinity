@@ -1,7 +1,7 @@
 const std = @import("std");
 const TrueType = @import("TrueType");
 const gl = @import("gl");
-///hashmap of diffrent fonts
+const ztracy = @import("root").ztracy;
 var isinit: bool = false;
 //
 var textShaderProgram: c_uint = undefined;
@@ -64,17 +64,17 @@ fn LoadFacebuffer() void {
 
     gl.GenBuffers(1, @ptrCast(&arrayBuffer));
     gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuffer);
-    gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * 6 * 4, null, gl.DYNAMIC_DRAW);
+    gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * 6 * 2, null, gl.DYNAMIC_DRAW);
 
     gl.EnableVertexAttribArray(0);
-    gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * @sizeOf(f32), 0);
+    gl.VertexAttribPointer(0, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(f32), 0);
 }
 
 pub const Font = struct {
     fontisinit: bool,
     font: TrueType.stbtt_fontinfo,
     scale: f32,
-    characters: std.AutoHashMap(u32, Character),
+    characters: std.AutoHashMap(u32, Character), //TODO use a Cache
 
     const Character = struct {
         width: c_int,
@@ -86,6 +86,8 @@ pub const Font = struct {
         x2: c_int,
         y1: c_int,
         y2: c_int,
+        advanceWidth: c_int,
+        leftSideBearing: c_int,
     };
     ///loads and saves a font
     ///must be called in a valid opengl context
@@ -108,42 +110,54 @@ pub const Font = struct {
         };
         const ranges = loadRanges orelse defaultRange[0..];
         for (ranges) |range| {
-            for (range[0]..range[1]) |index| { //load first 256 glyphs
-                var width: c_int = undefined;
-                var height: c_int = undefined;
-                var xoff: c_int = undefined;
-                var yoff: c_int = undefined;
-                var cx1: c_int = undefined;
-                var cx2: c_int = undefined;
-                var cy1: c_int = undefined;
-                var cy2: c_int = undefined;
-                TrueType.stbtt_GetCodepointBitmapBox(&font.font, @intCast(index), scale, scale, &cx1, &cy1, &cx2, &cy2);
-                const bitmap = TrueType.stbtt_GetCodepointBitmap(&font.font, scale, scale, @intCast(index), &width, &height, &xoff, &yoff);
-                defer TrueType.stbtt_FreeBitmap(bitmap, null);
-                const char: Character = .{
-                    .width = width,
-                    .height = height,
-                    .xoff = xoff,
-                    .yoff = yoff,
-                    .texture = undefined,
-                    .x1 = cx1,
-                    .x2 = cx2,
-                    .y1 = cy1,
-                    .y2 = cy2,
-                };
-                gl.GenTextures(1, @ptrCast(@constCast(&char.texture)));
-                gl.BindTexture(gl.TEXTURE_2D, char.texture);
-                gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, bitmap);
-                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                try font.characters.put(@intCast(index), char);
+            for (range[0]..range[1]) |codepoint| { //load first 256 glyphs
+                _ = try LoadGlyph(&font, @intCast(codepoint));
             }
         }
         font.fontisinit = true;
         return font;
     }
+
+    pub fn LoadGlyph(self: *@This(), codepoint: c_int) !Character {
+        var width: c_int = undefined;
+        var height: c_int = undefined;
+        var xoff: c_int = undefined;
+        var yoff: c_int = undefined;
+        var cx1: c_int = undefined;
+        var cx2: c_int = undefined;
+        var cy1: c_int = undefined;
+        var cy2: c_int = undefined;
+        var advanceWidth: c_int = undefined;
+        var leftSideBearing: c_int = undefined;
+        const index = TrueType.stbtt_FindGlyphIndex(&self.font, @intCast(codepoint));
+        TrueType.stbtt_GetGlyphBitmapBox(&self.font, index, self.scale, self.scale, &cx1, &cy1, &cx2, &cy2);
+        TrueType.stbtt_GetGlyphHMetrics(&self.font, index, @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
+        const bitmap = TrueType.stbtt_GetGlyphBitmap(&self.font, self.scale, self.scale, index, &width, &height, &xoff, &yoff);
+        defer TrueType.stbtt_FreeBitmap(bitmap, null);
+        var char: Character = .{
+            .width = width,
+            .height = height,
+            .xoff = xoff,
+            .yoff = yoff,
+            .texture = undefined,
+            .x1 = cx1,
+            .x2 = cx2,
+            .y1 = cy1,
+            .y2 = cy2,
+            .advanceWidth = advanceWidth,
+            .leftSideBearing = leftSideBearing,
+        };
+        gl.GenTextures(1, @ptrCast(@constCast(&char.texture)));
+        gl.BindTexture(gl.TEXTURE_2D, char.texture);
+        gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RED, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, bitmap);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        try self.characters.put(@intCast(codepoint), char);
+        return char;
+    }
+
     ///must be called in a valid opengl context
     pub fn deinit(self: *@This()) void {
         std.debug.assert(self.fontisinit);
@@ -160,7 +174,13 @@ pub const Text = struct {
     allocator: std.mem.Allocator,
     font: *Font,
     color: [4]f32,
-    scale: f32,
+    scale: union(enum) {
+        ///an absolute unit of text size
+        absolute: f32,
+        ///a unit of text size relative to the screen height
+        relative: f32,
+    },
+    lineSpacing: f32 = 1.0,
     ///text is UTF-8 encoded, must be owned by the Text's allocator
     text: ?[]u8,
     ///the Y position of the bottom of the first line of the text
@@ -178,68 +198,84 @@ pub const Text = struct {
     }
 
     pub fn RenderText(self: *@This(), screen_dimensions: [2]u32) void {
+        const drawText = ztracy.ZoneNC(@src(), "DrawText", 24342);
+        defer drawText.End();
         if (self.text == null) return;
-        gl.Disable(gl.DEPTH_TEST);
-        // activate corresponding render state
         gl.UseProgram(textShaderProgram);
         gl.Uniform4f(textColorLocation, self.color[0], self.color[1], self.color[2], self.color[3]);
         gl.BindVertexArray(vertexArray);
         const font = self.font;
         std.debug.assert(font.fontisinit);
-        // iterate through all characters
+
         var x: f32 = self.startX;
         var y: f32 = self.startY;
+        const hw = @as(f32, @floatFromInt(screen_dimensions[1])) / @as(f32, @floatFromInt(screen_dimensions[0]));
+        const textScale: f32 = switch (self.scale) {
+            .absolute => 0.01 * (self.scale.absolute / @as(f32, @floatFromInt(screen_dimensions[1]))),
+            .relative => 0.0001 * self.scale.relative,
+        };
         var textIter = std.unicode.Utf8Iterator{
             .bytes = self.text.?,
             .i = 0,
         };
+        
         while (textIter.nextCodepoint()) |codepoint| {
-            if (codepoint == '\n') {
-                x = self.startX;
-                y -= font.scale * self.scale * @as(f32, @floatFromInt(screen_dimensions[1]));
-                continue;
-            }
-            var advanceWidth: c_int = undefined;
-            var leftSideBearing: c_int = undefined;
-            TrueType.stbtt_GetCodepointHMetrics(&font.font, codepoint, @ptrCast(&advanceWidth), @ptrCast(&leftSideBearing));
-            const ch = font.characters.get(@intCast(codepoint)) orelse continue;
-            const wh = @as(f32, @floatFromInt(screen_dimensions[0])) / @as(f32, @floatFromInt(screen_dimensions[1]));
-            const hw = @as(f32, @floatFromInt(screen_dimensions[1])) / @as(f32, @floatFromInt(screen_dimensions[0]));
-
-            const xpos: f32 = (x) + @as(f32, @floatFromInt(ch.xoff)) * self.scale;
-            const ypos: f32 = y - (@as(f32, @floatFromInt(ch.yoff + ch.y2 - ch.y1)) * self.scale); // + @as(f32, @floatFromInt(ascent)) * scale; //TODO real y pos
-
-            var w: f32 = @as(f32, @floatFromInt(ch.width)) * self.scale;
-            var h: f32 = @as(f32, @floatFromInt(ch.height)) * self.scale;
-            h *= 1;
-            w *= 1; //*= ((1 + hw)*0.5
-            _ = wh;
-            _ = hw;
-
-            // update VBO for each character
-            const vertices: [6][4]f32 = .{
-                .{ xpos, ypos + h, 0.0, 0.0 },
-                .{ xpos, ypos, 0.0, 1.0 },
-                .{ xpos + w, ypos, 1.0, 1.0 },
-
-                .{ xpos, ypos + h, 0.0, 0.0 },
-                .{ xpos + w, ypos, 1.0, 1.0 },
-                .{ xpos + w, ypos + h, 1.0, 0.0 },
+            const ch = font.characters.get(@intCast(codepoint)) orelse font.LoadGlyph(@intCast(codepoint)) catch |err| {
+                std.debug.panic("err loading charactor: {any}\n", .{err});
             };
+            //handle whitespace
+            switch (codepoint) {
+                '\n' => {
+                    x = self.startX;
+                    y -= font.scale * textScale * 1000.0 * self.lineSpacing;
+                    continue;
+                },
+                '\t' => {
+                    //advance 4 spaces
+                    x += @as(f32, @floatFromInt(ch.advanceWidth)) * font.scale * textScale * hw * 4;
+                    continue;
+                },
+                '\r' => {
+                    x = self.startX;
+                    continue;
+                },
+                else => {},
+            }
 
-            // render glyph texture over quad
-            gl.BindTexture(gl.TEXTURE_2D, ch.texture);
-            // update content of VBO memory
-            gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuffer);
-            gl.BufferSubData(gl.ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-            gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-            // render quad
-            gl.DrawArrays(gl.TRIANGLES, 0, 6);
-            // now advance cursors for next glyph (note that advance is number of 1/64 pixels)
-            x += @as(f32, @floatFromInt(advanceWidth)) * font.scale * self.scale * 1; //TODO fix everything
+            const xpos: f32 = x + @as(f32, @floatFromInt(ch.xoff)) * textScale * hw;
+            const ypos: f32 = y - (@as(f32, @floatFromInt(ch.yoff + ch.y2 - ch.y1)) * textScale);
 
+            const w: f32 = @as(f32, @floatFromInt(ch.width)) * textScale * hw;
+            const h: f32 = @as(f32, @floatFromInt(ch.height)) * textScale;
+
+            const next_codepoint = std.mem.bytesToValue(u21, textIter.peek(1));
+            const kernAdvance = TrueType.stbtt_GetCodepointKernAdvance(&font.font, codepoint, next_codepoint);
+
+            DrawCharacter(xpos, ypos, w, h, ch.texture);
+            x += @as(f32, @floatFromInt(ch.advanceWidth + kernAdvance)) * font.scale * textScale * hw;
         }
         gl.BindVertexArray(0);
         gl.BindTexture(gl.TEXTURE_2D, 0);
+    }
+
+    fn DrawCharacter(xpos: f32, ypos: f32, w: f32, h: f32, texture: c_uint) void {
+        const vertices: [6][2]f32 = .{
+            .{ xpos, ypos + h},
+            .{ xpos, ypos},
+            .{ xpos + w, ypos},
+
+            .{ xpos, ypos + h},
+            .{ xpos + w, ypos},
+            .{ xpos + w, ypos + h},
+        };
+        
+
+        // render glyph texture over quad
+        gl.BindTexture(gl.TEXTURE_2D, texture);
+        gl.BindBuffer(gl.ARRAY_BUFFER, arrayBuffer);
+        gl.BufferSubData(gl.ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
+        gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+        // render quad
+        gl.DrawArrays(gl.TRIANGLES, 0, 6);
     }
 };

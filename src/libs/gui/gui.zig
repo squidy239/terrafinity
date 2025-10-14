@@ -2,7 +2,7 @@ const std = @import("std");
 const gl = @import("gl");
 const glfw = @import("glfw");
 const zigimg = @import("root").zigimg;
-pub const Text = @import("text.zig");
+pub const Text = @import("text/text.zig");
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
@@ -50,7 +50,7 @@ pub const Element = struct {
         textColor: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 1.0 },
         ///uses the default font if this is null
         font: ?*Text.Font = null,
-        scale: f32,
+        scale: @FieldType(Text.Text, "scale"),
         startPosition: Position = .{ .xPercent = 0, .yPercent = 0 },
     };
     pub const CreationOptions = struct {
@@ -168,7 +168,6 @@ pub const Element = struct {
         if (self.text != null) {
             self.text.?.RenderText(screen_dimensions);
         }
-        //if (self.options.text != null) text.RenderText(0, self.options.text.?, (self.pos[0] * 2) - 1, (self.pos[1] * 2) - 1, 0.0005, [3]f32{ 1, 0, 0.4 }, screen_dimensions) catch |err| std.debug.panic("err: {any}\n", .{err});
         if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, false);
         }

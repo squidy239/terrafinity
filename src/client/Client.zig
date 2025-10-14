@@ -173,16 +173,42 @@ pub fn main() !void {
         .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
         .textOptions = .{
             .text = "",
-            .scale = 0.0005,
+            .scale = .{ .relative = 5 },
             .startPosition = .{
                 .xPercent = 0,
                 .yPercent = 65,
             },
         },
     };
+
+    const largeTextoptions = gui.Element.Options{
+        .position = .{ .xPercent = 10, .yPercent = 50 },
+        .size = .{
+            .widthPercent = 20,
+            .heightPercent = 100,
+        },
+    };
+
+    const largeTextcreationOptions = gui.Element.CreationOptions{
+        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
+        .textOptions = .{
+            .text = @embedFile("text.txt"),
+            .scale = .{ .absolute = 32 },
+            .startPosition = .{
+                .xPercent = 0,
+                .yPercent = 100,
+            },
+        },
+    };
+
     var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, fpsCreationOptions, null);
     defer fpsBox.deinit();
+
+    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextoptions, largeTextcreationOptions, null);
+    defer largeText.deinit();
+
     fpsBox.init();
+    largeText.init();
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
@@ -210,6 +236,9 @@ pub fn main() !void {
         renderer.DrawEntities(playerPos);
         drawEntities.End();
         fpsBox.Draw(renderer.screen_dimensions, renderer.window);
+        const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
+        largeText.Draw(renderer.screen_dimensions, renderer.window);
+        drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
@@ -237,7 +266,7 @@ pub fn main() !void {
         try UserInput.processInput();
         prossesinput.End();
         const fps = @round(std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1],MainWorld.Chunks.count()});
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1], MainWorld.Chunks.count() });
         defer secondary_allocator.free(printText);
         try fpsBox.text.?.SetText(printText);
     }
