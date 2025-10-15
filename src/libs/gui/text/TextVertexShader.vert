@@ -15,4 +15,6 @@ void main()
 {
     gl_Position = vec4(vertex.xy, 0.0, 1.0);
     TexCoords = textureIndecies[gl_VertexID % 6];
+    //gl_ClipDistance[0] = 0.0 - (gl_Position.x / gl_Position.w);
+    //TODO clip distance
 }

@@ -58,7 +58,7 @@ pub fn main() !void {
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .SpawnRange = 0,
-        .SpawnCenterPos = [3]i32{ 0, 0, 0 },
+        .SpawnCenterPos = [3]i32{ 0, 0, 0 }, //5333, -5333 is the mountain
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -1024,
@@ -176,7 +176,7 @@ pub fn main() !void {
             .scale = .{ .relative = 5 },
             .startPosition = .{
                 .xPercent = 0,
-                .yPercent = 65,
+                .yPercent = 100,
             },
         },
     };
@@ -193,7 +193,7 @@ pub fn main() !void {
         .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
         .textOptions = .{
             .text = @embedFile("text.txt"),
-            .scale = .{ .absolute = 32 },
+            .scale = .{ .absolute = 16 },
             .startPosition = .{
                 .xPercent = 0,
                 .yPercent = 100,
@@ -209,6 +209,7 @@ pub fn main() !void {
 
     fpsBox.init();
     largeText.init();
+    var lastFps: ?f128 = null;
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
@@ -237,7 +238,7 @@ pub fn main() !void {
         drawEntities.End();
         fpsBox.Draw(renderer.screen_dimensions, renderer.window);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
-        largeText.Draw(renderer.screen_dimensions, renderer.window);
+        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(renderer.screen_dimensions, renderer.window);
         drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -250,7 +251,6 @@ pub fn main() !void {
         st = std.time.nanoTimestamp();
         const glCreateSync = ztracy.ZoneNC(@src(), "glCreateSync", 34545);
         const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
-            std.debug.panic("Failed to create GL sync object\n", .{});
             return error.FailedToCreateGLSync;
         };
         glCreateSync.End();
@@ -265,8 +265,10 @@ pub fn main() !void {
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
         prossesinput.End();
-        const fps = @round(std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], fps, drawn[0], drawn[1], MainWorld.Chunks.count() });
+        var fps = (std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
+        if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);
+        lastFps = fps;
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], MainWorld.Chunks.count() });
         defer secondary_allocator.free(printText);
         try fpsBox.text.?.SetText(printText);
     }

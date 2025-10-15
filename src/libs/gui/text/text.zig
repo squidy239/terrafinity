@@ -70,6 +70,9 @@ pub const Font = struct {
     font: TrueType.stbtt_fontinfo,
     scale: f32,
     characters: std.AutoHashMap(u32, Character), //TODO use a Cache
+    ascent: c_int,
+    descent: c_int,
+    lineGap: c_int,
 
     const Character = struct {
         width: c_int,
@@ -93,6 +96,7 @@ pub const Font = struct {
         if (TrueType.stbtt_InitFont(&font.font, @ptrCast(fontBytes), 0) == 0) return error.FontLoading;
         const scale = TrueType.stbtt_ScaleForPixelHeight(&font.font, pixelHeight);
         font.scale = scale;
+        TrueType.stbtt_GetFontVMetrics(&font.font, @ptrCast(&font.ascent), @ptrCast(&font.descent), @ptrCast(&font.lineGap));
         font.characters = .init(allocator);
         gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1);
         std.log.debug("font has {d} glyphs...\n", .{font.font.numGlyphs});
@@ -120,12 +124,12 @@ pub const Font = struct {
         TrueType.stbtt_GetGlyphHMetrics(&self.font, index, @ptrCast(&char.advanceWidth), @ptrCast(&char.leftSideBearing));
         const bitmap = TrueType.stbtt_GetGlyphBitmap(&self.font, self.scale, self.scale, index, &char.width, &char.height, &char.xoff, &char.yoff);
         defer TrueType.stbtt_FreeBitmap(bitmap, null);
-        if(char.width == 0 or char.height == 0) {
+        if (char.width == 0 or char.height == 0) {
             char.texture = null;
             try self.characters.put(@intCast(codepoint), char);
             return char;
         }
-        var textureID:c_uint = undefined;
+        var textureID: c_uint = undefined;
         gl.GenTextures(1, @ptrCast(&textureID));
         char.texture = textureID;
         gl.BindTexture(gl.TEXTURE_2D, textureID);
@@ -168,7 +172,7 @@ pub const Text = struct {
     startY: f32,
     startX: f32,
     oldScreenDimensions: ?[2]u32,
-    textChanged:bool,
+    textChanged: bool,
     vertexArray: ?c_uint,
     arrayBuffer: ?c_uint,
     ///copies the input text
@@ -180,12 +184,12 @@ pub const Text = struct {
         std.debug.assert(self.vertexArray != null and self.arrayBuffer != null);
         self.textChanged = true;
     }
-    
+
     //TODO fix text artifacts
-    
+
     pub fn init(self: *@This()) void {
-        var arrBuff:c_uint = undefined;
-        var vertArr:c_uint = undefined;
+        var arrBuff: c_uint = undefined;
+        var vertArr: c_uint = undefined;
         LoadFacebuffer(@ptrCast(&vertArr), @ptrCast(&arrBuff));
         self.vertexArray = vertArr;
         self.arrayBuffer = arrBuff;
@@ -195,18 +199,20 @@ pub const Text = struct {
     pub fn deinit(self: *@This()) void {
         std.debug.assert(self.isinit);
         defer self.isinit = false;
-        if(self.vertexArray != null) gl.DeleteVertexArrays(1, @ptrCast(&self.vertexArray.?));
-        if(self.arrayBuffer != null) gl.DeleteBuffers(1, @ptrCast(&self.arrayBuffer.?));
+        if (self.vertexArray != null) gl.DeleteVertexArrays(1, @ptrCast(&self.vertexArray.?));
+        if (self.arrayBuffer != null) gl.DeleteBuffers(1, @ptrCast(&self.arrayBuffer.?));
         self.allocator.free(self.text orelse return);
     }
 
-    pub fn RenderText(self: *@This(), screen_dimensions: [2]u32) void {
+    pub fn render(self: *@This(), screen_dimensions: [2]u32) void {
         std.debug.assert(self.isinit);
         const drawText = ztracy.ZoneNC(@src(), "DrawText", 24342);
         defer drawText.End();
         if (self.text == null) return;
         gl.UseProgram(textShaderProgram);
-        if(self.textChanged or self.oldScreenDimensions == null or !std.mem.eql(u32, &screen_dimensions, &self.oldScreenDimensions.?))CalculateText(self, screen_dimensions);
+        if (self.textChanged or self.oldScreenDimensions == null or !std.mem.eql(u32, &screen_dimensions, &self.oldScreenDimensions.?)) {
+            CalculateText(self, screen_dimensions, self.allocator) catch std.debug.panic("OOM", .{});
+        }
         self.textChanged = false;
         self.oldScreenDimensions = screen_dimensions;
         gl.Uniform4f(textColorLocation, self.color[0], self.color[1], self.color[2], self.color[3]);
@@ -221,24 +227,27 @@ pub const Text = struct {
         gl.BindBuffer(gl.ARRAY_BUFFER, self.arrayBuffer.?);
         var index: usize = 0;
         while (textIter.nextCodepoint()) |codepoint| {
-            defer index += 1;
             const ch = font.characters.get(@intCast(codepoint)) orelse font.LoadGlyph(@intCast(codepoint)) catch |err| {
                 std.debug.panic("err loading charactor: {any}\n", .{err});
             };
+            switch (codepoint) {
+                '\n', '\t', '\r' => continue,
+                else => {},
+            }
+            index += 1;
             DrawCharacter(ch.texture orelse continue, index);
         }
         gl.BindVertexArray(0);
         gl.BindTexture(gl.TEXTURE_2D, 0);
     }
 
-    fn DrawCharacter(texture: c_uint, index:usize) void {
+    fn DrawCharacter(texture: c_uint, index: usize) void {
         gl.BindTexture(gl.TEXTURE_2D, texture);
         // render quad
-        gl.DrawArrays(gl.TRIANGLES, @intCast(index * 6),6);
+        gl.DrawArrays(gl.TRIANGLES, @intCast(index * 6), 6);
     }
-    
-    
-    pub fn CalculateText(self: *@This(), screen_dimensions: [2]u32) void {
+
+    pub fn CalculateText(self: *@This(), screen_dimensions: [2]u32, allocator: std.mem.Allocator) !void {
         std.debug.assert(self.isinit);
         const calcText = ztracy.ZoneNC(@src(), "CalculateText", 24342);
         defer calcText.End();
@@ -249,24 +258,27 @@ pub const Text = struct {
         };
         var numChars: usize = 0;
         while (textIter.nextCodepoint()) |_| numChars += 1;
-        gl.UseProgram(textShaderProgram);
-        gl.BindVertexArray(self.vertexArray.?);
-        gl.BindBuffer(gl.ARRAY_BUFFER, self.arrayBuffer.?);
-        gl.BufferData(gl.ARRAY_BUFFER,@intCast(@sizeOf([6][2]f32) * numChars), null,  gl.STATIC_DRAW);
+        const tempBuffer = try allocator.alloc([6][2]f32, numChars);
+        defer allocator.free(tempBuffer);
         const font = self.font;
         std.debug.assert(font.fontisinit);
 
         var x: f32 = self.startX;
         var y: f32 = self.startY;
+
         const hw = @as(f32, @floatFromInt(screen_dimensions[1])) / @as(f32, @floatFromInt(screen_dimensions[0]));
         const textScale: f32 = switch (self.scale) {
             .absolute => 0.01 * (self.scale.absolute / @as(f32, @floatFromInt(screen_dimensions[1]))),
             .relative => 0.0001 * self.scale.relative,
         };
-        textIter.i = 0;//reset iterator to start
+
+        const scaled_ascent = @as(f32, @floatFromInt(font.ascent)) * font.scale * textScale;
+        // Adjust the y so the ascender line sits at y
+        y -= scaled_ascent;
+
+        textIter.i = 0; //reset iterator to start
         var index: usize = 0;
         while (textIter.nextCodepoint()) |codepoint| {
-            defer index += 1;
             const ch = font.characters.get(@intCast(codepoint)) orelse font.LoadGlyph(@intCast(codepoint)) catch |err| {
                 std.debug.panic("err loading charactor: {any}\n", .{err});
             };
@@ -274,7 +286,7 @@ pub const Text = struct {
             switch (codepoint) {
                 '\n' => {
                     x = self.startX;
-                    y -= font.scale * textScale * 1000.0 * self.lineSpacing;
+                    y -= @as(f32, @floatFromInt(font.ascent - font.descent + font.lineGap)) * font.scale * textScale * self.lineSpacing;
                     continue;
                 },
                 '\t' => {
@@ -288,9 +300,10 @@ pub const Text = struct {
                 },
                 else => {},
             }
+            index += 1;
 
             const xpos: f32 = x + @as(f32, @floatFromInt(ch.xoff)) * textScale * hw;
-            const ypos: f32 = y - (@as(f32, @floatFromInt(ch.yoff + ch.y2 - ch.y1)) * textScale);
+            const ypos: f32 = y - (@as(f32, @floatFromInt(ch.yoff + (ch.y2 - ch.y1))) * textScale);
 
             const w: f32 = @as(f32, @floatFromInt(ch.width)) * textScale * hw;
             const h: f32 = @as(f32, @floatFromInt(ch.height)) * textScale;
@@ -298,25 +311,22 @@ pub const Text = struct {
             const next_codepoint = std.mem.bytesToValue(u21, textIter.peek(1));
             const kernAdvance = TrueType.stbtt_GetCodepointKernAdvance(&font.font, codepoint, next_codepoint);
 
-            CalcCharacter(xpos, ypos, w, h, index);
+            const vertices: [6][2]f32 = .{
+                .{ xpos, ypos + h },
+                .{ xpos, ypos },
+                .{ xpos + w, ypos },
+                .{ xpos, ypos + h },
+                .{ xpos + w, ypos },
+                .{ xpos + w, ypos + h },
+            };
+
+            tempBuffer[index] = vertices;
             x += @as(f32, @floatFromInt(ch.advanceWidth + kernAdvance)) * font.scale * textScale * hw;
         }
+        gl.UseProgram(textShaderProgram);
+        gl.BindVertexArray(self.vertexArray.?);
+        gl.BindBuffer(gl.ARRAY_BUFFER, self.arrayBuffer.?);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf([6][2]f32) * numChars), @ptrCast(tempBuffer), gl.STATIC_DRAW);
         gl.BindVertexArray(0);
-    }
-
-    fn CalcCharacter(xpos: f32, ypos: f32, w: f32, h: f32, index:usize) void {
-        const vertices: [6][2]f32 = .{
-            .{ xpos, ypos + h},
-            .{ xpos, ypos},
-            .{ xpos + w, ypos},
-
-            .{ xpos, ypos + h},
-            .{ xpos + w, ypos},
-            .{ xpos + w, ypos + h},
-        };
-                // render glyph texture over quad
-
-        gl.BufferSubData(gl.ARRAY_BUFFER, @intCast(@sizeOf([6][2]f32) * index), @sizeOf(@TypeOf(vertices)), &vertices);
-        // render quad
     }
 };

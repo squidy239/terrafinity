@@ -126,7 +126,7 @@ pub const Element = struct {
     }
 
     ///requires a valid opengl context
-    pub fn Draw(self: *@This(), screen_dimensions: [2]u32, window: *glfw.Window) void {
+    pub fn Draw(self: *@This(), screen_dimensions: [2]u32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
@@ -157,6 +157,7 @@ pub const Element = struct {
         gl.Disable(gl.CULL_FACE);
         gl.Disable(gl.DEPTH_TEST);
         gl.Enable(gl.BLEND);
+
         gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         defer if (cf) gl.Enable(gl.CULL_FACE);
         defer if (dt) gl.Enable(gl.DEPTH_TEST);
@@ -174,7 +175,7 @@ pub const Element = struct {
         gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
 
         if (self.text != null) {
-            self.text.?.RenderText(screen_dimensions);
+            self.text.?.render(screen_dimensions);
         }
         if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, false);
