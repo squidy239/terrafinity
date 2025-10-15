@@ -30,6 +30,11 @@ pub const Element = struct {
         yPixels: f32 = 0.0,
     };
 
+    pub const SizeUnit = union(enum) { //TODO
+        widthPercent: f32,
+        heightPercent: f32,
+        pixels: f32,
+    };
     pub const Size = struct {
         widthPercent: f32 = 0.0,
         heightPercent: f32 = 0.0,
@@ -53,7 +58,7 @@ pub const Element = struct {
     pub const CreationOptions = struct {
         textOptions: ?TextOptions = null,
         elementBackground: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
-        
+
         position: Position = .{ .xPercent = 50, .yPercent = 50 },
         ///the size of the element. all units are added together
         size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
@@ -66,6 +71,18 @@ pub const Element = struct {
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
+
+        children: ?[]const CreationOptions = null,
+
+        pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
+            var count: usize = 0;
+            if (self.children) |children| {
+                for (children) |child| {
+                    count += child.CountChildren(true);
+                }
+            }
+            return count + @intFromBool(isChild);
+        }
     };
 
     const Options = struct {
@@ -82,15 +99,14 @@ pub const Element = struct {
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
-        
+
         elementBackground: ElementBackground,
         text: ?Text.Text,
         textStartPosition: ?Position,
     };
     ///the allocator must remain valid for the lifetime of the element
     ///init must be called after creating the outermost Element
-    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, creationOptions: CreationOptions, children: ?[]const Element) !Element {
-        //TODO use ZON for layouts, do something like html and css
+    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, creationOptions: CreationOptions) !Element {
         var elementText: ?Text.Text = null;
         if (creationOptions.textOptions != null) {
             elementText = Text.Text{
@@ -110,6 +126,16 @@ pub const Element = struct {
             elementText.?.init();
             try elementText.?.SetText(creationOptions.textOptions.?.text);
         }
+
+        const childrenCount = creationOptions.CountChildren(false);
+        const children: ?[]Element = if (childrenCount > 0) try allocator.alloc(Element, childrenCount) else null;
+
+        if (creationOptions.children) |childrenOptions| {
+            for (childrenOptions, 0..) |childOptions, i| {
+                children.?[i] = try Element.create(allocator, screen_dimensions, childOptions);
+            }
+        }
+
         return Element{
             .allocator = allocator,
             .screen_dimensions = screen_dimensions,
@@ -126,7 +152,7 @@ pub const Element = struct {
                 .text = elementText,
                 .textStartPosition = if (creationOptions.textOptions == null) null else creationOptions.textOptions.?.startPosition,
             },
-            .children = if (children != null) try allocator.dupe(Element, children.?) else null,
+            .children = children,
             .parent = null,
             .isinit = false,
         };

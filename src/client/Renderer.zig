@@ -386,18 +386,20 @@ pub const Renderer = struct {
         }
     }
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
-    pub fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32) void {
-        self.playerLock.lockShared();
-        const playerPos = self.player.pos;
-        self.playerLock.unlockShared();
-        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-        const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
-        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-        if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
-            self.AddChunkToRender(Pos, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
-        } else {
-            _ = self.LoadingChunks.remove(Pos);
-        }
+    pub fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32, genStructures: bool, cullOutsideGenDistance: bool) void {
+        if (cullOutsideGenDistance) {
+            self.playerLock.lockShared();
+            const playerPos = self.player.pos;
+            self.playerLock.unlockShared();
+            const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+            const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
+            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+            if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
+                self.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+            } else {
+                _ = self.LoadingChunks.remove(Pos);
+            }
+        } else self.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 
     fn outOfSquareRange(Pos: @Vector(3, i32), range: @Vector(3, i32)) bool {

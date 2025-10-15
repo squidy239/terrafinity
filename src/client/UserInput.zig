@@ -19,8 +19,8 @@ pub fn init(ren: *Renderer) !void {
     render = ren;
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
-    //menu is temporay test code 
-    menu = try gui.Element.create(std.heap.c_allocator, render.screen_dimensions, textEscMenu, &.{try gui.Element.create(std.heap.c_allocator, [2]u32{800,600} , textEscMenuButton, null),try gui.Element.create(std.heap.c_allocator, [2]u32{800,600} , textContinueMenuButton, null),}); 
+    //menu is temporay test code
+    menu = try gui.Element.create(std.heap.c_allocator, render.screen_dimensions, textEscMenu);
     menu.init();
     isinit = true;
 }
@@ -34,7 +34,7 @@ pub fn deinit() void {
 fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
     _ = element;
     _ = mouse_pos;
-    if(toggle and window.getMouseButton(glfw.MouseButton.left) == .press){
+    if (toggle and window.getMouseButton(glfw.MouseButton.left) == .press) {
         std.debug.print("quitting\n", .{});
         window.setShouldClose(true);
     }
@@ -73,47 +73,46 @@ const textEscMenu = gui.Element.CreationOptions{
         .widthPercent = 75,
         .heightPercent = 75,
     },
-};
-
-const textEscMenuButton = gui.Element.CreationOptions{
-    .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-    .position = .{ .xPercent = 50, .yPercent = 60 },
-    .size = .{
-        .widthPercent = 60,
-        .heightPercent = 10,
-    },
-    .textOptions = .{
-        .text = "Quit",
-        .scale = .{ .relative = 4 },
-        .startPosition = .{
-            .xPercent = 45,
-            .yPercent = 100,
+    .children = &.{
+        .{
+            .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+            .position = .{ .xPercent = 50, .yPercent = 60 },
+            .size = .{
+                .widthPercent = 60,
+                .heightPercent = 10,
+            },
+            .textOptions = .{
+                .text = "Quit",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .xPercent = 45,
+                    .yPercent = 100,
+                },
+            },
+            .onHover = onHoverEsc,
+        },
+        .{
+            .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+            .position = .{ .xPercent = 50, .yPercent = 80 },
+            .size = .{
+                .widthPercent = 60,
+                .heightPercent = 10,
+            },
+            .textOptions = .{
+                .text = "Back to Game",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .xPercent = 35,
+                    .yPercent = 100,
+                },
+            },
+            .onHover = onHoverC,
         },
     },
-    .onHover = onHoverEsc,
 };
-
-const textContinueMenuButton = gui.Element.CreationOptions{
-    .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-    .position = .{ .xPercent = 50, .yPercent = 80 },
-    .size = .{
-        .widthPercent = 60,
-        .heightPercent = 10,
-    },
-    .textOptions = .{
-        .text = "Back to Game",
-        .scale = .{ .relative = 4 },
-        .startPosition = .{
-            .xPercent = 35,
-            .yPercent = 100,
-        },
-    },
-    .onHover = onHoverC,
-};
-
 
 pub fn menuDraw() void {
-    if(ts.CursorEscaped)menu.Draw(render.screen_dimensions, render.window);
+    if (ts.CursorEscaped) menu.Draw(render.screen_dimensions, render.window);
 }
 pub fn processInput() !void {
     std.debug.assert(isinit);

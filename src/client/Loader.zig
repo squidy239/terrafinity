@@ -95,7 +95,7 @@ fn LoadChunksSingleplayer(renderer: *Renderer, playerChunkPos: @Vector(3, i32), 
                 if ((!loaded or ((renderer.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
                     renderer.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
-                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
+                    renderer.pool.spawn(Renderer.AddChunkToRenderTask, .{ renderer, ChunkPos, true, true}, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                 }
             }
         }

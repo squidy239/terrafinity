@@ -161,7 +161,6 @@ pub fn main() !void {
     gui.init(secondary_allocator);
     defer gui.deinit();
 
-
     const fpsoptions = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 1, 1, 1, 0.1 } },
         .textOptions = .{
@@ -178,7 +177,7 @@ pub fn main() !void {
             .heightPercent = 30,
         },
     };
-    
+
     const largeTextcreationOptions = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
         .position = .{ .xPercent = 10, .yPercent = 50 },
@@ -196,10 +195,10 @@ pub fn main() !void {
         },
     };
 
-    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, null);
+    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions);
     defer fpsBox.deinit();
-    
-    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextcreationOptions, null);
+
+    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextcreationOptions);
     defer largeText.deinit();
 
     fpsBox.init();

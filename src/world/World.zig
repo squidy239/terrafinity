@@ -232,6 +232,7 @@ pub const World = struct {
         chunkLock: ?*std.Thread.RwLock, //if it is not null its locked
         renderer: ?*Renderer,
         world: *World,
+        remeshWithThreadPool: bool = false,
         tempallocator: std.mem.Allocator,
         ///allocator only makes temporary allocations, stackfallbackallocator should be used if clear is not called. mainchunk must not be locked
         pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, tempallocator: std.mem.Allocator) !@This() {
@@ -294,9 +295,12 @@ pub const World = struct {
                 it = self.chunkMap.iterator();
                 while (it.next()) |entry| {
                     if (self.mainChunkPos == null or @reduce(.Or, @as(@Vector(3, i32), entry.key_ptr.*) != @as(@Vector(3, i32), self.mainChunkPos.?))) {
-                        self.renderer.?.AddChunkToRender(entry.key_ptr.*, false) catch |err| {
-                            std.log.err("error adding chunk to render: {any}", .{err});
-                        };
+                        if (self.remeshWithThreadPool) {
+                            self.world.threadPool.spawn(Renderer.AddChunkToRenderTask, .{self.renderer.?, entry.key_ptr.*, false, false }, .High) catch |err| std.debug.panic("error adding chunk to render: {any}", .{err});
+                        } else {
+                            self.renderer.?.AddChunkToRender(entry.key_ptr.*, false) catch |err| 
+                                std.debug.panic("error adding chunk to render: {any}", .{err});
+                        }
                         remeshed += 1;
                     }
                 }
