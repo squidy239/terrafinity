@@ -234,7 +234,7 @@ pub const Text = struct {
                 '\n', '\t', '\r' => continue,
                 else => {},
             }
-            index += 1;
+            defer index += 1;
             DrawCharacter(ch.texture orelse continue, index);
         }
         gl.BindVertexArray(0);
@@ -257,7 +257,7 @@ pub const Text = struct {
             .i = 0,
         };
         var numChars: usize = 0;
-        while (textIter.nextCodepoint()) |_| numChars += 1;
+        while (textIter.nextCodepoint()) |codepoint| {if(codepoint != '\n' and codepoint != '\t' and codepoint != '\r') numChars += 1;}
         const tempBuffer = try allocator.alloc([6][2]f32, numChars);
         defer allocator.free(tempBuffer);
         const font = self.font;
@@ -300,7 +300,6 @@ pub const Text = struct {
                 },
                 else => {},
             }
-            index += 1;
 
             const xpos: f32 = x + @as(f32, @floatFromInt(ch.xoff)) * textScale * hw;
             const ypos: f32 = y - (@as(f32, @floatFromInt(ch.yoff + (ch.y2 - ch.y1))) * textScale);
@@ -322,6 +321,8 @@ pub const Text = struct {
 
             tempBuffer[index] = vertices;
             x += @as(f32, @floatFromInt(ch.advanceWidth + kernAdvance)) * font.scale * textScale * hw;
+            index += 1;//TODO fix possible bug since numChars could be greater than the number of vertecies do to whitespace
+
         }
         gl.UseProgram(textShaderProgram);
         gl.BindVertexArray(self.vertexArray.?);

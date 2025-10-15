@@ -6,10 +6,12 @@ const zm = @import("zm");
 const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
+const gui = @import("gui");
 var render: *Renderer = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
+var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
@@ -17,12 +19,36 @@ pub fn init(ren: *Renderer) !void {
     render = ren;
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
+    //menu is temporay test code 
+    menu = try gui.Element.create(std.heap.c_allocator, render.screen_dimensions, textEscMenu, &.{try gui.Element.create(std.heap.c_allocator, [2]u32{800,600} , textEscMenuButton, null),try gui.Element.create(std.heap.c_allocator, [2]u32{800,600} , textContinueMenuButton, null),}); 
+    menu.init();
     isinit = true;
 }
 
 pub fn deinit() void {
     _ = worldEditor.deinit();
+    menu.deinit();
     isinit = false;
+}
+
+fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = element;
+    _ = mouse_pos;
+    if(toggle and window.getMouseButton(glfw.MouseButton.left) == .press){
+        std.debug.print("quitting\n", .{});
+        window.setShouldClose(true);
+    }
+}
+
+fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = element;
+    _ = mouse_pos;
+    if (toggle and window.getMouseButton(glfw.MouseButton.left) == .press) {
+        if (ts.CursorEscaped) {
+            ts.CursorEscaped = false;
+            _ = glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
+        }
+    }
 }
 
 const ToggleSettings = struct {
@@ -40,6 +66,55 @@ var ts = ToggleSettings{
     .Benchmark = false,
 };
 
+const textEscMenu = gui.Element.CreationOptions{
+    .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
+    .position = .{ .xPercent = 50, .yPercent = 50 },
+    .size = .{
+        .widthPercent = 75,
+        .heightPercent = 75,
+    },
+};
+
+const textEscMenuButton = gui.Element.CreationOptions{
+    .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+    .position = .{ .xPercent = 50, .yPercent = 60 },
+    .size = .{
+        .widthPercent = 60,
+        .heightPercent = 10,
+    },
+    .textOptions = .{
+        .text = "Quit",
+        .scale = .{ .relative = 4 },
+        .startPosition = .{
+            .xPercent = 45,
+            .yPercent = 100,
+        },
+    },
+    .onHover = onHoverEsc,
+};
+
+const textContinueMenuButton = gui.Element.CreationOptions{
+    .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+    .position = .{ .xPercent = 50, .yPercent = 80 },
+    .size = .{
+        .widthPercent = 60,
+        .heightPercent = 10,
+    },
+    .textOptions = .{
+        .text = "Back to Game",
+        .scale = .{ .relative = 4 },
+        .startPosition = .{
+            .xPercent = 35,
+            .yPercent = 100,
+        },
+    },
+    .onHover = onHoverC,
+};
+
+
+pub fn menuDraw() void {
+    if(ts.CursorEscaped)menu.Draw(render.screen_dimensions, render.window);
+}
 pub fn processInput() !void {
     std.debug.assert(isinit);
     const timestamp = std.time.microTimestamp();
@@ -72,12 +147,6 @@ pub fn processInput() !void {
         const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
         if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
             posAdjustment += zm.vec.normalize(cross) * cameraSpeed;
-    }
-    if (render.window.getMouseButton(glfw.MouseButton.left) == .press) {
-        if (ts.CursorEscaped) {
-            ts.CursorEscaped = false;
-            _ = try glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled);
-        }
     }
     if (render.window.getKey(glfw.Key.F11) == .press and std.time.milliTimestamp() - lastfullscreentoggle > 500) {
         if (ts.Fullscreen) {

@@ -19,9 +19,6 @@ pub const Element = struct {
     height: f32,
     pos: @Vector(2, f32),
     options: Options,
-    elementBackground: ElementBackground,
-    text: ?Text.Text,
-    textStartPosition: ?Position,
     children: ?[]Element,
     parent: ?*Element,
     isinit: bool = false,
@@ -56,10 +53,7 @@ pub const Element = struct {
     pub const CreationOptions = struct {
         textOptions: ?TextOptions = null,
         elementBackground: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
-    };
-
-    pub const Options = struct {
-        ///the position of the element. all units are added together
+        
         position: Position = .{ .xPercent = 50, .yPercent = 50 },
         ///the size of the element. all units are added together
         size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
@@ -73,9 +67,30 @@ pub const Element = struct {
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
     };
+
+    const Options = struct {
+        ///the position of the element. all units are added together
+        position: Position = .{ .xPercent = 50, .yPercent = 50 },
+        ///the size of the element. all units are added together
+        size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
+        ///if this is false the element and its children will not be drawn and onHover and onDraw will not be called
+        Visible: bool = true,
+        ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
+        ///last bool is false if it is being called after drawing so the options can be reset if needed
+        ///update must be called after any modifications to the element
+        onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
+        ///gets called before drawing before onHover
+        ///update must be called after any modifications to the element
+        onDraw: ?*const fn (*Element, *glfw.Window) void = null,
+        
+        elementBackground: ElementBackground,
+        text: ?Text.Text,
+        textStartPosition: ?Position,
+    };
     ///the allocator must remain valid for the lifetime of the element
     ///init must be called after creating the outermost Element
-    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, options: Options, creationOptions: CreationOptions, children: ?[]const Element) !Element {
+    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, creationOptions: CreationOptions, children: ?[]const Element) !Element {
+        //TODO use ZON for layouts, do something like html and css
         var elementText: ?Text.Text = null;
         if (creationOptions.textOptions != null) {
             elementText = Text.Text{
@@ -101,10 +116,16 @@ pub const Element = struct {
             .width = undefined,
             .height = undefined,
             .pos = undefined,
-            .text = elementText,
-            .textStartPosition = if (creationOptions.textOptions == null) null else creationOptions.textOptions.?.startPosition,
-            .elementBackground = creationOptions.elementBackground,
-            .options = options,
+            .options = .{
+                .Visible = creationOptions.Visible,
+                .onHover = creationOptions.onHover,
+                .onDraw = creationOptions.onDraw,
+                .position = creationOptions.position,
+                .size = creationOptions.size,
+                .elementBackground = creationOptions.elementBackground,
+                .text = elementText,
+                .textStartPosition = if (creationOptions.textOptions == null) null else creationOptions.textOptions.?.startPosition,
+            },
             .children = if (children != null) try allocator.dupe(Element, children.?) else null,
             .parent = null,
             .isinit = false,
@@ -170,12 +191,12 @@ pub const Element = struct {
         const glPos = [2]f32{ @mulAdd(f32, self.pos[0], 2, -1), @mulAdd(f32, self.pos[1], 2, -1) }; //convert the 0-1 coords to -1 to 1
         gl.Uniform2f(guiElementPositionLocation, glPos[0], glPos[1]);
         gl.Uniform2f(guiElementSizeLocation, self.width, self.height);
-        if (self.elementBackground == .solid)
-            gl.Uniform4f(guiElementColorLocation, self.elementBackground.solid[0], self.elementBackground.solid[1], self.elementBackground.solid[2], self.elementBackground.solid[3]);
+        if (self.options.elementBackground == .solid)
+            gl.Uniform4f(guiElementColorLocation, self.options.elementBackground.solid[0], self.options.elementBackground.solid[1], self.options.elementBackground.solid[2], self.options.elementBackground.solid[3]);
         gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
 
-        if (self.text != null) {
-            self.text.?.render(screen_dimensions);
+        if (self.options.text != null) {
+            self.options.text.?.render(screen_dimensions);
         }
         if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, false);
@@ -214,21 +235,21 @@ pub const Element = struct {
     }
 
     fn updateText(self: *@This(), screen_dimensions: [2]u32) void {
-        if (self.text == null or self.textStartPosition == null) return;
-        var startX = self.textStartPosition.?.xPercent / 100;
-        var startY = self.textStartPosition.?.yPercent / 100;
+        if (self.options.text == null or self.options.textStartPosition == null) return;
+        var startX = self.options.textStartPosition.?.xPercent / 100;
+        var startY = self.options.textStartPosition.?.yPercent / 100;
 
         startX = NormilizeInRange(startX, 0, 1, self.pos[0] - (self.width * 0.5), self.pos[0] + (self.width * 0.5));
         startY = NormilizeInRange(startY, 0, 1, self.pos[1] - (self.height * 0.5), self.pos[1] + (self.height * 0.5));
 
-        startX += (self.textStartPosition.?.xPixels / @as(f32, @floatFromInt(screen_dimensions[0])));
-        startY += (self.textStartPosition.?.yPixels / @as(f32, @floatFromInt(screen_dimensions[1])));
+        startX += (self.options.textStartPosition.?.xPixels / @as(f32, @floatFromInt(screen_dimensions[0])));
+        startY += (self.options.textStartPosition.?.yPixels / @as(f32, @floatFromInt(screen_dimensions[1])));
 
         startX = (startX * 2) - 1;
         startY = (startY * 2) - 1;
 
-        self.text.?.startX = startX;
-        self.text.?.startY = startY;
+        self.options.text.?.startX = startX;
+        self.options.text.?.startY = startY;
     }
 
     pub fn deinit(self: *@This()) void {
@@ -239,7 +260,7 @@ pub const Element = struct {
             }
             self.allocator.free(children);
         }
-        if (self.text != null) self.text.?.deinit();
+        if (self.options.text != null) self.options.text.?.deinit();
         self.children = null;
     }
 };

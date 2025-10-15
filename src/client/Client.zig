@@ -161,16 +161,9 @@ pub fn main() !void {
     gui.init(secondary_allocator);
     defer gui.deinit();
 
-    const fpsoptions = gui.Element.Options{
-        .position = .{ .xPercent = 50, .yPercent = 50 },
-        .size = .{
-            .widthPercent = 40,
-            .heightPercent = 20,
-        },
-    };
 
-    const fpsCreationOptions = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
+    const fpsoptions = gui.Element.CreationOptions{
+        .elementBackground = .{ .solid = .{ 1, 1, 1, 0.1 } },
         .textOptions = .{
             .text = "",
             .scale = .{ .relative = 5 },
@@ -179,18 +172,20 @@ pub fn main() !void {
                 .yPercent = 100,
             },
         },
+        .position = .{ .xPercent = 20, .yPercent = 85 },
+        .size = .{
+            .widthPercent = 40,
+            .heightPercent = 30,
+        },
     };
-
-    const largeTextoptions = gui.Element.Options{
+    
+    const largeTextcreationOptions = gui.Element.CreationOptions{
+        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
         .position = .{ .xPercent = 10, .yPercent = 50 },
         .size = .{
             .widthPercent = 20,
             .heightPercent = 100,
         },
-    };
-
-    const largeTextcreationOptions = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
         .textOptions = .{
             .text = @embedFile("text.txt"),
             .scale = .{ .absolute = 16 },
@@ -201,10 +196,10 @@ pub fn main() !void {
         },
     };
 
-    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, fpsCreationOptions, null);
+    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions, null);
     defer fpsBox.deinit();
-
-    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextoptions, largeTextcreationOptions, null);
+    
+    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextcreationOptions, null);
     defer largeText.deinit();
 
     fpsBox.init();
@@ -237,6 +232,7 @@ pub fn main() !void {
         renderer.DrawEntities(playerPos);
         drawEntities.End();
         fpsBox.Draw(renderer.screen_dimensions, renderer.window);
+        UserInput.menuDraw();
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
         if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(renderer.screen_dimensions, renderer.window);
         drawText.End();
@@ -270,7 +266,7 @@ pub fn main() !void {
         lastFps = fps;
         const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], MainWorld.Chunks.count() });
         defer secondary_allocator.free(printText);
-        try fpsBox.text.?.SetText(printText);
+        try fpsBox.options.text.?.SetText(printText);
     }
 }
 
