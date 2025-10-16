@@ -162,7 +162,7 @@ pub fn main() !void {
     defer gui.deinit();
 
     const fpsoptions = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 1, 1, 1, 0.1 } },
+        .elementBackground = .{ .solid = .{ 1, 1, 1, 0.7 } },
         .textOptions = .{
             .text = "",
             .scale = .{ .relative = 5 },
@@ -176,7 +176,10 @@ pub fn main() !void {
             .widthPercent = 40,
             .heightPercent = 30,
         },
+        .cornerPixelRadii = .{0, 0, 25,0 },
     };
+    var f3t:bool = true;
+    var f3noholdt:bool = true;
 
     const largeTextcreationOptions = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
@@ -195,16 +198,16 @@ pub fn main() !void {
         },
     };
 
-    var fpsBox = try gui.Element.create(allocator, renderer.screen_dimensions, fpsoptions);
+    var fpsBox = try gui.Element.create(allocator, renderer.GetScreenDimensions(), fpsoptions);
     defer fpsBox.deinit();
 
-    var largeText = try gui.Element.create(allocator, renderer.screen_dimensions, largeTextcreationOptions);
+    var largeText = try gui.Element.create(allocator, renderer.GetScreenDimensions(), largeTextcreationOptions);
     defer largeText.deinit();
 
     fpsBox.init();
     largeText.init();
     var lastFps: ?f128 = null;
-    while (!renderer.window.shouldClose()) {
+    while (!renderer.window.shouldClose()){
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
         const frameStart = std.time.nanoTimestamp();
@@ -230,10 +233,10 @@ pub fn main() !void {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
         drawEntities.End();
-        fpsBox.Draw(renderer.screen_dimensions, renderer.window);
+        if(f3t)fpsBox.Draw(renderer.GetScreenDimensions(), renderer.window);
         UserInput.menuDraw();
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
-        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(renderer.screen_dimensions, renderer.window);
+        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(renderer.GetScreenDimensions(), renderer.window);
         drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -259,6 +262,7 @@ pub fn main() !void {
         poll.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
+        if(glfw.getKey(renderer.window, glfw.Key.F3) == .press) {if(f3noholdt)f3t = !f3t;f3noholdt = false;}else f3noholdt = true;//TODO use this toggle type for fullscreen and other toggle settings
         prossesinput.End();
         var fps = (std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
         if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);

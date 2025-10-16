@@ -20,7 +20,7 @@ pub fn init(ren: *Renderer) !void {
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
     //menu is temporay test code
-    menu = try gui.Element.create(std.heap.c_allocator, render.screen_dimensions, textEscMenu);
+    menu = try gui.Element.create(std.heap.c_allocator, render.GetScreenDimensions(), textEscMenu);
     menu.init();
     isinit = true;
 }
@@ -32,22 +32,43 @@ pub fn deinit() void {
 }
 
 fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
-    _ = element;
     _ = mouse_pos;
-    if (toggle and window.getMouseButton(glfw.MouseButton.left) == .press) {
+    if (toggle) {
+        element.options.size.heightPixels += 5;
+        element.options.size.widthPixels += 5;
+        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        if( window.getMouseButton(glfw.MouseButton.left) == .press){
         std.debug.print("quitting\n", .{});
-        window.setShouldClose(true);
+        window.setShouldClose(true);}
+        element.update(render.GetScreenDimensions());
+    }
+    else {
+        element.options.size.heightPixels -= 5;
+        element.options.size.widthPixels -= 5;
+        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        element.update(render.GetScreenDimensions());
     }
 }
 
 fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
-    _ = element;
     _ = mouse_pos;
-    if (toggle and window.getMouseButton(glfw.MouseButton.left) == .press) {
-        if (ts.CursorEscaped) {
+    if (toggle) {
+        element.options.size.widthPixels += 5;
+        element.options.size.heightPixels += 5;
+
+        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        if (window.getMouseButton(glfw.MouseButton.left) == .press and ts.CursorEscaped) {
             ts.CursorEscaped = false;
             _ = glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
         }
+        element.update(render.GetScreenDimensions());
+    }
+    else{
+        element.options.size.widthPixels -= 5;
+        element.options.size.heightPixels -= 5;
+
+        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        element.update(render.GetScreenDimensions());
     }
 }
 
@@ -73,6 +94,7 @@ const textEscMenu = gui.Element.CreationOptions{
         .widthPercent = 75,
         .heightPercent = 75,
     },
+    .cornerPixelRadii = @splat(25.0),
     .children = &.{
         .{
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
@@ -90,6 +112,7 @@ const textEscMenu = gui.Element.CreationOptions{
                 },
             },
             .onHover = onHoverEsc,
+            .cornerPixelRadii = @splat(15.0),
         },
         .{
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
@@ -107,12 +130,13 @@ const textEscMenu = gui.Element.CreationOptions{
                 },
             },
             .onHover = onHoverC,
+            .cornerPixelRadii = @splat(15.0),
         },
     },
 };
 
 pub fn menuDraw() void {
-    if (ts.CursorEscaped) menu.Draw(render.screen_dimensions, render.window);
+    if (ts.CursorEscaped) menu.Draw(render.GetScreenDimensions(), render.window);
 }
 pub fn processInput() !void {
     std.debug.assert(isinit);
@@ -149,7 +173,7 @@ pub fn processInput() !void {
     }
     if (render.window.getKey(glfw.Key.F11) == .press and std.time.milliTimestamp() - lastfullscreentoggle > 500) {
         if (ts.Fullscreen) {
-            render.window.setMonitor(null, 0, 0, @intCast(render.screen_dimensions[0]), @intCast(render.screen_dimensions[1]), 0);
+            render.window.setMonitor(null, 0, 0, @intCast(render.GetScreenDimensions()[0]), @intCast(render.GetScreenDimensions()[1]), 0);
             ts.Fullscreen = false;
             lastfullscreentoggle = std.time.milliTimestamp();
         } else {

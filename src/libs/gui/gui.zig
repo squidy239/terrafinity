@@ -7,6 +7,10 @@ var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
 var guiElementColorLocation: c_int = undefined;
+var upper_left_location:c_int = undefined;
+var width_height_location:c_int = undefined;
+var corner_radii_location:c_int = undefined; 
+
 var vertexArray: c_uint = undefined;
 var elementBuffer: c_uint = undefined;
 var arrayBuffer: c_uint = undefined;
@@ -73,7 +77,10 @@ pub const Element = struct {
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
 
         children: ?[]const CreationOptions = null,
-
+        
+        ///top=left, top=right, bottom=right, bottom=left
+        cornerPixelRadii:[4]f32 = @splat(0.0),
+        
         pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
             var count: usize = 0;
             if (self.children) |children| {
@@ -103,6 +110,8 @@ pub const Element = struct {
         elementBackground: ElementBackground,
         text: ?Text.Text,
         textStartPosition: ?Position,
+        ///top=left, top=right, bottom=right, bottom=left
+        cornerPixelRadii:[4]f32 = @splat(0.0),
     };
     ///the allocator must remain valid for the lifetime of the element
     ///init must be called after creating the outermost Element
@@ -151,6 +160,7 @@ pub const Element = struct {
                 .elementBackground = creationOptions.elementBackground,
                 .text = elementText,
                 .textStartPosition = if (creationOptions.textOptions == null) null else creationOptions.textOptions.?.startPosition,
+                .cornerPixelRadii = creationOptions.cornerPixelRadii,
             },
             .children = children,
             .parent = null,
@@ -172,7 +182,7 @@ pub const Element = struct {
         self.isinit = true;
     }
 
-    ///requires a valid opengl context
+    ///requires a valid opengl context, screen_dimentions MUST be multiplyed by fractional scailing
     pub fn Draw(self: *@This(), screen_dimensions: [2]u32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
@@ -183,7 +193,7 @@ pub const Element = struct {
         }
         const screen_dimensions_float = @Vector(2, f64){ @floatFromInt(screen_dimensions[0]), @floatFromInt(screen_dimensions[1]) };
         //
-        var cursorPos = window.getCursorPos();
+        var cursorPos = window.getCursorPos() * @as(@Vector(2, f64), @floatCast(@as(@Vector(2, f32), window.getContentScale())));
         cursorPos[0] = @min(@max(cursorPos[0], 0), screen_dimensions_float[0]);
         cursorPos[1] = @abs(screen_dimensions_float[1] - @min(@max(cursorPos[1], 0), screen_dimensions_float[1]));
         cursorPos = @Vector(2, f64){ cursorPos[0] / (screen_dimensions_float[0]), cursorPos[1] / (screen_dimensions_float[1]) };
@@ -217,6 +227,21 @@ pub const Element = struct {
         const glPos = [2]f32{ @mulAdd(f32, self.pos[0], 2, -1), @mulAdd(f32, self.pos[1], 2, -1) }; //convert the 0-1 coords to -1 to 1
         gl.Uniform2f(guiElementPositionLocation, glPos[0], glPos[1]);
         gl.Uniform2f(guiElementSizeLocation, self.width, self.height);
+        
+        // Convert normalized 0–1 coordinates to pixels
+        const pixelX = self.pos[0] * @as(f32, @floatCast(screen_dimensions_float[0]));
+        const pixelY = self.pos[1] * @as(f32, @floatCast(screen_dimensions_float[1]));
+        const pixelWidth = self.width * @as(f32, @floatCast(screen_dimensions_float[0]));
+        const pixelHeight = self.height * @as(f32, @floatCast(screen_dimensions_float[1]));
+        
+        // top-left corner = center - half-size (Y flipped to match OpenGL’s bottom-left origin)
+        const upper_left_x = pixelX - pixelWidth * 0.5;
+        const upper_left_y = pixelY + pixelHeight * 0.5;
+        
+        gl.Uniform2f(upper_left_location, upper_left_x, upper_left_y);
+        gl.Uniform2f(width_height_location, pixelWidth, pixelHeight);
+        gl.Uniform4f(corner_radii_location, self.options.cornerPixelRadii[0], self.options.cornerPixelRadii[1], self.options.cornerPixelRadii[2], self.options.cornerPixelRadii[3]);
+
         if (self.options.elementBackground == .solid)
             gl.Uniform4f(guiElementColorLocation, self.options.elementBackground.solid[0], self.options.elementBackground.solid[1], self.options.elementBackground.solid[2], self.options.elementBackground.solid[3]);
         gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
@@ -327,6 +352,9 @@ pub fn init(allocator: std.mem.Allocator) void {
     guiElementPositionLocation = gl.GetUniformLocation(shader_program, "position");
     guiElementSizeLocation = gl.GetUniformLocation(shader_program, "size");
     guiElementColorLocation = gl.GetUniformLocation(shader_program, "color");
+    upper_left_location = gl.GetUniformLocation(shader_program, "upper_left");
+    width_height_location = gl.GetUniformLocation(shader_program, "width_height");
+    corner_radii_location = gl.GetUniformLocation(shader_program, "corner_radii");
     LoadFacebuffer();
     Text.init();
     defaultFont = Text.Font.load(@embedFile("GoNotoCurrent-Regular.ttf"), 256, null, allocator) catch |err| std.debug.panic("err: {any}\n", .{err});
