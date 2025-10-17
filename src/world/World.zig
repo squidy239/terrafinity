@@ -147,10 +147,8 @@ pub const World = struct {
                                     .main_branches = 0,
                                     .branch_length = 0,
                                     .canopy_radius = @intFromFloat(30 * factor),
-                                    .num_roots = 0,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.95,
-                                    .root_length = 0,
                                     .canopy_density = 0.9,
                                 });
                                 worldEditor.empty();
@@ -164,10 +162,8 @@ pub const World = struct {
                                     .main_branches = 0,
                                     .branch_length = 0,
                                     .canopy_radius = @intFromFloat(20 * factor),
-                                    .num_roots = 6,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,
-                                    .root_length = 3,
                                     .canopy_density = 0.7,
                                 });
                                 worldEditor.empty();
@@ -181,10 +177,8 @@ pub const World = struct {
                                     .main_branches = 0,
                                     .branch_length = 0,
                                     .canopy_radius = @intFromFloat(12 * factor),
-                                    .num_roots = 4,
                                     .top_radius_factor = 0.75,
                                     .branch_start_height_factor = 0.90,
-                                    .root_length = 2,
                                     .canopy_density = 0.7,
                                 });
                                 worldEditor.empty();
