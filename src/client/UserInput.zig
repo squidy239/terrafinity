@@ -96,7 +96,7 @@ const textEscMenu = gui.Element.CreationOptions{
         .width = .{ .xPercent = 75 },
         .height = .{ .yPercent = 75 },
     },
-    .cornerPixelRadii = @splat(25.0),
+    .cornerPixelRadii = @splat(.{.pixels = 25}),
     .children = &.{
         .{
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
@@ -114,7 +114,7 @@ const textEscMenu = gui.Element.CreationOptions{
                 },
             },
             .onHover = onHoverEsc,
-            .cornerPixelRadii = @splat(15.0),
+            .cornerPixelRadii = @splat(.{.pixels = 15}),
         },
         .{
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
@@ -132,7 +132,7 @@ const textEscMenu = gui.Element.CreationOptions{
                 },
             },
             .onHover = onHoverC,
-            .cornerPixelRadii = @splat(15.0),
+            .cornerPixelRadii = @splat(.{.pixels = 15}),
         },
     },
 };

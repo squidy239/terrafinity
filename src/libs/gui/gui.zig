@@ -39,12 +39,14 @@ pub const SizeUnit = struct {
         const container_range = if (containerRange) |range| range else [2][2]f32{ [2]f32{ 0, 100 }, [2]f32{ 0, 100 } };
         inline for(std.meta.fields(@This())) |field| {
             const fieldData = @field(self, field.name);
-            if(std.mem.eql(u8, field.name, "xPercent")) percents[0] += NormilizeInRange(fieldData, 0, 100, container_range[0][0], container_range[0][1]);
-            if(std.mem.eql(u8, field.name, "yPercent")) percents[1] += NormilizeInRange(yPercentToxPercent(self.yPercent, viewport_pixels), 0, 100, container_range[1][0], container_range[1][1]);
-            if(std.mem.eql(u8, field.name, "pixels")) percents[axis] += pixelsToPercent(self.pixels, viewport_pixels[1]);
-            if(std.mem.eql(u8, field.name, "millimeters")) percents[axis] += millimetersToPercent(self.millimeters, (viewport_millimeters orelse unreachable)[axis]);
-            if(std.mem.eql(u8, field.name, "point")) percents[axis] += pointToPercent(self.point, (viewport_millimeters orelse unreachable)[axis]);
+            if(std.mem.eql(u8, field.name, "xPercent"))percents[0] += NormilizeInRange(fieldData, 0, 100, container_range[0][0], container_range[0][1]);
+            if(std.mem.eql(u8, field.name, "yPercent")) percents[1] += NormilizeInRange(fieldData, 0, 100, container_range[1][0], container_range[1][1]);
+            if(std.mem.eql(u8, field.name, "pixels")) percents[axis] += pixelsToPercent(fieldData, viewport_pixels[1]);
+            if(std.mem.eql(u8, field.name, "millimeters")) percents[axis] += millimetersToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
+            if(std.mem.eql(u8, field.name, "point")) percents[axis] += pointToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
+
         }
+
         return switch (unit) {
             .xPercent => percents[0] + yPercentToxPercent(percents[1], viewport_pixels),
             .yPercent => percents[1] + xPercentToyPercent(percents[0], viewport_pixels),
@@ -89,13 +91,14 @@ pub const SizeUnit = struct {
     };
 };
 
-test "Conversion" {
+test "SizeUnit" {
     const wsize = SizeUnit{ .yPercent = 0, .xPercent = 100, .pixels = 0 };
     const hsize = SizeUnit{ .yPercent = 50, .xPercent = 0, .pixels = 0 };
 
     try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 },null,1, .yPercent), 50);
     try std.testing.expectEqual(hsize.as(.{ 100, 200 },.{ 100, 200 },null,0, .xPercent), 200);
     try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 }, null,0,.milimeters), 100);
+
 
     const size = SizeUnit{ .yPercent = 0, .xPercent = 0, .pixels = 200 };
     try std.testing.expectEqual(size.as(.{ 200, 100 },.{ 100, 200 },null,1, .yPercent), 200);
@@ -166,7 +169,7 @@ pub const Element = struct {
         children: ?[]const CreationOptions = null,
 
         ///top=left, top=right, bottom=right, bottom=left
-        cornerPixelRadii: [4]f32 = @splat(0.0),
+        cornerPixelRadii: [4]SizeUnit = @splat(.{}),
 
         pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
             var count: usize = 0;
@@ -198,7 +201,7 @@ pub const Element = struct {
         text: ?Text.Text,
         textStartPosition: ?Position,
         ///top=left, top=right, bottom=right, bottom=left
-        cornerPixelRadii: [4]f32 = @splat(0.0),
+        cornerPixelRadii: [4]SizeUnit = @splat(.{}),
     };
     ///the allocator must remain valid for the lifetime of the element
     ///init must be called after creating the outermost Element
@@ -333,7 +336,7 @@ pub const Element = struct {
 
         gl.Uniform2f(upper_left_location, upper_left_x, upper_left_y);
         gl.Uniform2f(width_height_location, pixelWidth, pixelHeight);
-        gl.Uniform4f(corner_radii_location, self.options.cornerPixelRadii[0], self.options.cornerPixelRadii[1], self.options.cornerPixelRadii[2], self.options.cornerPixelRadii[3]);
+        gl.Uniform4f(corner_radii_location, self.options.cornerPixelRadii[0].as(self.viewport_pixels, self.viewport_millimeters, null, 0, .pixels), self.options.cornerPixelRadii[1].as(self.viewport_pixels, self.viewport_millimeters, null, 0, .pixels), self.options.cornerPixelRadii[2].as(self.viewport_pixels, self.viewport_millimeters, null, 0, .pixels), self.options.cornerPixelRadii[3].as(self.viewport_pixels, self.viewport_millimeters, null, 0, .pixels));
 
         if (self.options.elementBackground == .solid)
             gl.Uniform4f(guiElementColorLocation, self.options.elementBackground.solid[0], self.options.elementBackground.solid[1], self.options.elementBackground.solid[2], self.options.elementBackground.solid[3]);
@@ -354,27 +357,38 @@ pub const Element = struct {
     }
     ///requires a valid opengl context
     pub fn update(self: *@This()) void {
-        var width: f32 = 0.0;
-        width += self.options.size.width.xPercent / 100.0;
-        var height: f32 = 0.0;
-        height += self.options.size.height.yPercent / 100.0;
-        var posx = self.options.position.x.xPercent;
-        var posy = self.options.position.y.yPercent;
+        var sizeRange:[2][2]f32 = .{
+            .{ 0, 100 },
+            .{ 0, 100 },
+        };
+        
+        var posRangeX:[2][2]f32 = .{//must have x and y becuause a 0 coord for the other axis can get normilised, TODO find a better solution
+            .{ 0, 100 },
+            .{ 0, 100 },
+        };
+        
+        var posRangeY:[2][2]f32 = .{
+            .{ 0, 100 },
+            .{ 0, 100 },
+        };
         if (self.parent) |parent| {
-            posx = NormilizeInRange(posx, 0, 100, 100 * (parent.pos[0] - (parent.width * 0.5)), 100 * (parent.pos[0] + (parent.width * 0.5)));
-            posy = NormilizeInRange(posy, 0, 100, 100 * (parent.pos[1] - (parent.height * 0.5)), 100 * (parent.pos[1] + (parent.height * 0.5)));
-            width = NormilizeInRange(width, 0, 1, 0, parent.width);
-            height = NormilizeInRange(height, 0, 1, 0, parent.height);
-        }
-        width += self.options.size.width.pixels / (self.viewport_pixels[0]);
-        height += self.options.size.height.pixels / (self.viewport_pixels[1]);
-        posx /= 100;
-        posy /= 100;
-        posx += (self.options.position.x.pixels / (self.viewport_pixels[0]));
-        posy += (self.options.position.y.pixels / (self.viewport_pixels[1]));
-        self.width = width;
-        self.height = height;
-        self.pos = [2]f32{ posx, posy };
+            sizeRange = .{
+                .{0, parent.width * 100},
+                .{0, parent.height * 100},
+            };
+            posRangeX = .{
+                .{ 100 * (parent.pos[0] - (parent.width * 0.5)), 100 * (parent.pos[0] + (parent.width * 0.5))},
+                .{0, 100},
+            };
+            posRangeY = .{
+                .{0, 100},
+                .{ 100 * (parent.pos[1] - (parent.height * 0.5)), 100 * (parent.pos[1] + (parent.height * 0.5))},
+            };
+        }        
+        self.width =  0.01 * self.options.size.width.as(self.viewport_pixels, self.viewport_millimeters, sizeRange, 0, .xPercent) ;
+        self.height = 0.01 * self.options.size.height.as(self.viewport_pixels, self.viewport_millimeters, sizeRange, 1, .yPercent);
+        self.pos[0] = 0.01 * self.options.position.x.as(self.viewport_pixels, self.viewport_millimeters, posRangeX, 0, .xPercent);
+        self.pos[1] = 0.01 * self.options.position.y.as(self.viewport_pixels, self.viewport_millimeters, posRangeY, 1, .yPercent);
         updateText(self);
     }
 

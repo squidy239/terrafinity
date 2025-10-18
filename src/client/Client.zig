@@ -176,7 +176,7 @@ pub fn main() !void {
             .width = .{ .xPercent = 40 },
             .height = .{ .yPercent = 30 },
         },
-        .cornerPixelRadii = .{ 0, 0, 25, 0 },
+        .cornerPixelRadii = .{ .{}, .{}, .{.pixels = 25}, .{} },
     };
     var f3t: bool = true;
     var f3noholdt: bool = true;
