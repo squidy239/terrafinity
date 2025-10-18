@@ -18,7 +18,7 @@ pub const GiantTreeGenParams = struct {
 fn getTaperedRadius(base_radius: u32, y: u32, height: u32, top_radius_factor: f32, scale: f32) u32 {
     const progress = (@as(f32, @floatFromInt(y))) / (@as(f32, @floatFromInt(height)) * scale);
     const base_r = @as(f32, @floatFromInt(base_radius));
-    const top_r = base_r * top_radius_factor ;
+    const top_r = base_r * top_radius_factor;
     std.debug.assert(progress >= 0 and progress <= 1);
     const radius = (base_r * (1.0 - progress) + top_r * progress) * scale;
     return @max(1, @as(u32, @intFromFloat(radius)));
@@ -26,7 +26,7 @@ fn getTaperedRadius(base_radius: u32, y: u32, height: u32, top_radius_factor: f3
 
 fn generateTrunk(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeGenParams) !void {
     var y: u32 = 0;
-    const sh:u32 = @intFromFloat(@as(f32, @floatFromInt(params.height)) * params.scale);
+    const sh: u32 = @intFromFloat(@as(f32, @floatFromInt(params.height)) * params.scale);
     while (y < sh) : (y += 1) {
         const r = getTaperedRadius(params.base_radius, y, params.height, params.top_radius_factor, params.scale);
         var dx: i32 = -@as(i32, @intCast(r));
@@ -44,7 +44,6 @@ fn generateTrunk(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeG
     }
 }
 
-
 fn generateBranches(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeGenParams) !void {
     const start_y = @as(f32, @floatFromInt(params.height)) * params.branch_start_height_factor;
     var branch: u32 = 0;
@@ -54,16 +53,16 @@ fn generateBranches(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTr
         while (step < params.branch_length) : (step += 1) {
             const t = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(params.branch_length));
             const dist = t * @as(f32, @floatFromInt(params.branch_length));
-            const x = base[0] + @as(i64, @intFromFloat(@cos(angle) * dist  * params.scale));
-            const z = base[2] + @as(i64, @intFromFloat(@sin(angle) * dist  * params.scale));
-            const y = base[1] + @as(i64, @intFromFloat((start_y + t * @as(f32, @floatFromInt(params.branch_length)) * 0.4)  * params.scale));
+            const x = base[0] + @as(i64, @intFromFloat(@cos(angle) * dist * params.scale));
+            const z = base[2] + @as(i64, @intFromFloat(@sin(angle) * dist * params.scale));
+            const y = base[1] + @as(i64, @intFromFloat((start_y + t * @as(f32, @floatFromInt(params.branch_length)) * 0.4) * params.scale));
             try editor.PlaceBlock(.{ .block = .Wood, .pos = .{ x, y, z } });
         }
     }
 }
 
 fn generateCanopy(editor: *WorldEditor, base: @Vector(3, i64), params: GiantTreeGenParams, rng: std.Random) !void {
-    const r:u32 = @intFromFloat(@as(f32, @floatFromInt(params.canopy_radius)) * params.scale);
+    const r: u32 = @intFromFloat(@as(f32, @floatFromInt(params.canopy_radius)) * params.scale);
     const r_sq = r * r;
     const r_y = @max(1, r * 7 / 10); // vertical squash
     const r_y_sq = r_y * r_y;

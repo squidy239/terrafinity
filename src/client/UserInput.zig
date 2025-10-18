@@ -20,8 +20,11 @@ pub fn init(ren: *Renderer) !void {
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
     //menu is temporay test code
-    menu = try gui.Element.create(std.heap.c_allocator, render.GetScreenDimensions(), textEscMenu);
-    menu.init();
+    menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
+    const viewport_pixels:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
+    const viewport_millimeters:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));//TODO find a way to get the monitor that the window is on
+    menu.init(viewport_pixels, viewport_millimeters);
+    
     isinit = true;
 }
 
@@ -34,41 +37,40 @@ pub fn deinit() void {
 fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
     _ = mouse_pos;
     if (toggle) {
-        element.options.size.heightPixels += 5;
-        element.options.size.widthPixels += 5;
+        element.options.size.height.pixels += 5;
+        element.options.size.width.pixels += 5;
         element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        if( window.getMouseButton(glfw.MouseButton.left) == .press){
-        std.debug.print("quitting\n", .{});
-        window.setShouldClose(true);}
-        element.update(render.GetScreenDimensions());
-    }
-    else {
-        element.options.size.heightPixels -= 5;
-        element.options.size.widthPixels -= 5;
+        if (window.getMouseButton(glfw.MouseButton.left) == .press) {
+            std.debug.print("quitting\n", .{});
+            window.setShouldClose(true);
+        }
+        element.update();
+    } else {
+        element.options.size.height.pixels -= 5;
+        element.options.size.width.pixels -= 5;
         element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        element.update(render.GetScreenDimensions());
+        element.update();
     }
 }
 
 fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
     _ = mouse_pos;
     if (toggle) {
-        element.options.size.widthPixels += 5;
-        element.options.size.heightPixels += 5;
+        element.options.size.width.pixels += 5;
+        element.options.size.height.pixels += 5;
 
         element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
         if (window.getMouseButton(glfw.MouseButton.left) == .press and ts.CursorEscaped) {
             ts.CursorEscaped = false;
             _ = glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
         }
-        element.update(render.GetScreenDimensions());
-    }
-    else{
-        element.options.size.widthPixels -= 5;
-        element.options.size.heightPixels -= 5;
+        element.update();
+    } else {
+        element.options.size.width.pixels -= 5;
+        element.options.size.height.pixels -= 5;
 
         element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        element.update(render.GetScreenDimensions());
+        element.update();
     }
 }
 
@@ -89,26 +91,26 @@ var ts = ToggleSettings{
 
 const textEscMenu = gui.Element.CreationOptions{
     .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
-    .position = .{ .xPercent = 50, .yPercent = 50 },
+    .position = .{ .x = .{ .xPercent = 50 }, .y = .{.yPercent = 50} },
     .size = .{
-        .widthPercent = 75,
-        .heightPercent = 75,
+        .width = .{ .xPercent = 75 },
+        .height = .{ .yPercent = 75 },
     },
     .cornerPixelRadii = @splat(25.0),
     .children = &.{
         .{
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-            .position = .{ .xPercent = 50, .yPercent = 60 },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
             .size = .{
-                .widthPercent = 60,
-                .heightPercent = 10,
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
             },
             .textOptions = .{
                 .text = "Quit",
                 .scale = .{ .relative = 4 },
                 .startPosition = .{
-                    .xPercent = 45,
-                    .yPercent = 100,
+                    .x = .{ .xPercent = 45 },
+                     .y = .{ .yPercent = 100 },
                 },
             },
             .onHover = onHoverEsc,
@@ -116,17 +118,17 @@ const textEscMenu = gui.Element.CreationOptions{
         },
         .{
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-            .position = .{ .xPercent = 50, .yPercent = 80 },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
             .size = .{
-                .widthPercent = 60,
-                .heightPercent = 10,
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
             },
             .textOptions = .{
                 .text = "Back to Game",
                 .scale = .{ .relative = 4 },
                 .startPosition = .{
-                    .xPercent = 35,
-                    .yPercent = 100,
+                    .x = .{ .xPercent = 35 },
+                    .y = .{ .yPercent = 100 },
                 },
             },
             .onHover = onHoverC,
@@ -135,8 +137,8 @@ const textEscMenu = gui.Element.CreationOptions{
     },
 };
 
-pub fn menuDraw() void {
-    if (ts.CursorEscaped) menu.Draw(render.GetScreenDimensions(), render.window);
+pub fn menuDraw(viewport_pixels:@Vector(2, f32), viewport_millimeters:@Vector(2, f32)) void {
+    if (ts.CursorEscaped) menu.Draw(viewport_pixels,viewport_millimeters, render.window);
 }
 pub fn processInput() !void {
     std.debug.assert(isinit);

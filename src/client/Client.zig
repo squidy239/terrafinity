@@ -167,47 +167,47 @@ pub fn main() !void {
             .text = "",
             .scale = .{ .relative = 5 },
             .startPosition = .{
-                .xPercent = 0,
-                .yPercent = 100,
+                .x = .{ .xPercent = 0 },
+                .y = .{ .yPercent = 100 },
             },
         },
-        .position = .{ .xPercent = 20, .yPercent = 85 },
+        .position = .{ .x = .{ .xPercent = 20 }, .y = .{ .yPercent = 85 } },
         .size = .{
-            .widthPercent = 40,
-            .heightPercent = 30,
+            .width = .{ .xPercent = 40 },
+            .height = .{ .yPercent = 30 },
         },
-        .cornerPixelRadii = .{0, 0, 25,0 },
+        .cornerPixelRadii = .{ 0, 0, 25, 0 },
     };
-    var f3t:bool = true;
-    var f3noholdt:bool = true;
+    var f3t: bool = true;
+    var f3noholdt: bool = true;
 
     const largeTextcreationOptions = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
-        .position = .{ .xPercent = 10, .yPercent = 50 },
+        .position = .{ .x = .{ .xPercent = 10 }, .y = .{ .yPercent = 50 } },
         .size = .{
-            .widthPercent = 20,
-            .heightPercent = 100,
+            .width = .{ .xPercent = 20 },
+            .height = .{ .yPercent = 100 },
         },
         .textOptions = .{
             .text = @embedFile("text.txt"),
             .scale = .{ .absolute = 16 },
             .startPosition = .{
-                .xPercent = 0,
-                .yPercent = 100,
+                .x = .{ .xPercent = 0 },
+                .y = .{ .yPercent = 100 },
             },
         },
     };
 
-    var fpsBox = try gui.Element.create(allocator, renderer.GetScreenDimensions(), fpsoptions);
+    var fpsBox = try gui.Element.create(allocator, fpsoptions);
+    var largeText = try gui.Element.create(allocator, largeTextcreationOptions);
+    const viewport_pixels:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+    const viewport_millimeters:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
+    fpsBox.init(viewport_pixels, viewport_millimeters);
     defer fpsBox.deinit();
-
-    var largeText = try gui.Element.create(allocator, renderer.GetScreenDimensions(), largeTextcreationOptions);
+    largeText.init(viewport_pixels, viewport_millimeters);
     defer largeText.deinit();
-
-    fpsBox.init();
-    largeText.init();
     var lastFps: ?f128 = null;
-    while (!renderer.window.shouldClose()){
+    while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
         const frameStart = std.time.nanoTimestamp();
@@ -233,10 +233,12 @@ pub fn main() !void {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
         drawEntities.End();
-        if(f3t)fpsBox.Draw(renderer.GetScreenDimensions(), renderer.window);
-        UserInput.menuDraw();
+        const viewport_pixels_loop:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+        const viewport_millimeters_loop:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
+        if (f3t) fpsBox.Draw(viewport_pixels_loop,viewport_millimeters_loop, renderer.window);
+        UserInput.menuDraw(viewport_pixels_loop,viewport_millimeters_loop);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
-        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(renderer.GetScreenDimensions(), renderer.window);
+        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(viewport_pixels_loop,viewport_millimeters_loop, renderer.window);
         drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -262,7 +264,10 @@ pub fn main() !void {
         poll.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
         try UserInput.processInput();
-        if(glfw.getKey(renderer.window, glfw.Key.F3) == .press) {if(f3noholdt)f3t = !f3t;f3noholdt = false;}else f3noholdt = true;//TODO use this toggle type for fullscreen and other toggle settings
+        if (glfw.getKey(renderer.window, glfw.Key.F3) == .press) {
+            if (f3noholdt) f3t = !f3t;
+            f3noholdt = false;
+        } else f3noholdt = true; //TODO use this toggle type for fullscreen and other toggle settings
         prossesinput.End();
         var fps = (std.time.ns_per_s / @as(f128, @floatFromInt(std.time.nanoTimestamp() - frameStart)));
         if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);

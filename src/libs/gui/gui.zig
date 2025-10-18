@@ -1,24 +1,120 @@
 const std = @import("std");
+const zigimg = @import("root").zigimg;
+
 const gl = @import("gl");
 const glfw = @import("glfw");
-const zigimg = @import("root").zigimg;
+
 pub const Text = @import("text/text.zig");
+
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
 var guiElementColorLocation: c_int = undefined;
-var upper_left_location:c_int = undefined;
-var width_height_location:c_int = undefined;
-var corner_radii_location:c_int = undefined; 
+var upper_left_location: c_int = undefined;
+var width_height_location: c_int = undefined;
+var corner_radii_location: c_int = undefined;
 
 var vertexArray: c_uint = undefined;
 var elementBuffer: c_uint = undefined;
 var arrayBuffer: c_uint = undefined;
 var defaultFont: Text.Font = undefined;
 var isinit: bool = false;
+
+//all element types must be the same
+pub const SizeUnit = struct {
+    ///a percent of the container's width
+    xPercent: f32 = 0,
+    ///a percent of the container's height
+    yPercent: f32 = 0,
+    pixels: f32 = 0,
+    millimeters: f32 = 0,
+    ///a unit of font size
+    point: f32 = 0,
+    ///converts and adds the units, x and y percent get normilized to the container range. if it is null 0 to 100 is used
+    ///if viewport_millimeters is null millimeters and point units cannot be used
+    ///axis that the units are being converted for, 0 for x and 1 for y
+    pub fn as(self: @This(), viewport_pixels: [2]f32, viewport_millimeters: ?[2]f32,containerRange: ?[2][2]f32,axis:u1, unit: Units) f32 {
+        //common unit is width percent
+        var percents:[2]f32 = @splat(0.0);
+        const container_range = if (containerRange) |range| range else [2][2]f32{ [2]f32{ 0, 100 }, [2]f32{ 0, 100 } };
+        inline for(std.meta.fields(@This())) |field| {
+            const fieldData = @field(self, field.name);
+            if(std.mem.eql(u8, field.name, "xPercent")) percents[0] += NormilizeInRange(fieldData, 0, 100, container_range[0][0], container_range[0][1]);
+            if(std.mem.eql(u8, field.name, "yPercent")) percents[1] += NormilizeInRange(yPercentToxPercent(self.yPercent, viewport_pixels), 0, 100, container_range[1][0], container_range[1][1]);
+            if(std.mem.eql(u8, field.name, "pixels")) percents[axis] += pixelsToPercent(self.pixels, viewport_pixels[1]);
+            if(std.mem.eql(u8, field.name, "millimeters")) percents[axis] += millimetersToPercent(self.millimeters, (viewport_millimeters orelse unreachable)[axis]);
+            if(std.mem.eql(u8, field.name, "point")) percents[axis] += pointToPercent(self.point, (viewport_millimeters orelse unreachable)[axis]);
+        }
+        return switch (unit) {
+            .xPercent => percents[0] + yPercentToxPercent(percents[1], viewport_pixels),
+            .yPercent => percents[1] + xPercentToyPercent(percents[0], viewport_pixels),
+            .pixels => pixelsFromPercent(percents[1], viewport_pixels[1]) + pixelsFromPercent(percents[0], viewport_pixels[0]),
+            .milimeters => millimetersFromPercent(percents[1], (viewport_millimeters orelse unreachable)[1]) + millimetersFromPercent(percents[0], (viewport_millimeters orelse unreachable)[0]),
+            .point => pointFromPercent(percents[1], (viewport_millimeters orelse unreachable)[1]) + pointFromPercent(percents[0], (viewport_millimeters orelse unreachable)[0]),
+        };
+    }
+
+    fn xPercentToyPercent(xPercent: f32, container_dimensions: [2]f32) f32 {
+        return 100 * ((pixelsFromPercent(xPercent, container_dimensions[0]) / container_dimensions[1]));
+    }
+    fn yPercentToxPercent(yPercent: f32, container_dimensions: [2]f32) f32 {
+        return 100 * ((pixelsFromPercent(yPercent, container_dimensions[1]) / container_dimensions[0]));
+    }
+    fn pixelsToPercent(pixels: f32, container_dimension: f32) f32 {
+        return 100 * (pixels / container_dimension);
+    }
+    fn pixelsFromPercent(percent: f32, container_dimension: f32) f32 {
+        return percent * (0.01 * container_dimension);
+    }
+    fn millimetersToPercent(millimeters: f32, container_millimeters: f32) f32 {
+        return 100 * (millimeters / container_millimeters);
+    }
+    fn millimetersFromPercent(percent: f32, container_millimeters: f32) f32 {
+        return percent * (0.01 * container_millimeters);//having the parentheses maintaines precision
+    }
+    fn pointToPercent(point: f32, container_millimeters: f32) f32 {
+        const container_points = container_millimeters * 2.8346456693;//points per mm
+        return point / container_points;
+    }
+    fn pointFromPercent(percent: f32, container_millimeters: f32) f32 {
+        const container_points = container_millimeters * 2.8346456693;//points per mm
+        return percent * (0.01 * container_points);
+    }
+    const Units = enum {
+        xPercent,
+        yPercent,
+        pixels,
+        milimeters,
+        point,
+    };
+};
+
+test "Conversion" {
+    const wsize = SizeUnit{ .yPercent = 0, .xPercent = 100, .pixels = 0 };
+    const hsize = SizeUnit{ .yPercent = 50, .xPercent = 0, .pixels = 0 };
+
+    try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 },null,1, .yPercent), 50);
+    try std.testing.expectEqual(hsize.as(.{ 100, 200 },.{ 100, 200 },null,0, .xPercent), 200);
+    try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 }, null,0,.milimeters), 100);
+
+    const size = SizeUnit{ .yPercent = 0, .xPercent = 0, .pixels = 200 };
+    try std.testing.expectEqual(size.as(.{ 200, 100 },.{ 100, 200 },null,1, .yPercent), 200);
+    try std.testing.expectEqual(size.as(.{ 100, 200 },.{ 100, 200 },null,0, .milimeters), 100);
+
+    const mmsize = SizeUnit{ .yPercent = 0, .xPercent = 0, .pixels = 0, .millimeters = 10 };
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .xPercent), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 100 },null,0, .xPercent), 5);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 100 },null,1, .yPercent), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 200 },null,1, .yPercent), 5);
+
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .pixels), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .point), 28.346455);
+}
+
 pub const Element = struct {
     allocator: std.mem.Allocator,
-    screen_dimensions: [2]u32,
+    viewport_pixels: [2]f32,
+    viewport_millimeters: [2]f32,
     width: f32,
     height: f32,
     pos: @Vector(2, f32),
@@ -28,22 +124,13 @@ pub const Element = struct {
     isinit: bool = false,
     ///a position on the screen, x and y can be between 0 and 100
     pub const Position = struct {
-        xPercent: f32 = 0.0,
-        yPercent: f32 = 0.0,
-        xPixels: f32 = 0.0,
-        yPixels: f32 = 0.0,
+        x: SizeUnit = .{},
+        y: SizeUnit = .{},
     };
 
-    pub const SizeUnit = union(enum) { //TODO
-        widthPercent: f32,
-        heightPercent: f32,
-        pixels: f32,
-    };
     pub const Size = struct {
-        widthPercent: f32 = 0.0,
-        heightPercent: f32 = 0.0,
-        widthPixels: f32 = 0.0,
-        heightPixels: f32 = 0.0,
+        width: SizeUnit = .{},
+        height: SizeUnit = .{},
     };
 
     pub const ElementBackground = union(enum) {
@@ -57,15 +144,15 @@ pub const Element = struct {
         ///uses the default font if this is null
         font: ?*Text.Font = null,
         scale: @FieldType(Text.Text, "scale"),
-        startPosition: Position = .{ .xPercent = 0, .yPercent = 0 },
+        startPosition: Position = .{ .x = .{ .xPercent = 0 }, .y = .{ .yPercent = 0 } },
     };
     pub const CreationOptions = struct {
         textOptions: ?TextOptions = null,
         elementBackground: ElementBackground = .{ .solid = .{ 1.0, 1.0, 1.0, 1.0 } },
 
-        position: Position = .{ .xPercent = 50, .yPercent = 50 },
+        position: Position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
         ///the size of the element. all units are added together
-        size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
+        size: Size = .{ .width = .{ .xPercent = 100 }, .height = .{ .yPercent = 100 } },
         ///if this is false the element and its children will not be drawn and onHover and onDraw will not be called
         Visible: bool = true,
         ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
@@ -77,10 +164,10 @@ pub const Element = struct {
         onDraw: ?*const fn (*Element, *glfw.Window) void = null,
 
         children: ?[]const CreationOptions = null,
-        
+
         ///top=left, top=right, bottom=right, bottom=left
-        cornerPixelRadii:[4]f32 = @splat(0.0),
-        
+        cornerPixelRadii: [4]f32 = @splat(0.0),
+
         pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
             var count: usize = 0;
             if (self.children) |children| {
@@ -94,9 +181,9 @@ pub const Element = struct {
 
     const Options = struct {
         ///the position of the element. all units are added together
-        position: Position = .{ .xPercent = 50, .yPercent = 50 },
+        position: Position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
         ///the size of the element. all units are added together
-        size: Size = .{ .widthPercent = 100, .heightPercent = 100 },
+        size: Size = .{ .width = .{ .xPercent = 100 }, .height = .{ .yPercent = 100 } },
         ///if this is false the element and its children will not be drawn and onHover and onDraw will not be called
         Visible: bool = true,
         ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
@@ -111,11 +198,11 @@ pub const Element = struct {
         text: ?Text.Text,
         textStartPosition: ?Position,
         ///top=left, top=right, bottom=right, bottom=left
-        cornerPixelRadii:[4]f32 = @splat(0.0),
+        cornerPixelRadii: [4]f32 = @splat(0.0),
     };
     ///the allocator must remain valid for the lifetime of the element
     ///init must be called after creating the outermost Element
-    pub fn create(allocator: std.mem.Allocator, screen_dimensions: [2]u32, creationOptions: CreationOptions) !Element {
+    pub fn create(allocator: std.mem.Allocator, creationOptions: CreationOptions) !Element {
         var elementText: ?Text.Text = null;
         if (creationOptions.textOptions != null) {
             elementText = Text.Text{
@@ -138,19 +225,21 @@ pub const Element = struct {
 
         const childrenCount = creationOptions.CountChildren(false);
         const children: ?[]Element = if (childrenCount > 0) try allocator.alloc(Element, childrenCount) else null;
-
+        errdefer if (children) |childrenn| allocator.free(childrenn);
         if (creationOptions.children) |childrenOptions| {
             for (childrenOptions, 0..) |childOptions, i| {
-                children.?[i] = try Element.create(allocator, screen_dimensions, childOptions);
+                errdefer for(children.?[0..i]) |*child| child.deinit();
+                children.?[i] = try Element.create(allocator, childOptions);
             }
         }
 
         return Element{
             .allocator = allocator,
-            .screen_dimensions = screen_dimensions,
+            .viewport_pixels = undefined,
             .width = undefined,
             .height = undefined,
             .pos = undefined,
+            .viewport_millimeters = undefined,
             .options = .{
                 .Visible = creationOptions.Visible,
                 .onHover = creationOptions.onHover,
@@ -168,14 +257,16 @@ pub const Element = struct {
         };
     }
     //msut be called after creation on outermost element
-    pub fn init(self: *@This()) void {
+    pub fn init(self: *@This(), viewport_pixels: [2]f32, viewport_millimeters: [2]f32) void {
         std.debug.assert(!self.isinit);
-        self.update(self.screen_dimensions);
-        self.updateText(self.screen_dimensions);
+        self.viewport_millimeters = viewport_millimeters;
+        self.viewport_pixels = viewport_pixels;
+        self.update();
+        self.updateText();
         if (self.children) |children| {
             for (children) |*child| {
                 child.parent = self;
-                child.init();
+                child.init(viewport_pixels, viewport_millimeters);
             }
         }
 
@@ -183,20 +274,22 @@ pub const Element = struct {
     }
 
     ///requires a valid opengl context, screen_dimentions MUST be multiplyed by fractional scailing
-    pub fn Draw(self: *@This(), screen_dimensions: [2]u32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
+    pub fn Draw(self: *@This(), viewport_pixels: [2]f32,viewport_millimeters: [2]f32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
         if (self.options.onDraw) |onDraw| onDraw(self, window);
-        if (screen_dimensions[0] != self.screen_dimensions[0] or screen_dimensions[1] != self.screen_dimensions[1]) {
-            self.update(screen_dimensions);
+        if (viewport_pixels[0] != self.viewport_pixels[0] or viewport_pixels[1] != self.viewport_pixels[1] or viewport_millimeters[0] != self.viewport_millimeters[0] or viewport_millimeters[1] != self.viewport_millimeters[1]) {
+            self.viewport_pixels = viewport_pixels;
+            self.viewport_millimeters = viewport_millimeters;
+            self.update();
         }
-        const screen_dimensions_float = @Vector(2, f64){ @floatFromInt(screen_dimensions[0]), @floatFromInt(screen_dimensions[1]) };
+        const viewport_pixels_float = @Vector(2, f64){ @floatCast(viewport_pixels[0]), @floatCast(viewport_pixels[1]) };
         //
         var cursorPos = window.getCursorPos() * @as(@Vector(2, f64), @floatCast(@as(@Vector(2, f32), window.getContentScale())));
-        cursorPos[0] = @min(@max(cursorPos[0], 0), screen_dimensions_float[0]);
-        cursorPos[1] = @abs(screen_dimensions_float[1] - @min(@max(cursorPos[1], 0), screen_dimensions_float[1]));
-        cursorPos = @Vector(2, f64){ cursorPos[0] / (screen_dimensions_float[0]), cursorPos[1] / (screen_dimensions_float[1]) };
+        cursorPos[0] = @min(@max(cursorPos[0], 0), viewport_pixels_float[0]);
+        cursorPos[1] = @abs(viewport_pixels_float[1] - @min(@max(cursorPos[1], 0), viewport_pixels_float[1]));
+        cursorPos = @Vector(2, f64){ cursorPos[0] / (viewport_pixels_float[0]), cursorPos[1] / (viewport_pixels_float[1]) };
         const bottomCorner = @Vector(2, f32){ self.pos[0] - (self.width * 0.5), self.pos[1] - (self.height * 0.5) };
         const topCorner = @Vector(2, f32){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) };
         const inBottom = bottomCorner[0] < cursorPos[0] and bottomCorner[1] < cursorPos[1];
@@ -227,17 +320,17 @@ pub const Element = struct {
         const glPos = [2]f32{ @mulAdd(f32, self.pos[0], 2, -1), @mulAdd(f32, self.pos[1], 2, -1) }; //convert the 0-1 coords to -1 to 1
         gl.Uniform2f(guiElementPositionLocation, glPos[0], glPos[1]);
         gl.Uniform2f(guiElementSizeLocation, self.width, self.height);
-        
+
         // Convert normalized 0–1 coordinates to pixels
-        const pixelX = self.pos[0] * @as(f32, @floatCast(screen_dimensions_float[0]));
-        const pixelY = self.pos[1] * @as(f32, @floatCast(screen_dimensions_float[1]));
-        const pixelWidth = self.width * @as(f32, @floatCast(screen_dimensions_float[0]));
-        const pixelHeight = self.height * @as(f32, @floatCast(screen_dimensions_float[1]));
-        
+        const pixelX = self.pos[0] * @as(f32, @floatCast(viewport_pixels_float[0]));
+        const pixelY = self.pos[1] * @as(f32, @floatCast(viewport_pixels_float[1]));
+        const pixelWidth = self.width * @as(f32, @floatCast(viewport_pixels_float[0]));
+        const pixelHeight = self.height * @as(f32, @floatCast(viewport_pixels_float[1]));
+
         // top-left corner = center - half-size (Y flipped to match OpenGL’s bottom-left origin)
         const upper_left_x = pixelX - pixelWidth * 0.5;
         const upper_left_y = pixelY + pixelHeight * 0.5;
-        
+
         gl.Uniform2f(upper_left_location, upper_left_x, upper_left_y);
         gl.Uniform2f(width_height_location, pixelWidth, pixelHeight);
         gl.Uniform4f(corner_radii_location, self.options.cornerPixelRadii[0], self.options.cornerPixelRadii[1], self.options.cornerPixelRadii[2], self.options.cornerPixelRadii[3]);
@@ -247,7 +340,7 @@ pub const Element = struct {
         gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0);
 
         if (self.options.text != null) {
-            self.options.text.?.render(screen_dimensions);
+            self.options.text.?.render(viewport_pixels);
         }
         if (mouseOverElement) {
             self.options.onHover.?(self, cursorPos, window, false);
@@ -255,46 +348,46 @@ pub const Element = struct {
 
         if (self.children) |children| {
             for (children) |*child| {
-                child.Draw(screen_dimensions, window);
+                child.Draw(viewport_pixels,viewport_millimeters, window);
             }
         }
     }
     ///requires a valid opengl context
-    pub fn update(self: *@This(), screen_dimensions: [2]u32) void {
-        self.screen_dimensions = screen_dimensions;
+    pub fn update(self: *@This()) void {
         var width: f32 = 0.0;
-        width += self.options.size.widthPercent / 100.0;
-
+        width += self.options.size.width.xPercent / 100.0;
         var height: f32 = 0.0;
-        height += self.options.size.heightPercent / 100.0;
-        var posx = self.options.position.xPercent / 100;
-        var posy = self.options.position.yPercent / 100;
+        height += self.options.size.height.yPercent / 100.0;
+        var posx = self.options.position.x.xPercent;
+        var posy = self.options.position.y.yPercent;
         if (self.parent) |parent| {
-            posx = NormilizeInRange(posx, 0, 1, parent.pos[0] - (parent.width * 0.5), parent.pos[0] + (parent.width * 0.5));
-            posy = NormilizeInRange(posy, 0, 1, parent.pos[1] - (parent.height * 0.5), parent.pos[1] + (parent.height * 0.5));
+            posx = NormilizeInRange(posx, 0, 100, 100 * (parent.pos[0] - (parent.width * 0.5)), 100 * (parent.pos[0] + (parent.width * 0.5)));
+            posy = NormilizeInRange(posy, 0, 100, 100 * (parent.pos[1] - (parent.height * 0.5)), 100 * (parent.pos[1] + (parent.height * 0.5)));
             width = NormilizeInRange(width, 0, 1, 0, parent.width);
             height = NormilizeInRange(height, 0, 1, 0, parent.height);
         }
-        width += self.options.size.widthPixels / @as(f32, @floatFromInt(screen_dimensions[0]));
-        height += self.options.size.heightPixels / @as(f32, @floatFromInt(screen_dimensions[1]));
-        posx += (self.options.position.xPixels / @as(f32, @floatFromInt(screen_dimensions[0])));
-        posy += (self.options.position.yPixels / @as(f32, @floatFromInt(screen_dimensions[1])));
+        width += self.options.size.width.pixels / (self.viewport_pixels[0]);
+        height += self.options.size.height.pixels / (self.viewport_pixels[1]);
+        posx /= 100;
+        posy /= 100;
+        posx += (self.options.position.x.pixels / (self.viewport_pixels[0]));
+        posy += (self.options.position.y.pixels / (self.viewport_pixels[1]));
         self.width = width;
         self.height = height;
         self.pos = [2]f32{ posx, posy };
-        updateText(self, screen_dimensions);
+        updateText(self);
     }
 
-    fn updateText(self: *@This(), screen_dimensions: [2]u32) void {
+    fn updateText(self: *@This()) void {
         if (self.options.text == null or self.options.textStartPosition == null) return;
-        var startX = self.options.textStartPosition.?.xPercent / 100;
-        var startY = self.options.textStartPosition.?.yPercent / 100;
+        var startX = self.options.textStartPosition.?.x.xPercent / 100;
+        var startY = self.options.textStartPosition.?.y.yPercent / 100;
 
         startX = NormilizeInRange(startX, 0, 1, self.pos[0] - (self.width * 0.5), self.pos[0] + (self.width * 0.5));
         startY = NormilizeInRange(startY, 0, 1, self.pos[1] - (self.height * 0.5), self.pos[1] + (self.height * 0.5));
 
-        startX += (self.options.textStartPosition.?.xPixels / @as(f32, @floatFromInt(screen_dimensions[0])));
-        startY += (self.options.textStartPosition.?.yPixels / @as(f32, @floatFromInt(screen_dimensions[1])));
+        startX += (self.options.textStartPosition.?.x.pixels / (self.viewport_pixels[0]));
+        startY += (self.options.textStartPosition.?.y.pixels / (self.viewport_pixels[1]));
 
         startX = (startX * 2) - 1;
         startY = (startY * 2) - 1;

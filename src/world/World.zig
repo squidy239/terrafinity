@@ -290,9 +290,9 @@ pub const World = struct {
                 while (it.next()) |entry| {
                     if (self.mainChunkPos == null or @reduce(.Or, @as(@Vector(3, i32), entry.key_ptr.*) != @as(@Vector(3, i32), self.mainChunkPos.?))) {
                         if (self.remeshWithThreadPool) {
-                            self.world.threadPool.spawn(Renderer.AddChunkToRenderTask, .{self.renderer.?, entry.key_ptr.*, false, false }, .High) catch |err| std.debug.panic("error adding chunk to render: {any}", .{err});
+                            self.world.threadPool.spawn(Renderer.AddChunkToRenderTask, .{ self.renderer.?, entry.key_ptr.*, false, false }, .High) catch |err| std.debug.panic("error adding chunk to render: {any}", .{err});
                         } else {
-                            self.renderer.?.AddChunkToRender(entry.key_ptr.*, false) catch |err| 
+                            self.renderer.?.AddChunkToRender(entry.key_ptr.*, false) catch |err|
                                 std.debug.panic("error adding chunk to render: {any}", .{err});
                         }
                         remeshed += 1;

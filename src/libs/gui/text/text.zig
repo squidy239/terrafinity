@@ -171,7 +171,7 @@ pub const Text = struct {
     ///the Y position of the bottom of the first line of the text
     startY: f32,
     startX: f32,
-    oldScreenDimensions: ?[2]u32,
+    oldScreenDimensions: ?[2]f32,
     textChanged: bool,
     vertexArray: ?c_uint,
     arrayBuffer: ?c_uint,
@@ -204,13 +204,13 @@ pub const Text = struct {
         self.allocator.free(self.text orelse return);
     }
 
-    pub fn render(self: *@This(), screen_dimensions: [2]u32) void {
+    pub fn render(self: *@This(), screen_dimensions: [2]f32) void {
         std.debug.assert(self.isinit);
         const drawText = ztracy.ZoneNC(@src(), "DrawText", 24342);
         defer drawText.End();
         if (self.text == null) return;
         gl.UseProgram(textShaderProgram);
-        if (self.textChanged or self.oldScreenDimensions == null or !std.mem.eql(u32, &screen_dimensions, &self.oldScreenDimensions.?)) {
+        if (self.textChanged or self.oldScreenDimensions == null or !std.mem.eql(f32, &screen_dimensions, &self.oldScreenDimensions.?)) {
             CalculateText(self, screen_dimensions, self.allocator) catch std.debug.panic("OOM", .{});
         }
         self.textChanged = false;
@@ -247,7 +247,7 @@ pub const Text = struct {
         gl.DrawArrays(gl.TRIANGLES, @intCast(index * 6), 6);
     }
 
-    pub fn CalculateText(self: *@This(), screen_dimensions: [2]u32, allocator: std.mem.Allocator) !void {
+    pub fn CalculateText(self: *@This(), screen_dimensions: [2]f32, allocator: std.mem.Allocator) !void {
         std.debug.assert(self.isinit);
         const calcText = ztracy.ZoneNC(@src(), "CalculateText", 24342);
         defer calcText.End();
@@ -268,9 +268,9 @@ pub const Text = struct {
         var x: f32 = self.startX;
         var y: f32 = self.startY;
 
-        const hw = @as(f32, @floatFromInt(screen_dimensions[1])) / @as(f32, @floatFromInt(screen_dimensions[0]));
+        const hw = screen_dimensions[1] / screen_dimensions[0];
         const textScale: f32 = switch (self.scale) {
-            .absolute => 0.01 * (self.scale.absolute / @as(f32, @floatFromInt(screen_dimensions[1]))),
+            .absolute => 0.01 * (self.scale.absolute / screen_dimensions[1]),
             .relative => 0.0001 * self.scale.relative,
         };
 

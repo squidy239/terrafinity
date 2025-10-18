@@ -155,7 +155,7 @@ pub const Renderer = struct {
                 self.window.destroy();
             }
         }
-        
+
         gl.makeProcTableCurrent(self.proc_table);
         const xz = self.window.getContentScale();
         gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
@@ -168,13 +168,13 @@ pub const Renderer = struct {
         gl.Enable(gl.BLEND);
         gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
-    
-    pub fn GetScreenDimensions(self: *@This()) [2]u32{
-        return [2]u32{@intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1])};
+
+    pub fn GetScreenDimensions(self: *@This()) [2]u32 {
+        return [2]u32{ @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
     }
-    
-    pub fn GetFloatScreenDimensions(self: *@This()) [2]f32{
-        return [2]f32{(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), (@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1])};
+
+    pub fn GetFloatScreenDimensions(self: *@This()) [2]f32 {
+        return [2]f32{ (@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), (@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
     }
     fn CompileShaders(self: *@This()) !void {
         const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
