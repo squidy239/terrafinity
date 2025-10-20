@@ -51,6 +51,7 @@ pub fn main() !void {
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
     std.log.info("using seed {d}\n", .{seed});
+    
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
@@ -124,10 +125,12 @@ pub fn main() !void {
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
     try MainWorld.Entitys.put(World.PlayerIDtoEntityId(player.player_UUID), playerEntity);
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
+    const window = try InitWindowAndProcs(&proc);
     var renderer = Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
+    renderer.window = window;
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
@@ -135,7 +138,6 @@ pub fn main() !void {
 
     defer {
         std.debug.print("started closing\n", .{});
-        renderer.window.destroy();
         running.store(false, .monotonic);
         UserInput.deinit();
         updateEntitiesThread.join();
@@ -147,11 +149,14 @@ pub fn main() !void {
         std.debug.print("pool deinit\n", .{});
         EntityTypes.FreeMeshes();
         renderer.deinit();
+        glfw.terminate();
         _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         std.debug.print("renderer deinit\n", .{});
         _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
+        renderer.window.destroy();
+        glfw.pollEvents();//must be called to close the window
     }
 
     try UserInput.init(&renderer);
@@ -319,4 +324,43 @@ fn DeflateElement(element: *gui.Element, window: *glfw.Window) void {
     element.options.size.heightPixels = std.math.lerp(element.options.size.heightPixels, -10, 0.001);
     element.options.position.yPixels = std.math.lerp(element.options.position.yPixels, 0, 0.001);
     if (wp != element.options.size.widthPixels or hp != element.options.size.heightPixels or yp != element.options.position.yPixels) element.update(element.screen_dimensions);
+}
+
+fn InitWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
+    //try glfw.initHint(.platform, glfw.Platform.x11); //renderdoc wont work with wayland
+    try glfw.init();
+    std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});
+    const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
+    var window: ?*glfw.Window = null;
+    for (gl_versions) |version| {
+        std.log.info("trying OpenGL version {d}.{d}\n", .{ version[0], version[1] });
+        glfw.windowHint(.context_version_major, version[0]);
+        glfw.windowHint(.context_version_minor, version[1]);
+        glfw.windowHint(.opengl_forward_compat, true);
+        glfw.windowHint(.client_api, .opengl_api);
+        glfw.windowHint(.doublebuffer, true);
+        glfw.windowHint(.samples, 8);
+        window = glfw.Window.create(800, 600, "voxelgame", null) catch continue;
+        glfw.makeContextCurrent(window);
+        if (proc_table.init(glfw.getProcAddress)) {
+            std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });
+            break;
+        } else {
+            window.?.destroy();
+        }
+    }
+    if(window == null) return error.FailedToCreateWindow;
+    gl.makeProcTableCurrent(proc_table);
+    const xz = window.?.getContentScale();
+    gl.Enable(gl.MULTISAMPLE);
+    gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
+    glfw.swapInterval(0);
+    gl.Enable(gl.DEPTH_TEST);
+    gl.Enable(gl.CULL_FACE);
+    gl.CullFace(gl.BACK);
+    gl.FrontFace(gl.CW);
+    gl.DepthFunc(gl.LESS);
+    gl.Enable(gl.BLEND);
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    return window.?;
 }

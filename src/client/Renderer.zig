@@ -101,7 +101,6 @@ pub const Renderer = struct {
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
         };
-        try renderer.InitWindowAndProcs();
         try renderer.CompileShaders();
         renderer.LoadFacebuffer();
         renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
@@ -124,7 +123,6 @@ pub const Renderer = struct {
                 if (mesh.value_ptr.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
             }
         }
-        glfw.terminate();
         self.ChunkRenderList.deinit();
         self.LoadingChunks.deinit();
         while (self.MeshesToLoad.popFirst()) |mesh| {
@@ -133,41 +131,7 @@ pub const Renderer = struct {
         self.MeshesToLoad.deinit(true);
         std.debug.print("stopped renderer\n", .{});
     }
-    fn InitWindowAndProcs(self: *@This()) !void {
-        //try glfw.initHint(.platform, glfw.Platform.x11); //renderdoc wont work with wayland
-        try glfw.init();
-        std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});
-        const gl_versions = [_][2]c_int{ [2]c_int{ 4, 6 }, [2]c_int{ 4, 5 }, [2]c_int{ 4, 4 }, [2]c_int{ 4, 3 }, [2]c_int{ 4, 2 }, [2]c_int{ 4, 1 }, [2]c_int{ 4, 0 }, [2]c_int{ 3, 3 } };
-        for (gl_versions) |version| {
-            std.log.info("trying OpenGL version {d}.{d}\n", .{ version[0], version[1] });
-            glfw.windowHint(.context_version_major, version[0]);
-            glfw.windowHint(.context_version_minor, version[1]);
-            glfw.windowHint(.opengl_forward_compat, true);
-            glfw.windowHint(.client_api, .opengl_api);
-            glfw.windowHint(.doublebuffer, true);
-            glfw.windowHint(.samples, 8);
-            self.window = glfw.Window.create(800, 600, "voxelgame", null) catch continue;
-            glfw.makeContextCurrent(self.window);
-            if (self.proc_table.init(glfw.getProcAddress)) {
-                std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });
-                break;
-            } else {
-                self.window.destroy();
-            }
-        }
 
-        gl.makeProcTableCurrent(self.proc_table);
-        const xz = self.window.getContentScale();
-        gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
-        glfw.swapInterval(0);
-        gl.Enable(gl.DEPTH_TEST);
-        gl.Enable(gl.CULL_FACE);
-        gl.CullFace(gl.BACK);
-        gl.FrontFace(gl.CW);
-        gl.DepthFunc(gl.LESS);
-        gl.Enable(gl.BLEND);
-        gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    }
 
     pub fn GetScreenDimensions(self: *@This()) [2]u32 {
         return [2]u32{ @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
