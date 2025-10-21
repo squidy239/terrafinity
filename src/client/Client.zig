@@ -43,9 +43,9 @@ pub fn main() !void {
     };
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_REALTIME);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
-    //const smp_allocator = std.heap.smp_allocator;
-    const allocator = if (builtin.mode == .ReleaseFast) std.heap.c_allocator else main_debug_allocator.allocator();
-    const secondary_allocator = if (builtin.mode == .ReleaseFast) std.heap.c_allocator else secondary_debug_allocator.allocator(); //smp_allocator seems to not free memory, TODO figure out why
+    const smp_allocator = std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
+    const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
     const cpu_count = try std.Thread.getCpuCount();
     var pool: ThreadPool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
