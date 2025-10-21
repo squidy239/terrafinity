@@ -132,10 +132,10 @@ pub fn main() !void {
     };
     renderer.window = window;
     try EntityTypes.LoadMeshes(allocator);
-    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 40 * std.time.ns_per_ms, &running });
+    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
-
+    
     defer {
         std.debug.print("started closing\n", .{});
         running.store(false, .monotonic);
