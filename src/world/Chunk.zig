@@ -23,7 +23,6 @@ pub const Chunk = struct {
         TerrainGenerated,
         StructuresGenerated,
     };
-    
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
@@ -73,7 +72,7 @@ pub const Chunk = struct {
         zPlus = 4,
         zMinus = 5,
     };
-    fn GenerateTerrain(chunkBlocks:*[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32,heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams,rand: *std.Random) void {
+    fn GenerateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams, rand: *std.Random) void {
         const terrainScaleUp: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const terrainScaleDown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
         const terrainScales: [2]f32 = .{ terrainScaleUp, terrainScaleDown };
@@ -88,66 +87,66 @@ pub const Chunk = struct {
         }
     }
     ///generates caves in the chunk, returns true if the chunk is one block
-    fn GenerateCaves(chunkBlocks:*[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32,heights:*const[ChunkSize][ChunkSize]i32, gen_params: *const GenParams) void {
-            const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
-            defer caves.End();
-            var grid: [4][4][4]f32 = undefined; //TODO make threadlocal var
-            const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
-            const onedthreeVec:@Vector(3, f32) = comptime @splat(1.0 / 3.0);
-            const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
-            // Sample at 4x4x4 points across the chunk area
-            for (0..4) |x| {
-                for (0..4) |y| {
-                    for (0..4) |z| {
-                        const xyz = @Vector(3, f32){@floatFromInt(x), @floatFromInt(y), @floatFromInt(z)};
-                        const sample_offset = xyz * onedthreeVec;
-                        const pos = floatPos + sample_offset;
-                        grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
-                    }
+    fn GenerateCaves(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams) void {
+        const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
+        defer caves.End();
+        var grid: [4][4][4]f32 = undefined; //TODO make threadlocal var
+        const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
+        const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
+        const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
+        // Sample at 4x4x4 points across the chunk area
+        for (0..4) |x| {
+            for (0..4) |y| {
+                for (0..4) |z| {
+                    const xyz = @Vector(3, f32){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
+                    const sample_offset = xyz * onedthreeVec;
+                    const pos = floatPos + sample_offset;
+                    grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
                 }
             }
-            caveNoise.End();
+        }
+        caveNoise.End();
 
-            const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
-            defer inter.End(); //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
-            const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
-            var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
-            initinterp.End();
-            const oneD32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
-            comptime var zs: @Vector(ChunkSize, f32) = undefined;
-            comptime for (0..ChunkSize) |i| {
-                zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
-            };
-            const xs: @Vector(ChunkSize, f32) = comptime zs;
-            const ys: @Vector(ChunkSize, f32) = comptime zs;
-            //     const waterCaveSpacing = 10;
-            _ = heights;
-            @setEvalBranchQuota(32000);
-            inline for (0..ChunkSize) |x| {
-                for (0..ChunkSize) |y| {
-                    const realY = (floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y));
-                    const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
-                    const cavesess: f32 = (gen_params.Cavesess + (m * 2));
-                    inline for (0..ChunkSize) |z| {
-                        const isCave = int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cavesess;
-                        if (isCave) {
-                            chunkBlocks[x][y][z] = .Air;
-                        }
+        const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
+        defer inter.End(); //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
+        const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
+        var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
+        initinterp.End();
+        const oneD32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
+        comptime var zs: @Vector(ChunkSize, f32) = undefined;
+        comptime for (0..ChunkSize) |i| {
+            zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
+        };
+        const xs: @Vector(ChunkSize, f32) = comptime zs;
+        const ys: @Vector(ChunkSize, f32) = comptime zs;
+        //     const waterCaveSpacing = 10;
+        _ = heights;
+        @setEvalBranchQuota(32000);
+        inline for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |y| {
+                const realY = (floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y));
+                const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
+                const cavesess: f32 = (gen_params.Cavesess + (m * 2));
+                inline for (0..ChunkSize) |z| {
+                    const isCave = int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cavesess;
+                    if (isCave) {
+                        chunkBlocks[x][y][z] = .Air;
                     }
                 }
             }
+        }
     }
     ///checks if the block array is all the same block
     pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
         const issOneBlock = ztracy.ZoneNC(@src(), "isOneBlock", 354354);
         defer issOneBlock.End();
         const firstBlockVec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(blockArray[0][0][0]));
-        var isOneBlock:@Vector(ChunkSize, bool) = comptime @splat(true);
-        const linearBlockArray: *const [ChunkSize*ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
+        var isOneBlock: @Vector(ChunkSize, bool) = comptime @splat(true);
+        const linearBlockArray: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
         for (linearBlockArray) |blocks| isOneBlock &= (blocks == firstBlockVec);
         return if (@reduce(.And, isOneBlock)) blockArray[0][0][0] else null;
     }
-    
+
     pub fn extractFace(self: *@This(), comptime face: FaceRotation, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
         const ef = ztracy.ZoneNC(@src(), "ExtractFace", 9999);
         defer ef.End();

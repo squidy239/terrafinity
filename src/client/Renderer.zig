@@ -132,7 +132,6 @@ pub const Renderer = struct {
         std.debug.print("stopped renderer\n", .{});
     }
 
-
     pub fn GetScreenDimensions(self: *@This()) [2]u32 {
         return [2]u32{ @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
     }

@@ -34,8 +34,8 @@ var running = std.atomic.Value(bool).init(true);
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
-    var main_debug_allocator = std.heap.DebugAllocator(.{.backing_allocator_zeroes = false}).init;
-    var secondary_debug_allocator = std.heap.DebugAllocator(.{.backing_allocator_zeroes = false}).init;
+    var main_debug_allocator = std.heap.DebugAllocator(.{ .backing_allocator_zeroes = false }).init;
+    var secondary_debug_allocator = std.heap.DebugAllocator(.{ .backing_allocator_zeroes = false }).init;
     defer if (main_debug_allocator.deinit() == .leak or secondary_debug_allocator.deinit() == .leak) {
         std.debug.panic("mem leaked", .{});
     } else {
@@ -43,9 +43,9 @@ pub fn main() !void {
     };
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_REALTIME);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
-    const smp_allocator = std.heap.smp_allocator;
-    const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
-    const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();//smp_allocator seems to not free memory, TODO figure out why
+    //const smp_allocator = std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .ReleaseFast) std.heap.c_allocator else main_debug_allocator.allocator();
+    const secondary_allocator = if (builtin.mode == .ReleaseFast) std.heap.c_allocator else secondary_debug_allocator.allocator(); //smp_allocator seems to not free memory, TODO figure out why
     const cpu_count = try std.Thread.getCpuCount();
     var pool: ThreadPool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
@@ -135,7 +135,7 @@ pub fn main() !void {
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
-    
+
     defer {
         std.debug.print("started closing\n", .{});
         running.store(false, .monotonic);
@@ -156,7 +156,7 @@ pub fn main() !void {
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
         renderer.window.destroy();
-        glfw.pollEvents();//must be called to close the window
+        glfw.pollEvents(); //must be called to close the window
     }
 
     try UserInput.init(&renderer);
@@ -181,7 +181,7 @@ pub fn main() !void {
             .width = .{ .xPercent = 40 },
             .height = .{ .yPercent = 30 },
         },
-        .cornerPixelRadii = .{ .{}, .{}, .{.pixels = 25}, .{} },
+        .cornerPixelRadii = .{ .{}, .{}, .{ .pixels = 25 }, .{} },
     };
     var f3t: bool = true;
     var f3noholdt: bool = true;
@@ -205,8 +205,8 @@ pub fn main() !void {
 
     var fpsBox = try gui.Element.create(allocator, fpsoptions);
     var largeText = try gui.Element.create(allocator, largeTextcreationOptions);
-    const viewport_pixels:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
-    const viewport_millimeters:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
+    const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+    const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
     fpsBox.init(viewport_pixels, viewport_millimeters);
     defer fpsBox.deinit();
     largeText.init(viewport_pixels, viewport_millimeters);
@@ -238,12 +238,12 @@ pub fn main() !void {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         renderer.DrawEntities(playerPos);
         drawEntities.End();
-        const viewport_pixels_loop:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
-        const viewport_millimeters_loop:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
-        if (f3t) fpsBox.Draw(viewport_pixels_loop,viewport_millimeters_loop, renderer.window);
-        UserInput.menuDraw(viewport_pixels_loop,viewport_millimeters_loop);
+        const viewport_pixels_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+        const viewport_millimeters_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
+        if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
+        UserInput.menuDraw(viewport_pixels_loop, viewport_millimeters_loop);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
-        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(viewport_pixels_loop,viewport_millimeters_loop, renderer.window);
+        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
         drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
@@ -254,13 +254,14 @@ pub fn main() !void {
         unloadMeshes.End();
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
         st = std.time.nanoTimestamp();
-        const glCreateSync = ztracy.ZoneNC(@src(), "glCreateSync", 34545);
-        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
-            return error.FailedToCreateGLSync;
-        };
-        glCreateSync.End();
-        const meshesLoaded = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
-        _ = meshesLoaded;
+
+        {
+            const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse {
+                return error.FailedToCreateGLSync;
+            };
+            defer gl.DeleteSync(glSync);
+            _ = try renderer.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+        }
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
         renderer.window.swapBuffers();
         swap.End();
@@ -349,7 +350,7 @@ fn InitWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
             window.?.destroy();
         }
     }
-    if(window == null) return error.FailedToCreateWindow;
+    if (window == null) return error.FailedToCreateWindow;
     gl.makeProcTableCurrent(proc_table);
     const xz = window.?.getContentScale();
     gl.Enable(gl.MULTISAMPLE);

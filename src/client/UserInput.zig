@@ -21,10 +21,10 @@ pub fn init(ren: *Renderer) !void {
     lastmicrotime = std.time.microTimestamp();
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
-    const viewport_pixels:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
-    const viewport_millimeters:@Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));//TODO find a way to get the monitor that the window is on
+    const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
+    const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize())); //TODO find a way to get the monitor that the window is on
     menu.init(viewport_pixels, viewport_millimeters);
-    
+
     isinit = true;
 }
 
@@ -91,12 +91,12 @@ var ts = ToggleSettings{
 
 const textEscMenu = gui.Element.CreationOptions{
     .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
-    .position = .{ .x = .{ .xPercent = 50 }, .y = .{.yPercent = 50} },
+    .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
     .size = .{
         .width = .{ .xPercent = 75 },
         .height = .{ .yPercent = 75 },
     },
-    .cornerPixelRadii = @splat(.{.pixels = 25}),
+    .cornerPixelRadii = @splat(.{ .pixels = 25 }),
     .children = &.{
         .{
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
@@ -110,11 +110,11 @@ const textEscMenu = gui.Element.CreationOptions{
                 .scale = .{ .relative = 4 },
                 .startPosition = .{
                     .x = .{ .xPercent = 45 },
-                     .y = .{ .yPercent = 100 },
+                    .y = .{ .yPercent = 100 },
                 },
             },
             .onHover = onHoverEsc,
-            .cornerPixelRadii = @splat(.{.pixels = 15}),
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
         },
         .{
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
@@ -132,13 +132,13 @@ const textEscMenu = gui.Element.CreationOptions{
                 },
             },
             .onHover = onHoverC,
-            .cornerPixelRadii = @splat(.{.pixels = 15}),
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
         },
     },
 };
 
-pub fn menuDraw(viewport_pixels:@Vector(2, f32), viewport_millimeters:@Vector(2, f32)) void {
-    if (ts.CursorEscaped) menu.Draw(viewport_pixels,viewport_millimeters, render.window);
+pub fn menuDraw(viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32)) void {
+    if (ts.CursorEscaped) menu.Draw(viewport_pixels, viewport_millimeters, render.window);
 }
 pub fn processInput() !void {
     std.debug.assert(isinit);

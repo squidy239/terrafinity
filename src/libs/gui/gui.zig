@@ -33,18 +33,17 @@ pub const SizeUnit = struct {
     ///converts and adds the units, x and y percent get normilized to the container range. if it is null 0 to 100 is used
     ///if viewport_millimeters is null millimeters and point units cannot be used
     ///axis that the units are being converted for, 0 for x and 1 for y
-    pub fn as(self: @This(), viewport_pixels: [2]f32, viewport_millimeters: ?[2]f32,containerRange: ?[2][2]f32,axis:u1, unit: Units) f32 {
+    pub fn as(self: @This(), viewport_pixels: [2]f32, viewport_millimeters: ?[2]f32, containerRange: ?[2][2]f32, axis: u1, unit: Units) f32 {
         //common unit is width percent
-        var percents:[2]f32 = @splat(0.0);
+        var percents: [2]f32 = @splat(0.0);
         const container_range = if (containerRange) |range| range else [2][2]f32{ [2]f32{ 0, 100 }, [2]f32{ 0, 100 } };
-        inline for(std.meta.fields(@This())) |field| {
+        inline for (std.meta.fields(@This())) |field| {
             const fieldData = @field(self, field.name);
-            if(std.mem.eql(u8, field.name, "xPercent"))percents[0] += NormilizeInRange(fieldData, 0, 100, container_range[0][0], container_range[0][1]);
-            if(std.mem.eql(u8, field.name, "yPercent")) percents[1] += NormilizeInRange(fieldData, 0, 100, container_range[1][0], container_range[1][1]);
-            if(std.mem.eql(u8, field.name, "pixels")) percents[axis] += pixelsToPercent(fieldData, viewport_pixels[1]);
-            if(std.mem.eql(u8, field.name, "millimeters")) percents[axis] += millimetersToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
-            if(std.mem.eql(u8, field.name, "point")) percents[axis] += pointToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
-
+            if (std.mem.eql(u8, field.name, "xPercent")) percents[0] += NormilizeInRange(fieldData, 0, 100, container_range[0][0], container_range[0][1]);
+            if (std.mem.eql(u8, field.name, "yPercent")) percents[1] += NormilizeInRange(fieldData, 0, 100, container_range[1][0], container_range[1][1]);
+            if (std.mem.eql(u8, field.name, "pixels")) percents[axis] += pixelsToPercent(fieldData, viewport_pixels[1]);
+            if (std.mem.eql(u8, field.name, "millimeters")) percents[axis] += millimetersToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
+            if (std.mem.eql(u8, field.name, "point")) percents[axis] += pointToPercent(fieldData, (viewport_millimeters orelse unreachable)[axis]);
         }
 
         return switch (unit) {
@@ -72,14 +71,14 @@ pub const SizeUnit = struct {
         return 100 * (millimeters / container_millimeters);
     }
     fn millimetersFromPercent(percent: f32, container_millimeters: f32) f32 {
-        return percent * (0.01 * container_millimeters);//having the parentheses maintaines precision
+        return percent * (0.01 * container_millimeters); //having the parentheses maintaines precision
     }
     fn pointToPercent(point: f32, container_millimeters: f32) f32 {
-        const container_points = container_millimeters * 2.8346456693;//points per mm
+        const container_points = container_millimeters * 2.8346456693; //points per mm
         return point / container_points;
     }
     fn pointFromPercent(percent: f32, container_millimeters: f32) f32 {
-        const container_points = container_millimeters * 2.8346456693;//points per mm
+        const container_points = container_millimeters * 2.8346456693; //points per mm
         return percent * (0.01 * container_points);
     }
     const Units = enum {
@@ -95,23 +94,22 @@ test "SizeUnit" {
     const wsize = SizeUnit{ .yPercent = 0, .xPercent = 100, .pixels = 0 };
     const hsize = SizeUnit{ .yPercent = 50, .xPercent = 0, .pixels = 0 };
 
-    try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 },null,1, .yPercent), 50);
-    try std.testing.expectEqual(hsize.as(.{ 100, 200 },.{ 100, 200 },null,0, .xPercent), 200);
-    try std.testing.expectEqual(wsize.as(.{ 100, 200 },.{ 100, 200 }, null,0,.milimeters), 100);
-
+    try std.testing.expectEqual(wsize.as(.{ 100, 200 }, .{ 100, 200 }, null, 1, .yPercent), 50);
+    try std.testing.expectEqual(hsize.as(.{ 100, 200 }, .{ 100, 200 }, null, 0, .xPercent), 200);
+    try std.testing.expectEqual(wsize.as(.{ 100, 200 }, .{ 100, 200 }, null, 0, .milimeters), 100);
 
     const size = SizeUnit{ .yPercent = 0, .xPercent = 0, .pixels = 200 };
-    try std.testing.expectEqual(size.as(.{ 200, 100 },.{ 100, 200 },null,1, .yPercent), 200);
-    try std.testing.expectEqual(size.as(.{ 100, 200 },.{ 100, 200 },null,0, .milimeters), 100);
+    try std.testing.expectEqual(size.as(.{ 200, 100 }, .{ 100, 200 }, null, 1, .yPercent), 200);
+    try std.testing.expectEqual(size.as(.{ 100, 200 }, .{ 100, 200 }, null, 0, .milimeters), 100);
 
     const mmsize = SizeUnit{ .yPercent = 0, .xPercent = 0, .pixels = 0, .millimeters = 10 };
-    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .xPercent), 10);
-    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 100 },null,0, .xPercent), 5);
-    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 100 },null,1, .yPercent), 10);
-    try std.testing.expectEqual(mmsize.as(.{ 200, 100 },.{ 200, 200 },null,1, .yPercent), 5);
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 }, .{ 100, 100 }, null, 0, .xPercent), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 }, .{ 200, 100 }, null, 0, .xPercent), 5);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 }, .{ 200, 100 }, null, 1, .yPercent), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 200, 100 }, .{ 200, 200 }, null, 1, .yPercent), 5);
 
-    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .pixels), 10);
-    try std.testing.expectEqual(mmsize.as(.{ 100, 100 },.{ 100, 100 },null,0, .point), 28.346455);
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 }, .{ 100, 100 }, null, 0, .pixels), 10);
+    try std.testing.expectEqual(mmsize.as(.{ 100, 100 }, .{ 100, 100 }, null, 0, .point), 28.346455);
 }
 
 pub const Element = struct {
@@ -231,7 +229,7 @@ pub const Element = struct {
         errdefer if (children) |childrenn| allocator.free(childrenn);
         if (creationOptions.children) |childrenOptions| {
             for (childrenOptions, 0..) |childOptions, i| {
-                errdefer for(children.?[0..i]) |*child| child.deinit();
+                errdefer for (children.?[0..i]) |*child| child.deinit();
                 children.?[i] = try Element.create(allocator, childOptions);
             }
         }
@@ -277,7 +275,7 @@ pub const Element = struct {
     }
 
     ///requires a valid opengl context, screen_dimentions MUST be multiplyed by fractional scailing
-    pub fn Draw(self: *@This(), viewport_pixels: [2]f32,viewport_millimeters: [2]f32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
+    pub fn Draw(self: *@This(), viewport_pixels: [2]f32, viewport_millimeters: [2]f32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
@@ -351,41 +349,41 @@ pub const Element = struct {
 
         if (self.children) |children| {
             for (children) |*child| {
-                child.Draw(viewport_pixels,viewport_millimeters, window);
+                child.Draw(viewport_pixels, viewport_millimeters, window);
             }
         }
     }
     ///requires a valid opengl context
     pub fn update(self: *@This()) void {
-        var sizeRange:[2][2]f32 = .{
+        var sizeRange: [2][2]f32 = .{
             .{ 0, 100 },
             .{ 0, 100 },
         };
-        
-        var posRangeX:[2][2]f32 = .{//must have x and y becuause a 0 coord for the other axis can get normilised, TODO find a better solution
+
+        var posRangeX: [2][2]f32 = .{ //must have x and y becuause a 0 coord for the other axis can get normilised, TODO find a better solution
             .{ 0, 100 },
             .{ 0, 100 },
         };
-        
-        var posRangeY:[2][2]f32 = .{
+
+        var posRangeY: [2][2]f32 = .{
             .{ 0, 100 },
             .{ 0, 100 },
         };
         if (self.parent) |parent| {
             sizeRange = .{
-                .{0, parent.width * 100},
-                .{0, parent.height * 100},
+                .{ 0, parent.width * 100 },
+                .{ 0, parent.height * 100 },
             };
             posRangeX = .{
-                .{ 100 * (parent.pos[0] - (parent.width * 0.5)), 100 * (parent.pos[0] + (parent.width * 0.5))},
-                .{0, 100},
+                .{ 100 * (parent.pos[0] - (parent.width * 0.5)), 100 * (parent.pos[0] + (parent.width * 0.5)) },
+                .{ 0, 100 },
             };
             posRangeY = .{
-                .{0, 100},
-                .{ 100 * (parent.pos[1] - (parent.height * 0.5)), 100 * (parent.pos[1] + (parent.height * 0.5))},
+                .{ 0, 100 },
+                .{ 100 * (parent.pos[1] - (parent.height * 0.5)), 100 * (parent.pos[1] + (parent.height * 0.5)) },
             };
-        }        
-        self.width =  0.01 * self.options.size.width.as(self.viewport_pixels, self.viewport_millimeters, sizeRange, 0, .xPercent) ;
+        }
+        self.width = 0.01 * self.options.size.width.as(self.viewport_pixels, self.viewport_millimeters, sizeRange, 0, .xPercent);
         self.height = 0.01 * self.options.size.height.as(self.viewport_pixels, self.viewport_millimeters, sizeRange, 1, .yPercent);
         self.pos[0] = 0.01 * self.options.position.x.as(self.viewport_pixels, self.viewport_millimeters, posRangeX, 0, .xPercent);
         self.pos[1] = 0.01 * self.options.position.y.as(self.viewport_pixels, self.viewport_millimeters, posRangeY, 1, .yPercent);
