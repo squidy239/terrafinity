@@ -31,27 +31,21 @@ pub const Chunk = struct {
         gc.End();
         var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos)))));
         var rand = rng.random();
-        var LastBlock: ?Block = null;
-        var isOneBlock = true;
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
         GenerateTerrain(&chunk, Pos, &heights, &gen_params, &rand);
         genterra.End();
-        const oneBlock = IsOneBlock(&chunk);
-        isOneBlock = isOneBlock and (oneBlock != null);
-        LastBlock = oneBlock orelse LastBlock;
-        if (!(isOneBlock and LastBlock == Block.Air)) {
+        var oneBlock = IsOneBlock(&chunk);
+        if (oneBlock != null and oneBlock.? == Block.Air) {
             GenerateCaves(&chunk, Pos, &heights, &gen_params);
-            const oneBlockAfterCaves = IsOneBlock(&chunk);
-            isOneBlock = isOneBlock and (oneBlockAfterCaves != null);
-            LastBlock = oneBlockAfterCaves orelse LastBlock;
+            oneBlock = IsOneBlock(&chunk);
         }
         gen.End();
         const ad = ztracy.ZoneNC(@src(), "allocBlocks", 234313);
         defer ad.End();
         var blockEncoding: BlockEncoding = undefined;
-        if (isOneBlock) {
-            blockEncoding = BlockEncoding{ .oneBlock = LastBlock.? };
+        if (oneBlock != null) {
+            blockEncoding = BlockEncoding{ .oneBlock = oneBlock.? };
         } else {
             const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
             mem.* = chunk;
@@ -90,7 +84,7 @@ pub const Chunk = struct {
     fn GenerateCaves(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams) void {
         const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
         defer caves.End();
-        var grid: [4][4][4]f32 = undefined; //TODO make threadlocal var
+        var grid: [4][4][4]f32 = undefined;
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
         const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
         const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
@@ -108,7 +102,7 @@ pub const Chunk = struct {
         caveNoise.End();
 
         const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
-        defer inter.End(); //TODO linear interpolate 3d noise for caves and maybe terrain and rivers, biomes and more
+        defer inter.End(); //TODO terrain and rivers, biomes and more
         const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
         var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
         initinterp.End();
@@ -155,7 +149,7 @@ pub const Chunk = struct {
             if (removeRef) self.release();
             self.releaseAndUnlockShared();
         }
-        var cube: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var cube: *const [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         switch (self.blocks) {
             .blocks => cube = self.blocks.blocks,
             .oneBlock => {
@@ -280,7 +274,7 @@ pub const Chunk = struct {
         return true;
     }
 
-    pub fn WaitForRefAmount(self: *@This(), comptime amount: u32, comptime maxMicroTime: ?u64) bool {
+    pub fn WaitForRefAmount(self: *const @This(), comptime amount: u32, comptime maxMicroTime: ?u64) bool {
         const wait = ztracy.ZoneNC(@src(), "WaitForRefAmount", 5554);
         defer wait.End();
         if (self.ref_count.load(.seq_cst) == amount) return true;

@@ -3,9 +3,8 @@ const zigimg = @import("root").zigimg;
 
 const gl = @import("gl");
 const glfw = @import("glfw");
-
 pub const Text = @import("text/text.zig");
-
+pub const Widgets = @import("widgets.zig");
 var guiShaderProgram: c_uint = undefined;
 var guiElementPositionLocation: c_int = undefined;
 var guiElementSizeLocation: c_int = undefined;
@@ -172,8 +171,8 @@ pub const Element = struct {
         pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
             var count: usize = 0;
             if (self.children) |children| {
-                for (children) |child| {
-                    count += child.CountChildren(true);
+                for (children) |_| {
+                    count += 1;
                 }
             }
             return count + @intFromBool(isChild);
@@ -228,12 +227,12 @@ pub const Element = struct {
         const children: ?[]Element = if (childrenCount > 0) try allocator.alloc(Element, childrenCount) else null;
         errdefer if (children) |childrenn| allocator.free(childrenn);
         if (creationOptions.children) |childrenOptions| {
+            std.debug.assert(childrenCount > 0);
             for (childrenOptions, 0..) |childOptions, i| {
                 errdefer for (children.?[0..i]) |*child| child.deinit();
                 children.?[i] = try Element.create(allocator, childOptions);
             }
         }
-
         return Element{
             .allocator = allocator,
             .viewport_pixels = undefined,

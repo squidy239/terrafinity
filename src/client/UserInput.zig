@@ -19,6 +19,53 @@ pub fn init(ren: *Renderer) !void {
     render = ren;
     worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
     lastmicrotime = std.time.microTimestamp();
+    const textEscMenu = gui.Element.CreationOptions{
+        .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
+        .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+        .size = .{
+            .width = .{ .xPercent = 75 },
+            .height = .{ .yPercent = 75 },
+        },
+        .cornerPixelRadii = @splat(.{ .pixels = 25 }),
+        .children = &.{
+            .{
+                .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
+                .size = .{
+                    .width = .{ .xPercent = 60 },
+                    .height = .{ .yPercent = 10 },
+                },
+                .textOptions = .{
+                    .text = "Quit",
+                    .scale = .{ .relative = 4 },
+                    .startPosition = .{
+                        .x = .{ .xPercent = 45 },
+                        .y = .{ .yPercent = 100 },
+                    },
+                },
+                .onHover = onHoverEsc,
+                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+            },
+            .{
+                .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
+                .size = .{
+                    .width = .{ .xPercent = 60 },
+                    .height = .{ .yPercent = 10 },
+                },
+                .textOptions = .{
+                    .text = "Back to Game",
+                    .scale = .{ .relative = 4 },
+                    .startPosition = .{
+                        .x = .{ .xPercent = 35 },
+                        .y = .{ .yPercent = 100 },
+                    },
+                },
+                .onHover = onHoverC,
+                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+            },
+        },
+    };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
     const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
@@ -88,54 +135,8 @@ var ts = ToggleSettings{
     .CursorEscaped = true,
     .Benchmark = false,
 };
-
-const textEscMenu = gui.Element.CreationOptions{
-    .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
-    .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-    .size = .{
-        .width = .{ .xPercent = 75 },
-        .height = .{ .yPercent = 75 },
-    },
-    .cornerPixelRadii = @splat(.{ .pixels = 25 }),
-    .children = &.{
-        .{
-            .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
-            .size = .{
-                .width = .{ .xPercent = 60 },
-                .height = .{ .yPercent = 10 },
-            },
-            .textOptions = .{
-                .text = "Quit",
-                .scale = .{ .relative = 4 },
-                .startPosition = .{
-                    .x = .{ .xPercent = 45 },
-                    .y = .{ .yPercent = 100 },
-                },
-            },
-            .onHover = onHoverEsc,
-            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        },
-        .{
-            .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
-            .size = .{
-                .width = .{ .xPercent = 60 },
-                .height = .{ .yPercent = 10 },
-            },
-            .textOptions = .{
-                .text = "Back to Game",
-                .scale = .{ .relative = 4 },
-                .startPosition = .{
-                    .x = .{ .xPercent = 35 },
-                    .y = .{ .yPercent = 100 },
-                },
-            },
-            .onHover = onHoverC,
-            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        },
-    },
-};
+var slideamount: f32 = 0.5;
+var childrenBuffer: [1]gui.Element.CreationOptions = undefined;
 
 pub fn menuDraw(viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32)) void {
     if (ts.CursorEscaped) menu.Draw(viewport_pixels, viewport_millimeters, render.window);

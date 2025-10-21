@@ -18,6 +18,7 @@ pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
 pub const Loader = @import("Loader.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
+pub const menu = @import("menu.zig");
 const UserInput = @import("UserInput.zig");
 const ChunkSize = Chunk.ChunkSize;
 pub const gui = @import("gui");
@@ -166,51 +167,14 @@ pub fn main() !void {
     gui.init(secondary_allocator);
     defer gui.deinit();
 
-    const fpsoptions = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 1, 1, 1, 0.7 } },
-        .textOptions = .{
-            .text = "",
-            .scale = .{ .relative = 5 },
-            .startPosition = .{
-                .x = .{ .xPercent = 0 },
-                .y = .{ .yPercent = 100 },
-            },
-        },
-        .position = .{ .x = .{ .xPercent = 20 }, .y = .{ .yPercent = 85 } },
-        .size = .{
-            .width = .{ .xPercent = 40 },
-            .height = .{ .yPercent = 30 },
-        },
-        .cornerPixelRadii = .{ .{}, .{}, .{ .pixels = 25 }, .{} },
-    };
     var f3t: bool = true;
     var f3noholdt: bool = true;
 
-    const largeTextcreationOptions = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 0.2, 0.7, 0.9, 0.8 } },
-        .position = .{ .x = .{ .xPercent = 10 }, .y = .{ .yPercent = 50 } },
-        .size = .{
-            .width = .{ .xPercent = 20 },
-            .height = .{ .yPercent = 100 },
-        },
-        .textOptions = .{
-            .text = @embedFile("text.txt"),
-            .scale = .{ .absolute = 16 },
-            .startPosition = .{
-                .x = .{ .xPercent = 0 },
-                .y = .{ .yPercent = 100 },
-            },
-        },
-    };
-
-    var fpsBox = try gui.Element.create(allocator, fpsoptions);
-    var largeText = try gui.Element.create(allocator, largeTextcreationOptions);
+    var fpsBox = try gui.Element.create(allocator, menu.fpsoptions);
     const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
     const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
     fpsBox.init(viewport_pixels, viewport_millimeters);
     defer fpsBox.deinit();
-    largeText.init(viewport_pixels, viewport_millimeters);
-    defer largeText.deinit();
     var lastFps: ?f128 = null;
     while (!renderer.window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
@@ -243,7 +207,6 @@ pub fn main() !void {
         if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
         UserInput.menuDraw(viewport_pixels_loop, viewport_millimeters_loop);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
-        if (glfw.getKey(renderer.window, glfw.Key.t) == .press) largeText.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
         drawText.End();
         //unload meshes
         const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
