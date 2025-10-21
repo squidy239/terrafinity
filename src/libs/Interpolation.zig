@@ -5,8 +5,8 @@ const print = std.debug.print;
 // 3D Monotone Cubic Interpolator for 4x4x4 grid
 pub const NaturalCubicInterpolator3D = struct {
     // Precomputed cubic coefficients for all directions
-    coeffs_x_vectorized: [4][16]f32, // X-direction coefficients for each (y,z)
-    coeffs_y_vectorized: [4][4]f32, // Y-direction coefficients for each (x,z)
+    coeffs_x_vectorized: [4]@Vector(16, f32), // X-direction coefficients for each (y,z)
+    coeffs_y_vectorized: [4]@Vector(4, f32), // Y-direction coefficients for each (x,z)
     coeffs_z_vectorized: [4]f32, // Z-direction coefficients for each (x,y)
 
     //transposed vectorized grid data
@@ -94,7 +94,7 @@ pub const NaturalCubicInterpolator3D = struct {
 
     pub fn sampleComptimeXZ(interp: *const Self, comptime x: f32, y: f32, comptime z: f32) f32 {
         // Step 1: X interpolation
-        var xresult: [4][4]f32 = @bitCast(splineEvalSimdComptimeT(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
+        var xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
         // Step 2: Y interpolation
         const yresult = splineEvalSimd(f32, 4, &xresult, &interp.coeffs_y_vectorized, y);
         // Step 3: Z interpolation
@@ -148,7 +148,7 @@ pub const NaturalCubicInterpolator3D = struct {
         return result;
     }
 
-    pub inline fn splineEvalSimd(comptime T: type, comptime len: usize, values: *const [4][len]T, m: *const [4][len]T, t: T) @Vector(len, T) {
+    pub inline fn splineEvalSimd(comptime T: type, comptime len: usize, values: *const [4]@Vector(len, T), m: *const [4][len]T, t: T) @Vector(len, T) {
         const i: usize = @intFromFloat(@min(@floor(t * 3), 2));
         const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = @splat(localT);

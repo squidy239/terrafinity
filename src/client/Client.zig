@@ -34,8 +34,8 @@ var running = std.atomic.Value(bool).init(true);
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
-    var main_debug_allocator = std.heap.DebugAllocator(.{}).init;
-    var secondary_debug_allocator = std.heap.DebugAllocator(.{}).init;
+    var main_debug_allocator = std.heap.DebugAllocator(.{.backing_allocator_zeroes = false}).init;
+    var secondary_debug_allocator = std.heap.DebugAllocator(.{.backing_allocator_zeroes = false}).init;
     defer if (main_debug_allocator.deinit() == .leak or secondary_debug_allocator.deinit() == .leak) {
         std.debug.panic("mem leaked", .{});
     } else {
@@ -43,15 +43,15 @@ pub fn main() !void {
     };
     const prioritySet = SetThreadPriority(.THREAD_PRIORITY_REALTIME);
     if (prioritySet) std.debug.print("Render thread priority set\n", .{}) else std.debug.print("Could not set render thread priority\n", .{});
-    const allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else main_debug_allocator.allocator();
-    const secondary_allocator = if (builtin.mode == .ReleaseFast) std.heap.smp_allocator else secondary_debug_allocator.allocator();
+    const smp_allocator = std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
+    const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();//smp_allocator seems to not free memory, TODO figure out why
     const cpu_count = try std.Thread.getCpuCount();
     var pool: ThreadPool = undefined;
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
     std.log.info("using seed {d}\n", .{seed});
-    
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,

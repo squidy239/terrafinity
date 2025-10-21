@@ -364,7 +364,7 @@ pub const Renderer = struct {
             self.playerLock.unlockShared();
             const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
             const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
             if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
                 self.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
             } else {
