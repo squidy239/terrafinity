@@ -30,7 +30,7 @@ pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3,
         addChunkstoLoad.End();
     }
 }
-
+//TODO unload until done
 pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
     _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
     while (running.load(.monotonic)) {

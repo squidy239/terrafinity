@@ -64,14 +64,19 @@ pub fn init(ren: *Renderer) !void {
                 .onHover = onHoverC,
                 .cornerPixelRadii = @splat(.{ .pixels = 15 }),
             },
+            gui.Widgets.Slider(.{
+                .size = .{.height = .{.yPercent = 100}, .width = .{.pixels = 50}},
+                .centerPos = .{.x = .{.xPercent = 100, .pixels = -50}, .y = .{.yPercent = 50}},
+            }, &childrenBuffer)
         },
+        
     };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
     const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
     const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize())); //TODO find a way to get the monitor that the window is on
     menu.init(viewport_pixels, viewport_millimeters);
-
+    @as(*gui.Widgets.SlideData, @ptrCast(@alignCast(menu.children.?[2].customData.?))).onSlide = OnSlide;
     isinit = true;
 }
 
@@ -79,6 +84,26 @@ pub fn deinit() void {
     _ = worldEditor.deinit();
     menu.deinit();
     isinit = false;
+}
+
+fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window: *glfw.Window) void {
+    _ = slider;
+    _ = window;
+    var genDistf:@Vector(2, f32) = @Vector(2,f32){100,100};
+    genDistf *= @splat(slideData.sliderPos);
+    const genDist:@Vector(2, u32) = @intFromFloat(genDistf);
+    render.GenerateDistance[0].store(genDist[0], .seq_cst);
+    render.GenerateDistance[1].store(genDist[1], .seq_cst);
+    render.GenerateDistance[2].store(genDist[0], .seq_cst);
+    render.LoadDistance[0].store(genDist[1] + 2, .seq_cst);
+    render.LoadDistance[1].store(genDist[0] + 2, .seq_cst);
+    render.LoadDistance[2].store(genDist[1] + 2, .seq_cst);
+    render.MeshDistance[0].store(genDist[0] + 2, .seq_cst);
+    render.MeshDistance[1].store(genDist[1] + 2, .seq_cst);
+    render.MeshDistance[2].store(genDist[0] + 2, .seq_cst);
+    std.debug.print("genDist: {d}\n", .{genDist});
+    
+    
 }
 
 fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {

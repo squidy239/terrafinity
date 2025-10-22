@@ -1,42 +1,76 @@
 const gui = @import("gui.zig");
 const glfw = @import("glfw");
+const std = @import("std");
+
+pub const SlideData = struct {
+    sliderPos: f32 = 0,
+    lastSliderPos: f32 = 0,
+    isClicked: bool = false,
+    onSlide:?*const fn(slider: *gui.Element, slideData: *const SlideData, window: *glfw.Window) void = null,
+};
 
 const SliderOptions = struct {
-    centerPos: gui.Element.Position,
-    size: gui.Element.Size,
+    centerPos: gui.Element.Position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+    size: gui.Element.Size = .{ .width = .{ .xPercent = 50 }, .height = .{ .yPercent = 100 } },
     ///a pointer to a float that will be updated with the sliders value from 0 to 1
-    slideAmountPtr: *f32,
-    slideBarBackground: gui.Element.ElementBackground,
-    sliderScrollerBackground: gui.Element.ElementBackground,
-    //TODO onSlide
 
-    fn OnHover(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
-        _ = mouse_pos;
-        _ = window;
-        _ = toggle;
-        _ = element;
+    slideBarBackground: gui.Element.ElementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+    sliderScrollerBackground: gui.Element.ElementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+    
+    onSlide:?fn(slider: *gui.Element, slideData: SlideData, window: *glfw.Window) void = null,
+    
+    fn OnHover(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window, toggle: bool) void {
+        _ = mousePos;
+        if(toggle and window.getMouseButton(glfw.MouseButton.left) == glfw.Action.press) {
+            const slideData:*SlideData  = @ptrCast(@alignCast(element.customData.?));
+            slideData.isClicked = true;
+        }
+    }
+
+    fn OnDraw(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window) void {
+        const slideData:*SlideData  = @ptrCast(@alignCast(element.customData.?));
+        slideData.isClicked = slideData.isClicked and window.getMouseButton(glfw.MouseButton.left) == glfw.Action.press;
+        if(slideData.isClicked) {
+            const scrollerHalfHeight = element.children.?[0].options.size.height.yPercent * 0.01 * 0.5;
+            const sliderPos:f32 = @floatCast(@min(1 - (scrollerHalfHeight),@max(0 + (scrollerHalfHeight),mousePos[1])));
+            element.children.?[0].options.position.y.yPercent =  100 * slideData.sliderPos;
+            slideData.sliderPos = gui.NormilizeInRange(sliderPos, 0 + scrollerHalfHeight, 1 - scrollerHalfHeight, 0, 1);
+            element.children.?[0].update();
+            if(slideData.lastSliderPos != slideData.sliderPos and slideData.onSlide != null) {
+                slideData.onSlide.?(element, slideData, window);
+            }
+            slideData.lastSliderPos = slideData.sliderPos;
+        }
+    }
+    
+    fn OnInit(element: *gui.Element) void {
+        const b = SlideData{};
+        @memcpy(element.customData.?, @as([]const u8, @ptrCast(&b)));
     }
 };
 
-var c: [1]gui.Element.CreationOptions = undefined;
 ///returns the creation options for a slider, childrenBuffer must remain unchanger until Init is called
 pub fn Slider(options: SliderOptions, childrenBuffer: *[1]gui.Element.CreationOptions) gui.Element.CreationOptions { //TODO widgets
-    _ = childrenBuffer;
-    c[0] = .{
+    childrenBuffer[0] = .{
         .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
         .size = .{
-            .width = .{ .xPercent = 50 },
-            .height = .{ .yPercent = 50 },
+            .width = .{ .xPercent = 80 },
+            .height = .{ .yPercent = 10 },
         },
+        .cornerPixelRadii = @splat(.{.pixels = 15}),
         .elementBackground = options.sliderScrollerBackground,
         .children = null,
-        // .onHover = SliderOptions.OnHover,
+        
     };
     return .{
+        .cornerPixelRadii = @splat(.{.pixels = 15}),
         .position = options.centerPos,
         .size = options.size,
         .elementBackground = options.slideBarBackground,
-        //  .onHover = SliderOptions.OnHover,
-        .children = &c,
+        .onHover = SliderOptions.OnHover,
+        .onInit = SliderOptions.OnInit,
+        .onDraw = SliderOptions.OnDraw,
+        .customDataLen = @sizeOf(SlideData),
+        .children = childrenBuffer,
     };
 }

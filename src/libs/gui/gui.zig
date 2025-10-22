@@ -121,6 +121,7 @@ pub const Element = struct {
     options: Options,
     children: ?[]Element,
     parent: ?*Element,
+    customData: ?[]u8,
     isinit: bool = false,
     ///a position on the screen, x and y can be between 0 and 100
     pub const Position = struct {
@@ -161,12 +162,18 @@ pub const Element = struct {
         onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
-        onDraw: ?*const fn (*Element, *glfw.Window) void = null,
+        onDraw: ?*const fn (*Element,  [2]f64, *glfw.Window) void = null,
+
+        ///gets called when the element is initialized
+        onInit: ?*const fn (*Element) void = null,
 
         children: ?[]const CreationOptions = null,
 
         ///top=left, top=right, bottom=right, bottom=left
         cornerPixelRadii: [4]SizeUnit = @splat(.{}),
+
+        ///the length of the customData, it can be set with onInit
+        customDataLen: ?usize = null,
 
         pub fn CountChildren(self: *const CreationOptions, isChild: bool) usize {
             var count: usize = 0;
@@ -186,13 +193,15 @@ pub const Element = struct {
         size: Size = .{ .width = .{ .xPercent = 100 }, .height = .{ .yPercent = 100 } },
         ///if this is false the element and its children will not be drawn and onHover and onDraw will not be called
         Visible: bool = true,
-        ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0.
+        ///onclick can be made by checking mouse status in this function. [2]f64 is mousePos from 0.0 to 1.0. relative to the element
         ///last bool is false if it is being called after drawing so the options can be reset if needed
         ///update must be called after any modifications to the element
         onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
-        onDraw: ?*const fn (*Element, *glfw.Window) void = null,
+        onDraw: ?*const fn (*Element, [2]f64, *glfw.Window) void = null,
+
+        onInit: ?*const fn (*Element) void = null,
 
         elementBackground: ElementBackground,
         text: ?Text.Text,
@@ -240,10 +249,12 @@ pub const Element = struct {
             .height = undefined,
             .pos = undefined,
             .viewport_millimeters = undefined,
+            .customData = if (creationOptions.customDataLen) |len| try allocator.alloc(u8, len) else null,
             .options = .{
                 .Visible = creationOptions.Visible,
                 .onHover = creationOptions.onHover,
                 .onDraw = creationOptions.onDraw,
+                .onInit = creationOptions.onInit,
                 .position = creationOptions.position,
                 .size = creationOptions.size,
                 .elementBackground = creationOptions.elementBackground,
@@ -261,6 +272,7 @@ pub const Element = struct {
         std.debug.assert(!self.isinit);
         self.viewport_millimeters = viewport_millimeters;
         self.viewport_pixels = viewport_pixels;
+        if (self.options.onInit) |onInit| {onInit(self);}
         self.update();
         self.updateText();
         if (self.children) |children| {
@@ -278,7 +290,6 @@ pub const Element = struct {
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
-        if (self.options.onDraw) |onDraw| onDraw(self, window);
         if (viewport_pixels[0] != self.viewport_pixels[0] or viewport_pixels[1] != self.viewport_pixels[1] or viewport_millimeters[0] != self.viewport_millimeters[0] or viewport_millimeters[1] != self.viewport_millimeters[1]) {
             self.viewport_pixels = viewport_pixels;
             self.viewport_millimeters = viewport_millimeters;
@@ -294,9 +305,12 @@ pub const Element = struct {
         const topCorner = @Vector(2, f32){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) };
         const inBottom = bottomCorner[0] < cursorPos[0] and bottomCorner[1] < cursorPos[1];
         const inTop = topCorner[0] > cursorPos[0] and topCorner[1] > cursorPos[1];
+        const relativeCursorPos = NormilizeInRange(cursorPos, @Vector(2, f64){ self.pos[0] - (self.width * 0.5), self.pos[1] - (self.height * 0.5) }, @Vector(2, f64){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) }, @Vector(2, f64){ 0, 0 }, @Vector(2, f64){ 1, 1 });
+        if (self.options.onDraw) |onDraw| onDraw(self,relativeCursorPos, window);
+
         const mouseOverElement: bool = inBottom and inTop and self.options.onHover != null;
         if (mouseOverElement) {
-            self.options.onHover.?(self, cursorPos, window, true);
+            self.options.onHover.?(self, relativeCursorPos, window, true);
         }
         //
         const cf = gl.IsEnabled(gl.CULL_FACE) != 0;
@@ -343,7 +357,7 @@ pub const Element = struct {
             self.options.text.?.render(viewport_pixels);
         }
         if (mouseOverElement) {
-            self.options.onHover.?(self, cursorPos, window, false);
+            self.options.onHover.?(self, relativeCursorPos, window, false);
         }
 
         if (self.children) |children| {
@@ -416,6 +430,7 @@ pub const Element = struct {
             self.allocator.free(children);
         }
         if (self.options.text != null) self.options.text.?.deinit();
+        if (self.customData) |data| self.allocator.free(data);
         self.children = null;
     }
 };
@@ -503,9 +518,6 @@ fn LoadFacebuffer() void {
     gl.EnableVertexAttribArray(0);
 }
 
-fn NormilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
-    switch (@typeInfo(@TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound))) {
-        .float => return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound,
-        else => unreachable,
-    }
+pub fn NormilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
+    return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
 }
