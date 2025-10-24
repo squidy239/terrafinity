@@ -53,6 +53,7 @@ pub fn main() !void {
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
     std.log.info("using seed {d}\n", .{seed});
+    //TODO after world saving find and fix rare chunk meshing bug, might be caused by chunk the structure unloading partually
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
@@ -63,8 +64,8 @@ pub fn main() !void {
         .SpawnCenterPos = [3]i32{ 5333, 0, -5333 }, //5333, -5333 is the mountain
         .Rand = rand.random(),
         .GenParams = .{
-            .terrainmin = -1024,
-            .terrainmax = 5192,
+            .terrainmin = -2048,
+            .terrainmax = 5196,
             .seed = seed,
             .SeaLevel = 0,
             .terrainblockRandomness = 0.125,
@@ -73,29 +74,39 @@ pub fn main() !void {
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
-                .frequency = 0.003,
+                .frequency = 0.001,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 2000,
+                
+                
+                
             },
-            .terrainNoiseBalance = 0.5, //0 is TerrainNoise, 1 is LargeTerrainNoise
+            .terrainNoiseBalance = 0.2, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ping_pong,
                 .octaves = 1,
                 .noise_type = .value_cubic,
-                .frequency = 0.005,
+                .frequency = 0.0004,
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ping_pong,
-                .octaves = 8,
+                .octaves = 12,
                 .lacunarity = 2,
                 .ping_pong_strength = 2.0,
                 .gain = 0.5,
                 .noise_type = .perlin,
-                .frequency = 0.03,
+                .frequency = 0.02,
+                .domain_warp_amp = 2000,
+                .domain_warp_type = .simplex,
+                
             },
-            .CaveExpansionMax = 4000,
+            .CaveExpansionMax = 80000,
             .CaveExpansionStart = undefined, //TODO
             .Cavesess = -0.7,
+            .terrainScale = 1,
+            .genStructures = true,
         },
     };
     const tempPlayer: EntityTypes.Player = .{

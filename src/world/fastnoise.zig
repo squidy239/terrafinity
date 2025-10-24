@@ -369,6 +369,10 @@ pub fn Noise(comptime Float: type) type {
             return @intFromFloat(if (f >= 0) f + 0.5 else f - 0.5);
         }
 
+        inline fn lerp(a: Float, b: Float, t: Float) Float {
+            return a + t * (b - a);
+        }
+
         inline fn interpHermite(t: Float) Float {
             return t * t * (3 - 2 * t);
         }
@@ -391,7 +395,7 @@ pub fn Noise(comptime Float: type) type {
             const gain: Float = @abs(self.gain);
             var amp = gain;
             var amp_fractal: Float = 1.0;
-            for (0..self.octaves) |_| {
+            for (1..self.octaves) |_| {
                 amp_fractal += amp;
                 amp *= gain;
             }
@@ -589,7 +593,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = state.genNoiseSingle2D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1]);
                 sum += noise * vec[2];
-                vec[2] *= std.math.lerp(1.0, @min(noise + 1.0, 2.0) * 0.5, state.weighted_strength);
+                vec[2] *= lerp(1.0, @min(noise + 1.0, 2.0) * 0.5, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -604,7 +608,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = state.genNoiseSingle3D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1], vec[2]);
                 sum += noise * vec[3];
-                vec[3] *= std.math.lerp(1.0, (noise + 1.0) * 0.5, state.weighted_strength);
+                vec[3] *= lerp(1.0, (noise + 1.0) * 0.5, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -621,7 +625,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = @abs(state.genNoiseSingle2D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1]));
                 sum += (noise * -2.0 + 1.0) * vec[2];
-                vec[2] *= std.math.lerp(1.0, 1.0 - noise, state.weighted_strength);
+                vec[2] *= lerp(1.0, 1.0 - noise, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -636,7 +640,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = @abs(state.genNoiseSingle3D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1], vec[2]));
                 sum += (noise * -2 + 1) * vec[3];
-                vec[3] *= std.math.lerp(1.0, 1.0 - noise, state.weighted_strength);
+                vec[3] *= lerp(1.0, 1.0 - noise, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -653,7 +657,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = pingPong((state.genNoiseSingle2D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1]) + 1) * state.ping_pong_strength);
                 sum += (noise - 0.5) * 2.0 * vec[2];
-                vec[2] *= std.math.lerp(1.0, noise, state.weighted_strength);
+                vec[2] *= lerp(1.0, noise, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -668,7 +672,7 @@ pub fn Noise(comptime Float: type) type {
             for (0..state.octaves) |i| {
                 const noise = pingPong((state.genNoiseSingle3D(state.seed + @as(i32, @intCast(i)), vec[0], vec[1], vec[2]) + 1.0) * state.ping_pong_strength);
                 sum += (noise - 0.5) * 2.0 * vec[3];
-                vec[3] *= std.math.lerp(1.0, noise, state.weighted_strength);
+                vec[3] *= lerp(1.0, noise, state.weighted_strength);
                 vec *= mul;
             }
 
@@ -678,7 +682,7 @@ pub fn Noise(comptime Float: type) type {
         // Domain Warp Single Wrapper
 
         fn domainWarpSingle2D(state: *const State, x: *Float, y: *Float) void {
-            const amp = state.domain_warp_amp * state.calculateFractalBounding();
+            const amp = state.domain_warp_amp;
             var xs: Float = x.*;
             var ys: Float = y.*;
             state.transformDomainWarpCoordinate2D(&xs, &ys);
@@ -686,7 +690,7 @@ pub fn Noise(comptime Float: type) type {
         }
 
         fn domainWarpSingle3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
-            const amp = state.domain_warp_amp * state.calculateFractalBounding();
+            const amp = state.domain_warp_amp;
             var xs: Float = x.*;
             var ys: Float = y.*;
             var zs: Float = z.*;
@@ -729,8 +733,8 @@ pub fn Noise(comptime Float: type) type {
             var xs: Float = x.*;
             var ys: Float = y.*;
             state.transformDomainWarpCoordinate2D(&xs, &ys);
-            const amp = state.domain_warp_amp * state.calculateFractalBounding();
-            const freq = state.frequency;
+            var amp = state.domain_warp_amp * state.calculateFractalBounding();
+            var freq = state.frequency;
             for (0..state.octaves) |i| {
                 state.doSingleDomainWarp2D(state.seed + @as(i32, @intCast(i)), amp, freq, xs, ys, x, y);
                 amp *= state.gain;
@@ -743,8 +747,8 @@ pub fn Noise(comptime Float: type) type {
             var ys: Float = y.*;
             var zs: Float = z.*;
             state.transformDomainWarpCoordinate3D(&xs, &ys, &zs);
-            const amp = state.domain_warp_amp * state.calculateFractalBounding();
-            const freq = state.frequency;
+            var amp = state.domain_warp_amp * state.calculateFractalBounding();
+            var freq = state.frequency;
             for (0..state.octaves) |i| {
                 state.doSingleDomainWarp3D(state.seed + @as(i32, @intCast(i)), amp, freq, xs, ys, zs, x, y, z);
                 amp *= state.gain;
@@ -772,17 +776,17 @@ pub fn Noise(comptime Float: type) type {
             var idx0: usize = @intCast(hash2D(seed, x0, y0) & (255 << 1));
             var idx1: usize = @intCast(hash2D(seed, x1, y0) & (255 << 1));
 
-            const lx0x = std.math.lerp(rand_2d[idx0], rand_2d[idx1], xs);
-            const ly0x = std.math.lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
+            const lx0x = lerp(rand_2d[idx0], rand_2d[idx1], xs);
+            const ly0x = lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
 
             idx0 = @intCast(hash2D(seed, x0, y1) & (255 << 1));
             idx1 = @intCast(hash2D(seed, x1, y1) & (255 << 1));
 
-            const lx1x = std.math.lerp(rand_2d[idx0], rand_2d[idx1], xs);
-            const ly1x = std.math.lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
+            const lx1x = lerp(rand_2d[idx0], rand_2d[idx1], xs);
+            const ly1x = lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
 
-            xp.* += std.math.lerp(lx0x, lx1x, ys) * warp_amp;
-            yp.* += std.math.lerp(ly0x, ly1x, ys) * warp_amp;
+            xp.* += lerp(lx0x, lx1x, ys) * warp_amp;
+            yp.* += lerp(ly0x, ly1x, ys) * warp_amp;
         }
 
         fn singleDomainWarpBasicGrid3D(seed: i32, warp_amp: Float, frequency: Float, x: Float, y: Float, z: Float, xp: *Float, yp: *Float, zp: *Float) void {
@@ -808,38 +812,38 @@ pub fn Noise(comptime Float: type) type {
             var idx0: usize = @intCast(hash3D(seed, x0, y0, z0) & (255 << 2));
             var idx1: usize = @intCast(hash3D(seed, x1, y0, z0) & (255 << 2));
 
-            const lx0x = std.math.lerp(rand_3d[idx0], rand_3d[idx1], xs);
-            const ly0x = std.math.lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
-            const lz0x = std.math.lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
+            const lx0x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
+            const ly0x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
+            const lz0x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
             idx0 = @intCast(hash3D(seed, x0, y1, z0) & (255 << 2));
             idx1 = @intCast(hash3D(seed, x1, y1, z0) & (255 << 2));
 
-            var lx1x = std.math.lerp(rand_3d[idx0], rand_3d[idx1], xs);
-            var ly1x = std.math.lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
-            var lz1x = std.math.lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
+            var lx1x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
+            var ly1x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
+            var lz1x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
-            const lx0y = std.math.lerp(lx0x, lx1x, ys);
-            const ly0y = std.math.lerp(ly0x, ly1x, ys);
-            const lz0y = std.math.lerp(lz0x, lz1x, ys);
+            const lx0y = lerp(lx0x, lx1x, ys);
+            const ly0y = lerp(ly0x, ly1x, ys);
+            const lz0y = lerp(lz0x, lz1x, ys);
 
             idx0 = hash3D(seed, x0, y0, z1) & (255 << 2);
             idx1 = hash3D(seed, x1, y0, z1) & (255 << 2);
 
-            lx0x = std.math.lerp(rand_3d[idx0], rand_3d[idx1], xs);
-            ly0x = std.math.lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
-            lz0x = std.math.lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
+            lx0x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
+            ly0x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
+            lz0x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
             idx0 = hash3D(seed, x0, y1, z1) & (255 << 2);
             idx1 = hash3D(seed, x1, y1, z1) & (255 << 2);
 
-            lx1x = std.math.lerp(rand_3d[idx0], rand_3d[idx1], xs);
-            ly1x = std.math.lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
-            lz1x = std.math.lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
+            lx1x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
+            ly1x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
+            lz1x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
-            xp.* += std.math.lerp(lx0y, std.math.lerp(lx0x, lx1x, ys), zs) * warp_amp;
-            yp.* += std.math.lerp(ly0y, std.math.lerp(ly0x, ly1x, ys), zs) * warp_amp;
-            zp.* += std.math.lerp(lz0y, std.math.lerp(lz0x, lz1x, ys), zs) * warp_amp;
+            xp.* += lerp(lx0y, lerp(lx0x, lx1x, ys), zs) * warp_amp;
+            yp.* += lerp(ly0y, lerp(ly0x, ly1x, ys), zs) * warp_amp;
+            zp.* += lerp(lz0y, lerp(lz0x, lz1x, ys), zs) * warp_amp;
         }
 
         // Domain Warp Simplex/OpenSimplex2
@@ -1056,10 +1060,10 @@ pub fn Noise(comptime Float: type) type {
             const x1 = x0 +% prime_x;
             const y1 = y0 +% prime_y;
 
-            const xf0: Float = std.math.lerp(gradCoord2D(seed, x0, y0, xd0, yd0), gradCoord2D(seed, x1, y0, xd1, yd0), xs);
-            const xf1: Float = std.math.lerp(gradCoord2D(seed, x0, y1, xd0, yd1), gradCoord2D(seed, x1, y1, xd1, yd1), xs);
+            const xf0: Float = lerp(gradCoord2D(seed, x0, y0, xd0, yd0), gradCoord2D(seed, x1, y0, xd1, yd0), xs);
+            const xf1: Float = lerp(gradCoord2D(seed, x0, y1, xd0, yd1), gradCoord2D(seed, x1, y1, xd1, yd1), xs);
 
-            return std.math.lerp(xf0, xf1, ys) * 1.4247691104677813;
+            return lerp(xf0, xf1, ys) * 1.4247691104677813;
         }
 
         fn singlePerlin3D(seed: i32, x: Float, y: Float, z: Float) Float {
@@ -1085,14 +1089,14 @@ pub fn Noise(comptime Float: type) type {
             const y1 = y0 +% prime_y;
             const z1 = z0 +% prime_z;
 
-            const xf00: Float = std.math.lerp(gradCoord3D(seed, x0, y0, z0, xd0, yd0, zd0), gradCoord3D(seed, x1, y0, z0, xd1, yd0, zd0), xs);
-            const xf10: Float = std.math.lerp(gradCoord3D(seed, x0, y1, z0, xd0, yd1, zd0), gradCoord3D(seed, x1, y1, z0, xd1, yd1, zd0), xs);
-            const xf01: Float = std.math.lerp(gradCoord3D(seed, x0, y0, z1, xd0, yd0, zd1), gradCoord3D(seed, x1, y0, z1, xd1, yd0, zd1), xs);
-            const xf11: Float = std.math.lerp(gradCoord3D(seed, x0, y1, z1, xd0, yd1, zd1), gradCoord3D(seed, x1, y1, z1, xd1, yd1, zd1), xs);
+            const xf00: Float = lerp(gradCoord3D(seed, x0, y0, z0, xd0, yd0, zd0), gradCoord3D(seed, x1, y0, z0, xd1, yd0, zd0), xs);
+            const xf10: Float = lerp(gradCoord3D(seed, x0, y1, z0, xd0, yd1, zd0), gradCoord3D(seed, x1, y1, z0, xd1, yd1, zd0), xs);
+            const xf01: Float = lerp(gradCoord3D(seed, x0, y0, z1, xd0, yd0, zd1), gradCoord3D(seed, x1, y0, z1, xd1, yd0, zd1), xs);
+            const xf11: Float = lerp(gradCoord3D(seed, x0, y1, z1, xd0, yd1, zd1), gradCoord3D(seed, x1, y1, z1, xd1, yd1, zd1), xs);
 
-            const yf0 = std.math.lerp(xf00, xf10, ys);
-            const yf1 = std.math.lerp(xf01, xf11, ys);
-            return std.math.lerp(yf0, yf1, zs) * 0.964921414852142333984375;
+            const yf0 = lerp(xf00, xf10, ys);
+            const yf1 = lerp(xf01, xf11, ys);
+            return lerp(yf0, yf1, zs) * 0.964921414852142333984375;
         }
 
         // Simplex/OpenSimplex2 Noise
@@ -1234,10 +1238,10 @@ pub fn Noise(comptime Float: type) type {
             const x1 = x0 +% prime_x;
             const y1 = y0 +% prime_y;
 
-            const xf0: Float = std.math.lerp(valCoord2D(seed, x0, y0), valCoord2D(seed, x1, y0), xs);
-            const xf1: Float = std.math.lerp(valCoord2D(seed, x0, y1), valCoord2D(seed, x1, y1), xs);
+            const xf0: Float = lerp(valCoord2D(seed, x0, y0), valCoord2D(seed, x1, y0), xs);
+            const xf1: Float = lerp(valCoord2D(seed, x0, y1), valCoord2D(seed, x1, y1), xs);
 
-            return std.math.lerp(xf0, xf1, ys);
+            return lerp(xf0, xf1, ys);
         }
 
         fn singleValue3D(seed: i32, x: Float, y: Float, z: Float) Float {
@@ -1256,15 +1260,15 @@ pub fn Noise(comptime Float: type) type {
             const y1 = y0 +% prime_y;
             const z1 = z0 +% prime_z;
 
-            const xf00: Float = std.math.lerp(valCoord3D(seed, x0, y0, z0), valCoord3D(seed, x1, y0, z0), xs);
-            const xf10: Float = std.math.lerp(valCoord3D(seed, x0, y1, z0), valCoord3D(seed, x1, y1, z0), xs);
-            const xf01: Float = std.math.lerp(valCoord3D(seed, x0, y0, z1), valCoord3D(seed, x1, y0, z1), xs);
-            const xf11: Float = std.math.lerp(valCoord3D(seed, x0, y1, z1), valCoord3D(seed, x1, y1, z1), xs);
+            const xf00: Float = lerp(valCoord3D(seed, x0, y0, z0), valCoord3D(seed, x1, y0, z0), xs);
+            const xf10: Float = lerp(valCoord3D(seed, x0, y1, z0), valCoord3D(seed, x1, y1, z0), xs);
+            const xf01: Float = lerp(valCoord3D(seed, x0, y0, z1), valCoord3D(seed, x1, y0, z1), xs);
+            const xf11: Float = lerp(valCoord3D(seed, x0, y1, z1), valCoord3D(seed, x1, y1, z1), xs);
 
-            const yf0: Float = std.math.lerp(xf00, xf10, ys);
-            const yf1: Float = std.math.lerp(xf01, xf11, ys);
+            const yf0: Float = lerp(xf00, xf10, ys);
+            const yf1: Float = lerp(xf01, xf11, ys);
 
-            return std.math.lerp(yf0, yf1, zs);
+            return lerp(yf0, yf1, zs);
         }
 
         // Value Cubic

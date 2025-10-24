@@ -36,7 +36,7 @@ pub const Chunk = struct {
         GenerateTerrain(&chunk, Pos, &heights, &gen_params, &rand);
         genterra.End();
         var oneBlock = IsOneBlock(&chunk);
-        if (oneBlock != null and oneBlock.? == Block.Air) {
+        if (oneBlock == null or oneBlock.? == Block.Stone) {
             GenerateCaves(&chunk, Pos, &heights, &gen_params);
             oneBlock = IsOneBlock(&chunk);
         }
@@ -70,12 +70,13 @@ pub const Chunk = struct {
         const terrainScaleUp: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const terrainScaleDown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
         const terrainScales: [2]f32 = .{ terrainScaleUp, terrainScaleDown };
+        const oneDterrainScale: f32 = 1.0 / gen_params.terrainScale;
         var block_height_vec: [ChunkSize]i32 = undefined;
         for (0..ChunkSize) |i| block_height_vec[i] = (Pos[1] * ChunkSize) + @as(i32, @intCast(i));
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    chunkBlocks[x][c][z] = GetSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness);
+                    chunkBlocks[x][c][z] = GetSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness,oneDterrainScale );
                 }
             }
         }
@@ -87,6 +88,7 @@ pub const Chunk = struct {
         var grid: [4][4][4]f32 = undefined;
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
         const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
+        const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / gen_params.terrainScale);
         const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
         // Sample at 4x4x4 points across the chunk area
         for (0..4) |x| {
@@ -94,8 +96,13 @@ pub const Chunk = struct {
                 for (0..4) |z| {
                     const xyz = @Vector(3, f32){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const sample_offset = xyz * onedthreeVec;
-                    const pos = floatPos + sample_offset;
-                    grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
+                    const pos = (floatPos + sample_offset) * oneDterrainScaleVec;
+                    const genX = pos[0];
+                    const genY = pos[1];
+                    const genZ = pos[2];
+                    
+                  //  gen_params.CaveNoise.domainWarp3D(&genX, &genZ, &genY);
+                    grid[x][y][z] = gen_params.CaveNoise.genNoise3D(genX, genY, genZ);
                 }
             }
         }
@@ -118,12 +125,12 @@ pub const Chunk = struct {
         @setEvalBranchQuota(32000);
         inline for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
-                const realY = (floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y));
+                const realY = ((floatPos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * oneDterrainScaleVec[0];
                 const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
                 const cavesess: f32 = (gen_params.Cavesess + (m * 2));
                 inline for (0..ChunkSize) |z| {
                     const isCave = int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cavesess;
-                    if (isCave) {
+                       if (isCave) {
                         chunkBlocks[x][y][z] = .Air;
                     }
                 }
@@ -189,13 +196,13 @@ pub const Chunk = struct {
         return true;
     }
 
-    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32) Block {
+    fn GetSurfaceBlock(block_height: i32, terrain_height: i32, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32, oneDterrainScale: f32) Block {
         if (block_height < terrain_height - 5) {
             return Block.Stone;
         } else if (block_height < terrain_height) {
             return Block.Dirt;
         } else if (block_height == terrain_height) {
-            return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height < SeaLevel)], block_height, SeaLevel, blockRandomness);
+            return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height < SeaLevel)], block_height, SeaLevel, blockRandomness, oneDterrainScale);
         } else if (block_height > terrain_height and block_height < SeaLevel) {
             return Block.Water;
         } else {
@@ -203,8 +210,8 @@ pub const Chunk = struct {
         }
     }
 
-    fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32) Block {
-        const a = std.math.lerp(heightPercent, rand.float(f32), blockRandomness);
+    fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32, oneDterrainScale: f32) Block {
+        const a = std.math.lerp(heightPercent * oneDterrainScale, rand.float(f32), blockRandomness);
         return if (block_height < seaLevel) Block.Dirt else if (a < 0.4) Block.Grass else if (a < 0.5) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
     }
 
@@ -237,16 +244,20 @@ pub const Chunk = struct {
         const floatmin: f32 = @floatFromInt(params.terrainmin);
         const floatmax: f32 = @floatFromInt(params.terrainmax);
         const floatBounds = [2]f32{ floatmin, floatmax };
+        const oneDterrainscale: f32 = 1.0 / params.terrainScale;
         for (0..ChunkSize) |ux| {
-            const x: f32 = (@as(f32, @floatFromInt(ux)) * d32) + floatpos[0];
+            const x: f32 = ((@as(f32, @floatFromInt(ux)) * d32) + floatpos[0]) * oneDterrainscale;
             for (0..ChunkSize) |uz| {
-                const z: f32 = (@as(f32, @floatFromInt(uz)) * d32) + floatpos[1];
-                const terrainNoise = params.TerrainNoise.genNoise2D(x, z);
-                const largeterrainNoise = params.LargeTerrainNoise.genNoise2D(x, z);
+                const z: f32 = ((@as(f32, @floatFromInt(uz)) * d32) + floatpos[1]) * oneDterrainscale;
+                var genX = x;
+                var genZ = z;
+                params.TerrainNoise.domainWarp2D(&genX, &genZ);
+                const terrainNoise = std.math.pow(f32, params.TerrainNoise.genNoise2D(genX, genZ), 3);
+                const largeterrainNoise = std.math.pow(f32, params.LargeTerrainNoise.genNoise2D(x, z), 1);
 
                 const noise = std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
-                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise > 0)]));
+                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise > 0)]) * params.terrainScale);
                 height[ux][uz] = block_height;
             }
         }
@@ -334,5 +345,7 @@ pub const Chunk = struct {
         CaveExpansionMax: f32,
         CaveExpansionStart: f32,
         seed: u64,
+        terrainScale: f32,  
+        genStructures: bool,
     };
 };
