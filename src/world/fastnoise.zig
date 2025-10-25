@@ -232,8 +232,8 @@ pub fn Noise(comptime Float: type) type {
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise2D(x, y))));
             return switch (@typeInfo(T)) {
-                .Int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
-                .Float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
+                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -242,12 +242,12 @@ pub fn Noise(comptime Float: type) type {
         /// The return value is mapped to the range of the specified numeric type.
         pub fn genNoise2DAsType(self: *const State, x: Float, y: Float, comptime T: type) T {
             return switch (@typeInfo(T)) {
-                .Int => {
+                .int => {
                     const min = comptime std.math.minInt(T);
                     const max = comptime std.math.maxInt(T);
                     return genNoise2DRange(self, x, y, T, min, max);
                 },
-                .Float => @floatCast(genNoise2D(self, x, y)),
+                .float => @floatCast(genNoise2D(self, x, y)),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -287,8 +287,8 @@ pub fn Noise(comptime Float: type) type {
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise3D(x, y, z))));
             return switch (@typeInfo(T)) {
-                .Int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
-                .Float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
+                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
@@ -297,12 +297,12 @@ pub fn Noise(comptime Float: type) type {
         /// The return value is mapped to the range of the specified numeric type.
         pub fn genNoise3DAsType(self: *const State, x: Float, y: Float, z: Float, comptime T: type) T {
             return switch (@typeInfo(T)) {
-                .Int => {
+                .int => {
                     const min = comptime std.math.minInt(T);
                     const max = comptime std.math.maxInt(T);
                     return genNoise3DRange(self, x, y, z, T, min, max);
                 },
-                .Float => @floatCast(genNoise3D(self, x, y, z)),
+                .float => @floatCast(genNoise3D(self, x, y, z)),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }

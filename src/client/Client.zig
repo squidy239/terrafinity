@@ -65,7 +65,7 @@ pub fn main() !void {
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -2048,
-            .terrainmax = 5196,
+            .terrainmax = 4096,
             .seed = seed,
             .SeaLevel = 0,
             .terrainblockRandomness = 0.125,
@@ -74,20 +74,26 @@ pub fn main() !void {
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
-                .frequency = 0.001,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 2000,
-                
-                
+                .frequency = 0.01,                
                 
             },
-            .terrainNoiseBalance = 0.2, //0 is TerrainNoise, 1 is LargeTerrainNoise
+            .terrainNoiseBalance = 0.9, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ping_pong,
                 .octaves = 1,
                 .noise_type = .value_cubic,
-                .frequency = 0.0004,
+                .frequency = 0.002,                
+            },
+            .LargeTerrainNoiseWarp = .{
+                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
+                .fractal_type = .independent,
+                .octaves = 2,
+                .frequency = 0.008,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 400,
+                .rotation_type = .improve_xy_planes,
+                
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
@@ -97,15 +103,12 @@ pub fn main() !void {
                 .ping_pong_strength = 2.0,
                 .gain = 0.5,
                 .noise_type = .perlin,
-                .frequency = 0.02,
-                .domain_warp_amp = 2000,
-                .domain_warp_type = .simplex,
-                
+                .frequency = 0.02,                
             },
             .CaveExpansionMax = 80000,
             .CaveExpansionStart = undefined, //TODO
             .Cavesess = -0.7,
-            .terrainScale = 1,
+            .terrainScale = 0.5,
             .genStructures = true,
         },
     };
