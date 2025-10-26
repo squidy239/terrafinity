@@ -67,7 +67,7 @@ pub fn init(ren: *Renderer) !void {
             gui.Widgets.Slider(.{
                 .size = .{.height = .{.yPercent = 100}, .width = .{.pixels = 50}},
                 .centerPos = .{.x = .{.xPercent = 100, .pixels = -50}, .y = .{.yPercent = 50}},
-            }, &childrenBuffer)
+            }, &childrenBuffer, .y)
         },
         
     };

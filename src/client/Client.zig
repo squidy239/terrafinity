@@ -88,7 +88,7 @@ pub fn main() !void {
             .LargeTerrainNoiseWarp = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .independent,
-                .octaves = 2,
+                .octaves = 1,
                 .frequency = 0.008,
                 .domain_warp_type = .simplex,
                 .domain_warp_amp = 400,
