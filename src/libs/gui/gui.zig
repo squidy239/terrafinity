@@ -162,7 +162,7 @@ pub const Element = struct {
         onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
-        onDraw: ?*const fn (*Element,  [2]f64, *glfw.Window) void = null,
+        onDraw: ?*const fn (*Element, [2]f64, *glfw.Window) void = null,
 
         ///gets called when the element is initialized
         onInit: ?*const fn (*Element) void = null,
@@ -272,7 +272,9 @@ pub const Element = struct {
         std.debug.assert(!self.isinit);
         self.viewport_millimeters = viewport_millimeters;
         self.viewport_pixels = viewport_pixels;
-        if (self.options.onInit) |onInit| {onInit(self);}
+        if (self.options.onInit) |onInit| {
+            onInit(self);
+        }
         self.update();
         self.updateText();
         if (self.children) |children| {
@@ -306,7 +308,7 @@ pub const Element = struct {
         const inBottom = bottomCorner[0] < cursorPos[0] and bottomCorner[1] < cursorPos[1];
         const inTop = topCorner[0] > cursorPos[0] and topCorner[1] > cursorPos[1];
         const relativeCursorPos = NormilizeInRange(cursorPos, @Vector(2, f64){ self.pos[0] - (self.width * 0.5), self.pos[1] - (self.height * 0.5) }, @Vector(2, f64){ self.pos[0] + (self.width * 0.5), self.pos[1] + (self.height * 0.5) }, @Vector(2, f64){ 0, 0 }, @Vector(2, f64){ 1, 1 });
-        if (self.options.onDraw) |onDraw| onDraw(self,relativeCursorPos, window);
+        if (self.options.onDraw) |onDraw| onDraw(self, relativeCursorPos, window);
 
         const mouseOverElement: bool = inBottom and inTop and self.options.onHover != null;
         if (mouseOverElement) {

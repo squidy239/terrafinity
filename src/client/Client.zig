@@ -74,8 +74,7 @@ pub fn main() !void {
                 .fractal_type = .ridged,
                 .octaves = 12,
                 .noise_type = .perlin,
-                .frequency = 0.01,                
-                
+                .frequency = 0.01,
             },
             .terrainNoiseBalance = 0.9, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{
@@ -83,7 +82,7 @@ pub fn main() !void {
                 .fractal_type = .ping_pong,
                 .octaves = 1,
                 .noise_type = .value_cubic,
-                .frequency = 0.002,                
+                .frequency = 0.002,
             },
             .LargeTerrainNoiseWarp = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
@@ -93,7 +92,6 @@ pub fn main() !void {
                 .domain_warp_type = .simplex,
                 .domain_warp_amp = 400,
                 .rotation_type = .improve_xy_planes,
-                
             },
             .CaveNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
@@ -103,7 +101,7 @@ pub fn main() !void {
                 .ping_pong_strength = 2.0,
                 .gain = 0.5,
                 .noise_type = .perlin,
-                .frequency = 0.02,                
+                .frequency = 0.02,
             },
             .CaveExpansionMax = 80000,
             .CaveExpansionStart = undefined, //TODO

@@ -23,7 +23,6 @@ pub const World = struct {
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     GenParams: Chunk.GenParams,
-    
 
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
@@ -126,7 +125,7 @@ pub const World = struct {
         defer genstructures.End();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
-        if(!self.GenParams.genStructures) return;
+        if (!self.GenParams.genStructures) return;
         const randomSeed = std.hash.Wyhash.hash(self.GenParams.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
@@ -138,11 +137,11 @@ pub const World = struct {
                 for (0..ChunkSize) |z| {
                     for (0..ChunkSize) |y| {
                         if (chunk.blocks.blocks[x][y][z] == .Grass) {
-                            const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same  
+                            const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
                             if (false and treeChance < 0.00001) {
                                 structuresGenerated += 1;
                                 const factor = (rand.float(f32) * 2) + 0.5;
-                                
+
                                 const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
                                 try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
                                     .height = @intFromFloat(100 * factor),

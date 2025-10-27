@@ -27,49 +27,44 @@ pub fn init(ren: *Renderer) !void {
             .height = .{ .yPercent = 75 },
         },
         .cornerPixelRadii = @splat(.{ .pixels = 25 }),
-        .children = &.{
-            .{
-                .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
-                .size = .{
-                    .width = .{ .xPercent = 60 },
-                    .height = .{ .yPercent = 10 },
-                },
-                .textOptions = .{
-                    .text = "Quit",
-                    .scale = .{ .relative = 4 },
-                    .startPosition = .{
-                        .x = .{ .xPercent = 45 },
-                        .y = .{ .yPercent = 100 },
-                    },
-                },
-                .onHover = onHoverEsc,
-                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+        .children = &.{ .{
+            .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
+            .size = .{
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
             },
-            .{
-                .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
-                .size = .{
-                    .width = .{ .xPercent = 60 },
-                    .height = .{ .yPercent = 10 },
+            .textOptions = .{
+                .text = "Quit",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .x = .{ .xPercent = 45 },
+                    .y = .{ .yPercent = 100 },
                 },
-                .textOptions = .{
-                    .text = "Back to Game",
-                    .scale = .{ .relative = 4 },
-                    .startPosition = .{
-                        .x = .{ .xPercent = 35 },
-                        .y = .{ .yPercent = 100 },
-                    },
-                },
-                .onHover = onHoverC,
-                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
             },
-            gui.Widgets.Slider(.{
-                .size = .{.height = .{.yPercent = 100}, .width = .{.pixels = 50}},
-                .centerPos = .{.x = .{.xPercent = 100, .pixels = -50}, .y = .{.yPercent = 50}},
-            }, &childrenBuffer, .y)
-        },
-        
+            .onHover = onHoverEsc,
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+        }, .{
+            .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
+            .size = .{
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
+            },
+            .textOptions = .{
+                .text = "Back to Game",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .x = .{ .xPercent = 35 },
+                    .y = .{ .yPercent = 100 },
+                },
+            },
+            .onHover = onHoverC,
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+        }, gui.Widgets.Slider(.{
+            .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
+            .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
+        }, &childrenBuffer, .y) },
     };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
@@ -89,9 +84,9 @@ pub fn deinit() void {
 fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window: *glfw.Window) void {
     _ = slider;
     _ = window;
-    var genDistf:@Vector(2, f32) = @Vector(2,f32){100,100};
+    var genDistf: @Vector(2, f32) = @Vector(2, f32){ 100, 100 };
     genDistf *= @splat(slideData.sliderPos);
-    const genDist:@Vector(2, u32) = @intFromFloat(genDistf);
+    const genDist: @Vector(2, u32) = @intFromFloat(genDistf);
     render.GenerateDistance[0].store(genDist[0], .seq_cst);
     render.GenerateDistance[1].store(genDist[1], .seq_cst);
     render.GenerateDistance[2].store(genDist[0], .seq_cst);
@@ -102,8 +97,6 @@ fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window
     render.MeshDistance[1].store(genDist[1] + 2, .seq_cst);
     render.MeshDistance[2].store(genDist[0] + 2, .seq_cst);
     std.debug.print("genDist: {d}\n", .{genDist});
-    
-    
 }
 
 fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {

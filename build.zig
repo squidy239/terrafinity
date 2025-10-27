@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-       .use_llvm = true,
+        .use_llvm = true,
     });
     const options = .{
         .enable_ztracy = b.option(

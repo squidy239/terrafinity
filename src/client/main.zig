@@ -82,7 +82,7 @@ fn InitWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
 pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{ .backing_allocator_zeroes = false }).init;
     const allocator = debug_allocator.allocator();
-    defer if(debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
+    defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
     var proc: gl.ProcTable = undefined;
     const window = try InitWindowAndProcs(&proc);
     _ = window.setSizeCallback(glfwSizeCallback);
@@ -91,15 +91,18 @@ pub fn main() !void {
     mainMenu = try gui.Element.create(allocator, menu.mainMenu);
     mainMenu.init(GetViewportPixels(window), @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window))));
     defer mainMenu.deinit();
-    
+
     optionsMenu = try gui.Element.create(allocator, menu.optionsMenu);
     optionsMenu.init(GetViewportPixels(window), @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window))));
     defer optionsMenu.deinit();
-    
+
     currentMenu = &mainMenu;
     currentMenu = currentMenu;
-    defer {window.destroy();glfw.pollEvents();}
-    while(window.shouldClose() == false) {
+    defer {
+        window.destroy();
+        glfw.pollEvents();
+    }
+    while (window.shouldClose() == false) {
         const viewport_pixels = GetViewportPixels(window);
         const viewport_millimeters: [2]f32 = @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window)));
         currentMenu.Draw(viewport_pixels, viewport_millimeters, window);
@@ -119,19 +122,18 @@ pub fn GetViewportPixels(window: *glfw.Window) @Vector(2, f32) {
     return @Vector(2, f32){ (@as(f32, @floatFromInt(width)) * window.getContentScale()[0]), (@as(f32, @floatFromInt(height)) * window.getContentScale()[1]) };
 }
 
-
 pub fn GetViewportMillimeters(window: *glfw.Window) !@Vector(2, i32) {
     _ = window;
-    return @as(@Vector(2, i32),(try glfw.getPrimaryMonitor().?.getPhysicalSize()) );
+    return @as(@Vector(2, i32), (try glfw.getPrimaryMonitor().?.getPhysicalSize()));
 }
 
-const menuPage = enum{
+const menuPage = enum {
     mainMenu,
     optionsMenu,
 };
 
 pub fn SwitchMenu(newMenu: menuPage) void {
-    currentMenu = switch(newMenu) {
+    currentMenu = switch (newMenu) {
         .mainMenu => &mainMenu,
         .optionsMenu => &optionsMenu,
     };

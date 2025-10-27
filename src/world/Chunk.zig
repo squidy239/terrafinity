@@ -76,7 +76,7 @@ pub const Chunk = struct {
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    chunkBlocks[x][c][z] = GetSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness,oneDterrainScale );
+                    chunkBlocks[x][c][z] = GetSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness, oneDterrainScale);
                 }
             }
         }
@@ -100,8 +100,8 @@ pub const Chunk = struct {
                     const genX = pos[0];
                     const genY = pos[1];
                     const genZ = pos[2];
-                    
-                  //  gen_params.CaveNoise.domainWarp3D(&genX, &genZ, &genY);
+
+                    //  gen_params.CaveNoise.domainWarp3D(&genX, &genZ, &genY);
                     grid[x][y][z] = gen_params.CaveNoise.genNoise3D(genX, genY, genZ);
                 }
             }
@@ -130,7 +130,7 @@ pub const Chunk = struct {
                 const cavesess: f32 = (gen_params.Cavesess + (m * 2));
                 inline for (0..ChunkSize) |z| {
                     const isCave = int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cavesess;
-                       if (isCave) {
+                    if (isCave) {
                         chunkBlocks[x][y][z] = .Air;
                     }
                 }
@@ -257,10 +257,10 @@ pub const Chunk = struct {
                 params.LargeTerrainNoiseWarp.domainWarp2D(&largegenX, &largegenZ);
                 const terrainNoise = std.math.pow(f32, params.TerrainNoise.genNoise2D(genX, genZ), 2);
                 const largeterrainNoise = params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ);
-               // largeterrainNoise = scaleHeight(largeterrainNoise);
-              //  largeterrainNoise = @min(0.2, largeterrainNoise);
-                const noise = terrainNoise * largeterrainNoise;//std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
-          //      std.debug.print("ltn:{any}, n:{any}, mix: {any}, o: {any}\n", .{largeterrainNoise, terrainNoise, noise, params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ)});
+                // largeterrainNoise = scaleHeight(largeterrainNoise);
+                //  largeterrainNoise = @min(0.2, largeterrainNoise);
+                const noise = terrainNoise * largeterrainNoise; //std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
+                //      std.debug.print("ltn:{any}, n:{any}, mix: {any}, o: {any}\n", .{largeterrainNoise, terrainNoise, noise, params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ)});
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
                 const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise > 0)]) * params.terrainScale);
                 height[ux][uz] = block_height;
@@ -269,24 +269,17 @@ pub const Chunk = struct {
         _ = cacheMisses.fetchAdd(1, .seq_cst);
         return height;
     }
-    
-    fn scaleHeight(height:f32)f32{
-        const terms = comptime [_]f32{
-            -2.5408277295123904e-003,
-             1.2812501147500588e+000,
-            -1.6573684564075566e+000,
-             1.0594173030800080e-001,
-             1.5586796210829328e+000,
-            -8.8744433151283975e-001
-        };
-        
-          var t:f32 = 1;
-          var r:f32 = 0;
-          inline for(terms)|c|{
+
+    fn scaleHeight(height: f32) f32 {
+        const terms = comptime [_]f32{ -2.5408277295123904e-003, 1.2812501147500588e+000, -1.6573684564075566e+000, 1.0594173030800080e-001, 1.5586796210829328e+000, -8.8744433151283975e-001 };
+
+        var t: f32 = 1;
+        var r: f32 = 0;
+        inline for (terms) |c| {
             r += c * t;
             t *= height;
-          }
-          return r;
+        }
+        return r;
     }
     pub fn GetBlock(self: *@This(), x: u5, y: u5, z: u5) Block {
         switch (self.blocks) {
@@ -369,7 +362,7 @@ pub const Chunk = struct {
         CaveExpansionMax: f32,
         CaveExpansionStart: f32,
         seed: u64,
-        terrainScale: f32,  
+        terrainScale: f32,
         genStructures: bool,
     };
 };
