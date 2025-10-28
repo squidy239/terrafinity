@@ -32,6 +32,9 @@ threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefi
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
 
+//TODO make better mesher, greedy meshing? 
+//maybie for each face move in and mesh the 2d face
+
 pub const Mesh = struct {
     faces: ?[]const Face,
     TransperentFaces: ?[]const Face,
@@ -51,46 +54,48 @@ pub const Mesh = struct {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
                     const block = extendedBlocks[x][y][z];
-                    if (block.Visible()) {
-                        const neighboring_blocks = [6]Block{
-                            extendedBlocks[x + 1][y][z],
-                            extendedBlocks[x - 1][y][z],
-                            extendedBlocks[x][y + 1][z],
-                            extendedBlocks[x][y - 1][z],
-                            extendedBlocks[x][y][z + 1],
-                            extendedBlocks[x][y][z - 1],
-                        };
-                        inline for (neighboring_blocks, 0..) |b, i| {
-                            if (b.Transperent()) {
-                                if (!block.Transperent()) {
-                                    std.debug.assert(pos < faceBuffer.len);
-                                    faceBuffer[pos] = Face{
-                                        .BlockType = block,
-                                        .isGreedy = false,
-                                        .height = 1,
-                                        .width = 1,
-                                        .rot = @enumFromInt(i),
-                                        .x = @intCast(x - 1),
-                                        .y = @intCast(y - 1),
-                                        .z = @intCast(z - 1),
-                                        ._ = undefined,
-                                    };
-                                    pos += 1;
-                                } else if (block != b) {
-                                    std.debug.assert(Tpos < TransparentfaceBuffer.len);
-                                    TransparentfaceBuffer[Tpos] = Face{
-                                        .BlockType = block,
-                                        .isGreedy = false,
-                                        .height = 1,
-                                        .width = 1,
-                                        .rot = @enumFromInt(i),
-                                        .x = @intCast(x - 1),
-                                        .y = @intCast(y - 1),
-                                        .z = @intCast(z - 1),
-                                        ._ = undefined,
-                                    };
-                                    Tpos += 1;
-                                }
+                    if (!block.Visible()) continue;
+                    const neighboring_blocks = @Vector(6, @typeInfo(Block).@"enum".tag_type){
+                        @intFromEnum(extendedBlocks[x + 1][y][z]),
+                        @intFromEnum(extendedBlocks[x - 1][y][z]),
+                        @intFromEnum(extendedBlocks[x][y + 1][z]),
+                        @intFromEnum(extendedBlocks[x][y - 1][z]),
+                        @intFromEnum(extendedBlocks[x][y][z + 1]),
+                        @intFromEnum(extendedBlocks[x][y][z - 1]),
+                    };
+                    const neighboring_blocks_transparent = Block.TransperentVec(6, neighboring_blocks);
+                    const block_transparent = block.Transperent();
+                    inline for (0..6) |i| {
+                        inner: {
+                            if (!neighboring_blocks_transparent[i]) break:inner;
+                            if (!block_transparent) {
+                                std.debug.assert(pos < faceBuffer.len);
+                                faceBuffer[pos] = Face{
+                                    .BlockType = block,
+                                    .isGreedy = false,
+                                    .height = 1,
+                                    .width = 1,
+                                    .rot = @enumFromInt(i),
+                                    .x = @intCast(x - 1),
+                                    .y = @intCast(y - 1),
+                                    .z = @intCast(z - 1),
+                                    ._ = undefined,
+                                };
+                                pos += 1;
+                            } else if (@intFromEnum(block) != neighboring_blocks[i]) {
+                                std.debug.assert(Tpos < TransparentfaceBuffer.len);
+                                TransparentfaceBuffer[Tpos] = Face{
+                                    .BlockType = block,
+                                    .isGreedy = false,
+                                    .height = 1,
+                                    .width = 1,
+                                    .rot = @enumFromInt(i),
+                                    .x = @intCast(x - 1),
+                                    .y = @intCast(y - 1),
+                                    .z = @intCast(z - 1),
+                                    ._ = undefined,
+                                };
+                                Tpos += 1;
                             }
                         }
                     }
