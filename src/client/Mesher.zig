@@ -32,7 +32,7 @@ threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefi
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
 
-//TODO make better mesher, greedy meshing? 
+//TODO make better mesher, greedy meshing?
 //maybie for each face move in and mesh the 2d face
 
 pub const Mesh = struct {
@@ -67,7 +67,7 @@ pub const Mesh = struct {
                     const block_transparent = block.Transperent();
                     inline for (0..6) |i| {
                         inner: {
-                            if (!neighboring_blocks_transparent[i]) break:inner;
+                            if (!neighboring_blocks_transparent[i]) break :inner;
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{

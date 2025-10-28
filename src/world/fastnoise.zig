@@ -492,7 +492,7 @@ pub fn Noise(comptime Float: type) type {
 
         // Noise Coordinate Transforms (frequency, and possible skew or rotation)
 
-        fn transformNoiseCoordinate2D(self: *const State, x: *Float, y: *Float) void {
+        inline fn transformNoiseCoordinate2D(self: *const State, x: *Float, y: *Float) void {
             x.* *= self.frequency;
             y.* *= self.frequency;
 

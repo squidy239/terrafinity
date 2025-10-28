@@ -62,9 +62,9 @@ pub const Renderer = struct {
     MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
     ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
     ChunkRenderListLock: std.Thread.RwLock,
-    MeshDistance: [3]std.atomic.Value(u32),
-    GenerateDistance: [3]std.atomic.Value(u32),
-    LoadDistance: [3]std.atomic.Value(u32),
+    MeshDistance: std.atomic.Value(@Vector(3, u32)),
+    GenerateDistance: std.atomic.Value(@Vector(3, u32)),
+    LoadDistance: std.atomic.Value(@Vector(3, u32)),
     window: *glfw.Window,
     proc_table: *gl.ProcTable,
     screen_dimensions: [2]u32,
@@ -94,9 +94,9 @@ pub const Renderer = struct {
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) }, //should be 2 or over gendistance
-            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
+            .GenerateDistance = .init(@Vector(3, u32){GenDist[0], GenDist[1], GenDist[0]}),
+            .LoadDistance =  .init(@Vector(3, u32){LoadDist[0], LoadDist[1], LoadDist[0]}), //should be 2 or over gendistance
+            .MeshDistance = .init(@Vector(3, u32){MeshDist[0], MeshDist[1], MeshDist[0]}), //must 2 or over gendistance to prevent infinite loop of loading and unloading
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
@@ -221,14 +221,37 @@ pub const Renderer = struct {
         gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
     }
-
-    pub fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) [2]u64 {
+    pub fn Draw(self: *@This())[2]u64{
+        const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
+        self.playerLock.lockShared();
+        const playerPos = self.player.pos;
+        self.playerLock.unlockShared();
+        waitforlock.End();
+        //draw chunks
+        const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
+        const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+        const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
+        const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
+        gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
+        gl.Clear(gl.DEPTH_BUFFER_BIT);
+        clear.End();
+        
+        const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
+        const drawn = self.DrawChunks(playerPos, skyColor);
+        drawChunks.End();
+        const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
+        self.DrawEntities(playerPos);
+        drawEntities.End();
+        return drawn;
+    }
+    fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) [2]u64 {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
         const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 10), 360)))));
-        const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
+        const projdist = 2 * 32 * @max(@max(self.MeshDistance.load(.seq_cst)[0], self.MeshDistance.load(.seq_cst)[1]), self.MeshDistance.load(.seq_cst)[2]);
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist));
         const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
@@ -269,7 +292,7 @@ pub const Renderer = struct {
         return [2]u64{ drawnchunks, torenderchunks };
     }
 
-    pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64)) void {
+    fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64)) void {
         gl.FrontFace(gl.CCW);
         gl.UseProgram(self.entityshaderprogram);
         const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
@@ -362,7 +385,7 @@ pub const Renderer = struct {
             const playerPos = self.player.pos;
             self.playerLock.unlockShared();
             const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-            const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
+            const GenDistance = self.GenerateDistance.load(.seq_cst);
             const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
             if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
                 self.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});

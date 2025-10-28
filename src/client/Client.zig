@@ -148,8 +148,8 @@ pub fn main() !void {
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
-
-    defer {
+   
+    defer { 
         std.debug.print("started closing\n", .{});
         running.store(false, .monotonic);
         UserInput.deinit();
@@ -197,23 +197,7 @@ pub fn main() !void {
         const playerPos = player.pos;
         playerEntity.lock.unlockShared();
         waitforlock.End();
-        //draw chunks
-        const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
-        const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-        const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
-        const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
-        gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-        gl.Clear(gl.COLOR_BUFFER_BIT);
-        gl.Clear(gl.DEPTH_BUFFER_BIT);
-        clear.End();
-        gl.UseProgram(renderer.shaderprogram);
-
-        const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        const drawn = renderer.DrawChunks(playerPos, skyColor);
-        drawChunks.End();
-        const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-        renderer.DrawEntities(playerPos);
-        drawEntities.End();
+        const drawn = renderer.Draw();
         const viewport_pixels_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
         const viewport_millimeters_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
         if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
@@ -221,7 +205,7 @@ pub fn main() !void {
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
         drawText.End();
         //unload meshes
-        const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
+        const meshDistance = renderer.MeshDistance.load(.seq_cst);
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);

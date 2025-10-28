@@ -99,7 +99,7 @@ pub const Name = struct {
         return self.data[0..self.len];
     }
 };
-pub const Player = struct {
+pub const Player = struct { //TODO atomic instead of lock
     player_UUID: u128,
     player_name: Name,
     gameMode: GameMode,

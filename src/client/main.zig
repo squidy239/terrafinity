@@ -35,7 +35,8 @@ var width: u32 = 600;
 
 var mainMenu: gui.Element = undefined;
 var optionsMenu: gui.Element = undefined;
-
+var world: ?World = null;
+var renderer: ?Renderer = null;
 pub var currentMenu: *gui.Element = undefined;
 
 var running = std.atomic.Value(bool).init(true);
@@ -130,11 +131,14 @@ pub fn GetViewportMillimeters(window: *glfw.Window) !@Vector(2, i32) {
 const menuPage = enum {
     mainMenu,
     optionsMenu,
+    worldRender,
 };
 
 pub fn SwitchMenu(newMenu: menuPage) void {
     currentMenu = switch (newMenu) {
         .mainMenu => &mainMenu,
         .optionsMenu => &optionsMenu,
+        else => unreachable,
     };
 }
+
