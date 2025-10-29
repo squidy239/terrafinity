@@ -142,7 +142,7 @@ pub const World = struct {
 
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
                     const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
-                    if (true and treeChance < 0.00001) {
+                    if (false and treeChance < 0.00001) {
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
                         const tree = Structures.Tree{
                             .pos = @intCast(centerPos),
@@ -157,17 +157,16 @@ pub const World = struct {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                            .height = @intFromFloat(50 * factor),
-                            .base_radius = @intFromFloat(@round(6 * factor)),
-                            .main_branches = 0,
-                            .branch_length = 0,
-                            .canopy_radius = @intFromFloat(20 * factor),
-                            .top_radius_factor = 0.75,
-                            .branch_start_height_factor = 0.90,
-                            .canopy_density = 0.7,
-                            .scale = self.GenParams.terrainScale,
-                        });
+                        const tree = Structures.Tree{ .pos = @intCast(centerPos), .baseRadius = 4 * factor, .rand = rand, .trunkHeight = 15 * factor, .step = .{
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .lengthPercentRandomness = 0.2,
+                            .branchRandomness = 0.1,
+                            .radiusPercentRandomness = 0.2,
+                        } };
+
+                        try tree.PlaceTree(&worldEditor);
+
                         worldEditor.empty();
                     } else if (treeChance < 0.0015) {
                         structuresGenerated += 1;

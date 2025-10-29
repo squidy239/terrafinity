@@ -96,7 +96,9 @@ pub const Tree = struct {
     branchRandomness: f64 = 0.2,
     branchRange: @Vector(3, f64) = @splat(0.1),
     maxRecursionDepth: usize = 20,
-    leafSize: f64 = 1.0,
+    leafSize: f64 = 2.0,
+    leafDensity: f32 = 0.75,
+    step: Step = .{},
     rand: std.Random,
 
     pub fn PlaceTree(self: *const @This(), editor: *WorldEditor) !void {
@@ -105,29 +107,7 @@ pub const Tree = struct {
         const trunk = WorldEditor.Cone(f64).init(@floatFromInt(self.pos), trunkVec, self.trunkHeight, self.baseRadius, self.baseRadius);
         try editor.PlaceSamplerShape(.Wood, trunk);
         pos += trunkVec * @as(@Vector(3, f64), @splat(self.trunkHeight)) * @Vector(3, f64){ 0.9, 0.9, 0.9 };
-        const step: Step = .{};
-        try self.placeStep(editor, step, pos, trunkVec, self.trunkHeight, self.baseRadius, 1);
-    }
-
-    fn placeBranches(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), iteration: usize) !void {
-        const firstBranches = self.rand.intRangeAtMost(usize, 2, 4);
-        const branchLengthPercent = std.math.pow(f64, self.BranchLengthPercent, @floatFromInt(iteration));
-        const topbranchRadiusPercent = std.math.pow(f64, self.BranchRadiusPercent, @floatFromInt(iteration));
-        const bottombranchRadiusPercent = std.math.pow(f64, self.BranchRadiusPercent, @floatFromInt(iteration -| 1));
-
-        for (0..firstBranches) |i| {
-            const branchVec = branchDirection(i, direction, self.branchRange, firstBranches) + rand3Vec(self.rand, -self.branchRandomness, self.branchRandomness);
-            const branch = WorldEditor.Cone(f64).init((pos), branchVec, self.trunkHeight * branchLengthPercent, self.baseRadius * bottombranchRadiusPercent, self.baseRadius * topbranchRadiusPercent);
-            if (branch.length < 1.0) {
-                try editor.PlaceBlock(.Leaves, @intFromFloat(@round(branch.position)));
-            } else {
-                const block = if (branch.length < 2.0) Block.Leaves else Block.Wood;
-                try editor.PlaceSamplerShape(block, branch);
-                if (iteration < self.maxRecursionDepth) {
-                    try self.placeBranches(editor, pos + branchVec * @as(@Vector(3, f64), @splat(branch.length)) * @Vector(3, f64){ 0.9, 0.9, 0.9 }, branchVec, iteration + 1);
-                }
-            }
-        }
+        try self.placeStep(editor, self.step, pos, trunkVec, self.trunkHeight, self.baseRadius, 1);
     }
 
     fn placeStep(self: *const @This(), editor: *WorldEditor, step: Step, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f64, lastRadius: f64, recursionDepth: usize) !void {
@@ -138,9 +118,11 @@ pub const Tree = struct {
             const length = lastLength * step.lengthPercent + self.rand.float(f64) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f64) * step.radiusPercentRandomness;
             const branch = WorldEditor.Cone(f64).init(pos, branchVec, length, lastRadius, radius);
-            if (length < self.leafSize or recursionDepth > self.maxRecursionDepth) {
+            if (length < 1.0 or recursionDepth > self.maxRecursionDepth) {
                 if (self.leafSize <= 1.0) {
-                    try editor.PlaceBlock(.Leaves, @intFromFloat(@floor(pos)));
+                    const block:Block = if (self.rand.float(f32) < self.leafDensity) .Leaves else .Air;
+                    try editor.PlaceBlock(block, @intFromFloat(@round(pos)));
+                        
                 } else {
                     const halfLeaf = self.leafSize * 0.5;
                     var y = -halfLeaf;
@@ -149,7 +131,9 @@ pub const Tree = struct {
                         while (x <= halfLeaf) : (x += 1) {
                             var z = -halfLeaf;
                             while (z <= halfLeaf) : (z += 1) {
-                                try editor.PlaceBlock(.Leaves, @intFromFloat(@floor(pos + @Vector(3, f64){ x, y, z })));
+                                const block:Block = if (self.rand.float(f32) < self.leafDensity) .Leaves else .Air;
+                                try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ x, y, z })));
+                                
                             }
                         }
                     }
