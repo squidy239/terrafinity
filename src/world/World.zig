@@ -143,21 +143,15 @@ pub const World = struct {
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
                     const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
                     if (true and treeChance < 0.00001) {
-                        structuresGenerated += 1;
-                        const factor = (rand.float(f32) * 2) + 0.5;
-
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                            .height = @intFromFloat(100 * factor),
-                            .base_radius = @intFromFloat(15 * factor),
-                            .main_branches = 0,
-                            .branch_length = 0,
-                            .canopy_radius = @intFromFloat(30 * factor),
-                            .top_radius_factor = 0.75,
-                            .branch_start_height_factor = 0.95,
-                            .canopy_density = 0.9,
-                            .scale = self.GenParams.terrainScale,
-                        });
+                        const tree = Structures.Tree{
+                            .pos = @intCast(centerPos),
+                            .baseRadius = 20,
+                            .rand = rand,
+                            .trunkHeight = 100,
+                        };
+
+                        try tree.PlaceTree(&worldEditor);
                         worldEditor.empty();
                     } else if (treeChance < 0.00015) {
                         structuresGenerated += 1;
@@ -328,10 +322,9 @@ pub const World = struct {
         fn LoadChunkNoErr(self: *World, Pos: [3]i32, renderer: ?*Renderer, structures: bool) ?*Chunk {
             return LoadChunk(self, Pos, renderer, structures) catch |err| std.debug.panic("err: {any}", .{err});
         }
-        pub fn PlaceBlock(self: *@This(), step: Step) !void {
-            const nextblockpos = step.pos;
-            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(nextblockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const nextchunkblockpos = @mod(nextblockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
+        pub fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
+            const nextchunk: @Vector(3, i32) = @intCast(@divFloor(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const nextchunkblockpos = @mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
             if (self.lastchunkpos == null or @reduce(.Or, self.lastchunkpos.? != nextchunk)) {
                 if (self.chunkLock != null) {
                     self.chunkLock.?.unlock();
@@ -365,7 +358,28 @@ pub const World = struct {
                 std.debug.assert(self.chunkLock.? == &self.chunk.?.lock);
                 if (self.chunk.?.blocks != .blocks) _ = try self.chunk.?.ToBlocks(self.world.allocator, false);
             }
-            self.chunk.?.blocks.blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = step.block;
+            self.chunk.?.blocks.blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = block;
+        }
+
+        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
+            const boundingBox = shape.boundingBox;
+            var y = boundingBox[2];
+            while (y < boundingBox[3]) : (y += 1) {
+                var dx = boundingBox[0];
+                while (dx <= boundingBox[1]) : (dx += 1) {
+                    var dz = boundingBox[4];
+                    while (dz <= boundingBox[5]) : (dz += 1) {
+                        if (shape.isPointInside(.{ dx, y, dz })) {
+                            const i64blockpos: @Vector(3, i64) = switch (comptime @typeInfo(@TypeOf(boundingBox[0]))) {
+                                .float => .{ @intFromFloat(dx), @intFromFloat(y), @intFromFloat(dz) },
+                                .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
+                                else => unreachable,
+                            };
+                            try self.PlaceBlock(block, i64blockpos);
+                        }
+                    }
+                }
+            }
         }
 
         pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
@@ -398,7 +412,63 @@ pub const World = struct {
             } else unreachable;
         }
 
-        pub const Step = struct { block: Block, pos: @Vector(3, i64) };
+        pub fn Cone(comptime T: type) type {
+            return struct {
+                position: @Vector(3, T), // top center of cone
+                axis: @Vector(3, T), // normalized axis (direction from top → base)
+                length: T,
+                radiusTop: T,
+                radiusBase: T,
+                boundingBox: @Vector(6, T),
+                pub fn init(pos: @Vector(3, T), axisVec: @Vector(3, T), coneLength: T, baseR: T, topR: T) @This() {
+                    // normalize axis
+                    const normAxis = axisVec / @as(@Vector(3, T), @splat(@sqrt(dot(axisVec, axisVec))));
+                    var cone: @This() = .{
+                        .position = pos,
+                        .axis = normAxis,
+                        .length = coneLength,
+                        .radiusTop = topR,
+                        .radiusBase = baseR,
+                        .boundingBox = undefined,
+                    };
+                    cone.updateBoundingBox();
+                    return cone;
+                }
+
+                pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+                    const v = P - self.position;
+                    const t = dot(v, self.axis);
+
+                    if (t < 0 or t > self.length) return false;
+
+                    const len2 = dot(v, v);
+                    const perp2 = len2 - t * t;
+
+                    const r = self.radiusBase + (self.radiusTop - self.radiusBase) * (t / self.length);
+                    return perp2 < r * r;
+                }
+
+                pub fn updateBoundingBox(self: *@This()) void {
+                    const top = self.position;
+                    const base = self.position + self.axis * @as(@Vector(3, T), @splat(self.length));
+                    const rMax = @max(self.radiusTop, self.radiusBase);
+
+                    const minX = @floor(@min(top[0], base[0]) - rMax);
+                    const maxX = @ceil(@max(top[0], base[0]) + rMax);
+
+                    const minY = @floor(@min(top[1], base[1]) - rMax);
+                    const maxY = @ceil(@max(top[1], base[1]) + rMax);
+
+                    const minZ = @floor(@min(top[2], base[2]) - rMax);
+                    const maxZ = @ceil(@max(top[2], base[2]) + rMax);
+                    self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
+                }
+            };
+        }
+
+        fn dot(a: anytype, b: @TypeOf(a)) @typeInfo(@TypeOf(a)).vector.child {
+            return @reduce(.Add, a * b);
+        }
     };
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {

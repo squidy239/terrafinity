@@ -222,15 +222,8 @@ pub fn processInput() !void {
 
     if (render.window.getKey(glfw.Key.b) == .press) {
         defer _ = worldEditor.clear();
-        // try worldEditor.PlaceBlock(.{ .block = .Stone, .pos = @as(@Vector(3, i64), @intFromFloat(render.player.pos)) });
-
-        for (0..512) |x| {
-            for (0..512) |y| {
-                for (0..512) |z| {
-                    try worldEditor.PlaceBlock(.{ .block = .Stone, .pos = @as(@Vector(3, i64), @intFromFloat(render.player.pos)) + @Vector(3, i64){ @intCast(x), @intCast(y), @intCast(z) } });
-                }
-            }
-        }
+        const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 100, 10, 5);
+        try worldEditor.PlaceSamplerShape(.Stone, cone);
     }
 
     if (render.window.getKey(glfw.Key.i) == .press) {
