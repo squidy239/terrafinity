@@ -125,70 +125,72 @@ pub const World = struct {
         defer genstructures.End();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
+        if (chunk.blocks != .blocks) return;
         if (!self.GenParams.genStructures) return;
         const randomSeed = std.hash.Wyhash.hash(self.GenParams.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
+        const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.GenParams, &self.TerrainHeightCache); //should still be in the cache
         var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, self.allocator); //temporary allocation
         defer _ = worldEditor.deinit();
         var structuresGenerated: u32 = 0;
-        if (chunk.blocks == .blocks) {
-            for (0..ChunkSize) |x| {
-                for (0..ChunkSize) |z| {
-                    for (0..ChunkSize) |y| {
-                        if (chunk.blocks.blocks[x][y][z] == .Grass) {
-                            const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
-                            if (false and treeChance < 0.00001) {
-                                structuresGenerated += 1;
-                                const factor = (rand.float(f32) * 2) + 0.5;
 
-                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                                    .height = @intFromFloat(100 * factor),
-                                    .base_radius = @intFromFloat(15 * factor),
-                                    .main_branches = 0,
-                                    .branch_length = 0,
-                                    .canopy_radius = @intFromFloat(30 * factor),
-                                    .top_radius_factor = 0.75,
-                                    .branch_start_height_factor = 0.95,
-                                    .canopy_density = 0.9,
-                                    .scale = self.GenParams.terrainScale,
-                                });
-                                worldEditor.empty();
-                            } else if (treeChance < 0.00015) {
-                                structuresGenerated += 1;
-                                const factor = rand.float(f32) + 0.5;
-                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                                    .height = @intFromFloat(50 * factor),
-                                    .base_radius = @intFromFloat(6 * factor),
-                                    .main_branches = 0,
-                                    .branch_length = 0,
-                                    .canopy_radius = @intFromFloat(20 * factor),
-                                    .top_radius_factor = 0.75,
-                                    .branch_start_height_factor = 0.90,
-                                    .canopy_density = 0.7,
-                                    .scale = self.GenParams.terrainScale,
-                                });
-                                worldEditor.empty();
-                            } else if (treeChance < 0.0015) {
-                                structuresGenerated += 1;
-                                const factor = rand.float(f32) + 0.5;
-                                const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                                try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                                    .height = @intFromFloat(25 * factor),
-                                    .base_radius = @intFromFloat(@round(3 * factor)),
-                                    .main_branches = 0,
-                                    .branch_length = 0,
-                                    .canopy_radius = @intFromFloat(12 * factor),
-                                    .top_radius_factor = 0.75,
-                                    .branch_start_height_factor = 0.90,
-                                    .canopy_density = 0.7,
-                                    .scale = self.GenParams.terrainScale,
-                                });
-                                worldEditor.empty();
-                            }
-                        }
+        for (heights, 0..) |row, x| {
+            for (row, 0..) |height, z| {
+                if (@divFloor(height, ChunkSize) != Pos[1] or height < self.GenParams.SeaLevel) continue;
+                const y: usize = @intCast(@mod(height, ChunkSize));
+
+                if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
+                    const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
+                    if (true and treeChance < 0.00001) {
+                        structuresGenerated += 1;
+                        const factor = (rand.float(f32) * 2) + 0.5;
+
+                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
+                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
+                            .height = @intFromFloat(100 * factor),
+                            .base_radius = @intFromFloat(15 * factor),
+                            .main_branches = 0,
+                            .branch_length = 0,
+                            .canopy_radius = @intFromFloat(30 * factor),
+                            .top_radius_factor = 0.75,
+                            .branch_start_height_factor = 0.95,
+                            .canopy_density = 0.9,
+                            .scale = self.GenParams.terrainScale,
+                        });
+                        worldEditor.empty();
+                    } else if (treeChance < 0.00015) {
+                        structuresGenerated += 1;
+                        const factor = rand.float(f32) + 0.5;
+                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
+                            .height = @intFromFloat(50 * factor),
+                            .base_radius = @intFromFloat(@round(6 * factor)),
+                            .main_branches = 0,
+                            .branch_length = 0,
+                            .canopy_radius = @intFromFloat(20 * factor),
+                            .top_radius_factor = 0.75,
+                            .branch_start_height_factor = 0.90,
+                            .canopy_density = 0.7,
+                            .scale = self.GenParams.terrainScale,
+                        });
+                        worldEditor.empty();
+                    } else if (treeChance < 0.0015) {
+                        structuresGenerated += 1;
+                        const factor = rand.float(f32) + 0.5;
+                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
+                            .height = @intFromFloat(25 * factor),
+                            .base_radius = @intFromFloat(@round(4 * factor)),
+                            .main_branches = 0,
+                            .branch_length = 0,
+                            .canopy_radius = @intFromFloat(12 * factor),
+                            .top_radius_factor = 0.75,
+                            .branch_start_height_factor = 0.90,
+                            .canopy_density = 0.7,
+                            .scale = self.GenParams.terrainScale,
+                        });
+                        worldEditor.empty();
                     }
                 }
             }

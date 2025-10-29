@@ -84,13 +84,18 @@ pub fn deinit() void {
 fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window: *glfw.Window) void {
     _ = slider;
     _ = window;
-    var genDistf: @Vector(3, f32) = @Vector(3, f32){ 100, 100, 100};
+    var genDistf: @Vector(2, f32) = @Vector(2, f32){ 100, 100 };
     genDistf *= @splat(slideData.sliderPos);
-    const genDist: @Vector(3, u32) = @intFromFloat(genDistf);
-    
-    render.GenerateDistance.store(genDist, .seq_cst);
-    render.LoadDistance.store(genDist + @Vector(3, u32){2,2,2}, .seq_cst);
-    render.MeshDistance.store(genDist + @Vector(3, u32){2,2,2}, .seq_cst);
+    const genDist: @Vector(2, u32) = @intFromFloat(genDistf);
+    render.GenerateDistance[0].store(genDist[0], .monotonic);
+    render.GenerateDistance[1].store(genDist[1], .monotonic);
+    render.GenerateDistance[2].store(genDist[0], .monotonic);
+    render.LoadDistance[0].store(genDist[1] + 2, .monotonic);
+    render.LoadDistance[1].store(genDist[0] + 2, .monotonic);
+    render.LoadDistance[2].store(genDist[1] + 2, .monotonic);
+    render.MeshDistance[0].store(genDist[0] + 2, .monotonic);
+    render.MeshDistance[1].store(genDist[1] + 2, .monotonic);
+    render.MeshDistance[2].store(genDist[0] + 2, .monotonic);
     std.debug.print("genDist: {d}\n", .{genDist});
 }
 

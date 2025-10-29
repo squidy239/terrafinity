@@ -148,8 +148,8 @@ pub fn main() !void {
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
     const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
     const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
-   
-    defer { 
+
+    defer {
         std.debug.print("started closing\n", .{});
         running.store(false, .monotonic);
         UserInput.deinit();
@@ -205,7 +205,7 @@ pub fn main() !void {
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
         drawText.End();
         //unload meshes
-        const meshDistance = renderer.MeshDistance.load(.seq_cst);
+        const meshDistance = [3]u32{ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);

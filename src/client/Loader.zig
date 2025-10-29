@@ -24,14 +24,14 @@ pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3,
         const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-        const genDistance = renderer.GenerateDistance.load(.seq_cst);
+        const genDistance = @Vector(3, u32){ renderer.GenerateDistance[0].load(.monotonic), renderer.GenerateDistance[1].load(.monotonic), renderer.GenerateDistance[2].load(.monotonic) };
         const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ ChunkSize, ChunkSize, ChunkSize })));
         LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
         addChunkstoLoad.End();
     }
 }
 //TODO unload until done
-pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *std.atomic.Value(@Vector(3, u32)), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
+pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
     _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
     while (running.load(.monotonic)) {
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -42,7 +42,7 @@ pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *std.atomic.Value(@Ve
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-        const loadDistance = loadDistancePtr.load(.seq_cst);
+        const loadDistance = @Vector(3, u32){ loadDistancePtr[0].load(.monotonic), loadDistancePtr[1].load(.monotonic), loadDistancePtr[2].load(.monotonic) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         UnloadChunks(world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});

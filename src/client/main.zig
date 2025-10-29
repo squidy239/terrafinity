@@ -141,4 +141,3 @@ pub fn SwitchMenu(newMenu: menuPage) void {
         else => unreachable,
     };
 }
-
