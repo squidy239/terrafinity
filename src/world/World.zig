@@ -131,8 +131,10 @@ pub const World = struct {
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
         const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.GenParams, &self.TerrainHeightCache); //should still be in the cache
-        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, self.allocator); //temporary allocation
-        defer _ = worldEditor.deinit();
+        var sfa = std.heap.stackFallback(100_000, self.allocator);
+        const tempAllocator = sfa.get();
+        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, tempAllocator); //temporary allocation
+        defer _ = worldEditor.deinit() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
         var structuresGenerated: u32 = 0;
 
         for (heights, 0..) |row, x| {
@@ -142,13 +144,37 @@ pub const World = struct {
 
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
                     const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
-                    if (false and treeChance < 0.00001) {
+                    if (true and treeChance < 0.000002) {
+                        comptime var csteps:[10]Structures.Tree.Step = undefined;
+                        comptime for(&csteps, 0..) |*step, r| {
+                            step.* = switch (r) {
+                                0...2 =>  Structures.Tree.Step{
+                                    .lengthPercent = 0.9,
+                                    .radiusPercent = 0.5,
+                                
+                                },
+                                3...5 =>  Structures.Tree.Step{
+                                    .lengthPercent = 0.6,
+                                    .radiusPercent = 0.5,
+                                },
+                                6...10 =>  Structures.Tree.Step{
+                                    .lengthPercent = 0.6,
+                                    .radiusPercent = 0.5,
+                                    .branchCountMax = 8,
+                                    .branchCountMin = 4,
+                                },
+                                else => unreachable,
+                            };
+                        };
+                        const steps = csteps;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
                         const tree = Structures.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 20,
                             .rand = rand,
                             .trunkHeight = 100,
+                            .maxRecursionDepth = 10,
+                            .steps = &steps,
                         };
 
                         try tree.PlaceTree(&worldEditor);
@@ -157,13 +183,20 @@ pub const World = struct {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        const tree = Structures.Tree{ .pos = @intCast(centerPos), .baseRadius = 4 * factor, .rand = rand, .trunkHeight = 15 * factor, .step = .{
-                            .branchCountMax = 4,
-                            .branchCountMin = 3,
-                            .lengthPercentRandomness = 0.2,
-                            .branchRandomness = 0.1,
-                            .radiusPercentRandomness = 0.2,
-                        } };
+                        const tree = Structures.Tree{
+                            .pos = @intCast(centerPos),
+                            .baseRadius = 4 * factor,
+                            .rand = rand,
+                            .trunkHeight = 15 * factor,
+                            .steps = &@as([10]Structures.Tree.Step, @splat(.{
+                                .branchCountMax = 4,
+                                .branchCountMin = 3,
+                                .lengthPercentRandomness = 0.2,
+                                .branchRandomness = 0.1,
+
+                                .radiusPercentRandomness = 0.2,
+                            })),
+                        };
 
                         try tree.PlaceTree(&worldEditor);
 
@@ -228,6 +261,13 @@ pub const World = struct {
         world: *World,
         remeshWithThreadPool: bool = false,
         tempallocator: std.mem.Allocator,
+        editBuffer: std.ArrayList(SetBlock) = .{},
+
+        pub const SetBlock = struct {
+            pos: @Vector(3, i64),
+            block: Block,
+        };
+
         ///allocator only makes temporary allocations, stackfallbackallocator should be used if clear is not called. mainchunk must not be locked
         pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, tempallocator: std.mem.Allocator) !@This() {
             const initworld = ztracy.ZoneNC(@src(), "initEditor", 45453);
@@ -252,10 +292,10 @@ pub const World = struct {
         }
 
         //clears and frees memory, returns amount of chunks remeshed
-        pub fn deinit(self: *@This()) usize {
+        pub fn deinit(self: *@This()) !usize {
             const deinitworld = ztracy.ZoneNC(@src(), "deinitEditor", 43224);
             defer deinitworld.End();
-            const remeshed = self.clear();
+            const remeshed = try self.clear();
             self.chunkMap.deinit();
             return remeshed;
         }
@@ -269,18 +309,21 @@ pub const World = struct {
             self.lastchunkpos = null;
         }
 
+        pub fn applyBuffered(self: *@This()) !void {
+            for (self.editBuffer.items) |setBlock| {
+                try self.PlaceBlock(setBlock.block, setBlock.pos);
+            }
+            self.editBuffer.clearAndFree(self.tempallocator);
+        }
+
         ///must be called after a series of actions to update renderer and empty chunk cache, returns amount remeshed.
         /// if StackFallbackAllocator is used, the WorldEditor should not be used after this call.
-        pub fn clear(self: *@This()) usize {
+        pub fn clear(self: *@This()) !usize {
             const clearworld = ztracy.ZoneNC(@src(), "clearEditor", 67556);
             defer clearworld.End();
             var remeshed: usize = 0;
-            if (self.chunkLock != null) {
-                self.chunkLock.?.unlock();
-                self.chunkLock = null;
-            }
-            self.chunk = null;
-            self.lastchunkpos = null;
+            try self.applyBuffered();
+            self.empty();
             var it = self.chunkMap.iterator();
             while (it.next()) |entry| {
                 entry.value_ptr.*.release();
@@ -290,10 +333,9 @@ pub const World = struct {
                 while (it.next()) |entry| {
                     if (self.mainChunkPos == null or @reduce(.Or, @as(@Vector(3, i32), entry.key_ptr.*) != @as(@Vector(3, i32), self.mainChunkPos.?))) {
                         if (self.remeshWithThreadPool) {
-                            self.world.threadPool.spawn(Renderer.AddChunkToRenderTask, .{ self.renderer.?, entry.key_ptr.*, false, false }, .High) catch |err| std.debug.panic("error adding chunk to render: {any}", .{err});
+                            try self.world.threadPool.spawn(Renderer.AddChunkToRenderTask, .{ self.renderer.?, entry.key_ptr.*, false, false }, .High);
                         } else {
-                            self.renderer.?.AddChunkToRender(entry.key_ptr.*, false) catch |err|
-                                std.debug.panic("error adding chunk to render: {any}", .{err});
+                            addChunkToRenderNoErr(self.renderer.?, entry.key_ptr.*, false);
                         }
                         remeshed += 1;
                     }
@@ -321,6 +363,14 @@ pub const World = struct {
         fn LoadChunkNoErr(self: *World, Pos: [3]i32, renderer: ?*Renderer, structures: bool) ?*Chunk {
             return LoadChunk(self, Pos, renderer, structures) catch |err| std.debug.panic("err: {any}", .{err});
         }
+
+        fn addChunkToRenderNoErr(r: *Renderer, Pos: [3]i32, genStructures: bool) void {
+            r.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("err: {any}", .{err});
+        }
+        pub fn PlaceBlockBuffered(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
+            try self.editBuffer.append(self.tempallocator, .{ .pos = pos, .block = block });
+        }
+
         pub fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
             const nextchunk: @Vector(3, i32) = @intCast(@divFloor(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const nextchunkblockpos = @mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
@@ -332,9 +382,9 @@ pub const World = struct {
                 self.chunk = self.chunkMap.get(nextchunk);
                 if (self.chunk == null) {
                     self.chunk = LoadChunkNoErr(self.world, nextchunk, null, false);
-                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
+                    //const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
                     self.chunk.?.lock.lockShared();
-                    lock.End();
+                    //lock.End();
                     const blockEncoding = self.chunk.?.blocks;
                     self.chunk.?.lock.unlockShared();
                     if (blockEncoding != .blocks) {
@@ -345,9 +395,9 @@ pub const World = struct {
                 if (self.chunk != null) {
                     std.debug.assert(self.chunkLock == null);
                     self.chunkLock = &self.chunk.?.lock;
-                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
+                    //const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
                     self.chunkLock.?.lock();
-                    lock.End();
+                    //lock.End();
                 }
             }
             self.lastchunkpos = nextchunk;
@@ -360,7 +410,7 @@ pub const World = struct {
             self.chunk.?.blocks.blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = block;
         }
 
-        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
+        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, comptime buffered: bool) !void {
             const boundingBox = shape.boundingBox;
             var y = boundingBox[2];
             while (y < boundingBox[3]) : (y += 1) {
@@ -374,7 +424,7 @@ pub const World = struct {
                                 .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                                 else => unreachable,
                             };
-                            try self.PlaceBlock(block, i64blockpos);
+                            if (buffered) try self.PlaceBlockBuffered(block, i64blockpos) else try self.PlaceBlock(block, i64blockpos);
                         }
                     }
                 }

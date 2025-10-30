@@ -76,7 +76,7 @@ pub fn init(ren: *Renderer) !void {
 }
 
 pub fn deinit() void {
-    _ = worldEditor.deinit();
+    _ = worldEditor.deinit() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
     menu.deinit();
     isinit = false;
 }
@@ -221,9 +221,9 @@ pub fn processInput() !void {
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (render.window.getKey(glfw.Key.b) == .press) {
-        defer _ = worldEditor.clear();
+        defer _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 100, 10, 5);
-        try worldEditor.PlaceSamplerShape(.Stone, cone);
+        try worldEditor.PlaceSamplerShape(.Stone, cone, false);
     }
 
     if (render.window.getKey(glfw.Key.i) == .press) {
@@ -234,7 +234,7 @@ pub fn processInput() !void {
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
-        _ = worldEditor.clear();
+        _ = try worldEditor.clear();
     }
     if (render.window.getKey(glfw.Key.p) == .press) {
         ts.Benchmark = true;

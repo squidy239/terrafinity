@@ -267,7 +267,7 @@ pub const Renderer = struct {
         var torenderchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
         gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
-        gl.Uniform3f(self.uniforms.playerposlocation, @floatCast(playerPos[0]), @floatCast(playerPos[1]), @floatCast(playerPos[2]));
+        gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
         const frustrum = Frustum.extractFrustumPlanes(projview);
         inline for (0..2) |i| {
             if (i == 1) gl.Disable(gl.CULL_FACE);

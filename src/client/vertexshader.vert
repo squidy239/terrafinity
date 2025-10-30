@@ -3,7 +3,7 @@ layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
 uniform mat4 sunrot;
-uniform vec3 playerPos;
+uniform dvec3 playerPos;
 uniform double time;
 out vec3 coordss;
 flat out uint blockArrayLayer;
@@ -137,7 +137,7 @@ void main() {
     float animationMs = 500;
     float animationSpeed = 0.25;
     float chunktime = float(time - creationTime);
-    vec3 relativeChunkPos = (chunkPos.xyz * ChunkSize * scale) - playerPos;
+    vec3 relativeChunkPos = vec3(dvec3(chunkPos.xyz * ChunkSize * scale) - playerPos);
     coords.y -= ((animationMs - min(chunktime, animationMs)) * animationSpeed); //replace with pos.y for other aniamtion
-    gl_Position = projview * vec4((coords * scale) + ((pos * scale) + (relativeChunkPos)), 1);
+    gl_Position = projview * vec4((coords * scale) + (pos * scale) + (relativeChunkPos), 1);
 }

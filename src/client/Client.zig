@@ -61,7 +61,7 @@ pub fn main() !void {
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .SpawnRange = 0,
-        .SpawnCenterPos = [3]i32{ 5333, 0, -5333 }, //5333, -5333 is the mountain
+        .SpawnCenterPos = [3]f64{ 2500, 0, 200 },
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -2048,
