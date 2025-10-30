@@ -6,9 +6,12 @@ const zm = @import("zm");
 const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
+const Structures = World.Structures;
 const gui = @import("gui");
 var render: *Renderer = undefined;
 var worldEditor: World.WorldEditor = undefined;
+var worldEditorLock: std.Thread.Mutex = .{};
+
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
 var menu: gui.Element = undefined;
@@ -17,7 +20,7 @@ var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
 pub fn init(ren: *Renderer) !void {
     render = ren;
-    worldEditor = try World.WorldEditor.init(render.world, render, null, null, render.allocator);
+    worldEditor = try World.WorldEditor.init(render.world, render, null, null, true, render.allocator);
     lastmicrotime = std.time.microTimestamp();
     const textEscMenu = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
@@ -76,7 +79,10 @@ pub fn init(ren: *Renderer) !void {
 }
 
 pub fn deinit() void {
+    worldEditorLock.lock();
     _ = worldEditor.deinit() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
+    worldEditorLock.unlock();
+
     menu.deinit();
     isinit = false;
 }
@@ -221,9 +227,15 @@ pub fn processInput() !void {
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (render.window.getKey(glfw.Key.b) == .press) {
-        defer _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 100, 10, 5);
         try worldEditor.PlaceSamplerShape(.Stone, cone, false);
+        worldEditorLock.lock();
+        _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        worldEditorLock.unlock();
+    }
+
+    if (render.window.getKey(glfw.Key.g) == .press) {
+        try render.pool.spawn(genFractalTask, .{}, .High);
     }
 
     if (render.window.getKey(glfw.Key.i) == .press) {
@@ -233,7 +245,10 @@ pub fn processInput() !void {
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
+        worldEditorLock.lock();
+        defer worldEditorLock.unlock();
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
+
         _ = try worldEditor.clear();
     }
     if (render.window.getKey(glfw.Key.p) == .press) {
@@ -274,6 +289,48 @@ pub fn GenCube(state: anytype, genParams: anytype) ?World.Step {
     State.stage += 1;
     if (stage >= (genParams * genParams * genParams)) return null;
     return World.Step{ .block = .Stone, .pos = .{ @divFloor(stage, genParams * genParams), @mod(@divFloor(stage, genParams), genParams), @mod(stage, genParams) } };
+}
+
+fn genFractalTask() void {
+    comptime var csteps: [10]Structures.Tree.Step = undefined;
+    comptime for (&csteps, 0..) |*step, r| {
+        step.* = switch (r) {
+            0...1 => Structures.Tree.Step{
+                .lengthPercent = 1.0,
+                .radiusPercent = 1.0,
+                .branchCountMax = 32,
+                .branchCountMin = 32,
+                .branchRange = @Vector(3, f32){ 1, 1, 0 },
+                .block = .Stone,
+                .branchRandomness = 0.0,
+            },
+            2...11 => Structures.Tree.Step{
+                .lengthPercent = 0.75,
+                .radiusPercent = 0.75,
+                .branchRange = @Vector(3, f32){ 0, 0.05, 0 },
+                .block = .Stone,
+                .branchCountMax = 3,
+                .branchCountMin = 3,
+                .branchRandomness = 0.0,
+            },
+            else => unreachable,
+        };
+    };
+    const steps = csteps;
+    var random = std.Random.DefaultPrng.init(0);
+    const tree = Structures.Tree{
+        .pos = @intFromFloat(render.player.pos),
+        .baseRadius = 5,
+        .rand = random.random(),
+        .trunkHeight = 128,
+        .maxRecursionDepth = 8,
+        .steps = &steps,
+    };
+    worldEditorLock.lock();
+    defer worldEditorLock.unlock();
+    tree.PlaceTree(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+
+    _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
 }
 
 const CubeState = struct {

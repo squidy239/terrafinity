@@ -10,10 +10,9 @@ const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
 
-const Structures = @import("Structures.zig");
-
 const ChunkSize = Chunk.ChunkSize;
 pub const World = struct {
+    pub const Structures = @import("Structures.zig");
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192),
@@ -133,7 +132,7 @@ pub const World = struct {
         const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.GenParams, &self.TerrainHeightCache); //should still be in the cache
         var sfa = std.heap.stackFallback(100_000, self.allocator);
         const tempAllocator = sfa.get();
-        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, tempAllocator); //temporary allocation
+        var worldEditor = try WorldEditor.init(self, renderer, chunk, Pos, false, tempAllocator); //temporary allocation
         defer _ = worldEditor.deinit() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
         var structuresGenerated: u32 = 0;
 
@@ -145,19 +144,27 @@ pub const World = struct {
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
                     const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
                     if (true and treeChance < 0.000002) {
-                        comptime var csteps:[10]Structures.Tree.Step = undefined;
-                        comptime for(&csteps, 0..) |*step, r| {
+                        comptime var csteps: [10]Structures.Tree.Step = undefined;
+                        comptime for (&csteps, 0..) |*step, r| {
                             step.* = switch (r) {
-                                0...2 =>  Structures.Tree.Step{
+                                0...1 => Structures.Tree.Step{
+                                    .lengthPercent = 1.0,
+                                    .radiusPercent = 1.0,
+                                    .branchCountMax = 1,
+                                    .branchCountMin = 1,
+                                    .branchRange = @splat(0.01),
+                                },
+                                2...3 => Structures.Tree.Step{
                                     .lengthPercent = 0.9,
                                     .radiusPercent = 0.5,
-                                
                                 },
-                                3...5 =>  Structures.Tree.Step{
+                                4...6 => Structures.Tree.Step{
                                     .lengthPercent = 0.6,
                                     .radiusPercent = 0.5,
+                                    .branchCountMax = 4,
+                                    .branchCountMin = 3,
                                 },
-                                6...10 =>  Structures.Tree.Step{
+                                7...10 => Structures.Tree.Step{
                                     .lengthPercent = 0.6,
                                     .radiusPercent = 0.5,
                                     .branchCountMax = 8,
@@ -269,7 +276,7 @@ pub const World = struct {
         };
 
         ///allocator only makes temporary allocations, stackfallbackallocator should be used if clear is not called. mainchunk must not be locked
-        pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, tempallocator: std.mem.Allocator) !@This() {
+        pub fn init(world: *World, renderer: ?*Renderer, mainChunk: ?*Chunk, mainChunkPos: ?[3]i32, remeshWithThreadPool: bool, tempallocator: std.mem.Allocator) !@This() {
             const initworld = ztracy.ZoneNC(@src(), "initEditor", 45453);
             defer initworld.End();
             var Editor = @This(){
@@ -281,6 +288,7 @@ pub const World = struct {
                 .world = world,
                 .lastchunkpos = null,
                 .tempallocator = tempallocator,
+                .remeshWithThreadPool = remeshWithThreadPool,
             };
             if (mainChunk != null) {
                 mainChunk.?.add_ref();
@@ -313,7 +321,7 @@ pub const World = struct {
             for (self.editBuffer.items) |setBlock| {
                 try self.PlaceBlock(setBlock.block, setBlock.pos);
             }
-            self.editBuffer.clearAndFree(self.tempallocator);
+            self.editBuffer.shrinkAndFree(self.tempallocator, 0);
         }
 
         ///must be called after a series of actions to update renderer and empty chunk cache, returns amount remeshed.

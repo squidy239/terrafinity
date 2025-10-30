@@ -94,7 +94,6 @@ pub const Tree = struct {
     baseRadius: f32,
     trunkHeight: f32,
     branchRandomness: f32 = 0.2,
-    branchRange: @Vector(3, f32) = @splat(0.1),
     maxRecursionDepth: usize = 10,
     leafSize: f32 = 2.0,
     leafDensity: f32 = 0.75,
@@ -105,12 +104,8 @@ pub const Tree = struct {
 
     pub fn PlaceTree(self: *const @This(), editor: *WorldEditor) !void {
         std.debug.assert(self.steps.len >= self.maxRecursionDepth);
-        var pos: @Vector(3, f64) = @floatFromInt(self.pos);
-        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(self.rand, -0.25, 0.25);
-        const trunk = WorldEditor.Cone(f64).init(@floatFromInt(self.pos), trunkVec, self.trunkHeight, self.baseRadius, self.baseRadius);
-        try editor.PlaceSamplerShape(.Wood, trunk, true);
-        pos += trunkVec * @as(@Vector(3, f64), @splat(self.trunkHeight)) * @Vector(3, f64){ 0.9, 0.9, 0.9 };
-        try self.placeStep(editor, pos, trunkVec, self.trunkHeight, self.baseRadius, 1);
+        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(self.rand, -0.05, 0.05);
+        try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight, self.baseRadius, 1);
     }
 
     fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize) !void {
@@ -118,14 +113,14 @@ pub const Tree = struct {
         const step = self.steps[recursionDepth];
         const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
         for (0..firstBranches) |i| {
-            const branchVec = branchDirection(i, direction, self.branchRange, firstBranches) + rand3Vec(self.rand, -step.branchRandomness, step.branchRandomness);
+            const branchVec = branchDirection(i, direction, step.branchRange, firstBranches) + rand3Vec(self.rand, -step.branchRandomness, step.branchRandomness);
             const length = lastLength * step.lengthPercent + self.rand.float(f32) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f32) * step.radiusPercentRandomness;
             const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(lastRadius), @floatCast(radius));
             if (length < 2.0 or recursionDepth >= self.maxRecursionDepth -| 1) {
                 if (self.leafSize <= 1.0) {
                     const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
-                    try editor.PlaceBlockBuffered(block, @intFromFloat(@round(pos)));
+                    try editor.PlaceBlock(block, @intFromFloat(@round(pos)));
                 } else {
                     const halfLeaf = self.leafSize * 0.5;
                     var y = -halfLeaf;
@@ -135,13 +130,13 @@ pub const Tree = struct {
                             var z = -halfLeaf;
                             while (z <= halfLeaf) : (z += 1) {
                                 const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
-                                try editor.PlaceBlockBuffered(block, @intFromFloat(@round(pos + @Vector(3, f64){ x, y, z })));
+                                try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ x, y, z })));
                             }
                         }
                     }
                 }
             } else {
-                try editor.PlaceSamplerShape(step.block, branch, true);
+                try editor.PlaceSamplerShape(step.block, branch, false);
                 const newPos = pos + (branchVec * @as(@Vector(3, f64), @splat(length)) * @Vector(3, f64){ 0.9, 0.9, 0.9 });
                 try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
             }
@@ -155,7 +150,8 @@ pub const Tree = struct {
         radiusPercentRandomness: f32 = 0.0,
         branchCountMin: usize = 2.0,
         branchCountMax: usize = 4.0,
-        branchRandomness: f64 = 0.2,
+        branchRandomness: f64 = 0.0,
+        branchRange: @Vector(3, f32) = @splat(0.2),
         block: Block = Block.Wood,
         endBlock: Block = Block.Leaves,
     };
@@ -168,37 +164,53 @@ pub const Tree = struct {
         return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
     }
 
-    pub fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
+    ///range is per-axis angular range: 0–2 mapped to 0–360° each
+    pub fn branchDirection(
+        iteration: usize,
+        base: @Vector(3, f64),
+        range: @Vector(3, f64), // X,Y,Z scaling
+        branch_count: usize,
+    ) @Vector(3, f64) {
         const pi = std.math.pi;
-
-        // 1. Compute orientation and angle from range vector
-        const range_len = vecLength(range);
-        const max_angle_rad = pi;
-        const cone_angle = range_len * max_angle_rad; // 0–280° mapped from 0–1
-        // 2. Create orthonormal basis
+    
+        // 1) Orthonormal basis
         const up = if (@abs(base[2]) < 0.999)
-            @Vector(3, f32){ 0.0, 0.0, 1.0 }
+            @Vector(3, f64){ 0.0, 0.0, 1.0 }
         else
-            @Vector(3, f32){ 1.0, 0.0, 0.0 };
-
+            @Vector(3, f64){ 1.0, 0.0, 0.0 };
+    
         const right = vecNormalize(vecCross(up, base));
         const forward = vecNormalize(vecCross(base, right));
-
-        // 3. Azimuth angle for this branch
-        const azimuth = (2.0 * pi * @as(f64, @floatFromInt(iteration))) / @as(f64, @floatFromInt(branch_count));
-
-        // 4. Build local cone offset direction
-        const x: @Vector(3, f64) = @splat(std.math.sin(cone_angle) * std.math.cos(azimuth));
-        const y: @Vector(3, f64) = @splat(std.math.sin(cone_angle) * std.math.sin(azimuth));
-        const z: @Vector(3, f64) = @splat(std.math.cos(cone_angle));
-
-        var branch = x * right + y * forward + z * base;
-
-        // 5. Lean the branch toward the range vector’s direction
-        branch = vecNormalize(branch);
-
-        return vecNormalize(branch);
+    
+        // 2) Fibonacci sphere sample
+        const n = @as(f64, @floatFromInt(branch_count));
+        const i = @as(f64, @floatFromInt(iteration));
+        const offset = 2.0 / n;
+        const increment = pi * (3.0 - std.math.sqrt(5.0));
+    
+        const y_fib = (i * offset) - 1.0 + (offset * 0.5);
+        const r = std.math.sqrt(@max(0.0, 1.0 - y_fib * y_fib));
+        const azimuth = i * increment;
+    
+        const sample = @Vector(3, f64){
+            std.math.cos(azimuth) * r,
+            y_fib,
+            std.math.sin(azimuth) * r,
+        };
+    
+        // 3) Apply per-axis range scaling
+        const scaled = vecNormalize(
+            @as( @Vector(3, f64), @splat(sample[0] * range[0])) * right +
+            @as ( @Vector(3, f64), @splat(sample[1] * range[1])) * base +
+                    @as( @Vector(3, f64), @splat(sample[2] * range[2])) * forward
+        );
+    
+        return scaled;
     }
+
+
+
+
 
     inline fn vecLength(v: @Vector(3, f64)) f64 {
         return @sqrt(@reduce(.Add, v * v));
