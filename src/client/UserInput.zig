@@ -228,7 +228,7 @@ pub fn processInput() !void {
 
     if (render.window.getKey(glfw.Key.b) == .press) {
         const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 100, 10, 5);
-        try worldEditor.PlaceSamplerShape(.Stone, cone, false);
+        try worldEditor.PlaceSamplerShape(.Stone, cone);
         worldEditorLock.lock();
         _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
@@ -292,26 +292,27 @@ pub fn GenCube(state: anytype, genParams: anytype) ?World.Step {
 }
 
 fn genFractalTask() void {
-    comptime var csteps: [10]Structures.Tree.Step = undefined;
+    comptime var csteps: [20]Structures.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
         step.* = switch (r) {
-            0...1 => Structures.Tree.Step{
+            0 => Structures.Tree.Step{
                 .lengthPercent = 1.0,
                 .radiusPercent = 1.0,
                 .branchCountMax = 32,
                 .branchCountMin = 32,
-                .branchRange = @Vector(3, f32){ 1, 1, 0 },
+                .branchRange = @Vector(3, f32){ 2, 2, 2 },
                 .block = .Stone,
                 .branchRandomness = 0.0,
             },
-            2...11 => Structures.Tree.Step{
+            1...21 => Structures.Tree.Step{
                 .lengthPercent = 0.75,
-                .radiusPercent = 0.75,
-                .branchRange = @Vector(3, f32){ 0, 0.05, 0 },
+                .radiusPercent = 0.5,
+                .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },
                 .block = .Stone,
                 .branchCountMax = 3,
                 .branchCountMin = 3,
                 .branchRandomness = 0.0,
+                .endBlock = .Snow,
             },
             else => unreachable,
         };
@@ -322,8 +323,9 @@ fn genFractalTask() void {
         .pos = @intFromFloat(render.player.pos),
         .baseRadius = 5,
         .rand = random.random(),
-        .trunkHeight = 128,
-        .maxRecursionDepth = 8,
+        .trunkHeight = 64,
+        .maxRecursionDepth = 10,
+        .leafSize = 0,
         .steps = &steps,
     };
     worldEditorLock.lock();

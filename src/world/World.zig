@@ -147,28 +147,50 @@ pub const World = struct {
                         comptime var csteps: [10]Structures.Tree.Step = undefined;
                         comptime for (&csteps, 0..) |*step, r| {
                             step.* = switch (r) {
-                                0...1 => Structures.Tree.Step{
+                                0...0 => Structures.Tree.Step{
                                     .lengthPercent = 1.0,
                                     .radiusPercent = 1.0,
                                     .branchCountMax = 1,
                                     .branchCountMin = 1,
-                                    .branchRange = @splat(0.01),
+                                    .branchRange = @splat(0.0),
+                                    .lengthPercentRandomness = 0.5,
+
+                                    
                                 },
-                                2...3 => Structures.Tree.Step{
-                                    .lengthPercent = 0.9,
+                                1...2 => Structures.Tree.Step{
+                                    .lengthPercent = 0.7,
                                     .radiusPercent = 0.5,
-                                },
-                                4...6 => Structures.Tree.Step{
-                                    .lengthPercent = 0.6,
-                                    .radiusPercent = 0.5,
+                                    .branchRandomness = 0.3,
                                     .branchCountMax = 4,
                                     .branchCountMin = 3,
+                                    .lengthPercentRandomness = 0.4,
+
+                                    .branchRange = @splat(0.4),
+
                                 },
-                                7...10 => Structures.Tree.Step{
-                                    .lengthPercent = 0.6,
-                                    .radiusPercent = 0.5,
-                                    .branchCountMax = 8,
-                                    .branchCountMin = 4,
+                                3...5 => Structures.Tree.Step{
+                                    .lengthPercent = 0.7,
+                                    .radiusPercent = 0.7,
+                                    .branchCountMax = 4,
+                                    .branchCountMin = 3,
+                                    .branchRandomness = 0.3,
+                                    .lengthPercentRandomness = 0.3,
+
+                                    .branchRange = @splat(0.6),
+
+
+                                },
+                                6...10 => Structures.Tree.Step{
+                                    .lengthPercent = 0.7,
+                                    .radiusPercent = 0.7,
+                                    .branchCountMax = 4,
+                                    .branchCountMin = 3,
+                                    .branchRandomness = 0.3,
+                                    .lengthPercentRandomness = 0.3,
+
+                                    .branchRange = @splat(0.4),
+
+
                                 },
                                 else => unreachable,
                             };
@@ -177,10 +199,12 @@ pub const World = struct {
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
                         const tree = Structures.Tree{
                             .pos = @intCast(centerPos),
-                            .baseRadius = 20,
+                            .baseRadius = 15,
                             .rand = rand,
                             .trunkHeight = 100,
-                            .maxRecursionDepth = 10,
+                            .maxRecursionDepth = 9,
+                            .leafDensity = 0.5,
+                            .leafSize = 6,
                             .steps = &steps,
                         };
 
@@ -418,8 +442,9 @@ pub const World = struct {
             self.chunk.?.blocks.blocks[@intCast(nextchunkblockpos[0])][@intCast(nextchunkblockpos[1])][@intCast(nextchunkblockpos[2])] = block;
         }
 
-        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, comptime buffered: bool) !void {
+        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
             const boundingBox = shape.boundingBox;
+            //const T = comptime @TypeOf(shape.boundingBox[0]);
             var y = boundingBox[2];
             while (y < boundingBox[3]) : (y += 1) {
                 var dx = boundingBox[0];
@@ -432,7 +457,7 @@ pub const World = struct {
                                 .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                                 else => unreachable,
                             };
-                            if (buffered) try self.PlaceBlockBuffered(block, i64blockpos) else try self.PlaceBlock(block, i64blockpos);
+                            try self.PlaceBlock(block, i64blockpos);
                         }
                     }
                 }
@@ -523,7 +548,7 @@ pub const World = struct {
             };
         }
 
-        fn dot(a: anytype, b: @TypeOf(a)) @typeInfo(@TypeOf(a)).vector.child {
+        inline fn dot(a: anytype, b: @TypeOf(a)) @typeInfo(@TypeOf(a)).vector.child {
             return @reduce(.Add, a * b);
         }
     };
