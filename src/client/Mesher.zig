@@ -54,20 +54,19 @@ pub const Mesh = struct {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
                     const block = extendedBlocks[x][y][z];
-                    if (!block.Visible()) continue;
-                    const neighboring_blocks = @Vector(6, @typeInfo(Block).@"enum".tag_type){
-                        @intFromEnum(extendedBlocks[x + 1][y][z]),
-                        @intFromEnum(extendedBlocks[x - 1][y][z]),
-                        @intFromEnum(extendedBlocks[x][y + 1][z]),
-                        @intFromEnum(extendedBlocks[x][y - 1][z]),
-                        @intFromEnum(extendedBlocks[x][y][z + 1]),
-                        @intFromEnum(extendedBlocks[x][y][z - 1]),
+                    if (!Block.Properties.visible.get(block)) continue;
+                    const neighboring_blocks = [6]Block{
+                        extendedBlocks[x + 1][y][z],
+                        extendedBlocks[x - 1][y][z],
+                        extendedBlocks[x][y + 1][z],
+                        extendedBlocks[x][y - 1][z],
+                        extendedBlocks[x][y][z + 1],
+                        extendedBlocks[x][y][z - 1],
                     };
-                    const neighboring_blocks_transparent = Block.TransperentVec(6, neighboring_blocks);
-                    const block_transparent = block.Transperent();
+                    const block_transparent = Block.Properties.transperent.get(block);
                     inline for (0..6) |i| {
                         inner: {
-                            if (!neighboring_blocks_transparent[i]) break :inner;
+                            if (!Block.Properties.transperent.get(neighboring_blocks[i])) break :inner;
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{
@@ -82,7 +81,7 @@ pub const Mesh = struct {
                                     ._ = undefined,
                                 };
                                 pos += 1;
-                            } else if (@intFromEnum(block) != neighboring_blocks[i]) {
+                            } else if (block != neighboring_blocks[i]) {
                                 std.debug.assert(Tpos < TransparentfaceBuffer.len);
                                 TransparentfaceBuffer[Tpos] = Face{
                                     .BlockType = block,

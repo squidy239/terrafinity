@@ -116,8 +116,7 @@ void main() {
     uvec3 pos = DecodePosition(data);
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
-    uint invisibleBlockAmount = 2;
-    blockArrayLayer = blocktype - invisibleBlockAmount;
+    blockArrayLayer = blocktype;
     vec3 coords = rotateVertex(side, incoords);
     fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * ChunkSize * scale));
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;

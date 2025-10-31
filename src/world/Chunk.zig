@@ -137,6 +137,21 @@ pub const Chunk = struct {
             }
         }
     }
+    
+    pub fn Merge(self: *@This(), mergeBlocks: *const [ChunkSize][ChunkSize][ChunkSize]Block)void{
+        self.addAndlock();
+        defer self.releaseAndUnlock();
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |y| {
+                for (0..ChunkSize) |z| {
+                    if(self.blocks[x][y][z] != .Null) {
+                        self.chunkBlocks[x][y][z] = mergeBlocks[x][y][z];
+                    }
+                }
+            }
+        }
+    }
+    
     ///checks if the block array is all the same block
     pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
         const issOneBlock = ztracy.ZoneNC(@src(), "isOneBlock", 354354);

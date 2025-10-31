@@ -7,49 +7,44 @@ threadlocal var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 ///must be run in a valid opengl context
 pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
     const keyword = ".png";
-    const texture_count = try countFiles(textures_path, keyword);
-    if (texture_count == 0) return error.NoTexturesFound;
     const resolution = try allSquares(textures_path, keyword);
-    var textureArray = try allocator.alloc(zigimg.Image, texture_count);
+    var textureArray = try allocator.alloc(?zigimg.Image, @typeInfo(Block).@"enum".fields.len);
+    @memset(textureArray, null);
     defer {
         for (textureArray) |*img| {
-            img.deinit(allocator);
+            if (img.* == null) continue;
+            img.*.?.deinit(allocator);
+            
         }
         allocator.free(textureArray);
     }
-    std.debug.print("count: {any}, resolution: {any}\n", .{ texture_count, resolution });
+    std.debug.print("texture resolution: {any}\n", .{resolution });
     var it = std.fs.Dir.iterate(textures_path);
     var i: usize = 0;
     while (try it.next()) |image| {
         switch (image.kind) {
             .file => {
                 if (image.kind == .file and ((std.mem.indexOf(u8, image.name, keyword) != null))) {
-                    std.debug.assert(i < texture_count);
+                    std.debug.assert(i < textureArray.len);//should never happen because invalid textures are skipped
                     var loadedImg = try zigimg.Image.fromFile(allocator, try textures_path.openFile(image.name, .{}), &read_buffer);
+                    errdefer loadedImg.deinit(allocator);
                     try loadedImg.convert(allocator, .rgba32);
-                    std.debug.assert(loadedImg.width == resolution[0] and loadedImg.height == resolution[1]);
+                    if(loadedImg.width != resolution[0] or loadedImg.height != resolution[1]) return error.InvalidTextureResolution;
                     const blockName = image.name[0 .. std.mem.indexOfScalar(u8, image.name, '.') orelse image.name.len];
                     const blockType = std.meta.stringToEnum(Block, blockName);
                     if (blockType == null) {
                         std.log.warn("Invalid block type: {s}\n", .{blockName});
                         continue;
                     }
-                    std.debug.print("loaded tex: {any}\n", .{blockType.?});
-                    const index = @intFromEnum(blockType.?) - Block.invisibleBlocksAmount;
-                    if (index >= texture_count) {
-                        std.log.err("Texture index out of bounds: {d}\n", .{index});
-                        return error.NotEnoughTextures;
-                    }
+                    std.debug.print("loaded texture: {any}\n", .{blockType.?});
+                    const index = @intFromEnum(blockType.?);
+                    std.debug.assert(index < textureArray.len);
                     textureArray[index] = loadedImg;
                     i += 1;
                 }
             },
             else => {},
         }
-    }
-    if (i != texture_count) {
-        std.log.err("Not enough textures loaded\n", .{});
-        return error.NotEnoughTextures;
     }
     var gltexarrayid: c_uint = undefined;
     gl.GenTextures(1, @ptrCast(&gltexarrayid));
@@ -60,9 +55,10 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-    gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(texture_count), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    for (0..texture_count) |itt| {
-        gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, @intCast(itt), @intCast(resolution[0]), @intCast(resolution[1]), 1, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(textureArray[itt].rawBytes()));
+    gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(textureArray.len), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (0..textureArray.len) |itt| {
+        const textureData = (textureArray[itt] orelse continue).rawBytes();//TODO handle missing texture
+        gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, @intCast(itt), @intCast(resolution[0]), @intCast(resolution[1]), 1, gl.RGBA, gl.UNSIGNED_BYTE, @ptrCast(textureData));
     }
     gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, 0);
