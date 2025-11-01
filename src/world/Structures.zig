@@ -101,7 +101,7 @@ pub const Tree = struct {
     steps: []const Step,
     rand: std.Random,
     branchCounter: usize = 0,
-    minRadius:f32 = 0.75,
+    minRadius: f32 = 0.75,
 
     pub fn PlaceTree(self: *const @This(), editor: *WorldEditor) !void {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
@@ -118,21 +118,20 @@ pub const Tree = struct {
             const length = lastLength * step.lengthPercent + self.rand.float(f32) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f32) * step.radiusPercentRandomness;
             if (length < 2.0 or recursionDepth >= self.maxRecursionDepth) {
-                    const halfLeaf = self.leafSize * 0.5;
-                    var y = -halfLeaf;
-                    while (y < halfLeaf) : (y += 1) {
-                        var x = -halfLeaf;
-                        while (x <= halfLeaf) : (x += 1) {
-                            var z = -halfLeaf;
-                            while (z <= halfLeaf) : (z += 1) {
-                                const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
-                                try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })));
-                            }
+                const halfLeaf = self.leafSize * 0.5;
+                var y = -halfLeaf;
+                while (y < halfLeaf) : (y += 1) {
+                    var x = -halfLeaf;
+                    while (x <= halfLeaf) : (x += 1) {
+                        var z = -halfLeaf;
+                        while (z <= halfLeaf) : (z += 1) {
+                            const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
+                            try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })));
                         }
                     }
-                
+                }
             } else {
-                const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius,lastRadius)), @floatCast(radius));
+                const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius)), @floatCast(radius));
                 try editor.PlaceSamplerShape(step.block, branch);
                 const newPos = pos + (vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
                 try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
@@ -154,7 +153,7 @@ pub const Tree = struct {
         endBlock: Block = Block.Leaves,
     };
 
-    fn rand3Vec(comptime T:type, rand: std.Random, rangeBase: T, rangeTop: T) @Vector(3, T) {
+    fn rand3Vec(comptime T: type, rand: std.Random, rangeBase: T, rangeTop: T) @Vector(3, T) {
         const vec = @Vector(3, T){ rand.float(T), rand.float(T), rand.float(T) };
         return NormilizeInRange(@Vector(3, T), vec, @splat(0), @splat(1), @splat(rangeBase), @splat(rangeTop));
     }

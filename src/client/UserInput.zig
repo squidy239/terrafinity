@@ -20,7 +20,11 @@ var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
 pub fn init(ren: *Renderer) !void {
     render = ren;
-    worldEditor = try World.WorldEditor.init(render.world, render, null, null, true, render.allocator);
+    worldEditor = .{
+        .tempallocator = render.allocator,
+        .world = render.world,
+        .remeshWithThreadPool = true,
+    };
     lastmicrotime = std.time.microTimestamp();
     const textEscMenu = gui.Element.CreationOptions{
         .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
@@ -80,7 +84,7 @@ pub fn init(ren: *Renderer) !void {
 
 pub fn deinit() void {
     worldEditorLock.lock();
-    _ = worldEditor.deinit() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
+    _ = worldEditor.flush(null, void) catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
 
     menu.deinit();
@@ -227,10 +231,10 @@ pub fn processInput() !void {
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (render.window.getKey(glfw.Key.b) == .press) {
-        const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 100, 10, 5);
-        try worldEditor.PlaceSamplerShape(.Stone, cone);
+        const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
-        _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        try worldEditor.PlaceSamplerShape(.Stone, cone);
+        _ = worldEditor.flush(onEdit, render) catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
     }
 
@@ -247,9 +251,8 @@ pub fn processInput() !void {
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         worldEditorLock.lock();
         defer worldEditorLock.unlock();
-        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
-
-        _ = try worldEditor.clear();
+        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos), Renderer.onEdit, render)});
+        worldEditor.ClearReader();
     }
     if (render.window.getKey(glfw.Key.p) == .press) {
         ts.Benchmark = true;
@@ -291,6 +294,10 @@ pub fn GenCube(state: anytype, genParams: anytype) ?World.Step {
     return World.Step{ .block = .Stone, .pos = .{ @divFloor(stage, genParams * genParams), @mod(@divFloor(stage, genParams), genParams), @mod(stage, genParams) } };
 }
 
+fn onEdit(chunkPos: [3]i32, args: anytype) void {
+    const renderer = @as(*Renderer, @ptrCast(args));
+    renderer.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
+}
 fn genFractalTask() void {
     comptime var csteps: [20]Structures.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
@@ -331,8 +338,7 @@ fn genFractalTask() void {
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
     tree.PlaceTree(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
-
-    _ = worldEditor.clear() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+    _ = worldEditor.flush(onEdit, render) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 
 const CubeState = struct {

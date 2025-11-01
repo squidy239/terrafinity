@@ -10,15 +10,15 @@ pub const Blocks = enum(u20) {
     Wood,
     Leaves,
     Snow,
-  
+
     pub const Properties = struct {
-        pub const transperent:std.EnumArray(Blocks, bool) = initTransperent();
-        pub const visible:std.EnumArray(Blocks, bool) = initVisible();
-        
+        pub const transperent: std.EnumArray(Blocks, bool) = initTransperent();
+        pub const visible: std.EnumArray(Blocks, bool) = initVisible();
+
         fn initTransperent() std.EnumArray(Blocks, bool) {
             var temptransperent = std.EnumArray(Blocks, bool).initUndefined();
             for (@typeInfo(Blocks).@"enum".fields) |blockInt| {
-                const blockType:Blocks = @enumFromInt(blockInt.value);
+                const blockType: Blocks = @enumFromInt(blockInt.value);
                 const istransparent = switch (blockType) {
                     .Air, .Water, .Leaves, .Null => true,
                     else => false,
@@ -27,11 +27,11 @@ pub const Blocks = enum(u20) {
             }
             return temptransperent;
         }
-        
+
         fn initVisible() std.EnumArray(Blocks, bool) {
             var tempvisible = std.EnumArray(Blocks, bool).initUndefined();
             for (@typeInfo(Blocks).@"enum".fields) |blockInt| {
-                const blockType:Blocks = @enumFromInt(blockInt.value);
+                const blockType: Blocks = @enumFromInt(blockInt.value);
                 const isVisible = switch (blockType) {
                     .Air, .Null => false,
                     else => true,
@@ -42,4 +42,3 @@ pub const Blocks = enum(u20) {
         }
     };
 };
-

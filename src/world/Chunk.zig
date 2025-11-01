@@ -1,9 +1,11 @@
+const std = @import("std");
+
 const Block = @import("Block").Blocks;
-const ztracy = @import("ztracy");
-const Noise = @import("fastnoise.zig");
 const Cache = @import("Cache").Cache;
 const Interpolation = @import("Interpolation");
-const std = @import("std");
+const ztracy = @import("ztracy");
+
+const Noise = @import("fastnoise.zig");
 
 var cacheHits: std.atomic.Value(u32) = .init(0);
 var cacheMisses: std.atomic.Value(u32) = .init(0);
@@ -58,14 +60,6 @@ pub const Chunk = struct {
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
-    pub const FaceRotation = enum(u3) {
-        xPlus = 0,
-        xMinus = 1,
-        yPlus = 2,
-        yMinus = 3,
-        zPlus = 4,
-        zMinus = 5,
-    };
     fn GenerateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams, rand: *std.Random) void {
         const terrainScaleUp: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const terrainScaleDown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
@@ -137,21 +131,7 @@ pub const Chunk = struct {
             }
         }
     }
-    
-    pub fn Merge(self: *@This(), mergeBlocks: *const [ChunkSize][ChunkSize][ChunkSize]Block)void{
-        self.addAndlock();
-        defer self.releaseAndUnlock();
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |y| {
-                for (0..ChunkSize) |z| {
-                    if(self.blocks[x][y][z] != .Null) {
-                        self.chunkBlocks[x][y][z] = mergeBlocks[x][y][z];
-                    }
-                }
-            }
-        }
-    }
-    
+
     ///checks if the block array is all the same block
     pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
         const issOneBlock = ztracy.ZoneNC(@src(), "isOneBlock", 354354);
@@ -163,7 +143,42 @@ pub const Chunk = struct {
         return if (@reduce(.And, isOneBlock)) blockArray[0][0][0] else null;
     }
 
-    pub fn extractFace(self: *@This(), comptime face: FaceRotation, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
+    ///merges the chunk with the mergeBlocks, copies all non null mergeBlocks to blocks
+    pub fn Merge(self: *@This(), mergeBlocks: BlockEncoding, allocator: std.mem.Allocator, comptime lock: bool) !void {
+        const merge = ztracy.ZoneNC(@src(), "Merge", 756657567);
+        defer merge.End();
+        self.add_ref();
+        defer self.release();
+        if (lock) self.lock.lock();
+        defer if (lock) self.lock.unlock();
+        if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .Null)) return;
+        switch (mergeBlocks) {
+            .oneBlock => {
+                switch (self.blocks) {
+                    .oneBlock => {
+                        if (mergeBlocks.oneBlock != .Null)
+                            self.blocks = mergeBlocks;
+                    },
+                    .blocks => {
+                        if (mergeBlocks.oneBlock != .Null) {
+                            allocator.free(self.blocks.blocks);
+                            self.blocks = .{ .oneBlock = mergeBlocks.oneBlock };
+                        }
+                    },
+                }
+            },
+            .blocks => {
+                _ = try self.ToBlocks(allocator, false);
+                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks.blocks);
+                const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
+                for (flatArray, flatMergeArray) |*item, mergeItem| {
+                    if (mergeItem != .Null) item.* = mergeItem;
+                }
+            },
+        }
+    }
+
+    pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
         const ef = ztracy.ZoneNC(@src(), "ExtractFace", 9999);
         defer ef.End();
         self.addAndLockShared();
@@ -195,7 +210,7 @@ pub const Chunk = struct {
     }
     //returns true if the chunk was converted to blocks, false if it was already blocks
     pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator, comptime lock: bool) !bool {
-        const toblocks = ztracy.ZoneNC(@src(), "toblocks", 645);
+        const toblocks = ztracy.ZoneNC(@src(), "toBlocks", 645);
         defer toblocks.End();
         self.add_ref();
         defer self.release();
@@ -296,24 +311,21 @@ pub const Chunk = struct {
         }
         return r;
     }
-    pub fn GetBlock(self: *@This(), x: u5, y: u5, z: u5) Block {
-        switch (self.blocks) {
-            .oneBlock => return self.blocks.oneBlock,
-            .blocks => self.blocks.blocks[x][y][z],
-        }
-    }
-    ///their must oly be 1 ref before calling, use WaitForRefAmount
-    pub fn free(self: *@This(), allocator: std.mem.Allocator) bool {
+
+    ///frees the chunk's blocks, does not free the chunk itself
+    ///the chunk must only be 1 ref before calling, use WaitForRefAmount
+    ///locks the chunk
+    pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
         const freeChunk = ztracy.ZoneNC(@src(), "freeChunk", 11999);
         defer freeChunk.End();
         std.debug.assert(self.ref_count.load(.seq_cst) == 1);
-        if (self.blocks != .blocks) {
-            std.debug.assert(self.blocks == .oneBlock);
-            return true;
-        }
         self.lock.lock();
-        allocator.destroy(self.blocks.blocks);
-        return true;
+        switch (self.blocks) {
+            .blocks => {
+                allocator.destroy(self.blocks.blocks);
+            },
+            .oneBlock => {},
+        }
     }
 
     pub fn WaitForRefAmount(self: *const @This(), comptime amount: u32, comptime maxMicroTime: ?u64) bool {

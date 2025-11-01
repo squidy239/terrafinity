@@ -107,6 +107,12 @@ pub const Renderer = struct {
         renderer.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
         return renderer;
     }
+
+    pub fn onEdit(chunkPos: [3]i32, args: anytype) void {
+        const renderer = @as(*Renderer, @ptrCast(args));
+        renderer.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
+    }
+
     ///threadpool should be deinitualised before calling, dosent destroy window
     pub fn deinit(self: *@This()) void {
         gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
@@ -316,14 +322,14 @@ pub const Renderer = struct {
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
-        const chunk = try self.world.LoadChunk(Pos, self, genStructures);
+        const chunk = try self.world.LoadChunk(Pos, genStructures, onEdit, self);
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, self, false)).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, self, false)).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, self, false)).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, self, false)).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, self, false)).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, self, false)).extractFace(.zPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, false, onEdit, self)).extractFace(.xMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, false, onEdit, self)).extractFace(.xPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, false, onEdit, self)).extractFace(.yMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, false, onEdit, self)).extractFace(.yPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, false, onEdit, self)).extractFace(.zMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, false, onEdit, self)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
