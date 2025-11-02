@@ -131,7 +131,7 @@ pub const Tree = struct {
                     }
                 }
             } else {
-                const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius)), @floatCast(radius));
+                const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseLengthPercent)), @floatCast(@max(self.minRadius, radius)));
                 try editor.PlaceSamplerShape(step.block, branch);
                 const newPos = pos + (vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
                 try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
@@ -142,6 +142,7 @@ pub const Tree = struct {
     pub const Step = struct {
         lengthPercent: f32 = 0.7,
         lengthPercentRandomness: f32 = 0.0,
+        baseLengthPercent: f32 = 1.0,
         radiusPercent: f32 = 0.65,
         radiusPercentRandomness: f32 = 0.0,
         branchCountMin: usize = 2.0,
@@ -162,23 +163,17 @@ pub const Tree = struct {
     }
 
     ///range is per-axis angular range: 0–2 mapped to 0–360° each
-    pub fn branchDirection(
-        iteration: usize,
-        base: @Vector(3, f64),
-        // X,Y,Z scaling
-        range: @Vector(3, f64),
-        branch_count: usize,
-    ) @Vector(3, f64) {
+    pub fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
         const pi = std.math.pi;
         const n = @as(f64, @floatFromInt(branch_count));
         const i = @as(f64, @floatFromInt(iteration));
         const offset = 2.0 / n;
-        const increment = pi * (3.0 - std.math.sqrt(5.0));
+        const increment = pi * (3.0 - @sqrt(5.0));
         const y = (i * offset) - 1.0 + (offset * 0.5);
-        const r = std.math.sqrt(@max(0.0, 1.0 - y * y));
+        const r = @sqrt(@max(0.0, 1.0 - y * y));
         const azimuth = i * increment;
-        const x = std.math.cos(azimuth) * r;
-        const z = std.math.sin(azimuth) * r;
+        const x = @cos(azimuth) * r;
+        const z = @sin(azimuth) * r;
         var sample = @Vector(3, f64){ x, y, z };
 
         sample = ellipsoidToSphere(sample, range);
@@ -186,7 +181,6 @@ pub const Tree = struct {
 
         sample += base;
         sample = vecNormalize(sample);
-        //std.debug.print("s: {any}, ns: {any}\n", .{sample, sample});
         return sample;
     }
 
@@ -194,7 +188,7 @@ pub const Tree = struct {
         return @sqrt(@reduce(.Add, v * v));
     }
 
-    pub fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
+    inline fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
         const scaled = @Vector(3, f64){
             if (range[0] != 0) p[0] / range[0] else 0.0,
             if (range[1] != 0) p[1] / range[1] else 0.0,

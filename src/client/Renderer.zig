@@ -338,16 +338,25 @@ pub const Renderer = struct {
         switch (chunk.blocks) {
             .blocks => blocks = chunk.blocks.blocks,
             .oneBlock => {
-                var dd: [ChunkSize][ChunkSize]Block = undefined;
-                @memset(&dd, @splat(chunk.blocks.oneBlock));
-                Tempcube = @splat((dd));
+                @memset(@as(*[ChunkSize * ChunkSize * ChunkSize]Block, @ptrCast(&Tempcube)), chunk.blocks.oneBlock);
                 blocks = &Tempcube;
             },
         }
         exbl.End();
         const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.allocator);
         chunk.releaseAndUnlockShared();
-        if (mesh) |m| _ = try self.MeshesToLoad.append(m);
+        if (mesh) |m| {
+            _ = try self.MeshesToLoad.append(m);
+        }
+        else{
+            self.ChunkRenderListLock.lockShared();
+            const removeChunk = self.ChunkRenderList.contains(Pos);
+            self.ChunkRenderListLock.unlockShared();
+            
+            self.ChunkRenderListLock.lock();
+            if(removeChunk) _ = self.ChunkRenderList.swapRemove(Pos);
+            self.ChunkRenderListLock.unlock();
+        }//error if remeshing and no mesh is generated, old mesh dosent get unloaded
     }
     threadlocal var meshesToUnloadBuffer: [1024]Renderer.MeshBufferIDs = undefined;
     threadlocal var meshesToUnloadBufferPos: u16 = 0;

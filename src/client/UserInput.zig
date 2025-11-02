@@ -234,7 +234,7 @@ pub fn processInput() !void {
         const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
-        _ = worldEditor.flush(onEdit, render) catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        _ = worldEditor.flush(Renderer.onEdit, render) catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
     }
 
@@ -278,26 +278,6 @@ pub fn processInput() !void {
     }
 }
 
-fn BuildStructTask() void {
-    render.playerLock.lockShared();
-    const playerPos = render.player.pos;
-    render.playerLock.unlockShared();
-    render.world.PrintStructure(@intFromFloat(playerPos), render, GenCube, CubeState, 256, null, null) catch |err| {
-        std.debug.print("Error: {any}", .{err});
-    };
-}
-pub fn GenCube(state: anytype, genParams: anytype) ?World.Step {
-    var State: *CubeState = state;
-    const stage = State.stage;
-    State.stage += 1;
-    if (stage >= (genParams * genParams * genParams)) return null;
-    return World.Step{ .block = .Stone, .pos = .{ @divFloor(stage, genParams * genParams), @mod(@divFloor(stage, genParams), genParams), @mod(stage, genParams) } };
-}
-
-fn onEdit(chunkPos: [3]i32, args: anytype) void {
-    const renderer = @as(*Renderer, @ptrCast(args));
-    renderer.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
-}
 fn genFractalTask() void {
     comptime var csteps: [20]Structures.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
@@ -338,7 +318,7 @@ fn genFractalTask() void {
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
     tree.PlaceTree(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
-    _ = worldEditor.flush(onEdit, render) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+    _ = worldEditor.flush(Renderer.onEdit, render) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 
 const CubeState = struct {

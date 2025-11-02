@@ -204,19 +204,59 @@ pub const World = struct {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                        comptime var csteps: [10]Structures.Tree.Step = undefined;
+                        comptime for (&csteps, 0..) |*step, r| {
+                            step.* = switch (r) {
+                                0...0 => Structures.Tree.Step{
+                                    .lengthPercent = 1.0,
+                                    .radiusPercent = 1.0,
+                                    .branchCountMax = 1,
+                                    .branchCountMin = 1,
+                                    .branchRange = @splat(0.0),
+                                    .lengthPercentRandomness = 0.5,
+                                },
+                                1...2 => Structures.Tree.Step{
+                                    .lengthPercent = 0.6,
+                                    .radiusPercent = 0.4,
+                                    .branchRandomness = 0.3,
+                                    .branchCountMax = 8,
+                                    .branchCountMin = 5,
+                                    .lengthPercentRandomness = 0.4,
+
+                                    .branchRange = @splat(0.8),
+                                },
+                                3...5 => Structures.Tree.Step{
+                                    .lengthPercent = 0.7,
+                                    .radiusPercent = 0.8,
+                                    .branchCountMax = 4,
+                                    .branchCountMin = 3,
+                                    .branchRandomness = 0.3,
+                                    .lengthPercentRandomness = 0.3,
+                                    .branchRange = @splat(0.6),
+                                },
+                                6...10 => Structures.Tree.Step{
+                                    .lengthPercent = 0.6,
+                                    .radiusPercent = 0.7,
+                                    .branchCountMax = 4,
+                                    .branchCountMin = 3,
+                                    .branchRandomness = 0.3,
+                                    .lengthPercentRandomness = 0.3,
+
+                                    .branchRange = @splat(0.4),
+                                },
+                                else => unreachable,
+                            };
+                        };
+                        const steps = csteps;
                         const tree = Structures.Tree{
                             .pos = @intCast(centerPos),
-                            .baseRadius = 4 * factor,
+                            .baseRadius = 3 * factor,
                             .rand = rand,
                             .trunkHeight = 15 * factor,
-                            .steps = &@as([10]Structures.Tree.Step, @splat(.{
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .lengthPercentRandomness = 0.2,
-                                .branchRandomness = 0.1,
-
-                                .radiusPercentRandomness = 0.2,
-                            })),
+                            .steps = &steps,
+                            .maxRecursionDepth = 6,
+                            .leafDensity = 0.5,
+                            .leafSize = 3,
                         };
 
                         try tree.PlaceTree(&worldEditor);
@@ -283,9 +323,11 @@ pub const World = struct {
             self.editBuffer.lockPointers();
             var it = self.editBuffer.iterator();
             while (it.next()) |diffChunk| {
+                const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
                 const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false, null, void);
                 defer chunk.release();
-                try chunk.Merge(.{ .blocks = diffChunk.value_ptr }, self.world.allocator, true);
+
+                try chunk.Merge(encoding, self.world.allocator, true);
             }
             it.index = 0;
             while (it.next()) |diffChunk| {

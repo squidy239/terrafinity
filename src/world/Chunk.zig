@@ -208,7 +208,7 @@ pub const Chunk = struct {
         }
         return result;
     }
-    //returns true if the chunk was converted to blocks, false if it was already blocks
+    ///returns true if the chunk was converted to blocks, false if it was already blocks
     pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator, comptime lock: bool) !bool {
         const toblocks = ztracy.ZoneNC(@src(), "toBlocks", 645);
         defer toblocks.End();
