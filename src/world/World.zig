@@ -193,13 +193,14 @@ pub const World = struct {
                             .baseRadius = 15,
                             .rand = rand,
                             .trunkHeight = 100,
-                            .maxRecursionDepth = 9,
+                            .maxRecursionDepth = 8,
                             .leafDensity = 0.5,
                             .leafSize = 6,
+                            .scale = self.GenParams.terrainScale,
                             .steps = &steps,
                         };
 
-                        try tree.PlaceTree(&worldEditor);
+                        _ = try tree.place(&worldEditor);
                     } else if (treeChance < 0.00015) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
@@ -222,7 +223,7 @@ pub const World = struct {
                                     .branchCountMax = 8,
                                     .branchCountMin = 5,
                                     .lengthPercentRandomness = 0.4,
-
+                                    
                                     .branchRange = @splat(0.8),
                                 },
                                 3...5 => Structures.Tree.Step{
@@ -256,10 +257,11 @@ pub const World = struct {
                             .steps = &steps,
                             .maxRecursionDepth = 6,
                             .leafDensity = 0.5,
+                            .scale = self.GenParams.terrainScale,
                             .leafSize = 3,
                         };
 
-                        try tree.PlaceTree(&worldEditor);
+                        _ = try tree.place(&worldEditor);
                     } else if (treeChance < 0.0015) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
@@ -345,6 +347,7 @@ pub const World = struct {
                 self.lastChunkCache.?.blocks[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
                 return;
             }
+            
             var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
             chunk[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
             self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
@@ -377,8 +380,9 @@ pub const World = struct {
         }
 
         pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
+            const place = ztracy.ZoneNC(@src(), "PlaceSamplerShape", 6544564);
+            defer place.End();
             const boundingBox = shape.boundingBox;
-            //const T = comptime @TypeOf(shape.boundingBox[0]);
             var y = boundingBox[2];
             while (y < boundingBox[3]) : (y += 1) {
                 var dx = boundingBox[0];
@@ -447,6 +451,43 @@ pub const World = struct {
 
                     const minZ = @floor(@min(top[2], base[2]) - rMax);
                     const maxZ = @ceil(@max(top[2], base[2]) + rMax);
+                    self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
+                }
+            };
+        }
+        
+        pub fn Sphere(comptime T: type) type {
+            return struct {
+                position: @Vector(3, T),
+                radius: T,
+                boundingBox: @Vector(6, T),
+                pub fn init(pos: @Vector(3, T), radius: T) @This() {
+                    var sphere: @This() = .{
+                        .position = pos,
+                        .radius = radius,
+                        .boundingBox = undefined,
+                    };
+                    sphere.updateBoundingBox();
+                    return sphere;
+                }
+                
+                pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+                    const diff = P - self.position;
+                    const dist2 = dot(diff, diff);
+                    return dist2 <= self.radius * self.radius;
+                }
+                
+                pub fn updateBoundingBox(self: *@This()) void {
+                    const r = self.radius;
+                    
+                    const minX = @floor(@min(self.position[0] - r, self.position[0] + r));
+                    const maxX = @ceil(@max(self.position[0] - r, self.position[0] + r));
+                    
+                    const minY = @floor(@min(self.position[1] - r, self.position[1] + r));
+                    const maxY = @ceil(@max(self.position[1] - r, self.position[1] + r));
+                    
+                    const minZ = @floor(@min(self.position[2] - r, self.position[2] + r));
+                    const maxZ = @ceil(@max(self.position[2] - r, self.position[2] + r));
                     self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
                 }
             };

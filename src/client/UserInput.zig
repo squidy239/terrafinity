@@ -317,13 +317,10 @@ fn genFractalTask() void {
     };
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
-    tree.PlaceTree(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+    _  = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush(Renderer.onEdit, render) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 
-const CubeState = struct {
-    stage: i64 = 0,
-};
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;

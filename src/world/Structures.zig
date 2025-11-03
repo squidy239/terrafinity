@@ -102,23 +102,29 @@ pub const Tree = struct {
     rand: std.Random,
     branchCounter: usize = 0,
     minRadius: f32 = 0.75,
+    minLength: f32 = 2.0,
+    scale: f32 = 1.0,
 
-    pub fn PlaceTree(self: *const @This(), editor: *WorldEditor) !void {
+    pub fn place(self: *const @This(), editor: *WorldEditor) !u64 {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, self.rand, -0.05, 0.05);
-        try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight, self.baseRadius, 0);
+        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0);
     }
 
-    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize) !void {
+    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize) !u64 {
+        const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
+        defer pstep.End();
+
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const step = self.steps[recursionDepth];
         const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
+        var branchesCount: u64 = 0;
         for (0..firstBranches) |i| {
             const branchVec = branchDirection(i, direction, step.branchRange, firstBranches) + rand3Vec(f32, self.rand, -step.branchRandomness, step.branchRandomness);
             const length = lastLength * step.lengthPercent + self.rand.float(f32) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f32) * step.radiusPercentRandomness;
-            if (length < 2.0 or recursionDepth >= self.maxRecursionDepth) {
-                const halfLeaf = self.leafSize * 0.5;
+            if (length < self.minLength * self.scale or recursionDepth >= self.maxRecursionDepth) {
+                const halfLeaf = self.leafSize * self.scale * 0.5;
                 var y = -halfLeaf;
                 while (y < halfLeaf) : (y += 1) {
                     var x = -halfLeaf;
@@ -131,12 +137,14 @@ pub const Tree = struct {
                     }
                 }
             } else {
+                branchesCount += 1;
                 const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseLengthPercent)), @floatCast(@max(self.minRadius, radius)));
                 try editor.PlaceSamplerShape(step.block, branch);
                 const newPos = pos + (vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
-                try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
+                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
             }
         }
+        return branchesCount;
     }
 
     pub const Step = struct {
