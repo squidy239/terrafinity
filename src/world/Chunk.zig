@@ -168,6 +168,8 @@ pub const Chunk = struct {
                 }
             },
             .blocks => {
+                const bl = ztracy.ZoneNC(@src(), "Blocks", 642342342);
+                defer bl.End();
                 _ = try self.ToBlocks(allocator, false);
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks.blocks);
                 const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
