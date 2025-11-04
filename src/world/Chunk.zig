@@ -38,7 +38,7 @@ pub const Chunk = struct {
         GenerateTerrain(&chunk, Pos, &heights, &gen_params, &rand);
         genterra.End();
         var oneBlock = IsOneBlock(&chunk);
-        if (oneBlock == null or oneBlock.? == Block.Stone) {
+        if (oneBlock == null or oneBlock.? == Block.Stone or oneBlock.? == Block.Water) {
             GenerateCaves(&chunk, Pos, &heights, &gen_params);
             oneBlock = IsOneBlock(&chunk);
         }
@@ -91,24 +91,9 @@ pub const Chunk = struct {
                     const xyz = @Vector(3, f32){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const sample_offset = xyz * onedthreeVec;
                     const pos = (floatPos + sample_offset) * oneDterrainScaleVec;
-                    const genX = pos[0];
-                    const genY = pos[1];
-                    const genZ = pos[2];
-                    const fourthOfChunksize = comptime ChunkSize / 4;
-                    const realY:i32 = (Pos[1]*ChunkSize)+(@as(i32,@intCast(y))*fourthOfChunksize);
-                    //  gen_params.CaveNoise.domainWarp3D(&genX, &genZ, &genY);
-                   // const scaledDistanceToSurface = (10.0 / (@as(f32, @floatFromInt(heights[x*8][z*8])) - realY)) + @as(f32, @floatFromInt(@intFromBool(realY >= @as(f32, @floatFromInt(heights[x*8][z*8])))));
-                   // const c = @max(0, std.math.clamp(scaledDistanceToSurface, -1.0, 1.0));
-                 //   std.debug.print("gy:{d},c:{d}\n", .{realY, c});
-                    const distToSurface = @min(0, realY - heights[x*fourthOfChunksize][z*fourthOfChunksize]);
-                    if(gen_params.SeaLevel >= @max(gen_params.SeaLevel,heights[x*fourthOfChunksize][z*fourthOfChunksize]) and distToSurface > -100){//TODO
-                        const oneDist = 0.01 * (100.0 - @abs(@as(f32, @floatFromInt(distToSurface))));
-                        //std.debug.print("of: {any}\n", .{oneDist});
 
-                        grid[x][y][z] = gen_params.CaveNoise.genNoise3D(genX, genY, genZ) + oneDist*2; 
-                        continue;
-                    }//{grid[x][y][z] = (-5.0/@as(f32, @floatFromInt(distToSurface))) + gen_params.CaveNoise.genNoise3D(genX, genY, genZ); continue;}
-                    grid[x][y][z] = gen_params.CaveNoise.genNoise3D(genX, genY, genZ);//TODO use distance to suface if underwater to dissallow water caves
+                
+                    grid[x][y][z] = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]); 
                 }
             }
         }
@@ -126,7 +111,8 @@ pub const Chunk = struct {
         };
         const xs: @Vector(ChunkSize, f32) = comptime zs;
         const ys: @Vector(ChunkSize, f32) = comptime zs;
-        //     const waterCaveSpacing = 10;
+
+        _ = heights;
         @setEvalBranchQuota(32000);
         inline for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
