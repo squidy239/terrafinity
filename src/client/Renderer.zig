@@ -34,7 +34,7 @@ const UniformLocations = struct {
             .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
             .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
             .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
-            .sunlocation = gl.GetUniformLocation(shaderprogram, "sunpos"),
+            .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
             .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
@@ -255,7 +255,7 @@ pub const Renderer = struct {
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-        const sunrot = zm.Mat4.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@as(f32, @floatFromInt(@mod(@divFloor(std.time.milliTimestamp(), 10), 360)))));
+        const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@mod(@as(f32, @floatFromInt(std.time.milliTimestamp()))/1000, 360)));
         const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist));

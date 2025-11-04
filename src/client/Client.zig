@@ -54,8 +54,10 @@ pub fn main() !void {
     try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
+    std.debug.print("Bit size of Blocks: {d}\n", .{@bitSizeOf(Block)});
+
     std.log.info("using seed {d}\n", .{seed});
-    //TODO after world saving find and fix rare chunk meshing bug, might be caused by chunk the structure unloading partually
+    
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,

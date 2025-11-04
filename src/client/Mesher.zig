@@ -13,8 +13,6 @@ pub const FaceRotation = enum(u4) {
     yMinus = 3,
     zPlus = 4,
     zMinus = 5,
-    diagonalPlus = 6,
-    diagonalMinus = 7,
 };
 
 pub const Face = packed struct(u64) {
@@ -25,7 +23,7 @@ pub const Face = packed struct(u64) {
     isGreedy: bool,
     height: i6,
     width: i6,
-    BlockType: Block,
+    BlockType: u20,
     _: u12,
 };
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
@@ -45,6 +43,7 @@ pub const Mesh = struct {
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
         GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
+        comptime std.debug.assert(@bitSizeOf(Block) <= 20);
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
         var Tpos: usize = 0;
@@ -70,7 +69,7 @@ pub const Mesh = struct {
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{
-                                    .BlockType = block,
+                                    .BlockType = @intFromEnum(block),
                                     .isGreedy = false,
                                     .height = 1,
                                     .width = 1,
@@ -84,7 +83,7 @@ pub const Mesh = struct {
                             } else if (block != neighboring_blocks[i]) {
                                 std.debug.assert(Tpos < TransparentfaceBuffer.len);
                                 TransparentfaceBuffer[Tpos] = Face{
-                                    .BlockType = block,
+                                    .BlockType = @intFromEnum(block),
                                     .isGreedy = false,
                                     .height = 1,
                                     .width = 1,

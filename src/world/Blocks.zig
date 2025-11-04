@@ -1,14 +1,14 @@
 const std = @import("std");
 
-pub const Blocks = enum(u20) {
+pub const Blocks = enum {
     Null,
     Air,
-    Water,
     Stone,
     Grass,
     Dirt,
     Wood,
     Leaves,
+    Water,//id is 7 hardcoded for waves, TODO make this a property
     Snow,
 
     pub const Properties = struct {
