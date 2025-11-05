@@ -377,6 +377,7 @@ pub const Chunk = struct {
     pub const GenParams = struct {
         terrainblockRandomness: f32, //must be from 0 to 1
         TerrainNoise: Noise.Noise(f32),
+        TreeNoise: Noise.Noise(f32),
         terrainNoiseBalance: f32, //from 0 to 1, 0 is terrainnoise 1 is largeterrainnoise
         LargeTerrainNoise: Noise.Noise(f32),
         LargeTerrainNoiseWarp: Noise.Noise(f32),

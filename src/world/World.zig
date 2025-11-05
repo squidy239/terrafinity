@@ -136,6 +136,8 @@ pub const World = struct {
 
         for (heights, 0..) |row, x| {
             for (row, 0..) |height, z| {
+                const realX:f32 = @as(f32, @floatFromInt((Pos[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / self.GenParams.terrainScale;
+                const realZ:f32 = @as(f32, @floatFromInt((Pos[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / self.GenParams.terrainScale;
                 if (@divFloor(height, ChunkSize) != Pos[1] or height < self.GenParams.SeaLevel) continue;
                 const y: usize = @intCast(@mod(height, ChunkSize));
 
@@ -201,9 +203,10 @@ pub const World = struct {
                         };
 
                         _ = try tree.place(&worldEditor);
-                    } else if (treeChance < 0.00015) {
+                        
+                    } else if (self.GenParams.TreeNoise.genNoise2D(realX, realZ) > -0.0) {
                         structuresGenerated += 1;
-                        const factor = rand.float(f32) + 0.5;
+                        const factor = rand.float(f32) + 0.5;//TODO replace a lot of rand with hashes
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         comptime var csteps: [10]Structures.Tree.Step = undefined;
                         comptime for (&csteps, 0..) |*step, r| {
@@ -223,6 +226,7 @@ pub const World = struct {
                                     .branchCountMax = 8,
                                     .branchCountMin = 5,
                                     .lengthPercentRandomness = 0.4,
+                                    .baseRadiusPercent = 0.75,
                                     
                                     .branchRange = @splat(0.8),
                                 },
@@ -253,7 +257,7 @@ pub const World = struct {
                             .pos = @intCast(centerPos),
                             .baseRadius = 3 * factor,
                             .rand = rand,
-                            .trunkHeight = 15 * factor,
+                            .trunkHeight = 25 * factor,
                             .steps = &steps,
                             .maxRecursionDepth = 6,
                             .leafDensity = 0.5,
@@ -262,7 +266,7 @@ pub const World = struct {
                         };
 
                         _ = try tree.place(&worldEditor);
-                    } else if (treeChance < 0.0015) {
+                    } else if (false and treeChance < 0.0015) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
@@ -282,6 +286,8 @@ pub const World = struct {
             }
         }
     }
+    
+    
     ///adds a ref and loads chunk, ref must be removed if not using chunk
     pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {
         const chunk = self.Chunks.getandaddref(Pos);
@@ -299,17 +305,6 @@ pub const World = struct {
         } else return chunk.?;
     }
 
-    ///generates and places a structure at the given position, mainChunk is a chunk out of the hashmap that will be treated as the chunk at its pos, mainchunk cannot be locked. remeshes if there is a renderer. dosent remesh mainchunk
-    pub fn PrintStructure(worldEditor: *WorldEditor, BlockPos: @Vector(3, i64), GenStructure: fn (state: anytype, genParams: anytype) ?WorldEditor.Step, GenState: type, GenParams: anytype) !void {
-        const structure = ztracy.ZoneNC(@src(), "print_structure", 94);
-        defer structure.End();
-        var structureGenData: GenState = .{};
-        while (GenStructure(&structureGenData, GenParams)) |nextstep| {
-            var step = nextstep;
-            step.pos += BlockPos;
-            try worldEditor.PlaceBlock(step);
-        }
-    }
 
     pub const WorldEditor = struct {
         world: *World,

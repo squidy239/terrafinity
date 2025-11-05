@@ -65,7 +65,7 @@ pub fn main() !void {
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .SpawnRange = 0,
-        .SpawnCenterPos = [3]f64{ 2500, 0, 200 },
+        .SpawnCenterPos = [3]f64{ 7000, 0, 400 },
         .Rand = rand.random(),
         .GenParams = .{
             .terrainmin = -2048,
@@ -107,7 +107,13 @@ pub fn main() !void {
                 .noise_type = .perlin,
                 .frequency = 0.02,
             },
-            .CaveExpansionMax = 80000,
+            .TreeNoise = .{
+                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
+                .noise_type = .cellular,
+                .cellular_distance = .euclidean_sq,
+                .frequency = 0.1,
+            },
+            .CaveExpansionMax = 16000,
             .CaveExpansionStart = undefined, //TODO
             .Cavesess = -0.7,
             .terrainScale = 0.5,

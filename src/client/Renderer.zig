@@ -418,6 +418,12 @@ pub const Renderer = struct {
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
         var amount: u64 = 0;
+  //      self.playerLock.lockShared();
+    //    const playerPos = self.player.pos;
+      //  self.playerLock.unlockShared();
+     //   const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
+      //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+     //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         while (true) {
             var syncStatus: c_int = undefined;
             gl.GetSynciv(glSync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus));
@@ -425,6 +431,7 @@ pub const Renderer = struct {
             const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);
             std.debug.assert(mesh.TransperentFaces != null or mesh.faces != null);
+           // if(outOfSquareRange(mesh.Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) }))continue;//causes a bug TODO fix
             self.ChunkRenderListLock.lockShared();
             const ex = self.ChunkRenderList.get(mesh.Pos);
             self.ChunkRenderListLock.unlockShared();
@@ -439,12 +446,7 @@ pub const Renderer = struct {
                 defer self.ChunkRenderListLock.unlock();
                 const oldChunk = try self.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
                 if (oldChunk) |old_mesh| {
-                    //std.debug.print("remeshed chunk at pos:{d}\n", .{mesh.Pos});
-                    inline for (0..2) |i| {
-                        if (old_mesh.value.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
-                        if (old_mesh.value.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
-                        if (old_mesh.value.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
-                    }
+                    old_mesh.value.free();
                 }
             }
             _ = self.LoadingChunks.remove(mesh.Pos);
@@ -475,6 +477,17 @@ pub const Renderer = struct {
             .pos = mesh.Pos,
             .time = 0,
         };
+        
+        gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
+        gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
+        const UniformBuffer = UBO{
+            .chunkPos = mesh.Pos,
+            .scale = 1,
+            .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
+            ._0 = undefined,
+        };
+        gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
+        
         inline for (0..2) |i| {
             const faces = if (i == 0) mesh.faces else mesh.TransperentFaces;
             if (faces) |f| {
@@ -508,16 +521,6 @@ pub const Renderer = struct {
                     .instanceCount = @intCast(NewMeshIDs.count[i]),
                 };
                 gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
-
-                gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
-                gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
-                const UniformBuffer = UBO{
-                    .chunkPos = mesh.Pos,
-                    .scale = 1,
-                    .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
-                    ._0 = undefined,
-                };
-                gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
                 NewMeshIDs.drawCommand[i] = indirectBuff;
             }
         }
@@ -527,6 +530,7 @@ pub const Renderer = struct {
         gl.BindVertexArray(0);
         return NewMeshIDs;
     }
+    
 
     pub const MeshBufferIDs = struct {
         time: i64,
