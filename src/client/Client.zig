@@ -68,11 +68,11 @@ pub fn main() !void {
         .SpawnCenterPos = [3]f64{ 7000, 0, 400 },
         .Rand = rand.random(),
         .GenParams = .{
-            .terrainmin = -2048,
+            .terrainmin = -512,
             .terrainmax = 4096,
             .seed = seed,
             .SeaLevel = 0,
-            .terrainblockRandomness = 0.125,
+            .terrainblockRandomness = 0.25,
             .TerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .fractal_type = .ridged,
@@ -83,9 +83,9 @@ pub fn main() !void {
             .terrainNoiseBalance = 0.9, //0 is TerrainNoise, 1 is LargeTerrainNoise
             .LargeTerrainNoise = .{
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .ping_pong,
+                .fractal_type = .none,
                 .octaves = 1,
-                .noise_type = .value_cubic,
+                .noise_type = .perlin,
                 .frequency = 0.002,
             },
             .LargeTerrainNoiseWarp = .{
@@ -111,12 +111,13 @@ pub fn main() !void {
                 .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
                 .noise_type = .cellular,
                 .cellular_distance = .euclidean_sq,
-                .frequency = 0.1,
+                .frequency = 0.01,
+                .cellular_jitter_mod = 0.6,
             },
             .CaveExpansionMax = 16000,
             .CaveExpansionStart = undefined, //TODO
             .Cavesess = -0.7,
-            .terrainScale = 0.5,
+            .terrainScale = 1,
             .genStructures = true,
         },
     };

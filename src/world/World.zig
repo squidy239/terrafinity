@@ -203,8 +203,7 @@ pub const World = struct {
                         };
 
                         _ = try tree.place(&worldEditor);
-                        
-                    } else if (self.GenParams.TreeNoise.genNoise2D(realX, realZ) > -0.0) {
+                    } else if (self.GenParams.TreeNoise.genNoise2D(realX, realZ) < -0.99995 ) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;//TODO replace a lot of rand with hashes
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };

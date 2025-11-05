@@ -241,7 +241,7 @@ pub const Chunk = struct {
 
     fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i32, seaLevel: i32, blockRandomness: f32, oneDterrainScale: f32) Block {
         const a = std.math.lerp(heightPercent * oneDterrainScale, rand.float(f32), blockRandomness);
-        return if (block_height < seaLevel) Block.Dirt else if (a < 0.4) Block.Grass else if (a < 0.5) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
+        return if (block_height < seaLevel) Block.Dirt else if (a < 0.25) Block.Grass else if (a < 0.4) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
     }
 
     pub fn GetHeightsFromCache(Pos: [2]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192)) ?[ChunkSize][ChunkSize]i32 {
@@ -284,14 +284,21 @@ pub const Chunk = struct {
                 var largegenX = x;
                 var largegenZ = z;
                 params.LargeTerrainNoiseWarp.domainWarp2D(&largegenX, &largegenZ);
-                const terrainNoise = std.math.pow(f32, params.TerrainNoise.genNoise2D(genX, genZ), 2);
+                var terrainNoise = std.math.pow(f32, params.TerrainNoise.genNoise2D(genX, genZ), 1);
                 const largeterrainNoise = params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ);
                 // largeterrainNoise = scaleHeight(largeterrainNoise);
                 //  largeterrainNoise = @min(0.2, largeterrainNoise);
-                const noise = terrainNoise * largeterrainNoise; //std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
+              //  const noise = terrainNoise * largeterrainNoise; //std.math.lerp(terrainNoise, largeterrainNoise, params.terrainNoiseBalance);
+                if (terrainNoise < 0.0) terrainNoise = 0.0;
+                const P = 2.0; //Higher for stronger bias.
+                const E = largeterrainNoise * (if (terrainNoise < 0.5)
+                    (std.math.pow(f32, terrainNoise * 2, P) * 0.5)
+                else
+                    (1 - (std.math.pow(f32, (1 - terrainNoise) * 2, P) * 0.5)));
+
                 //      std.debug.print("ltn:{any}, n:{any}, mix: {any}, o: {any}\n", .{largeterrainNoise, terrainNoise, noise, params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ)});
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
-                const block_height: i32 = @intFromFloat(noise * @abs(floatBounds[@intFromBool(noise > 0)]) * params.terrainScale);
+                const block_height: i32 = @intFromFloat(E * @abs(floatBounds[@intFromBool(E > 0)]) * params.terrainScale);
                 height[ux][uz] = block_height;
             }
         }

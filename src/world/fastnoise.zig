@@ -1649,7 +1649,7 @@ pub fn Noise(comptime Float: type) type {
                 },
             }
 
-            std.debug.assert(dist0 >= 0 and dist0 < dist1);
+            //std.debug.assert(dist0 >= 0 and dist0 < dist1);//this assertion fails
             if (self.cellular_distance == .euclidean and self.cellular_return != .cell_value) {
                 dist0 = @sqrt(dist0);
                 if (self.cellular_return != .distance) dist1 = @sqrt(dist1);

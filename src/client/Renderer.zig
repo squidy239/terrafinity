@@ -70,6 +70,7 @@ pub const Renderer = struct {
     window: *glfw.Window,
     proc_table: *gl.ProcTable,
     screen_dimensions: [2]u32,
+    renderScale: f32,
 
     ///must be called on main thread
     pub fn Init(pool: *ThreadPool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
@@ -103,6 +104,7 @@ pub const Renderer = struct {
             .window = undefined,
             .proc_table = proc_table_location,
             .screen_dimensions = [2]u32{ 800, 600 },
+            .renderScale = 1.0,
         };
         try renderer.CompileShaders();
         renderer.LoadFacebuffer();
@@ -255,7 +257,7 @@ pub const Renderer = struct {
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-        const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(@mod(@as(f32, @floatFromInt(std.time.milliTimestamp()))/1000, 360)));
+        const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
         const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist));
@@ -286,7 +288,7 @@ pub const Renderer = struct {
                 const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
                 const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
                 const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-                if (!cull) continue;
+                if (!cull and item.value_ptr.time - std.time.milliTimestamp() > 2500) continue;//dont cull chunks in laoding animation
                 drawnchunks += 1;
                 gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                 gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
@@ -342,7 +344,7 @@ pub const Renderer = struct {
             },
         }
         exbl.End();
-        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.allocator);
+        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces,self.renderScale,  self.allocator);
         chunk.releaseAndUnlockShared();
         if (mesh) |m| {
             _ = try self.MeshesToLoad.append(m);
@@ -471,11 +473,11 @@ pub const Renderer = struct {
             .vao = [2]?c_uint{ null, null },
             .vbo = [2]?c_uint{ null, null },
             .count = [2]u32{ 0, 0 },
-            .scale = 1,
             .drawCommand = [2]?c_uint{ null, null },
             .UBO = undefined,
             .pos = mesh.Pos,
             .time = 0,
+            .scale = mesh.scale,
         };
         
         gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
@@ -540,7 +542,7 @@ pub const Renderer = struct {
         UBO: c_uint,
         pos: [3]i32,
         count: [2]u32,
-        scale: f32,
+        scale:f32,
 
         pub fn free(self: *const @This()) void {
             inline for (0..2) |i| {

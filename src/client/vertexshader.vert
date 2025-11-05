@@ -133,10 +133,13 @@ void main() {
     }
 
     coordss = coords;
-    float animationMs = 500;
+    float animationMs = 2500;
     float animationSpeed = 0.25;
     float chunktime = float(time - creationTime);
     vec3 relativeChunkPos = vec3(dvec3(chunkPos.xyz * ChunkSize * scale) - playerPos);
-    coords.y -= ((animationMs - min(chunktime, animationMs)) * animationSpeed); //replace with pos.y for other aniamtion
-    gl_Position = projview * vec4((coords * scale) + (pos * scale) + (relativeChunkPos), 1);
+   // coords.y += pow((animationMs - min(chunktime, animationMs))/animationMs, 2) * animationMs * animationSpeed; //replace with pos.y for other aniamtion
+    float newscale = scale;
+    newscale *= 1 - (pow((animationMs - min(chunktime, animationMs))/animationMs, 2)); //replace with pos.y for other aniamtion
+
+    gl_Position = projview * vec4((coords * newscale) + (pos * scale) + (relativeChunkPos), 1);
 }
