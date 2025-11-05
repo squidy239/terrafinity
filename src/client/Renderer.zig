@@ -288,7 +288,7 @@ pub const Renderer = struct {
                 const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
                 const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
                 const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-                if (!cull and item.value_ptr.time - std.time.milliTimestamp() > 2500) continue;//dont cull chunks in laoding animation
+                if (!cull) continue;
                 drawnchunks += 1;
                 gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                 gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
