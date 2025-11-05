@@ -83,3 +83,4 @@ void main()
     FragColor = vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
 }
+//    FragColor = vec4((sin(pow(cos(fragpos / coordss), tan(fragpos * -coordss)))+1)/2, 1);

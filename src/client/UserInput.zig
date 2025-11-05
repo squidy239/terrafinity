@@ -263,7 +263,7 @@ pub fn processInput() !void {
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
-        render.player.pos = std.math.lerp(render.player.pos, render.world.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.SpawnCenterPos[0] + t), @intFromFloat(render.world.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
+        render.player.pos = std.math.lerp(render.player.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = render.player.pos;
         render.playerLock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));

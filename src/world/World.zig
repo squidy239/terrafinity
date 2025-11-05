@@ -15,13 +15,17 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192),
-    SpawnRange: u32,
-    SpawnCenterPos: @Vector(3, f64),
     Rand: std.Random,
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
-    GenParams: Chunk.GenParams,
-
+    Config: WorldConfig,
+    
+    pub const WorldConfig = struct {
+        GenParams: Chunk.GenParams,
+        SpawnCenterPos: @Vector(3, f64),
+        SpawnRange: u32,
+    };
+    
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
     }
@@ -49,10 +53,10 @@ pub const World = struct {
     }
 
     pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
-        const pos = @Vector(2, i32){ @intFromFloat(self.SpawnCenterPos[0]), @intFromFloat(self.SpawnCenterPos[2]) } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.SpawnRange)), @as(i32, @intCast(self.SpawnRange))) };
+        const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
         const chunkPos = [2]i32{ @divFloor(pos[0], ChunkSize), @divFloor(pos[1], ChunkSize) };
         const posInChunk = [2]i32{ @mod(pos[0], ChunkSize), @mod(pos[1], ChunkSize) };
-        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.Config.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
@@ -60,7 +64,7 @@ pub const World = struct {
     pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) i64 {
         const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
         const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.Config.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
 
@@ -89,7 +93,7 @@ pub const World = struct {
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
-            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.GenParams, self.allocator);
+            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.Config.GenParams, self.allocator);
             const ad = ztracy.ZoneNC(@src(), "allocChunkStruct", 234313);
             var chunkptr: *Chunk = try self.allocator.create(Chunk);
             ad.End();
@@ -123,11 +127,11 @@ pub const World = struct {
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
         if (chunk.blocks != .blocks) return;
-        if (!self.GenParams.genStructures) return;
-        const randomSeed = std.hash.Wyhash.hash(self.GenParams.seed, std.mem.asBytes(&Pos));
+        if (!self.Config.GenParams.genStructures) return;
+        const randomSeed = std.hash.Wyhash.hash(self.Config.GenParams.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
-        const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.GenParams, &self.TerrainHeightCache); //should still be in the cache
+        const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.Config.GenParams, &self.TerrainHeightCache); //should still be in the cache
         var sfa = std.heap.stackFallback(100_000, self.allocator);
         const tempAllocator = sfa.get();
         var worldEditor = WorldEditor{ .remeshWithThreadPool = false, .world = self, .tempallocator = tempAllocator };
@@ -136,13 +140,13 @@ pub const World = struct {
 
         for (heights, 0..) |row, x| {
             for (row, 0..) |height, z| {
-                const realX:f32 = @as(f32, @floatFromInt((Pos[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / self.GenParams.terrainScale;
-                const realZ:f32 = @as(f32, @floatFromInt((Pos[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / self.GenParams.terrainScale;
-                if (@divFloor(height, ChunkSize) != Pos[1] or height < self.GenParams.SeaLevel) continue;
+                const realX:f32 = @as(f32, @floatFromInt((Pos[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / self.Config.GenParams.terrainScale;
+                const realZ:f32 = @as(f32, @floatFromInt((Pos[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / self.Config.GenParams.terrainScale;
+                if (@divFloor(height, ChunkSize) != Pos[1] or height < self.Config.GenParams.SeaLevel) continue;
                 const y: usize = @intCast(@mod(height, ChunkSize));
 
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
-                    const treeChance: f64 = rand.float(f64) * self.GenParams.terrainScale; //TODO advance rng to make tree placement the same
+                    const treeChance: f64 = rand.float(f64) * self.Config.GenParams.terrainScale; //TODO advance rng to make tree placement the same
                     if (true and treeChance < 0.000002) {
                         comptime var csteps: [10]Structures.Tree.Step = undefined;
                         comptime for (&csteps, 0..) |*step, r| {
@@ -198,12 +202,12 @@ pub const World = struct {
                             .maxRecursionDepth = 8,
                             .leafDensity = 0.5,
                             .leafSize = 6,
-                            .scale = self.GenParams.terrainScale,
+                            .scale = self.Config.GenParams.terrainScale,
                             .steps = &steps,
                         };
 
                         _ = try tree.place(&worldEditor);
-                    } else if (self.GenParams.TreeNoise.genNoise2D(realX, realZ) < -0.99995 ) {
+                    } else if (self.Config.GenParams.TreeNoise.genNoise2D(realX, realZ) < -0.99995 ) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5;//TODO replace a lot of rand with hashes
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
@@ -260,7 +264,7 @@ pub const World = struct {
                             .steps = &steps,
                             .maxRecursionDepth = 6,
                             .leafDensity = 0.5,
-                            .scale = self.GenParams.terrainScale,
+                            .scale = self.Config.GenParams.terrainScale,
                             .leafSize = 3,
                         };
 
@@ -278,7 +282,7 @@ pub const World = struct {
                             .top_radius_factor = 0.75,
                             .branch_start_height_factor = 0.90,
                             .canopy_density = 0.7,
-                            .scale = self.GenParams.terrainScale,
+                            .scale = self.Config.GenParams.terrainScale,
                         });
                     }
                 }

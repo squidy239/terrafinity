@@ -26,6 +26,7 @@ pub const Chunk = struct {
         StructuresGenerated,
     };
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192), gen_params: GenParams, allocator: std.mem.Allocator) !@This() {
+        //TODO make terrain generation more customisable and move it to a diffrent file
         var chunk: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
         const heights = GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, gen_params, TerrainHeightCache);

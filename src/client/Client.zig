@@ -58,68 +58,35 @@ pub fn main() !void {
 
     std.log.info("using seed {d}\n", .{seed});
     
+    var MainWorldConfig:World.WorldConfig = undefined;
+    
+    {
+    var readBuf:[1024]u8 = undefined;
+    const file = try std.fs.cwd().openFile("config/WorldConfig.zon", .{.mode = .read_only});
+    defer file.close();
+    const stat = try file.stat();
+
+    var reader = file.reader(&readBuf);
+     const slice = try reader.interface.readAlloc(secondary_allocator, stat.size);
+     defer secondary_allocator.free(slice);
+     @setEvalBranchQuota(10000);
+     MainWorldConfig = try std.zon.parse.fromSlice(World.WorldConfig, secondary_allocator, @ptrCast(slice), null, .{});
+    }
+    
+    MainWorldConfig.GenParams.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 1));
+    MainWorldConfig.GenParams.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 2));
+    MainWorldConfig.GenParams.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 3));
+    MainWorldConfig.GenParams.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 4));
+    MainWorldConfig.GenParams.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 4));
+    
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
         .TerrainHeightCache = try Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192).init(secondary_allocator),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
-        .SpawnRange = 0,
-        .SpawnCenterPos = [3]f64{ 7000, 0, 400 },
         .Rand = rand.random(),
-        .GenParams = .{
-            .terrainmin = -512,
-            .terrainmax = 4096,
-            .seed = seed,
-            .SeaLevel = 0,
-            .terrainblockRandomness = 0.25,
-            .TerrainNoise = .{
-                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .ridged,
-                .octaves = 12,
-                .noise_type = .perlin,
-                .frequency = 0.01,
-            },
-            .terrainNoiseBalance = 0.9, //0 is TerrainNoise, 1 is LargeTerrainNoise
-            .LargeTerrainNoise = .{
-                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .none,
-                .octaves = 1,
-                .noise_type = .perlin,
-                .frequency = 0.002,
-            },
-            .LargeTerrainNoiseWarp = .{
-                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .independent,
-                .octaves = 1,
-                .frequency = 0.008,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 400,
-                .rotation_type = .improve_xy_planes,
-            },
-            .CaveNoise = .{
-                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .fractal_type = .ping_pong,
-                .octaves = 12,
-                .lacunarity = 2,
-                .ping_pong_strength = 2.0,
-                .gain = 0.5,
-                .noise_type = .perlin,
-                .frequency = 0.02,
-            },
-            .TreeNoise = .{
-                .seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed)),
-                .noise_type = .cellular,
-                .cellular_distance = .euclidean_sq,
-                .frequency = 0.01,
-                .cellular_jitter_mod = 0.6,
-            },
-            .CaveExpansionMax = 16000,
-            .CaveExpansionStart = undefined, //TODO
-            .Cavesess = -0.7,
-            .terrainScale = 1,
-            .genStructures = true,
-        },
+        .Config = MainWorldConfig,
     };
     const tempPlayer: EntityTypes.Player = .{
         .player_UUID = 0, //UUID 0 resurved for client
