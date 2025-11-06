@@ -248,6 +248,12 @@ pub const DefaultGenerator = struct {
     fn GenerateStructures(self: *World, genParams: GenParams, chunk: *Chunk, Pos: [3]i32, terrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32)) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
+        chunk.addAndLockShared();
+        var sfa = std.heap.stackFallback(100_000, self.allocator);
+        const tempAllocator = sfa.get();
+        var worldEditor = World.WorldEditor{ .remeshWithThreadPool = false, .world = self, .tempallocator = tempAllocator };
+        defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+        defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
         if (chunk.blocks != .blocks) return;
@@ -256,10 +262,7 @@ pub const DefaultGenerator = struct {
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
         const heights = GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, genParams, terrainHeightCache); //should still be in the cache
-        var sfa = std.heap.stackFallback(100_000, self.allocator);
-        const tempAllocator = sfa.get();
-        var worldEditor = World.WorldEditor{ .remeshWithThreadPool = false, .world = self, .tempallocator = tempAllocator };
-        defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+
         var structuresGenerated: u32 = 0;
 
         for (heights, 0..) |row, x| {

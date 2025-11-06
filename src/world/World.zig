@@ -31,6 +31,7 @@ pub const World = struct {
     pub const ChunkGenerator = struct {
         ///onEditFn must be called on any modified chunks once all modifications are complete
         ///this function is responsible for locking and adding refs to the chunk
+        ///must set chunk.genstate to StructuresGenerated
         pub const AfterGenerationFunction = fn (self: *ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void;
         ///generate the chunk blocks, this may be called multiple times on the same chunk position
         pub const ChunkGenerationFunction = fn (self: *ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ OutOfMemory, GenerationError }!void;
@@ -118,7 +119,6 @@ pub const World = struct {
             const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
             if (structures) { //TODO move structures to Generator
                 try self.Generator.afterGeneration(&self.Generator, self, chunkptr, Pos);
-                std.debug.assert(chunkptr.genstate.load(.seq_cst) == .StructuresGenerated);
             }
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
@@ -168,20 +168,19 @@ pub const World = struct {
         ///applies the edits in the buffer to the world, frees any temporary allocations
         pub fn flush(self: *@This()) !void {
             self.editBuffer.lockPointers();
+            defer self.editBuffer.clearAndFree(self.tempallocator);
+            defer self.editBuffer.unlockPointers();
             var it = self.editBuffer.iterator();
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
                 const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false);
                 defer chunk.release();
-
                 try chunk.Merge(encoding, self.world.allocator, true);
             }
             it.index = 0;
             while (it.next()) |diffChunk| {
                 if (self.world.onEdit) |onEdit| onEdit.onEditFn(diffChunk.key_ptr.*, onEdit.onEditFnArgs);
             }
-            self.editBuffer.unlockPointers();
-            self.editBuffer.clearAndFree(self.tempallocator);
         }
 
         pub fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {

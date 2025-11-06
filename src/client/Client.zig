@@ -14,12 +14,10 @@ const glfw = @import("zglfw");
 pub const gui = @import("gui");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");
-const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
 const DefaultGenerator = World.DefaultGenerator;
-pub const Loader = @import("Loader.zig");
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
@@ -140,33 +138,27 @@ pub fn main() !void {
     try MainWorld.Entitys.put(World.PlayerIDtoEntityId(player.player_UUID), playerEntity);
     _ = playerEntity.ref_count.fetchAdd(1, .seq_cst);
     const window = try InitWindowAndProcs(&proc);
-    var renderer = Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator) catch |err| {
+    var renderer: Renderer = undefined;
+    MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
+    renderer = Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
-    MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
     renderer.window = window;
+    try renderer.SpawnThreads();
     try EntityTypes.LoadMeshes(allocator);
-    const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
-    const loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ &renderer, 40 * std.time.ns_per_ms, &player.pos, &playerEntity.lock, &running });
-    const updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &MainWorld, 5 * std.time.ns_per_ms, &running });
 
     defer {
         std.debug.print("started closing\n", .{});
         running.store(false, .monotonic);
         UserInput.deinit();
-        updateEntitiesThread.join();
-        std.debug.print("entity update thread stopped\n", .{});
-        loaderThread.join();
-        unloaderThread.join();
-        std.debug.print("loader and unloader threads stopped\n", .{});
-        pool.deinit();
+        pool.deinit(); //pool tasks depend on the renderer
         std.debug.print("pool deinit\n", .{});
-        EntityTypes.FreeMeshes();
         renderer.deinit();
-        glfw.terminate();
-        _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         std.debug.print("renderer deinit\n", .{});
+        _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
+        EntityTypes.FreeMeshes();
+        glfw.terminate();
         _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         MainWorld.Deinit() catch |err| std.debug.panic("error: {any}", .{err});
         std.debug.print("World Closed\n", .{});
