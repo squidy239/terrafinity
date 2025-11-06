@@ -84,10 +84,10 @@
     .terrainmin = -256,
     .terrainmax = 2048,
     .SeaLevel = 0,
-    .Cavesess = -100,
+    .Cavesess = -0.7,
     .CaveExpansionMax = 8192,
     .CaveExpansionStart = 0,
     .seed = 0,
     .terrainScale = 1,
-    .genStructures = false,
+    .genStructures = true,
 }
