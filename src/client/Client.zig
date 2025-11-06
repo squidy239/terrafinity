@@ -18,11 +18,12 @@ const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-
+const DefaultGenerator = World.DefaultGenerator;
 pub const Loader = @import("Loader.zig");
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
+pub const Interpolation = @import("Interpolation");
 
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -57,43 +58,64 @@ pub fn main() !void {
     std.debug.print("Bit size of Blocks: {d}\n", .{@bitSizeOf(Block)});
 
     std.log.info("using seed {d}\n", .{seed});
-    
-    var MainWorldConfig:World.WorldConfig = undefined;
-    
-    {
-    var readBuf:[1024]u8 = undefined;
-    const file = try std.fs.cwd().openFile("config/WorldConfig.zon", .{.mode = .read_only});
-    defer file.close();
-    const stat = try file.stat();
 
-    var reader = file.reader(&readBuf);
-     const slice = try reader.interface.readAlloc(secondary_allocator, stat.size);
-     defer secondary_allocator.free(slice);
-     @setEvalBranchQuota(10000);
-     MainWorldConfig = try std.zon.parse.fromSlice(World.WorldConfig, secondary_allocator, @ptrCast(slice), null, .{});
+    var MainWorldConfig: World.WorldConfig = undefined;
+    var GeneratorConfig: DefaultGenerator.GenParams = undefined;
+
+    {
+        var readBuf: [1024]u8 = undefined;
+        const file = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
+        defer file.close();
+        const stat = try file.stat();
+
+        var reader = file.reader(&readBuf);
+        const slice = try reader.interface.readAlloc(secondary_allocator, stat.size);
+        defer secondary_allocator.free(slice);
+        @setEvalBranchQuota(10000);
+        MainWorldConfig = try std.zon.parse.fromSlice(World.WorldConfig, secondary_allocator, @ptrCast(slice), null, .{});
     }
     
-    MainWorldConfig.GenParams.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 1));
-    MainWorldConfig.GenParams.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 2));
-    MainWorldConfig.GenParams.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 3));
-    MainWorldConfig.GenParams.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 4));
-    MainWorldConfig.GenParams.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(MainWorldConfig.GenParams.seed +% 4));
+    {
+        var readBuf: [1024]u8 = undefined;
+        const file = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
+        defer file.close();
+        const stat = try file.stat();
+
+        var reader = file.reader(&readBuf);
+        const slice = try reader.interface.readAlloc(secondary_allocator, stat.size);
+        defer secondary_allocator.free(slice);
+        @setEvalBranchQuota(10000);
+        GeneratorConfig = try std.zon.parse.fromSlice(DefaultGenerator.GenParams, secondary_allocator, @ptrCast(slice), null, .{});
+    }
+
+    GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
+   GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
+    GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
+    GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
+    GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
+    
+    var generator = World.DefaultGenerator{
+        .TerrainHeightCache = try .init(secondary_allocator, 4096), 
+        .params = GeneratorConfig,
+    };
     
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
-        .TerrainHeightCache = try Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192).init(secondary_allocator),
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .Rand = rand.random(),
         .Config = MainWorldConfig,
+        .Generator = generator.getGenerator(),
+        .onEdit = null,
+        
     };
     const tempPlayer: EntityTypes.Player = .{
         .player_UUID = 0, //UUID 0 resurved for client
         .player_name = .fromString("squid"),
         .gameMode = .Spectator,
         .OnGround = false,
-        .pos = MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
+        .pos = try MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
         .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
         .headRotationAxis = @Vector(2, f16){ 0, 0 },
         .armSwings = [2]f16{ 0, 0 }, //right,left
@@ -121,6 +143,7 @@ pub fn main() !void {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
+    MainWorld.onEdit = .{.onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer)};
     renderer.window = window;
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });

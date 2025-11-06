@@ -113,8 +113,8 @@ pub const Renderer = struct {
         return renderer;
     }
 
-    pub fn onEdit(chunkPos: [3]i32, args: anytype) void {
-        const renderer = @as(*Renderer, @ptrCast(args));
+    pub fn onEditFn(chunkPos: [3]i32, args: *anyopaque) void {
+        const renderer = @as(*Renderer, @ptrCast(@alignCast(args)));
         renderer.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
     }
 
@@ -323,14 +323,14 @@ pub const Renderer = struct {
     pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
-        const chunk = try self.world.LoadChunk(Pos, genStructures, onEdit, self);
+        const chunk = try self.world.LoadChunk(Pos, genStructures);
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, false, onEdit, self)).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, false, onEdit, self)).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, false, onEdit, self)).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, false, onEdit, self)).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, false, onEdit, self)).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, false, onEdit, self)).extractFace(.zPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, false)).extractFace(.xMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, false)).extractFace(.xPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, false)).extractFace(.yMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, false)).extractFace(.yPlus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, false)).extractFace(.zMinus, true),
+            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -344,7 +344,7 @@ pub const Renderer = struct {
             },
         }
         exbl.End();
-        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces,self.renderScale,  self.allocator);
+        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.renderScale, self.allocator);
         chunk.releaseAndUnlockShared();
         if (mesh) |m| {
             _ = try self.MeshesToLoad.append(m);
@@ -420,12 +420,12 @@ pub const Renderer = struct {
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
         var amount: u64 = 0;
-  //      self.playerLock.lockShared();
-    //    const playerPos = self.player.pos;
-      //  self.playerLock.unlockShared();
-     //   const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
-      //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-     //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        //      self.playerLock.lockShared();
+        //    const playerPos = self.player.pos;
+        //  self.playerLock.unlockShared();
+        //   const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
+        //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+        //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         while (true) {
             var syncStatus: c_int = undefined;
             gl.GetSynciv(glSync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus));
@@ -433,7 +433,7 @@ pub const Renderer = struct {
             const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);
             std.debug.assert(mesh.TransperentFaces != null or mesh.faces != null);
-           // if(outOfSquareRange(mesh.Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) }))continue;//causes a bug TODO fix
+            // if(outOfSquareRange(mesh.Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) }))continue;//causes a bug TODO fix
             self.ChunkRenderListLock.lockShared();
             const ex = self.ChunkRenderList.get(mesh.Pos);
             self.ChunkRenderListLock.unlockShared();
@@ -479,7 +479,7 @@ pub const Renderer = struct {
             .time = 0,
             .scale = mesh.scale,
         };
-        
+
         gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
         gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
         const UniformBuffer = UBO{
@@ -489,7 +489,7 @@ pub const Renderer = struct {
             ._0 = undefined,
         };
         gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
-        
+
         inline for (0..2) |i| {
             const faces = if (i == 0) mesh.faces else mesh.TransperentFaces;
             if (faces) |f| {
@@ -532,7 +532,6 @@ pub const Renderer = struct {
         gl.BindVertexArray(0);
         return NewMeshIDs;
     }
-    
 
     pub const MeshBufferIDs = struct {
         time: i64,
@@ -542,7 +541,7 @@ pub const Renderer = struct {
         UBO: c_uint,
         pos: [3]i32,
         count: [2]u32,
-        scale:f32,
+        scale: f32,
 
         pub fn free(self: *const @This()) void {
             inline for (0..2) |i| {

@@ -84,7 +84,7 @@ pub fn init(ren: *Renderer) !void {
 
 pub fn deinit() void {
     worldEditorLock.lock();
-    _ = worldEditor.flush(null, void) catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
+    _ = worldEditor.flush() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
 
     menu.deinit();
@@ -234,7 +234,7 @@ pub fn processInput() !void {
         const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
-        _ = worldEditor.flush(Renderer.onEdit, render) catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
     }
 
@@ -251,7 +251,7 @@ pub fn processInput() !void {
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         worldEditorLock.lock();
         defer worldEditorLock.unlock();
-        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos), Renderer.onEdit, render)});
+        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
         worldEditor.ClearReader();
     }
     if (render.window.getKey(glfw.Key.p) == .press) {
@@ -263,7 +263,7 @@ pub fn processInput() !void {
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
-        render.player.pos = std.math.lerp(render.player.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
+        render.player.pos = std.math.lerp(render.player.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = render.player.pos;
         render.playerLock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
@@ -317,10 +317,9 @@ fn genFractalTask() void {
     };
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
-    _  = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
-    _ = worldEditor.flush(Renderer.onEdit, render) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+    _ = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+    _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
-
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;

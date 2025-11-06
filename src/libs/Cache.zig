@@ -1,7 +1,7 @@
 const std = @import("std");
 
 //TODO make concurrent version with no allocations beyond the initialisation
-pub fn Cache(comptime K: type, comptime V: type, comptime capacity: usize) type {
+pub fn Cache(comptime K: type, comptime V: type) type {
     return struct {
         const Self = @This();
         const Node = struct {
@@ -15,12 +15,14 @@ pub fn Cache(comptime K: type, comptime V: type, comptime capacity: usize) type 
         map: std.AutoHashMap(K, *Node),
         head: ?*Node = null, // Most recently used
         tail: ?*Node = null, // Least recently used
+        capacity: usize,
         mutex: std.Thread.Mutex = .{},
 
-        pub fn init(allocator: std.mem.Allocator) !Self {
+        pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             return Self{
                 .allocator = allocator,
                 .map = std.AutoHashMap(K, *Node).init(allocator),
+                .capacity = capacity,
             };
         }
 
@@ -81,7 +83,7 @@ pub fn Cache(comptime K: type, comptime V: type, comptime capacity: usize) type 
             }
 
             // If we're over capacity, remove tail (LRU element)
-            if (self.map.count() > capacity) {
+            if (self.map.count() > self.capacity) {
                 self.removeTail();
             }
         }

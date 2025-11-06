@@ -1,6 +1,5 @@
 const std = @import("std");
 const ThreadPool = @import("root").ThreadPool;
-
 pub const Block = @import("Block").Blocks;
 const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
@@ -12,20 +11,42 @@ const ztracy = @import("ztracy");
 
 pub const World = struct {
     pub const Structures = @import("Structures.zig");
+    pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32, 8192),
     Rand: std.Random,
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
-    
+    Generator: ChunkGenerator,
+    onEdit: ?struct {
+         onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
+         onEditFnArgs: *anyopaque,
+     },
     pub const WorldConfig = struct {
-        GenParams: Chunk.GenParams,
         SpawnCenterPos: @Vector(3, f64),
         SpawnRange: u32,
     };
     
+    
+    pub const ChunkGenerator = struct {
+        ///onEditFn must be called on any modified chunks once all modifications are complete
+        ///this function is responsible for locking and adding refs to the chunk
+        pub const AfterGenerationFunction = fn (self: *ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32)  error{ OutOfMemory, Unrecoverable }!void;
+        ///generate the chunk blocks, this may be called multiple times on the same chunk position
+        pub const ChunkGenerationFunction = fn (self: *ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32)  error{ OutOfMemory, GenerationError }!void;
+        ///must return the height of the terrain in blocks at the given chunk coordinates
+        pub const GetTerrainHeightAtPosFunction = fn (self: *ChunkGenerator, world: *World, Pos: @Vector(2, i32))  error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32;
+        
+        pub const DeinitFunction = fn (self: *ChunkGenerator, world: *World)  void;
+
+        data: *anyopaque,
+        genChunkBlocks: *const ChunkGenerationFunction,
+        afterGeneration: *const AfterGenerationFunction,
+        getTerrainHeight: *const GetTerrainHeightAtPosFunction,
+        deinit: *const DeinitFunction,
+    };
+
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
     }
@@ -52,19 +73,19 @@ pub const World = struct {
         return allocated_entity;
     }
 
-    pub fn GetPlayerSpawnPos(self: *@This()) @Vector(3, f64) {
+    pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
         const chunkPos = [2]i32{ @divFloor(pos[0], ChunkSize), @divFloor(pos[1], ChunkSize) };
         const posInChunk = [2]i32{ @mod(pos[0], ChunkSize), @mod(pos[1], ChunkSize) };
-        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.Config.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = (try self.Generator.getTerrainHeight(&self.Generator, self, chunkPos))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
-    pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) i64 {
+    pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) !i64 {
         const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
         const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-        const height = Chunk.GetTerrainHeight([2]i32{ chunkPos[0], chunkPos[1] }, self.Config.GenParams, &self.TerrainHeightCache)[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = (try self.Generator.getTerrainHeight(&self.Generator, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
 
@@ -88,18 +109,16 @@ pub const World = struct {
         }
     }
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool, comptime onEditFn: ?fn (chunkPos: [3]i32, args: anytype) void, onEditFnArgs: anytype) error{OutOfMemory}!*Chunk {
+    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{OutOfMemory, GenerationError, Unrecoverable}!*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
-            const ch = try Chunk.GenChunk(Pos, &self.TerrainHeightCache, self.Config.GenParams, self.allocator);
-            const ad = ztracy.ZoneNC(@src(), "allocChunkStruct", 234313);
-            var chunkptr: *Chunk = try self.allocator.create(Chunk);
-            ad.End();
-            chunkptr.* = ch;
-            if (structures) {
-                try GenerateStructures(self, chunkptr, Pos, onEditFn, onEditFnArgs);
+            var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+            try self.Generator.genChunkBlocks(&self.Generator, self, &blocks, Pos);
+            const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
+            if (structures) { //TODO move structures to Generator
+                try self.Generator.afterGeneration(&self.Generator, self, chunkptr, Pos);
                 std.debug.assert(chunkptr.genstate.load(.seq_cst) == .StructuresGenerated);
             }
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
@@ -115,182 +134,13 @@ pub const World = struct {
             return chunkptr;
         } else {
             if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
-                try GenerateStructures(self, chunk.?, Pos, onEditFn, onEditFnArgs);
+                try self.Generator.afterGeneration(&self.Generator, self, chunk.?, Pos);
             }
             return chunk.?;
         }
     }
 
-    fn GenerateStructures(self: *@This(), chunk: *Chunk, Pos: [3]i32, comptime onEditFn: ?fn (chunkPos: [3]i32, args: anytype) void, onEditFnArgs: anytype) !void {
-        const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
-        defer genstructures.End();
-        if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
-        defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
-        if (chunk.blocks != .blocks) return;
-        if (!self.Config.GenParams.genStructures) return;
-        const randomSeed = std.hash.Wyhash.hash(self.Config.GenParams.seed, std.mem.asBytes(&Pos));
-        var random = std.Random.DefaultPrng.init(randomSeed);
-        const rand = random.random();
-        const heights = Chunk.GetTerrainHeight([2]i32{ Pos[0], Pos[2] }, self.Config.GenParams, &self.TerrainHeightCache); //should still be in the cache
-        var sfa = std.heap.stackFallback(100_000, self.allocator);
-        const tempAllocator = sfa.get();
-        var worldEditor = WorldEditor{ .remeshWithThreadPool = false, .world = self, .tempallocator = tempAllocator };
-        defer _ = worldEditor.flush(onEditFn, onEditFnArgs) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
-        var structuresGenerated: u32 = 0;
 
-        for (heights, 0..) |row, x| {
-            for (row, 0..) |height, z| {
-                const realX:f32 = @as(f32, @floatFromInt((Pos[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / self.Config.GenParams.terrainScale;
-                const realZ:f32 = @as(f32, @floatFromInt((Pos[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / self.Config.GenParams.terrainScale;
-                if (@divFloor(height, ChunkSize) != Pos[1] or height < self.Config.GenParams.SeaLevel) continue;
-                const y: usize = @intCast(@mod(height, ChunkSize));
-
-                if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
-                    const treeChance: f64 = rand.float(f64) * self.Config.GenParams.terrainScale; //TODO advance rng to make tree placement the same
-                    if (true and treeChance < 0.000002) {
-                        comptime var csteps: [10]Structures.Tree.Step = undefined;
-                        comptime for (&csteps, 0..) |*step, r| {
-                            step.* = switch (r) {
-                                0...0 => Structures.Tree.Step{
-                                    .lengthPercent = 1.0,
-                                    .radiusPercent = 1.0,
-                                    .branchCountMax = 1,
-                                    .branchCountMin = 1,
-                                    .branchRange = @splat(0.0),
-                                    .lengthPercentRandomness = 0.5,
-                                },
-                                1...2 => Structures.Tree.Step{
-                                    .lengthPercent = 0.7,
-                                    .radiusPercent = 0.5,
-                                    .branchRandomness = 0.3,
-                                    .branchCountMax = 4,
-                                    .branchCountMin = 3,
-                                    .lengthPercentRandomness = 0.4,
-
-                                    .branchRange = @splat(0.4),
-                                },
-                                3...5 => Structures.Tree.Step{
-                                    .lengthPercent = 0.7,
-                                    .radiusPercent = 0.7,
-                                    .branchCountMax = 4,
-                                    .branchCountMin = 3,
-                                    .branchRandomness = 0.3,
-                                    .lengthPercentRandomness = 0.3,
-
-                                    .branchRange = @splat(0.6),
-                                },
-                                6...10 => Structures.Tree.Step{
-                                    .lengthPercent = 0.7,
-                                    .radiusPercent = 0.7,
-                                    .branchCountMax = 4,
-                                    .branchCountMin = 3,
-                                    .branchRandomness = 0.3,
-                                    .lengthPercentRandomness = 0.3,
-
-                                    .branchRange = @splat(0.4),
-                                },
-                                else => unreachable,
-                            };
-                        };
-                        const steps = csteps;
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        const tree = Structures.Tree{
-                            .pos = @intCast(centerPos),
-                            .baseRadius = 15,
-                            .rand = rand,
-                            .trunkHeight = 100,
-                            .maxRecursionDepth = 8,
-                            .leafDensity = 0.5,
-                            .leafSize = 6,
-                            .scale = self.Config.GenParams.terrainScale,
-                            .steps = &steps,
-                        };
-
-                        _ = try tree.place(&worldEditor);
-                    } else if (self.Config.GenParams.TreeNoise.genNoise2D(realX, realZ) < -0.99995 ) {
-                        structuresGenerated += 1;
-                        const factor = rand.float(f32) + 0.5;//TODO replace a lot of rand with hashes
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        comptime var csteps: [10]Structures.Tree.Step = undefined;
-                        comptime for (&csteps, 0..) |*step, r| {
-                            step.* = switch (r) {
-                                0...0 => Structures.Tree.Step{
-                                    .lengthPercent = 1.0,
-                                    .radiusPercent = 1.0,
-                                    .branchCountMax = 1,
-                                    .branchCountMin = 1,
-                                    .branchRange = @splat(0.0),
-                                    .lengthPercentRandomness = 0.5,
-                                },
-                                1...2 => Structures.Tree.Step{
-                                    .lengthPercent = 0.6,
-                                    .radiusPercent = 0.4,
-                                    .branchRandomness = 0.3,
-                                    .branchCountMax = 8,
-                                    .branchCountMin = 5,
-                                    .lengthPercentRandomness = 0.4,
-                                    .baseRadiusPercent = 0.75,
-                                    
-                                    .branchRange = @splat(0.8),
-                                },
-                                3...5 => Structures.Tree.Step{
-                                    .lengthPercent = 0.7,
-                                    .radiusPercent = 0.8,
-                                    .branchCountMax = 4,
-                                    .branchCountMin = 3,
-                                    .branchRandomness = 0.3,
-                                    .lengthPercentRandomness = 0.3,
-                                    .branchRange = @splat(0.6),
-                                },
-                                6...10 => Structures.Tree.Step{
-                                    .lengthPercent = 0.6,
-                                    .radiusPercent = 0.7,
-                                    .branchCountMax = 4,
-                                    .branchCountMin = 3,
-                                    .branchRandomness = 0.3,
-                                    .lengthPercentRandomness = 0.3,
-
-                                    .branchRange = @splat(0.4),
-                                },
-                                else => unreachable,
-                            };
-                        };
-                        const steps = csteps;
-                        const tree = Structures.Tree{
-                            .pos = @intCast(centerPos),
-                            .baseRadius = 3 * factor,
-                            .rand = rand,
-                            .trunkHeight = 25 * factor,
-                            .steps = &steps,
-                            .maxRecursionDepth = 6,
-                            .leafDensity = 0.5,
-                            .scale = self.Config.GenParams.terrainScale,
-                            .leafSize = 3,
-                        };
-
-                        _ = try tree.place(&worldEditor);
-                    } else if (false and treeChance < 0.0015) {
-                        structuresGenerated += 1;
-                        const factor = rand.float(f32) + 0.5;
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        try Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                            .height = @intFromFloat(25 * factor),
-                            .base_radius = @intFromFloat(@round(4 * factor)),
-                            .main_branches = 0,
-                            .branch_length = 0,
-                            .canopy_radius = @intFromFloat(12 * factor),
-                            .top_radius_factor = 0.75,
-                            .branch_start_height_factor = 0.90,
-                            .canopy_density = 0.7,
-                            .scale = self.Config.GenParams.terrainScale,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    
-    
     ///adds a ref and loads chunk, ref must be removed if not using chunk
     pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {
         const chunk = self.Chunks.getandaddref(Pos);
@@ -308,7 +158,6 @@ pub const World = struct {
         } else return chunk.?;
     }
 
-
     pub const WorldEditor = struct {
         world: *World,
         lastChunkCache: ?struct { Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
@@ -319,19 +168,19 @@ pub const World = struct {
         remeshWithThreadPool: bool,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
-        pub fn flush(self: *@This(), comptime onEditFn: ?fn (chunkPos: [3]i32, args: anytype) void, onEditFnArgs: anytype) !void {
+        pub fn flush(self: *@This()) !void {
             self.editBuffer.lockPointers();
             var it = self.editBuffer.iterator();
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
-                const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false, null, void);
+                const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false);
                 defer chunk.release();
 
                 try chunk.Merge(encoding, self.world.allocator, true);
             }
             it.index = 0;
             while (it.next()) |diffChunk| {
-                if (onEditFn != null) onEditFn.?(diffChunk.key_ptr.*, onEditFnArgs);
+                if (self.world.onEdit) |onEdit| onEdit.onEditFn(diffChunk.key_ptr.*, onEdit.onEditFnArgs);
             }
             self.editBuffer.unlockPointers();
             self.editBuffer.clearAndFree(self.tempallocator);
@@ -345,14 +194,14 @@ pub const World = struct {
                 self.lastChunkCache.?.blocks[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
                 return;
             }
-            
+
             var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
             chunk[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
             self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
         }
 
         ///returns a block at the given position, ClearReader must be called after a series of calls to unlock the cached chunk
-        pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64), comptime onEditFn: ?fn (chunkPos: [3]i32, args: anytype) void, onEditFnArgs: anytype) !Block {
+        pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunkBlockPos = @mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
             if (self.lastChunkReadCache == null or @reduce(.Or, self.lastChunkCache.?.Pos != chunkPos)) {
@@ -360,7 +209,7 @@ pub const World = struct {
                     self.lastChunkReadCache.?.chunk.releaseAndUnlockShared();
                     self.lastChunkReadCache = null;
                 }
-                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true, onEditFn, onEditFnArgs) };
+                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true) };
                 self.lastChunkReadCache.?.chunk.lock.lockShared();
             }
             const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
@@ -453,7 +302,7 @@ pub const World = struct {
                 }
             };
         }
-        
+
         pub fn Sphere(comptime T: type) type {
             return struct {
                 position: @Vector(3, T),
@@ -468,22 +317,22 @@ pub const World = struct {
                     sphere.updateBoundingBox();
                     return sphere;
                 }
-                
+
                 pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
                     const diff = P - self.position;
                     const dist2 = dot(diff, diff);
                     return dist2 <= self.radius * self.radius;
                 }
-                
+
                 pub fn updateBoundingBox(self: *@This()) void {
                     const r = self.radius;
-                    
+
                     const minX = @floor(@min(self.position[0] - r, self.position[0] + r));
                     const maxX = @ceil(@max(self.position[0] - r, self.position[0] + r));
-                    
+
                     const minY = @floor(@min(self.position[1] - r, self.position[1] + r));
                     const maxY = @ceil(@max(self.position[1] - r, self.position[1] + r));
-                    
+
                     const minZ = @floor(@min(self.position[2] - r, self.position[2] + r));
                     const maxZ = @ceil(@max(self.position[2] - r, self.position[2] + r));
                     self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
@@ -535,7 +384,7 @@ pub const World = struct {
             }
         }
         self.Entitys.deinit();
-        self.TerrainHeightCache.deinit();
+        self.Generator.deinit(&self.Generator, self);
         self.Chunks.deinit();
     }
 };

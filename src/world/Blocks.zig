@@ -8,7 +8,7 @@ pub const Blocks = enum {
     Dirt,
     Wood,
     Leaves,
-    Water,//id is 7 hardcoded for waves, TODO make this a property
+    Water, //id is 7 hardcoded for waves, TODO make this a property
     Snow,
 
     pub const Properties = struct {
