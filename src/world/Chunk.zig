@@ -3,8 +3,6 @@ const std = @import("std");
 const Block = @import("Block").Blocks;
 const ztracy = @import("ztracy");
 
-
-
 pub const Chunk = struct {
     pub const ChunkSize = 32;
     blocks: BlockEncoding,
@@ -20,7 +18,6 @@ pub const Chunk = struct {
         TerrainGenerated,
         StructuresGenerated,
     };
-  
 
     ///Returns a chunk made from a given block array. The blocks and returned chunk are allocated by the allocator.
     pub fn FromBlocks(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !*@This() {
@@ -44,7 +41,6 @@ pub const Chunk = struct {
         };
         return chunk;
     }
-
 
     ///checks if the block array is all the same block
     pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
@@ -142,7 +138,6 @@ pub const Chunk = struct {
         return true;
     }
 
-
     ///frees the chunk's blocks, does not free the chunk itself
     ///the chunk must only be 1 ref before calling, use WaitForRefAmount
     ///locks the chunk
@@ -205,6 +200,4 @@ pub const Chunk = struct {
         self.lock.unlockShared();
         _ = self.ref_count.fetchSub(1, .seq_cst);
     }
-
-    
 };

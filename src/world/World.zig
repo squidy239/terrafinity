@@ -20,25 +20,24 @@ pub const World = struct {
     Config: WorldConfig,
     Generator: ChunkGenerator,
     onEdit: ?struct {
-         onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
-         onEditFnArgs: *anyopaque,
-     },
+        onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
+        onEditFnArgs: *anyopaque,
+    },
     pub const WorldConfig = struct {
         SpawnCenterPos: @Vector(3, f64),
         SpawnRange: u32,
     };
-    
-    
+
     pub const ChunkGenerator = struct {
         ///onEditFn must be called on any modified chunks once all modifications are complete
         ///this function is responsible for locking and adding refs to the chunk
-        pub const AfterGenerationFunction = fn (self: *ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32)  error{ OutOfMemory, Unrecoverable }!void;
+        pub const AfterGenerationFunction = fn (self: *ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void;
         ///generate the chunk blocks, this may be called multiple times on the same chunk position
-        pub const ChunkGenerationFunction = fn (self: *ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32)  error{ OutOfMemory, GenerationError }!void;
+        pub const ChunkGenerationFunction = fn (self: *ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ OutOfMemory, GenerationError }!void;
         ///must return the height of the terrain in blocks at the given chunk coordinates
-        pub const GetTerrainHeightAtPosFunction = fn (self: *ChunkGenerator, world: *World, Pos: @Vector(2, i32))  error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32;
-        
-        pub const DeinitFunction = fn (self: *ChunkGenerator, world: *World)  void;
+        pub const GetTerrainHeightAtPosFunction = fn (self: *ChunkGenerator, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32;
+
+        pub const DeinitFunction = fn (self: *ChunkGenerator, world: *World) void;
 
         data: *anyopaque,
         genChunkBlocks: *const ChunkGenerationFunction,
@@ -109,7 +108,7 @@ pub const World = struct {
         }
     }
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{OutOfMemory, GenerationError, Unrecoverable}!*Chunk {
+    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{ OutOfMemory, GenerationError, Unrecoverable }!*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
@@ -139,7 +138,6 @@ pub const World = struct {
             return chunk.?;
         }
     }
-
 
     ///adds a ref and loads chunk, ref must be removed if not using chunk
     pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {

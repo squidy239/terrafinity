@@ -74,7 +74,7 @@ pub fn main() !void {
         @setEvalBranchQuota(10000);
         MainWorldConfig = try std.zon.parse.fromSlice(World.WorldConfig, secondary_allocator, @ptrCast(slice), null, .{});
     }
-    
+
     {
         var readBuf: [1024]u8 = undefined;
         const file = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
@@ -87,18 +87,20 @@ pub fn main() !void {
         @setEvalBranchQuota(10000);
         GeneratorConfig = try std.zon.parse.fromSlice(DefaultGenerator.GenParams, secondary_allocator, @ptrCast(slice), null, .{});
     }
+    defer secondary_allocator.free(GeneratorConfig.LargeTrees);
+    defer secondary_allocator.free(GeneratorConfig.MediumTrees);
 
     GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
-   GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
+    GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
     GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
     GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
     GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-    
+
     var generator = World.DefaultGenerator{
-        .TerrainHeightCache = try .init(secondary_allocator, 4096), 
+        .TerrainHeightCache = try .init(secondary_allocator, 4096),
         .params = GeneratorConfig,
     };
-    
+
     var MainWorld = World{
         .allocator = allocator,
         .threadPool = &pool,
@@ -108,7 +110,6 @@ pub fn main() !void {
         .Config = MainWorldConfig,
         .Generator = generator.getGenerator(),
         .onEdit = null,
-        
     };
     const tempPlayer: EntityTypes.Player = .{
         .player_UUID = 0, //UUID 0 resurved for client
@@ -143,7 +144,7 @@ pub fn main() !void {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
-    MainWorld.onEdit = .{.onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer)};
+    MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
     renderer.window = window;
     try EntityTypes.LoadMeshes(allocator);
     const unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ &MainWorld, &renderer.LoadDistance, &player.pos, &playerEntity.lock, 5 * std.time.ns_per_ms, &running });
