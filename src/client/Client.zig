@@ -64,7 +64,6 @@ pub fn main() !void {
     defer g.arena.deinit();
     GeneratorConfig = g.result;
     MainWorldConfig = w.result;
-    
     GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
     GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
     GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
@@ -111,7 +110,7 @@ pub fn main() !void {
         _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
 
     }
-    const window = try InitWindowAndProcs(&proc);
+    const window = try initWindowAndProcs(&proc);
     var renderer = Renderer.init(&MainWorld, &proc, playerEntity, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
@@ -199,7 +198,7 @@ fn processInput(window: *glfw.Window, cameraPos: *@Vector(3, f64), camerafront: 
         cameraPos.* += zm.vec.normalize(zm.vec.cross(camerafront, cameraup)) * cameraSpeed;
 }
 
-fn OnHover(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+fn onHover(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
     _ = mouse_pos;
     if (!element.options.Visible) return;
     if (toggle) {
@@ -212,7 +211,7 @@ fn OnHover(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggl
     }
 }
 
-fn DeflateElement(element: *gui.Element, window: *glfw.Window) void {
+fn deflateElement(element: *gui.Element, window: *glfw.Window) void {
     if (!element.options.Visible) return;
     const time = std.time.timestamp();
     const eid = (element.options.position.xPercent * 10 * 0.5);
@@ -230,7 +229,7 @@ fn DeflateElement(element: *gui.Element, window: *glfw.Window) void {
     if (wp != element.options.size.widthPixels or hp != element.options.size.heightPixels or yp != element.options.position.yPixels) element.update(element.screen_dimensions);
 }
 
-fn InitWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
+fn initWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
     //try glfw.initHint(.platform, glfw.Platform.x11); //renderdoc wont work with wayland
     try glfw.init();
     std.debug.print("using: {s}\n", .{@tagName(glfw.getPlatform())});

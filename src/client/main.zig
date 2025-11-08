@@ -10,7 +10,6 @@ pub const ConcurrentQueue = @import("ConcurrentQueue");
 const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
-const glfw = @import("zglfw");
 pub const gui = @import("gui");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");
@@ -18,7 +17,7 @@ const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-
+const glfw = @import("zglfw");
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");

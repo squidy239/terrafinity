@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const exe = b.addExecutable(.{
+    var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/client/Client.zig"),
@@ -29,7 +29,8 @@ pub fn build(b: *std.Build) void {
             "Build tracy with TRACY_ON_DEMAND",
         ) orelse false,
     };
-
+    
+    const check = b.option(bool, "check", "check if the game compiles") orelse false;
     const ztracy = b.dependency("ztracy", .{
         .enable_ztracy = options.enable_ztracy,
         .enable_fibers = options.enable_fibers,
@@ -195,8 +196,15 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag != .emscripten) {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
+    
+    
+    if(check){//TODO redo this whole file
+        exe.use_llvm = false;
+        const checkStep = b.step("check", "Check if the game compiles");
+        checkStep.dependOn(&exe.step);
+        return;
+    }
     b.installArtifact(exe);
-
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
@@ -206,7 +214,5 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-
-    const check = b.step("check", "Check if the game compiles");
-    check.dependOn(&exe.step);
+    
 }
