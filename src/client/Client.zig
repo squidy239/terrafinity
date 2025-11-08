@@ -32,8 +32,6 @@ var yaw: f64 = 1;
 var height: u32 = 800;
 var width: u32 = 600;
 
-var running = std.atomic.Value(bool).init(true);
-
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
     var main_debug_allocator = std.heap.DebugAllocator(.{ .backing_allocator_zeroes = false }).init;
@@ -48,9 +46,6 @@ pub fn main() !void {
     const smp_allocator = std.heap.smp_allocator;
     const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
     const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
-    const cpu_count = try std.Thread.getCpuCount();
-    var pool: ThreadPool = undefined;
-    try pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     const seed = 0;
     std.debug.print("Bit size of Blocks: {d}\n", .{@bitSizeOf(Block)});
@@ -101,7 +96,7 @@ pub fn main() !void {
 
     var MainWorld = World{
         .allocator = allocator,
-        .threadPool = &pool,
+        .threadPool = undefined,
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
         .Rand = rand.random(),
@@ -140,22 +135,20 @@ pub fn main() !void {
     const window = try InitWindowAndProcs(&proc);
     var renderer: Renderer = undefined;
     MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
-    renderer = Renderer.Init(&pool, &MainWorld, &proc, &running, player, &playerEntity.lock, allocator) catch |err| {
+    renderer = Renderer.init(&MainWorld, &proc, playerEntity, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
+    MainWorld.threadPool = &renderer.pool;
     renderer.window = window;
-    try renderer.SpawnThreads();
+    try renderer.Start();
     try EntityTypes.LoadMeshes(allocator);
 
     defer {
         std.debug.print("started closing\n", .{});
-        running.store(false, .monotonic);
         UserInput.deinit();
-        pool.deinit(); //pool tasks depend on the renderer
-        std.debug.print("pool deinit\n", .{});
         renderer.deinit();
-        std.debug.print("renderer deinit\n", .{});
+
         _ = playerEntity.ref_count.fetchSub(1, .seq_cst);
         EntityTypes.FreeMeshes();
         glfw.terminate();

@@ -1,58 +1,33 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const ConcurrentQueue = @import("root").ConcurrentQueue;
+const SetThreadPriority = @import("root").SetThreadPriority;
+const ThreadPool = @import("root").ThreadPool;
+
+const Block = @import("Block").Blocks;
 const Chunk = @import("Chunk").Chunk;
-const zm = @import("zm");
-const World = @import("World").World;
-const Mesher = @import("Mesher.zig");
+const ChunkSize = Chunk.ChunkSize;
+const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const gl = @import("gl");
 const glfw = @import("zglfw");
-const ThreadPool = @import("root").ThreadPool;
-const ztracy = @import("ztracy");
-const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
-const builtin = @import("builtin");
-const Textures = @import("textures.zig");
-const SetThreadPriority = @import("root").SetThreadPriority;
-const ConcurrentQueue = @import("root").ConcurrentQueue;
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Block = @import("Block").Blocks;
-const ChunkSize = Chunk.ChunkSize;
 const Player = @import("EntityTypes").Player;
-const UniformLocations = struct {
-    projviewlocation: c_int,
-    entityprojviewlocation: c_int,
-    relativechunkposlocation: c_int,
-    relativeEntityposlocation: c_int,
-    EntityRotationlocation: c_int,
-    sunlocation: c_int,
-    playerposlocation: c_int,
-    fogDensity: c_int,
-    skyColor: c_int,
-    timelocation: c_int,
+const Entity = @import("Entity").Entity;
+const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
+const World = @import("World").World;
+const zm = @import("zm");
+const ztracy = @import("ztracy");
 
-    pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
-        return @This(){
-            .projviewlocation = gl.GetUniformLocation(shaderprogram, "projview"),
-            .entityprojviewlocation = gl.GetUniformLocation(entityshaderprogram, "ProjView"),
-            .relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos"),
-            .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
-            .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
-            .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
-            .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
-            .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
-            .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
-            .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
-        };
-    }
-};
+const Mesher = @import("Mesher.zig");
+const Textures = @import("textures.zig");
 
 pub const Renderer = struct {
     pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,
-    pool: *ThreadPool,
+    pool: ThreadPool,
     world: *World,
-    running: *std.atomic.Value(bool),
+    running: std.atomic.Value(bool),
     facebuffer: c_uint,
-    player: *Player,
-    playerLock: *std.Thread.RwLock,
+    player: *Entity,
     cameraFront: @Vector(3, f64),
     mouseSensitivity: f64,
     indecies: c_uint,
@@ -78,16 +53,16 @@ pub const Renderer = struct {
     updateEntitiesThread: ?std.Thread,
 
     ///must be called on main thread
-    pub fn Init(pool: *ThreadPool, world: *World, proc_table_location: *gl.ProcTable, running: *std.atomic.Value(bool), player: *Player, playerLock: *std.Thread.RwLock, allocator: std.mem.Allocator) !@This() {
+    pub fn init(world: *World, proc_table_location: *gl.ProcTable, player: *Entity, allocator: std.mem.Allocator) !@This() {
         const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
         const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
         const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-
+        std.debug.assert(player.type == .Player);
         var renderer = @This(){
             .allocator = allocator,
-            .pool = pool,
+            .pool = undefined,
             .world = world,
-            .running = running,
+            .running = .init(true),
             .mouseSensitivity = 0.2,
             .cameraFront = @Vector(3, f64){ 0.0001, -0.4, 0.001 },
             .facebuffer = undefined,
@@ -99,7 +74,6 @@ pub const Renderer = struct {
             .blockAtlasTextureId = undefined,
             .uniforms = undefined,
             .player = player,
-            .playerLock = playerLock,
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = .{},
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
@@ -121,10 +95,12 @@ pub const Renderer = struct {
         return renderer;
     }
 
-    pub fn SpawnThreads(self: *@This()) !void {
-        self.loaderThread = try std.Thread.spawn(.{}, Renderer.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms, &self.player.pos, self.playerLock, self.running });
-        self.unloaderThread = try std.Thread.spawn(.{}, Renderer.ChunkUnloaderThread, .{ self.world, &self.LoadDistance, &self.player.pos, self.playerLock, 5 * std.time.ns_per_ms, self.running });
-        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ self.world, 5 * std.time.ns_per_ms, self.running });
+    pub fn Start(self: *@This()) !void {
+        const cpu_count = try std.Thread.getCpuCount();
+        try self.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = self.allocator });
+        self.loaderThread = try std.Thread.spawn(.{}, Renderer.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms, self.player, &self.running });
+        self.unloaderThread = try std.Thread.spawn(.{}, Renderer.ChunkUnloaderThread, .{ self.world, &self.LoadDistance, self.player, 5 * std.time.ns_per_ms, &self.running });
+        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ self.world, 5 * std.time.ns_per_ms, &self.running });
     }
 
     pub fn onEditFn(chunkPos: [3]i32, args: *anyopaque) void {
@@ -134,10 +110,13 @@ pub const Renderer = struct {
 
     ///threadpool should be deinitualised before calling, dosent destroy window
     pub fn deinit(self: *@This()) void {
+        self.running.store(false, .monotonic);
         if (self.updateEntitiesThread) |thread| thread.join();
         if (self.loaderThread) |thread| thread.join();
         if (self.unloaderThread) |thread| thread.join();
-
+        std.log.info("stopped threads", .{});
+        self.pool.deinit();
+        std.log.info("closed threadpool", .{});
         gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
@@ -155,7 +134,7 @@ pub const Renderer = struct {
         }
         self.MeshesToLoad.deinit(true);
         self.MeshesToUnload.deinit(true);
-        std.debug.print("stopped renderer\n", .{});
+        std.log.info("renderer deinit", .{});
     }
 
     pub fn GetScreenDimensions(self: *@This()) [2]u32 {
@@ -247,11 +226,7 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
     pub fn Draw(self: *@This()) [2]u64 {
-        const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
-        self.playerLock.lockShared();
-        const playerPos = self.player.pos;
-        self.playerLock.unlockShared();
-        waitforlock.End();
+        const playerPos = self.player.GetPos().?;
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
         const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
@@ -416,14 +391,15 @@ pub const Renderer = struct {
     threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
     threadlocal var chunksToUnloadBufferPos: u16 = 0;
     ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
-    pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, running: *std.atomic.Value(bool)) void {
+    pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, player: *Entity, running: *std.atomic.Value(bool)) void {
         _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
+        std.debug.assert(player.type == .Player);
         while (running.load(.monotonic)) {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            posLock.lockShared();
+            player.lock.lockShared();
             lock.End();
-            const playerPos = pos.*;
-            posLock.unlockShared();
+            const playerPos = player.GetPos().?;
+            player.lock.unlockShared();
             const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
@@ -434,14 +410,10 @@ pub const Renderer = struct {
         }
     }
     //TODO unload until done
-    pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), pos: *@Vector(3, f64), posLock: *std.Thread.RwLock, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
+    pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), player: *Entity, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
         _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
         while (running.load(.monotonic)) {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            posLock.lockShared();
-            lock.End();
-            const playerPos = pos.*;
-            posLock.unlockShared();
+            const playerPos = player.GetPos().?;
             const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
@@ -506,61 +478,6 @@ pub const Renderer = struct {
         //if (amount_loaded > 0) std.log.info("added {d} chunks to load\n", .{amount_loaded});
     }
 
-    test "test" {
-        const excoords: [10][2]i32 = [10][2]i32{ [2]i32{ 0, 0 }, [2]i32{ 0, 1 }, [2]i32{ 1, 1 }, [2]i32{ 1, 0 }, [2]i32{ 1, -1 }, [2]i32{ 0, -1 }, [2]i32{ -1, -1 }, [2]i32{ -1, 0 }, [2]i32{ -1, 1 }, [2]i32{ -1, 2 } };
-        var newexcoords: [10][2]i32 = @splat(@splat(0));
-
-        var xz: [2]i32 = @splat(0);
-        var c: usize = 0;
-        var ta: usize = 0;
-        for (0..10) |_| {
-            var cc: i32 = 0;
-            const m = Move(xz, &c);
-            while (Line(&xz, &cc, m)) {
-                if (ta < 10) newexcoords[ta] = xz;
-                std.debug.print("x: {d}, y:{d}, c:{d}, cc:{d}\n", .{ xz[0], xz[1], c, cc });
-                ta += 1;
-            }
-        }
-        try std.testing.expectEqualDeep(excoords, newexcoords);
-    }
-
-    fn Move(xzin: [2]i32, c: *usize) [2]i32 {
-        const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
-        const mov: i32 = @intFromFloat(@ceil(movf + 0.01));
-        var xz = xzin;
-        switch (@mod(c.*, 4)) {
-            0 => xz[1] += mov,
-            1 => xz[0] += mov,
-            2 => xz[1] -= mov,
-            3 => xz[0] -= mov,
-            else => unreachable,
-        }
-        c.* += 1;
-        return xz;
-    }
-
-    fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
-        defer c.* += 1;
-        if (c.* == 0) return true;
-        if (xz[0] == end[0] and xz[1] == end[1]) return false;
-        std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
-        if (xz[0] == end[0]) {
-            if (xz[1] < end[1]) {
-                xz[1] += 1;
-            } else {
-                xz[1] -= 1;
-            }
-        } else {
-            if (xz[0] < end[0]) {
-                xz[0] += 1;
-            } else {
-                xz[0] -= 1;
-            }
-        }
-        if (xz[0] == end[0] and xz[1] == end[1]) return false;
-        return true;
-    }
     threadlocal var lastPlayerChunkPos: ?@Vector(3, i32) = undefined;
     threadlocal var lastloadDistance: ?@Vector(3, u32) = undefined;
     threadlocal var bufferFull: bool = false;
@@ -593,7 +510,7 @@ pub const Renderer = struct {
         for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
             try world.UnloadChunk(Pos);
         }
-        std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{ chunksToUnloadBufferPos, chunks });
+        //std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{ chunksToUnloadBufferPos, chunks });
         bufferFull = chunksToUnloadBufferPos == chunksToUnloadBuffer.len;
         chunksToUnloadBufferPos = 0;
     }
@@ -601,9 +518,7 @@ pub const Renderer = struct {
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(self: *@This(), Pos: [3]i32, genStructures: bool, cullOutsideGenDistance: bool) void {
         if (cullOutsideGenDistance) {
-            self.playerLock.lockShared();
-            const playerPos = self.player.pos;
-            self.playerLock.unlockShared();
+            const playerPos = self.player.GetPos().?;
             const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
             const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
             const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
@@ -737,6 +652,62 @@ pub const Renderer = struct {
         return NewMeshIDs;
     }
 
+    test "test" {
+        const excoords: [10][2]i32 = [10][2]i32{ [2]i32{ 0, 0 }, [2]i32{ 0, 1 }, [2]i32{ 1, 1 }, [2]i32{ 1, 0 }, [2]i32{ 1, -1 }, [2]i32{ 0, -1 }, [2]i32{ -1, -1 }, [2]i32{ -1, 0 }, [2]i32{ -1, 1 }, [2]i32{ -1, 2 } };
+        var newexcoords: [10][2]i32 = @splat(@splat(0));
+
+        var xz: [2]i32 = @splat(0);
+        var c: usize = 0;
+        var ta: usize = 0;
+        for (0..10) |_| {
+            var cc: i32 = 0;
+            const m = Move(xz, &c);
+            while (Line(&xz, &cc, m)) {
+                if (ta < 10) newexcoords[ta] = xz;
+                std.debug.print("x: {d}, y:{d}, c:{d}, cc:{d}\n", .{ xz[0], xz[1], c, cc });
+                ta += 1;
+            }
+        }
+        try std.testing.expectEqualDeep(excoords, newexcoords);
+    }
+
+    fn Move(xzin: [2]i32, c: *usize) [2]i32 {
+        const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
+        const mov: i32 = @intFromFloat(@ceil(movf + 0.01));
+        var xz = xzin;
+        switch (@mod(c.*, 4)) {
+            0 => xz[1] += mov,
+            1 => xz[0] += mov,
+            2 => xz[1] -= mov,
+            3 => xz[0] -= mov,
+            else => unreachable,
+        }
+        c.* += 1;
+        return xz;
+    }
+
+    fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
+        defer c.* += 1;
+        if (c.* == 0) return true;
+        if (xz[0] == end[0] and xz[1] == end[1]) return false;
+        std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
+        if (xz[0] == end[0]) {
+            if (xz[1] < end[1]) {
+                xz[1] += 1;
+            } else {
+                xz[1] -= 1;
+            }
+        } else {
+            if (xz[0] < end[0]) {
+                xz[0] += 1;
+            } else {
+                xz[0] -= 1;
+            }
+        }
+        if (xz[0] == end[0] and xz[1] == end[1]) return false;
+        return true;
+    }
+
     pub const MeshBufferIDs = struct {
         time: i64,
         vbo: [2]?c_uint,
@@ -770,90 +741,118 @@ pub const Renderer = struct {
         creationTime: f64,
         chunkPos: @Vector(3, i32),
     };
-};
 
-const Frustum = struct {
-    frus: [6]@Vector(4, f64),
+    const Frustum = struct {
+        frus: [6]@Vector(4, f64),
 
-    pub const Box = struct {
-        min: @Vector(3, f64),
-        max: @Vector(3, f64),
+        pub const Box = struct {
+            min: @Vector(3, f64),
+            max: @Vector(3, f64),
+        };
+
+        fn extractFrustumPlanes(mat: @Vector(16, f64)) Frustum {
+            // zm row-major
+            const m00 = mat[0];
+            const m01 = mat[1];
+            const m02 = mat[2];
+            const m03 = mat[3];
+            const m10 = mat[4];
+            const m11 = mat[5];
+            const m12 = mat[6];
+            const m13 = mat[7];
+            const m20 = mat[8];
+            const m21 = mat[9];
+            const m22 = mat[10];
+            const m23 = mat[11];
+            const m30 = mat[12];
+            const m31 = mat[13];
+            const m32 = mat[14];
+            const m33 = mat[15];
+
+            var planes: [6]@Vector(4, f64) = undefined;
+
+            planes[0] = @Vector(4, f64){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
+            planes[1] = @Vector(4, f64){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
+            planes[2] = @Vector(4, f64){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
+            planes[3] = @Vector(4, f64){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
+            planes[4] = @Vector(4, f64){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
+            planes[5] = @Vector(4, f64){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
+
+            // Normalize planes
+            for (0..6) |i| {
+                const n = @Vector(3, f64){ planes[i][0], planes[i][1], planes[i][2] };
+                const len = @sqrt(zm.vec.dot(n, n));
+                planes[i] /= @splat(len);
+            }
+
+            return Frustum{ .frus = planes };
+        }
+
+        pub fn boxInFrustum(self: *const @This(), box: Box) bool {
+            // Check box against each of the 6 frustum planes
+            inline for (0..6) |i| {
+                var out: u32 = 0;
+                const plane = self.frus[i];
+
+                // Test all 8 corners of the box against this plane
+                // Corner 1: min.x, min.y, min.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+                // Corner 2: max.x, min.y, min.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+                // Corner 3: min.x, max.y, min.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+                // Corner 4: max.x, max.y, min.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+                // Corner 5: min.x, min.y, max.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+                // Corner 6: max.x, min.y, max.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+                // Corner 7: min.x, max.y, max.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+                // Corner 8: max.x, max.y, max.z
+                out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+
+                // If all 8 corners are outside this plane, the box is completely outside the frustum
+                if (out == 8) return false;
+            }
+
+            return true;
+        }
+
+        pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f64), radius: f64) bool {
+            for (self.frus) |plane| {
+                const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
+                if (dist < -radius) return false;
+            }
+            return true;
+        }
     };
 
-    fn extractFrustumPlanes(mat: @Vector(16, f64)) Frustum {
-        // zm row-major
-        const m00 = mat[0];
-        const m01 = mat[1];
-        const m02 = mat[2];
-        const m03 = mat[3];
-        const m10 = mat[4];
-        const m11 = mat[5];
-        const m12 = mat[6];
-        const m13 = mat[7];
-        const m20 = mat[8];
-        const m21 = mat[9];
-        const m22 = mat[10];
-        const m23 = mat[11];
-        const m30 = mat[12];
-        const m31 = mat[13];
-        const m32 = mat[14];
-        const m33 = mat[15];
+    const UniformLocations = struct {
+        projviewlocation: c_int,
+        entityprojviewlocation: c_int,
+        relativechunkposlocation: c_int,
+        relativeEntityposlocation: c_int,
+        EntityRotationlocation: c_int,
+        sunlocation: c_int,
+        playerposlocation: c_int,
+        fogDensity: c_int,
+        skyColor: c_int,
+        timelocation: c_int,
 
-        var planes: [6]@Vector(4, f64) = undefined;
-
-        planes[0] = @Vector(4, f64){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
-        planes[1] = @Vector(4, f64){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
-        planes[2] = @Vector(4, f64){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
-        planes[3] = @Vector(4, f64){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
-        planes[4] = @Vector(4, f64){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
-        planes[5] = @Vector(4, f64){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
-
-        // Normalize planes
-        for (0..6) |i| {
-            const n = @Vector(3, f64){ planes[i][0], planes[i][1], planes[i][2] };
-            const len = @sqrt(zm.vec.dot(n, n));
-            planes[i] /= @splat(len);
+        pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
+            return @This(){
+                .projviewlocation = gl.GetUniformLocation(shaderprogram, "projview"),
+                .entityprojviewlocation = gl.GetUniformLocation(entityshaderprogram, "ProjView"),
+                .relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos"),
+                .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
+                .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
+                .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
+                .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
+                .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
+                .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
+                .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
+            };
         }
-
-        return Frustum{ .frus = planes };
-    }
-
-    pub fn boxInFrustum(self: *const @This(), box: Box) bool {
-        // Check box against each of the 6 frustum planes
-        inline for (0..6) |i| {
-            var out: u32 = 0;
-            const plane = self.frus[i];
-
-            // Test all 8 corners of the box against this plane
-            // Corner 1: min.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 2: max.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 3: min.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 4: max.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 5: min.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 6: max.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 7: min.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 8: max.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
-
-            // If all 8 corners are outside this plane, the box is completely outside the frustum
-            if (out == 8) return false;
-        }
-
-        return true;
-    }
-
-    pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f64), radius: f64) bool {
-        for (self.frus) |plane| {
-            const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
-            if (dist < -radius) return false;
-        }
-        return true;
-    }
+    };
 };

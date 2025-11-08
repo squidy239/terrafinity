@@ -251,7 +251,7 @@ pub const DefaultGenerator = struct {
         chunk.addAndLockShared();
         var sfa = std.heap.stackFallback(100_000, self.allocator);
         const tempAllocator = sfa.get();
-        var worldEditor = World.WorldEditor{ .remeshWithThreadPool = false, .world = self, .tempallocator = tempAllocator };
+        var worldEditor = World.WorldEditor{ .world = self, .tempallocator = tempAllocator };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;

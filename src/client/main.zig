@@ -19,7 +19,6 @@ pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
 
-pub const Loader = @import("Loader.zig");
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
@@ -35,9 +34,12 @@ var width: u32 = 600;
 
 var mainMenu: gui.Element = undefined;
 var optionsMenu: gui.Element = undefined;
-var world: ?World = null;
-var renderer: ?Renderer = null;
-pub var currentMenu: *gui.Element = undefined;
+
+var currentMenuPage: menuPage = undefined;
+
+var currentMenu: ?*gui.Element = undefined;
+var currentRenderer: ?Renderer = undefined;
+var currentWorld: ?World = undefined;
 
 var running = std.atomic.Value(bool).init(true);
 
@@ -106,7 +108,7 @@ pub fn main() !void {
     while (window.shouldClose() == false) {
         const viewport_pixels = GetViewportPixels(window);
         const viewport_millimeters: [2]f32 = @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window)));
-        currentMenu.Draw(viewport_pixels, viewport_millimeters, window);
+        if (currentMenu != null) currentMenu.?.Draw(viewport_pixels, viewport_millimeters, window);
         window.swapBuffers();
         glfw.pollEvents();
     }
@@ -135,9 +137,14 @@ const menuPage = enum {
 };
 
 pub fn SwitchMenu(newMenu: menuPage) void {
+    std.debug.assert(currentMenuPage != newMenu);
+    std.debug.assert((currentRenderer == null and currentWorld == null) or currentMenuPage == .worldRender);
     currentMenu = switch (newMenu) {
         .mainMenu => &mainMenu,
         .optionsMenu => &optionsMenu,
-        else => unreachable,
+        .worldRender => null,
     };
+    currentMenuPage = newMenu;
 }
+
+pub fn CreateRenderer() !void {}

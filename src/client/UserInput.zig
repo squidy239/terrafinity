@@ -6,6 +6,7 @@ const zm = @import("zm");
 const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
+const EntityTypes = @import("EntityTypes");
 const Structures = World.Structures;
 const gui = @import("gui");
 var render: *Renderer = undefined;
@@ -23,7 +24,6 @@ pub fn init(ren: *Renderer) !void {
     worldEditor = .{
         .tempallocator = render.allocator,
         .world = render.world,
-        .remeshWithThreadPool = true,
     };
     lastmicrotime = std.time.microTimestamp();
     const textEscMenu = gui.Element.CreationOptions{
@@ -176,10 +176,10 @@ pub fn processInput() !void {
     lastmicrotime = timestamp;
     var posAdjustment: @Vector(3, f64) = @splat(0);
     defer {
-        render.playerLock.lock();
+        render.player.lock.lock();
         std.debug.assert(@reduce(.Or, posAdjustment == posAdjustment)); //posAdjustment is not NaN
-        render.player.pos += posAdjustment;
-        render.playerLock.unlock();
+        @as(*EntityTypes.Player, @ptrCast(@alignCast(render.player.ptr))).pos += posAdjustment;
+        render.player.lock.unlock();
     }
     var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.002, 0.002, 0.002 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (ts.Sprinting) {
@@ -228,10 +228,10 @@ pub fn processInput() !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (render.window.getKey(glfw.Key.r) == .press)
-        try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.pos)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
+        try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (render.window.getKey(glfw.Key.b) == .press) {
-        const cone = World.WorldEditor.Cone(f64).init(render.player.pos, render.cameraFront, 1000, 100, 50);
+        const cone = World.WorldEditor.Cone(f64).init(render.player.GetPos().?, render.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
@@ -243,9 +243,7 @@ pub fn processInput() !void {
     }
 
     if (render.window.getKey(glfw.Key.i) == .press) {
-        render.playerLock.lockShared();
-        const playerPos = render.player.pos;
-        render.playerLock.unlockShared();
+        const playerPos = render.player.GetPos().?;
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
@@ -259,13 +257,14 @@ pub fn processInput() !void {
         benchmarkStartTime = std.time.microTimestamp();
     }
     if (ts.Benchmark) {
-        render.playerLock.lock();
+        render.player.lock.lock();
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
-        render.player.pos = std.math.lerp(render.player.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
-        const pos = render.player.pos;
-        render.playerLock.unlock();
+        const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(render.player.ptr));
+        playerptr.pos = std.math.lerp(playerptr.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
+        const pos = playerptr.pos;
+        render.player.lock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
         if (render.world.Chunks.get(chpos) == null) {
             std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
@@ -307,7 +306,7 @@ fn genFractalTask() void {
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
     const tree = Structures.Tree{
-        .pos = @intFromFloat(render.player.pos),
+        .pos = @intFromFloat(render.player.GetPos().?),
         .baseRadius = 5,
         .rand = random.random(),
         .trunkHeight = 64,
@@ -329,8 +328,8 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     const yoffset: f64 = (ypos - last_mouse_pos[1]) * render.mouseSensitivity;
     last_mouse_pos[0] = xpos;
     last_mouse_pos[1] = ypos;
-    const player = render.player;
-    render.playerLock.lock();
+    render.player.lock.lock();
+    const player: *EntityTypes.Player = @ptrCast(@alignCast(render.player.ptr));
     var newHeadRotationAxis = player.headRotationAxis;
     var newBodyRotationAxis = player.bodyRotationAxis;
     newHeadRotationAxis -= @Vector(2, f32){ @floatCast(yoffset), @floatCast(xoffset) };
@@ -341,7 +340,7 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
 
     player.headRotationAxis = newHeadRotationAxis;
     player.bodyRotationAxis = newBodyRotationAxis;
-    render.playerLock.unlock();
+    render.player.lock.unlock();
 
     var cameraFront: @Vector(3, f64) = undefined;
     cameraFront[0] = @floatCast(@sin(std.math.degreesToRadians(newHeadRotationAxis[1])) * @cos(std.math.degreesToRadians(newHeadRotationAxis[0])));

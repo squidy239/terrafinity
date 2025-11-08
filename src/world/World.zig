@@ -163,7 +163,6 @@ pub const World = struct {
 
         editBuffer: std.AutoHashMapUnmanaged([3]i32, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
         tempallocator: std.mem.Allocator,
-        remeshWithThreadPool: bool,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
         pub fn flush(self: *@This()) !void {

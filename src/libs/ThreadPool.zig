@@ -40,7 +40,6 @@ pub const Options = struct {
 ///the allocator must be thread-safe
 pub fn init(pool: *Pool, options: Options) !void {
     const allocator = options.allocator;
-
     pool.* = .{
         .allocator = allocator,
         .threads = if (builtin.single_threaded) .{} else &.{},
@@ -50,17 +49,14 @@ pub fn init(pool: *Pool, options: Options) !void {
     for (&pool.run_queue) |*q| {
         q.* = try ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false).init(allocator);
     }
-    if (builtin.single_threaded) {
-        return;
-    }
 
     const thread_count = options.n_jobs orelse @max(1, std.Thread.getCpuCount() catch 1);
 
     // kill and join any threads we spawned and free memory on error.
     pool.threads = try allocator.alloc(std.Thread, thread_count);
     var spawned: usize = 0;
+    errdefer allocator.free(pool.threads);
     errdefer pool.join(spawned);
-
     for (pool.threads) |*thread| {
         thread.* = try std.Thread.spawn(.{
             .stack_size = options.stack_size,
@@ -78,6 +74,7 @@ pub fn deinit(pool: *Pool) void {
             defer q.fragmentLocks[i].unlock();
             while (fragment.popFirst()) |runnable| { //make sure all tasks are completed
                 const datanode: *@TypeOf(pool.run_queue[i]).Node = @fieldParentPtr("node", runnable);
+                std.debug.print("running task: {any}\n", .{datanode.data});
                 datanode.data.runFn(datanode.data);
                 q.allocators[i].destroy(datanode);
             }
@@ -88,10 +85,6 @@ pub fn deinit(pool: *Pool) void {
 }
 
 fn join(pool: *Pool, spawned: usize) void {
-    if (builtin.single_threaded) {
-        return;
-    }
-
     {
         // ensure future worker threads exit the dequeue loop
         pool.is_running.store(false, .monotonic);

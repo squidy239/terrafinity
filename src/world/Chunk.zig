@@ -86,7 +86,7 @@ pub const Chunk = struct {
                 for (flatArray, flatMergeArray) |*item, mergeItem| {
                     if (mergeItem != .Null) item.* = mergeItem;
                 }
-                if (IsOneBlock(self.blocks.blocks))|block| {
+                if (IsOneBlock(self.blocks.blocks)) |block| {
                     allocator.free(self.blocks.blocks);
                     self.blocks = .{ .oneBlock = block };
                 }
