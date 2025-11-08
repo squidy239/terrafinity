@@ -58,6 +58,7 @@ pub const Renderer = struct {
         const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
         const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
         std.debug.assert(player.type == .Player);
+        _ = player.ref_count.fetchAdd(1, .seq_cst);
         var renderer = @This(){
             .allocator = allocator,
             .pool = undefined,
@@ -117,6 +118,7 @@ pub const Renderer = struct {
         std.log.info("stopped threads", .{});
         self.pool.deinit();
         std.log.info("closed threadpool", .{});
+        _ = self.player.ref_count.fetchSub(1, .seq_cst);
         gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
@@ -225,7 +227,7 @@ pub const Renderer = struct {
         gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
     }
-    pub fn Draw(self: *@This()) [2]u64 {
+    pub fn Draw(self: *@This()) ![2]u64 {
         const playerPos = self.player.GetPos().?;
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
@@ -243,6 +245,17 @@ pub const Renderer = struct {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         self.DrawEntities(playerPos);
         drawEntities.End();
+        const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
+        const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+        const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+        const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
+        self.UnloadMeshes(meshDistance, playerChunkPos);
+        unloadMeshes.End();
+        {
+            const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
+            defer if(glSync) |sync| gl.DeleteSync(sync);
+            _ = try self.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+        }
         return drawn;
     }
     fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) [2]u64 {
@@ -337,9 +350,9 @@ pub const Renderer = struct {
             },
         }
         exbl.End();
-        const mesh = try Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.renderScale, self.allocator);
+        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, self.renderScale, self.allocator);
         chunk.releaseAndUnlockShared();
-        if (mesh) |m| {
+        if (try mesh) |m| {
             _ = try self.MeshesToLoad.append(m);
         } else {
             self.ChunkRenderListLock.lockShared();
@@ -534,7 +547,7 @@ pub const Renderer = struct {
         return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(Pos))) > range);
     }
     ///must be called on main thread
-    pub fn LoadMeshes(self: *@This(), glSync: *gl.sync, min_us: u32, max_us: u32) !u64 {
+    pub fn LoadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
         const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
@@ -547,7 +560,7 @@ pub const Renderer = struct {
         //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         while (true) {
             var syncStatus: c_int = undefined;
-            gl.GetSynciv(glSync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus));
+            if( glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
             if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
             const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);

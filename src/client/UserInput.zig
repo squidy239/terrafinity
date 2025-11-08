@@ -116,7 +116,6 @@ fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, to
         element.options.size.width.pixels += 5;
         element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
         if (window.getMouseButton(glfw.MouseButton.left) == .press) {
-            std.debug.print("quitting\n", .{});
             window.setShouldClose(true);
         }
         element.update();

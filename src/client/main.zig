@@ -108,6 +108,7 @@ pub fn main() !void {
     while (window.shouldClose() == false) {
         const viewport_pixels = GetViewportPixels(window);
         const viewport_millimeters: [2]f32 = @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window)));
+        if(currentRenderer != null) _ = try (&currentRenderer.?).Draw();
         if (currentMenu != null) currentMenu.?.Draw(viewport_pixels, viewport_millimeters, window);
         window.swapBuffers();
         glfw.pollEvents();
@@ -147,4 +148,6 @@ pub fn SwitchMenu(newMenu: menuPage) void {
     currentMenuPage = newMenu;
 }
 
-pub fn CreateRenderer() !void {}
+pub fn CreateRenderer() !void {
+    
+}

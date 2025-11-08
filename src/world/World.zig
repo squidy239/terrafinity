@@ -60,14 +60,15 @@ pub const World = struct {
         en.fullfree(self.allocator);
     }
 
-    pub fn SpawnEntity(self: *@This(), UUID: u128, entity: anytype) !?*Entity {
-        if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
+    pub fn SpawnEntity(self: *@This(), UUID: ?u128, entity: anytype) !*Entity {
+        const uuid = UUID orelse self.Rand.int(u128);
+        if (self.Entitys.contains(uuid)) return error.EntityAlreadyExists;
         const allocated_entity = try entity.MakeEntity(self.allocator);
         errdefer allocated_entity.fullfree(self.allocator);
-        const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
+        const existing = try self.Entitys.putNoOverrideaddRef(uuid, allocated_entity);
         if (existing) |_| {
             allocated_entity.fullfree(self.allocator);
-            return null;
+            return error.EntityAlreadyExists;
         }
 
         return allocated_entity;
@@ -117,6 +118,10 @@ pub const World = struct {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
             try self.Generator.genChunkBlocks(&self.Generator, self, &blocks, Pos);
             const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
+            errdefer {
+                chunkptr.free(self.allocator);
+                self.allocator.destroy(chunkptr);
+            }
             if (structures) { //TODO move structures to Generator
                 try self.Generator.afterGeneration(&self.Generator, self, chunkptr, Pos);
             }
@@ -137,23 +142,6 @@ pub const World = struct {
             }
             return chunk.?;
         }
-    }
-
-    ///adds a ref and loads chunk, ref must be removed if not using chunk
-    pub fn LoadChunkFromBlocks(self: *@This(), Pos: [3]i32, blocks: [ChunkSize][ChunkSize][ChunkSize]Block) !*Chunk {
-        const chunk = self.Chunks.getandaddref(Pos);
-        if (chunk == null) {
-            const ch = Chunk{
-                .blocks = self.allocator.dupe(u8, std.mem.asBytes(blocks)),
-                .encoding = .Blocks,
-                .lock = .{},
-            };
-            const chunkptr = try self.allocator.create(Chunk);
-            chunkptr.* = ch;
-            chunkptr.add_ref();
-            try self.Chunks.put(Pos, chunkptr);
-            return chunkptr;
-        } else return chunk.?;
     }
 
     pub const WorldEditor = struct {
@@ -348,12 +336,12 @@ pub const World = struct {
         self.allocator.destroy(chunk);
     }
     ///dosent remove chunk from hashmap, just frees it
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) !void {
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) void {
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
     }
 
-    pub fn Deinit(self: *@This()) !void {
+    pub fn Deinit(self: *@This()) void {
         const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
         defer deinitWorld.End();
         const bktamount = self.Chunks.buckets.len;
@@ -364,7 +352,7 @@ pub const World = struct {
             var it = self.Chunks.buckets[b].hash_map.valueIterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                try self.UnloadChunkByPtr(c.*);
+                self.UnloadChunkByPtr(c.*);
                 self.allocator.destroy(c.*);
             }
         }
