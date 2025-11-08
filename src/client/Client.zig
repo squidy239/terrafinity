@@ -12,16 +12,17 @@ const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 pub const gui = @import("gui");
+pub const Interpolation = @import("Interpolation");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");
 pub const World = @import("World").World;
+const DefaultGenerator = World.DefaultGenerator;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-const DefaultGenerator = World.DefaultGenerator;
+
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig").Renderer;
 const UserInput = @import("UserInput.zig");
-pub const Interpolation = @import("Interpolation");
 
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -55,7 +56,6 @@ pub fn main() !void {
     var MainWorldConfig: World.WorldConfig = undefined;
     var GeneratorConfig: DefaultGenerator.GenParams = undefined;
 
-   
     const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
     const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
     const w = try loadZON(World.WorldConfig, worldConfigFile, secondary_allocator);
@@ -108,7 +108,6 @@ pub fn main() !void {
             .timestamp = std.time.microTimestamp(),
         };
         _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
-
     }
     const window = try initWindowAndProcs(&proc);
     var renderer = Renderer.init(&MainWorld, &proc, playerEntity, allocator) catch |err| {
@@ -141,7 +140,6 @@ pub fn main() !void {
 
     var f3t: bool = true;
     var f3noholdt: bool = true;
-
     var fpsBox = try gui.Element.create(allocator, menu.fpsoptions);
     const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
     const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
@@ -268,7 +266,7 @@ fn initWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
     return window.?;
 }
 
-fn loadZON(comptime T: type, file: std.fs.File, allocator: std.mem.Allocator) !struct {result: T, arena: std.heap.ArenaAllocator} {
+fn loadZON(comptime T: type, file: std.fs.File, allocator: std.mem.Allocator) !struct { result: T, arena: std.heap.ArenaAllocator } {
     var arena = std.heap.ArenaAllocator.init(allocator);
     const arenAllocator = arena.allocator();
     var readBuf: [1024]u8 = undefined;
@@ -278,5 +276,5 @@ fn loadZON(comptime T: type, file: std.fs.File, allocator: std.mem.Allocator) !s
     const slice = try reader.interface.readAlloc(allocator, stat.size);
     defer allocator.free(slice);
     @setEvalBranchQuota(100000000);
-    return .{.result = try std.zon.parse.fromSlice(T, arenAllocator, @ptrCast(slice), null, .{}), .arena = arena};
+    return .{ .result = try std.zon.parse.fromSlice(T, arenAllocator, @ptrCast(slice), null, .{}), .arena = arena };
 }

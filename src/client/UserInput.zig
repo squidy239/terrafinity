@@ -1,14 +1,17 @@
 const std = @import("std");
-const gl = @import("gl");
-const glfw = @import("zglfw");
-const ztracy = @import("ztracy");
-const zm = @import("zm");
-const Renderer = @import("Renderer.zig").Renderer;
 const World = @import("root").World;
+const Structures = World.Structures;
+
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
 const EntityTypes = @import("EntityTypes");
-const Structures = World.Structures;
+const gl = @import("gl");
+const glfw = @import("zglfw");
 const gui = @import("gui");
+const zm = @import("zm");
+const ztracy = @import("ztracy");
+
+const Renderer = @import("Renderer.zig").Renderer;
+
 var render: *Renderer = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};

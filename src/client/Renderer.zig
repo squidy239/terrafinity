@@ -8,10 +8,10 @@ const Block = @import("Block").Blocks;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const Entity = @import("Entity").Entity;
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const Player = @import("EntityTypes").Player;
-const Entity = @import("Entity").Entity;
 const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 const World = @import("World").World;
 const zm = @import("zm");
@@ -253,7 +253,7 @@ pub const Renderer = struct {
         unloadMeshes.End();
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
-            defer if(glSync) |sync| gl.DeleteSync(sync);
+            defer if (glSync) |sync| gl.DeleteSync(sync);
             _ = try self.LoadMeshes(glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
         }
         return drawn;
@@ -560,7 +560,7 @@ pub const Renderer = struct {
         //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         while (true) {
             var syncStatus: c_int = undefined;
-            if( glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
+            if (glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
             if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
             const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);

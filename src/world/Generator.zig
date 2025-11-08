@@ -1,12 +1,14 @@
 const std = @import("std");
-const Noise = @import("fastnoise.zig");
-const Cache = @import("Cache").Cache;
 const Interpolation = @import("root").Interpolation;
+
 const Block = @import("Block").Blocks;
-const ztracy = @import("ztracy");
+const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
-const World = @import("World.zig").World;
 const ChunkSize = Chunk.ChunkSize;
+const ztracy = @import("ztracy");
+
+const Noise = @import("fastnoise.zig");
+const World = @import("World.zig").World;
 
 pub const DefaultGenerator = struct {
     params: GenParams,

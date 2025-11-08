@@ -1,6 +1,8 @@
-const gui = @import("gui");
-const glfw = @import("zglfw");
 const switchMenu = @import("root").SwitchMenu;
+
+const glfw = @import("zglfw");
+const gui = @import("gui");
+
 pub const fpsoptions = gui.Element.CreationOptions{
     .elementBackground = .{ .solid = .{ 1, 1, 1, 0.7 } },
     .textOptions = .{

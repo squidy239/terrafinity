@@ -1,10 +1,10 @@
 const std = @import("std");
-const Chunk = @import("Chunk").Chunk;
+
 const Block = @import("Block").Blocks;
+const Chunk = @import("Chunk").Chunk;
+const ChunkSize = Chunk.ChunkSize;
 const Obj = @import("obj");
 const ztracy = @import("ztracy");
-
-const ChunkSize = Chunk.ChunkSize;
 
 pub const FaceRotation = enum(u4) {
     xPlus = 0,

@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
             "Build tracy with TRACY_ON_DEMAND",
         ) orelse false,
     };
-    
+
     const check = b.option(bool, "check", "check if the game compiles") orelse false;
     const ztracy = b.dependency("ztracy", .{
         .enable_ztracy = options.enable_ztracy,
@@ -196,9 +196,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag != .emscripten) {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
-    
-    
-    if(check){//TODO redo this whole file
+
+    if (check) { //TODO redo this whole file
         exe.use_llvm = false;
         const checkStep = b.step("check", "Check if the game compiles");
         checkStep.dependOn(&exe.step);
@@ -214,5 +213,4 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-    
 }

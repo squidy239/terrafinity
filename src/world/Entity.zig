@@ -1,8 +1,10 @@
 const std = @import("std");
-const EntityTypes = @import("EntityTypes");
 const Renderer = @import("root").Renderer;
 const World = @import("root").World;
 const ztracy = @import("root").ztracy;
+
+const EntityTypes = @import("EntityTypes");
+
 threadlocal var UnloadingEntities: [128]u128 = undefined;
 threadlocal var UnloadingEntitiesPos: usize = 0;
 

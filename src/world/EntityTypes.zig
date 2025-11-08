@@ -1,11 +1,12 @@
 const std = @import("std");
-const Entity = @import("Entity").Entity;
-const EntityType = @import("Entity").EntityType;
 const Renderer = @import("root").Renderer;
 const World = @import("root").World;
+const zm = @import("root").zm;
+
+const Entity = @import("Entity").Entity;
+const EntityType = @import("Entity").EntityType;
 const gl = @import("gl");
 const obj = @import("obj");
-const zm = @import("root").zm;
 
 pub const GameMode = enum(u8) {
     Survival = 0,
