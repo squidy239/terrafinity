@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root");
+const Game = root.Renderer.Game;
 const World = @import("root").World;
 const Structures = World.Structures;
 

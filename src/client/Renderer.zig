@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const ConcurrentQueue = @import("root").ConcurrentQueue;
+const ConcurrentQueue = @import("root").ConcurrentQueue.ConcurrentQueue;
+const root = @import("root");
+const ChunkManager = root.ChunkManager;
+const Loader = root.Loader;
 const SetThreadPriority = @import("root").SetThreadPriority;
 const ThreadPool = @import("root").ThreadPool;
 
@@ -9,6 +12,7 @@ const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("Entity").Entity;
+const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const Player = @import("EntityTypes").Player;
@@ -17,6 +21,7 @@ const World = @import("World").World;
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
+const Frustum = @import("Frustum.zig").Frustum;
 const Mesher = @import("Mesher.zig");
 const Textures = @import("textures.zig");
 
@@ -36,7 +41,7 @@ pub const Renderer = struct {
     MeshDistance: [3]std.atomic.Value(u32),
     GenerateDistance: [3]std.atomic.Value(u32),
     LoadDistance: [3]std.atomic.Value(u32),
-    chunkManager: ChunkManager,
+    chunkManager: *ChunkManager,
     loaderThread: ?std.Thread,
     unloaderThread: ?std.Thread,
     updateEntitiesThread: ?std.Thread,
@@ -57,16 +62,7 @@ pub const Renderer = struct {
             .indecies = undefined,
             .shaderprogram = undefined,
             .entityshaderprogram = undefined,
-            .chunkManager = .{            .pool = undefined,
-
-                .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
-                .ChunkRenderListLock = .{},
-                .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
-                .MeshesToLoad = try .init(allocator),
-                .world = world,
-                .MeshesToUnload = try .init(allocator),
-                .allocator = allocator,
-            },
+            .chunkManager = undefined, // Will be initialized below
             .blockAtlasTextureId = undefined,
             .uniforms = undefined,
             .player = player,
@@ -78,6 +74,19 @@ pub const Renderer = struct {
             .unloaderThread = null,
             .updateEntitiesThread = null,
         };
+
+        renderer.chunkManager = try allocator.create(ChunkManager);
+        renderer.chunkManager.* = .{
+            .pool = undefined,
+            .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
+            .ChunkRenderListLock = .{},
+            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+            .MeshesToLoad = try .init(allocator),
+            .world = world,
+            .MeshesToUnload = try .init(allocator),
+            .allocator = allocator,
+        };
+
         try renderer.CompileShaders();
         renderer.LoadFacebuffer();
         renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
@@ -87,11 +96,11 @@ pub const Renderer = struct {
 
     pub fn Start(self: *@This()) !void {
         const cpu_count = try std.Thread.getCpuCount();
-        try self.chunkManager.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = self.allocator });
+        try self.chunkManager.*.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = self.allocator });
         self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms, self.player, &self.running });
-        self.unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ self.chunkManager.world, &self.LoadDistance, self.player, 5 * std.time.ns_per_ms, &self.running });
-        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ self.chunkManager.world, 5 * std.time.ns_per_ms, &self.running });
-        self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager) };
+        self.unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ self.chunkManager.*.world, &self.LoadDistance, self.player, 5 * std.time.ns_per_ms, &self.running });
+        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ self.chunkManager.*.world, 5 * std.time.ns_per_ms, &self.running });
+        self.chunkManager.*.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(self.chunkManager) };
     }
 
     ///threadpool should be deinitualised before calling, dosent destroy window
@@ -101,7 +110,7 @@ pub const Renderer = struct {
         if (self.loaderThread) |thread| thread.join();
         if (self.unloaderThread) |thread| thread.join();
         std.log.info("stopped threads", .{});
-        self.chunkManager.pool.deinit();
+        self.chunkManager.*.pool.deinit();
         std.log.info("closed threadpool", .{});
         _ = self.player.ref_count.fetchSub(1, .seq_cst);
         gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
@@ -109,18 +118,19 @@ pub const Renderer = struct {
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
         gl.DeleteProgram(self.shaderprogram);
         gl.DeleteProgram(self.entityshaderprogram);
-        self.chunkManager.ChunkRenderListLock.lock();
-        var it = self.chunkManager.ChunkRenderList.iterator();
+        self.chunkManager.*.ChunkRenderListLock.lock();
+        var it = self.chunkManager.*.ChunkRenderList.iterator();
         while (it.next()) |mesh| {
             mesh.value_ptr.free();
         }
-        self.chunkManager.ChunkRenderList.deinit();
-        self.chunkManager.LoadingChunks.deinit();
-        while (self.chunkManager.MeshesToLoad.popFirst()) |mesh| {
+        self.chunkManager.*.ChunkRenderList.deinit();
+        self.chunkManager.*.LoadingChunks.deinit();
+        while (self.chunkManager.*.MeshesToLoad.popFirst()) |mesh| {
             mesh.free(self.allocator);
         }
-        self.chunkManager.MeshesToLoad.deinit(true);
-        self.chunkManager.MeshesToUnload.deinit(true);
+        self.chunkManager.*.MeshesToLoad.deinit(true);
+        self.chunkManager.*.MeshesToUnload.deinit(true);
+        self.allocator.destroy(self.chunkManager);
         std.log.info("renderer deinit", .{});
     }
 
@@ -227,7 +237,7 @@ pub const Renderer = struct {
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-        Loader.UnloadMeshes(&self.chunkManager, meshDistance, playerChunkPos);
+        Loader.UnloadMeshes(self.chunkManager, meshDistance, playerChunkPos);
         unloadMeshes.End();
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
@@ -250,8 +260,8 @@ pub const Renderer = struct {
         gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
         gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        self.chunkManager.ChunkRenderListLock.lockShared();
-        defer self.chunkManager.ChunkRenderListLock.unlockShared();
+        self.chunkManager.*.ChunkRenderListLock.lockShared();
+        defer self.chunkManager.*.ChunkRenderListLock.unlockShared();
 
         //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         var drawnchunks: u64 = 0;
@@ -264,7 +274,7 @@ pub const Renderer = struct {
             if (i == 1) gl.Disable(gl.CULL_FACE);
             defer gl.Enable(gl.CULL_FACE);
 
-            var it = self.chunkManager.ChunkRenderList.iterator();
+            var it = self.chunkManager.*.ChunkRenderList.iterator();
             while (it.next()) |item| {
                 torenderchunks += 1;
                 const buffer_ids = item.value_ptr;
@@ -288,11 +298,11 @@ pub const Renderer = struct {
         gl.UseProgram(self.entityshaderprogram);
         const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        const enbktamount = self.chunkManager.world.Entitys.buckets.len;
+        const enbktamount = self.chunkManager.*.world.Entitys.buckets.len;
         for (0..enbktamount) |b| {
-            self.chunkManager.world.Entitys.buckets[b].lock.lockShared();
-            var it = self.chunkManager.world.Entitys.buckets[b].hash_map.valueIterator();
-            defer self.chunkManager.world.Entitys.buckets[b].lock.unlockShared();
+            self.chunkManager.*.world.Entitys.buckets[b].lock.lockShared();
+            var it = self.chunkManager.*.world.Entitys.buckets[b].hash_map.valueIterator();
+            defer self.chunkManager.*.world.Entitys.buckets[b].lock.unlockShared();
             while (it.next()) |c| {
                 // std.debug.print("drawn: {any}\n", .{c.*.*});
                 _ = c.*.ref_count.fetchAdd(1, .seq_cst);
@@ -302,508 +312,12 @@ pub const Renderer = struct {
         }
     }
 
- 
-
     fn getLen(arraylist: anytype, lock: *std.Thread.RwLock) usize {
         lock.lockShared();
         defer lock.unlockShared();
         return arraylist.items.len;
     }
 };
-
-const ChunkManager = struct {
-    allocator: std.mem.Allocator,
-    pool: ThreadPool,
-    LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
-    MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
-    MeshesToUnload: ConcurrentQueue.ConcurrentQueue([3]i32, 32, true),
-    ChunkRenderListLock: std.Thread.RwLock,
-    world: *World,
-    ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
-
-    ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
-    threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    threadlocal var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
-        const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
-        defer GenMeshAndAdd.End();
-        const chunk = try self.world.LoadChunk(Pos, genStructures);
-        const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, false)).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, false)).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, false)).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, false)).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, false)).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, false)).extractFace(.zPlus, true),
-        };
-        const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
-        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-        chunk.lock.lockShared();
-        lock.End();
-        switch (chunk.blocks) {
-            .blocks => blocks = chunk.blocks.blocks,
-            .oneBlock => {
-                @memset(@as(*[ChunkSize * ChunkSize * ChunkSize]Block, @ptrCast(&Tempcube)), chunk.blocks.oneBlock);
-                blocks = &Tempcube;
-            },
-        }
-        exbl.End();
-        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, 1, self.allocator);
-        chunk.releaseAndUnlockShared();
-        if (try mesh) |m| {
-            _ = try self.MeshesToLoad.append(m);
-        } else {
-            self.ChunkRenderListLock.lockShared();
-            const removeChunk = self.ChunkRenderList.contains(Pos);
-            self.ChunkRenderListLock.unlockShared();
-            if (removeChunk) _ = try self.MeshesToUnload.append(Pos);
-        }
-    }
-
-    ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
-    pub fn AddChunkToRenderTask(self: *Renderer, Pos: [3]i32, genStructures: bool, cullOutsideGenDistance: bool) void {
-        if (cullOutsideGenDistance) {
-            const playerPos = self.player.GetPos().?;
-            const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-            const GenDistance = [3]u32{ self.GenerateDistance[0].load(.seq_cst), self.GenerateDistance[1].load(.seq_cst), self.GenerateDistance[2].load(.seq_cst) };
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
-            if (self.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
-                self.chunkManager.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
-            } else {
-                _ = self.chunkManager.LoadingChunks.remove(Pos);
-            }
-        } else self.chunkManager.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
-    }
-
-    pub fn onEditFn(chunkPos: [3]i32, args: *anyopaque) void {
-        const manager = @as(*ChunkManager, @ptrCast(@alignCast(args)));
-        manager.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
-    }
-};
-
-const Loader = struct {
-    threadlocal var meshesToUnloadBuffer: [1024][3]i32 = undefined;
-    threadlocal var meshesToUnloadBufferPos: usize = 0;
-    pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, playerChunkPos: @Vector(3, i32)) void {
-        const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
-        defer unload.End();
-        while (chunkManager.MeshesToUnload.popFirst()) |Pos| {
-            const meshIds = chunkManager.ChunkRenderList.fetchSwapRemove(Pos);
-            if (meshIds) |m| m.value.free();
-        }
-
-        {
-            const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
-            defer loop.End();
-            chunkManager.ChunkRenderListLock.lockShared();
-            defer chunkManager.ChunkRenderListLock.unlockShared();
-            chunkManager.ChunkRenderList.lockPointers();
-            defer chunkManager.ChunkRenderList.unlockPointers();
-            const positions = chunkManager.ChunkRenderList.keys();
-            for (positions) |Pos| {
-                if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
-                    meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                    meshesToUnloadBufferPos += 1;
-                }
-            }
-        }
-        if (meshesToUnloadBufferPos > 0) {
-            const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
-            defer free.End();
-            if (!chunkManager.ChunkRenderListLock.tryLock()) {
-                return;
-            }
-            for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-                const mesh = chunkManager.ChunkRenderList.fetchSwapRemove(Pos);
-                if (mesh) |m| m.value.free();
-            }
-            chunkManager.ChunkRenderListLock.unlock();
-            meshesToUnloadBufferPos = 0;
-        }
-    }
-
-    threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
-    threadlocal var chunksToUnloadBufferPos: u16 = 0;
-    ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
-    pub fn ChunkLoaderThread(renderer: *Renderer, intervel_ns: u64, player: *Entity, running: *std.atomic.Value(bool)) void {
-        _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
-        std.debug.assert(player.type == .Player);
-        while (running.load(.monotonic)) {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            player.lock.lockShared();
-            lock.End();
-            const playerPos = player.GetPos().?;
-            player.lock.unlockShared();
-            const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
-            const st = std.time.nanoTimestamp();
-            defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-            const genDistance = @Vector(3, u32){ renderer.GenerateDistance[0].load(.monotonic), renderer.GenerateDistance[1].load(.monotonic), renderer.GenerateDistance[2].load(.monotonic) };
-            const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ ChunkSize, ChunkSize, ChunkSize })));
-            LoadChunksSingleplayer(renderer, eyePosChunk, genDistance);
-            addChunkstoLoad.End();
-        }
-    }
-    //TODO unload until done
-    pub fn ChunkUnloaderThread(world: *World, loadDistancePtr: *[3]std.atomic.Value(u32), player: *Entity, intervel_ns: u64, running: *std.atomic.Value(bool)) void {
-        _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
-        while (running.load(.monotonic)) {
-            const playerPos = player.GetPos().?;
-            const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-            const st = std.time.nanoTimestamp();
-            defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-            const loadDistance = @Vector(3, u32){ loadDistancePtr[0].load(.monotonic), loadDistancePtr[1].load(.monotonic), loadDistancePtr[2].load(.monotonic) };
-            const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-            UnloadChunks(world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
-            unloadChunks.End();
-        }
-    }
-    ///loads chunks from top to bottom and in a spiral on a y level
-    threadlocal var lastLoadPlayerChunkPos: ?@Vector(3, i32) = undefined;
-    threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
-
-    fn LoadChunksSingleplayer(self: *Renderer, playerChunkPos: @Vector(3, i32), distance: @Vector(3, u32)) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
-        defer {
-            lastLoadPlayerChunkPos = playerChunkPos;
-            lastGenDistance = distance;
-        }
-        if (lastLoadPlayerChunkPos != null and lastGenDistance != null) {
-            if (@reduce(.And, lastLoadPlayerChunkPos.? == playerChunkPos) and @reduce(.And, lastGenDistance.? == distance)) return;
-        }
-
-        var amount_loaded: u64 = 0;
-        var amount_tested: u64 = 0;
-
-        var xz: [2]i32 = .{ 0, 0 };
-        var c: usize = 0;
-        //defer std.debug.print("amount_tested: {d}\n", .{amount_tested});
-
-        while (true) {
-            if (amount_tested >= 4 * distance[0] * distance[2]) { //* 4 because loaddistance is distance from the player, not a full square
-                break;
-            }
-
-            const m = Move(xz, &c);
-
-            var cc: i32 = 0;
-            while (Line(&xz, &cc, m)) {
-                amount_tested += 1;
-                std.debug.assert(cc <= 2 * @max(distance[0], distance[2]));
-                var y: i32 = -@as(i32, @intCast(distance[1]));
-                while (y < distance[1]) {
-                    defer y += 1;
-                    const ChunkPos = [3]i32{ xz[0] + playerChunkPos[0], y + playerChunkPos[1], xz[1] + playerChunkPos[2] };
-                    if (self.chunkManager.LoadingChunks.contains(ChunkPos)) {
-                        continue;
-                    }
-                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-                    self.chunkManager.ChunkRenderListLock.lockShared();
-                    lock.End();
-                    const loaded = self.chunkManager.ChunkRenderList.contains(ChunkPos);
-                    self.chunkManager.ChunkRenderListLock.unlockShared();
-                    if ((!loaded or ((self.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
-                        amount_loaded += 1;
-                        self.chunkManager.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
-                        self.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ self, ChunkPos, true, true }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
-                    }
-                }
-            }
-        }
-        //if (amount_loaded > 0) std.log.info("added {d} chunks to load\n", .{amount_loaded});
-    }
-
-    threadlocal var lastPlayerChunkPos: ?@Vector(3, i32) = undefined;
-    threadlocal var lastloadDistance: ?@Vector(3, u32) = undefined;
-    threadlocal var bufferFull: bool = false;
-    fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: @Vector(3, u32)) !void {
-        const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
-        defer unloadChunks.End();
-        defer {
-            lastPlayerChunkPos = playerChunkPos;
-            lastloadDistance = loadDistance;
-        }
-        if (lastPlayerChunkPos != null and lastPlayerChunkPos != null) {
-            if (@reduce(.And, lastPlayerChunkPos.? == playerChunkPos) and @reduce(.And, lastloadDistance.? == loadDistance) and !bufferFull) return;
-        }
-        const bktamount = world.Chunks.buckets.len;
-        var chunks: u64 = 0;
-        for (0..bktamount) |b| {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            world.Chunks.buckets[b].lock.lockShared();
-            lock.End();
-            var it = world.Chunks.buckets[b].hash_map.iterator();
-            defer world.Chunks.buckets[b].lock.unlockShared();
-            while (it.next()) |c| {
-                chunks += 1;
-                if (chunksToUnloadBufferPos < chunksToUnloadBuffer.len and outOfSquareRange(c.key_ptr.* - playerChunkPos, [3]i32{ @intCast(loadDistance[0]), @intCast(loadDistance[1]), @intCast(loadDistance[2]) })) {
-                    chunksToUnloadBuffer[chunksToUnloadBufferPos] = c.key_ptr.*;
-                    chunksToUnloadBufferPos += 1;
-                }
-            }
-        }
-        for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
-            try world.UnloadChunk(Pos);
-        }
-        //std.debug.print("tried to unload {d} chunks, {d} chunks loaded\n", .{ chunksToUnloadBufferPos, chunks });
-        bufferFull = chunksToUnloadBufferPos == chunksToUnloadBuffer.len;
-        chunksToUnloadBufferPos = 0;
-    }
-    
-    ///must be called on main thread
-    pub fn LoadMeshes(self: *Renderer, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
-        const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
-        defer loadMeshes.End();
-        const st = std.time.microTimestamp();
-        var amount: u64 = 0;
-        //      self.playerLock.lockShared();
-        //    const playerPos = self.player.pos;
-        //  self.playerLock.unlockShared();
-        //   const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
-        //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-        //   const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-        while (true) {
-            var syncStatus: c_int = undefined;
-            if (glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
-            if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
-            const mesh = self.chunkManager.MeshesToLoad.popFirst() orelse break;
-            defer mesh.free(self.allocator);
-            defer _ = self.chunkManager.LoadingChunks.remove(mesh.Pos);
-            std.debug.assert(mesh.TransperentFaces != null or mesh.faces != null);
-            // if(outOfSquareRange(mesh.Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) }))continue;//causes a bug TODO fix
-            self.chunkManager.ChunkRenderListLock.lockShared();
-            const ex = self.chunkManager.ChunkRenderList.get(mesh.Pos);
-            self.chunkManager.ChunkRenderListLock.unlockShared();
-            defer amount += 1;
-            var oldtime: ?i64 = null;
-            if (ex) |m| {
-                oldtime = m.time;
-            }
-            const mesh_buffer_ids = Loader.LoadMesh(self, mesh, oldtime);
-            {
-                self.chunkManager.ChunkRenderListLock.lock();
-                defer self.chunkManager.ChunkRenderListLock.unlock();
-                const oldChunk = try self.chunkManager.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
-                if (oldChunk) |old_mesh| {
-                    old_mesh.value.free();
-                }
-            }
-        }
-        return amount;
-    }
-    
-    ///caller must free mesh, must be called from main thread, creation time is to keep animation state the same when remeshing
-    fn LoadMesh(self: *Renderer, mesh: Mesher.Mesh, CreationTime: ?i64) MeshBufferIDs {
-        var NewMeshIDs: MeshBufferIDs = .{
-            .vao = [2]?c_uint{ null, null },
-            .vbo = [2]?c_uint{ null, null },
-            .count = [2]u32{ 0, 0 },
-            .drawCommand = [2]?c_uint{ null, null },
-            .UBO = undefined,
-            .pos = mesh.Pos,
-            .time = 0,
-            .scale = mesh.scale,
-        };
-
-        gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
-        gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
-        const UniformBuffer = UBO{
-            .chunkPos = mesh.Pos,
-            .scale = 1,
-            .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
-            ._0 = undefined,
-        };
-        gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
-
-        inline for (0..2) |i| {
-            const faces = if (i == 0) mesh.faces else mesh.TransperentFaces;
-            if (faces) |f| {
-                var a: c_uint = undefined;
-                var b: c_uint = undefined;
-                gl.GenVertexArrays(1, @ptrCast(&a));
-                gl.BindVertexArray(a);
-                gl.GenBuffers(1, @ptrCast(&b));
-                gl.BindBuffer(gl.ARRAY_BUFFER, b);
-                NewMeshIDs.vao[i] = a;
-                NewMeshIDs.vbo[i] = b;
-                const bytes = std.mem.sliceAsBytes(f);
-                gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(Mesher.Face) * f.len), bytes.ptr, gl.STATIC_DRAW);
-                NewMeshIDs.count[i] = @intCast(f.len);
-                gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-                gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
-                gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-                gl.EnableVertexAttribArray(0);
-                gl.BindBuffer(gl.ARRAY_BUFFER, b);
-                gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-                gl.EnableVertexAttribArray(1);
-                gl.VertexAttribDivisor(1, 1);
-                var indirectBuff: c_uint = undefined;
-                gl.GenBuffers(1, @ptrCast(&indirectBuff));
-                gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, indirectBuff);
-                const IndirectCommand: DrawElementsIndirectCommand = .{
-                    .count = 6,
-                    .baseInstance = 0,
-                    .baseVertex = 0,
-                    .firstIndex = 0,
-                    .instanceCount = @intCast(NewMeshIDs.count[i]),
-                };
-                gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
-                NewMeshIDs.drawCommand[i] = indirectBuff;
-            }
-        }
-        NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
-
-        gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-        gl.BindVertexArray(0);
-        return NewMeshIDs;
-    }
-    test "test" {
-        const excoords: [10][2]i32 = [10][2]i32{ [2]i32{ 0, 0 }, [2]i32{ 0, 1 }, [2]i32{ 1, 1 }, [2]i32{ 1, 0 }, [2]i32{ 1, -1 }, [2]i32{ 0, -1 }, [2]i32{ -1, -1 }, [2]i32{ -1, 0 }, [2]i32{ -1, 1 }, [2]i32{ -1, 2 } };
-        var newexcoords: [10][2]i32 = @splat(@splat(0));
-
-        var xz: [2]i32 = @splat(0);
-        var c: usize = 0;
-        var ta: usize = 0;
-        for (0..10) |_| {
-            var cc: i32 = 0;
-            const m = Move(xz, &c);
-            while (Line(&xz, &cc, m)) {
-                if (ta < 10) newexcoords[ta] = xz;
-                std.debug.print("x: {d}, y:{d}, c:{d}, cc:{d}\n", .{ xz[0], xz[1], c, cc });
-                ta += 1;
-            }
-        }
-        try std.testing.expectEqualDeep(excoords, newexcoords);
-    }
-
-    fn Move(xzin: [2]i32, c: *usize) [2]i32 {
-        const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
-        const mov: i32 = @intFromFloat(@ceil(movf + 0.01));
-        var xz = xzin;
-        switch (@mod(c.*, 4)) {
-            0 => xz[1] += mov,
-            1 => xz[0] += mov,
-            2 => xz[1] -= mov,
-            3 => xz[0] -= mov,
-            else => unreachable,
-        }
-        c.* += 1;
-        return xz;
-    }
-
-    fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
-        defer c.* += 1;
-        if (c.* == 0) return true;
-        if (xz[0] == end[0] and xz[1] == end[1]) return false;
-        std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
-        if (xz[0] == end[0]) {
-            if (xz[1] < end[1]) {
-                xz[1] += 1;
-            } else {
-                xz[1] -= 1;
-            }
-        } else {
-            if (xz[0] < end[0]) {
-                xz[0] += 1;
-            } else {
-                xz[0] -= 1;
-            }
-        }
-        if (xz[0] == end[0] and xz[1] == end[1]) return false;
-        return true;
-    }
-    
-    
-};
-
-const Frustum = struct {
-    frus: [6]@Vector(4, f64),
-
-    pub const Box = struct {
-        min: @Vector(3, f64),
-        max: @Vector(3, f64),
-    };
-
-    fn extractFrustumPlanes(mat: @Vector(16, f64)) Frustum {
-        // zm row-major
-        const m00 = mat[0];
-        const m01 = mat[1];
-        const m02 = mat[2];
-        const m03 = mat[3];
-        const m10 = mat[4];
-        const m11 = mat[5];
-        const m12 = mat[6];
-        const m13 = mat[7];
-        const m20 = mat[8];
-        const m21 = mat[9];
-        const m22 = mat[10];
-        const m23 = mat[11];
-        const m30 = mat[12];
-        const m31 = mat[13];
-        const m32 = mat[14];
-        const m33 = mat[15];
-
-        var planes: [6]@Vector(4, f64) = undefined;
-
-        planes[0] = @Vector(4, f64){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
-        planes[1] = @Vector(4, f64){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
-        planes[2] = @Vector(4, f64){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
-        planes[3] = @Vector(4, f64){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
-        planes[4] = @Vector(4, f64){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
-        planes[5] = @Vector(4, f64){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
-
-        // Normalize planes
-        for (0..6) |i| {
-            const n = @Vector(3, f64){ planes[i][0], planes[i][1], planes[i][2] };
-            const len = @sqrt(zm.vec.dot(n, n));
-            planes[i] /= @splat(len);
-        }
-
-        return Frustum{ .frus = planes };
-    }
-
-    pub fn boxInFrustum(self: *const @This(), box: Box) bool {
-        // Check box against each of the 6 frustum planes
-        inline for (0..6) |i| {
-            var out: u32 = 0;
-            const plane = self.frus[i];
-
-            // Test all 8 corners of the box against this plane
-            // Corner 1: min.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 2: max.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 3: min.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 4: max.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
-            // Corner 5: min.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 6: max.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 7: min.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
-            // Corner 8: max.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
-
-            // If all 8 corners are outside this plane, the box is completely outside the frustum
-            if (out == 8) return false;
-        }
-
-        return true;
-    }
-
-    pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f64), radius: f64) bool {
-        for (self.frus) |plane| {
-            const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
-            if (dist < -radius) return false;
-        }
-        return true;
-    }
-};
-
-fn outOfSquareRange(Pos: @Vector(3, i32), range: @Vector(3, i32)) bool {
-    return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(Pos))) > range);
-}
 
 pub const MeshBufferIDs = struct {
     time: i64,
@@ -825,7 +339,7 @@ pub const MeshBufferIDs = struct {
     }
 };
 
-const DrawElementsIndirectCommand = packed struct {
+pub const DrawElementsIndirectCommand = packed struct {
     count: c_uint,
     instanceCount: c_uint,
     firstIndex: c_uint,

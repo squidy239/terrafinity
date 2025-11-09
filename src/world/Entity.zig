@@ -22,7 +22,7 @@ pub const Entity = struct {
         updateFn: ?*const fn (ptr: *anyopaque, world: *World) void = null,
         freeFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void = null,
         getPosFn: ?*const fn (ptr: *anyopaque) @Vector(3, f64) = null,
-        drawFn: ?*const fn (ptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer) void = null,
+        drawFn: ?*const fn (ptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) void = null,
     },
 
     pub fn update(self: *@This(), world: *World) void {
@@ -33,7 +33,7 @@ pub const Entity = struct {
         }
     }
 
-    pub fn draw(self: *@This(), playerPos: @Vector(3, f64), r: *Renderer) !void {
+    pub fn draw(self: *@This(), playerPos: @Vector(3, f64), r: *Renderer.Renderer) !void {
         if (self.functions.drawFn) |drawFn| {
             self.lock.lockShared();
             defer self.lock.unlockShared();

@@ -17,12 +17,14 @@ pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");
 pub const World = @import("World").World;
 const DefaultGenerator = World.DefaultGenerator;
-pub const zm = @import("zm");
-pub const ztracy = @import("ztracy");
 
+pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
+pub const Loader = @import("Loader.zig").Loader;
 pub const menu = @import("menu.zig");
-pub const Renderer = @import("Renderer.zig").Renderer;
+pub const Renderer = @import("Renderer.zig");
 const UserInput = @import("UserInput.zig");
+pub const ztracy = @import("ztracy");
+pub const zm = @import("zm");
 
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -108,7 +110,7 @@ pub fn main() !void {
         _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
     }
     const window = try initWindowAndProcs(&proc);
-    var renderer = Renderer.init(&MainWorld, playerEntity, allocator) catch |err| {
+    var renderer = Renderer.Renderer.init(&MainWorld, playerEntity, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
