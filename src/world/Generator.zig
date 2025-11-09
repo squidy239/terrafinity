@@ -7,6 +7,7 @@ const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const ztracy = @import("ztracy");
 
+const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
 const Noise = @import("fastnoise.zig");
 const World = @import("World.zig").World;
 
@@ -246,13 +247,17 @@ pub const DefaultGenerator = struct {
         }
         return r;
     }
-
+    threadlocal var editorBuffer: [1_000_000]u8 = undefined;
     fn GenerateStructures(self: *World, genParams: GenParams, chunk: *Chunk, Pos: [3]i32, terrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32)) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
         chunk.addAndLockShared();
-        var sfa = std.heap.stackFallback(100_000, self.allocator);
-        const tempAllocator = sfa.get();
+        var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
+            .buffer = &editorBuffer,
+            .fallback_allocator = self.allocator,
+            .fixed_buffer_allocator = undefined,
+        };
+        const tempAllocator = bfa.get();
         var worldEditor = World.WorldEditor{ .world = self, .tempallocator = tempAllocator };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
@@ -275,6 +280,7 @@ pub const DefaultGenerator = struct {
                 const y: usize = @intCast(@mod(height, ChunkSize));
 
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
+                    //TODO find a way to make it deterministi becuase a diffrent thread may remove grass or dirt blocks
                     const treeChance: f64 = rand.float(f64) * genParams.terrainScale; //TODO advance rng to make tree placement the same
                     if (true and treeChance < 0.000002) {
                         const steps = genParams.LargeTrees;

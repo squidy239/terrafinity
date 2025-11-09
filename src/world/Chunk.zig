@@ -185,16 +185,6 @@ pub const Chunk = struct {
         self.lock.lock();
     }
 
-    pub fn addAndlockSharednoBlock(self: *@This()) void {
-        _ = self.ref_count.fetchAdd(1, .seq_cst);
-        self.lock.tryLockShared();
-    }
-
-    pub fn addAndlocknoBlock(self: *@This()) void {
-        self.lock.tryLock();
-        _ = self.ref_count.fetchAdd(1, .seq_cst);
-    }
-
     pub fn releaseAndUnlock(self: *@This()) void {
         self.lock.unlock();
         _ = self.ref_count.fetchSub(1, .seq_cst);

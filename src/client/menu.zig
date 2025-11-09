@@ -2,7 +2,7 @@ const switchMenu = @import("root").SwitchMenu;
 
 const glfw = @import("zglfw");
 const gui = @import("gui");
-
+const std = @import("std");
 pub const fpsoptions = gui.Element.CreationOptions{
     .elementBackground = .{ .solid = .{ 1, 1, 1, 0.7 } },
     .textOptions = .{
@@ -62,7 +62,7 @@ fn openOptionsMenu(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window
     _ = mousePos;
     _ = element;
     if (toggle and window.getMouseButton(.left) == .press) {
-        switchMenu(.optionsMenu);
+        switchMenu(.worldRender) catch |err| std.debug.panic("err: {any}", .{err});
     }
 }
 

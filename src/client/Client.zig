@@ -30,8 +30,8 @@ var cameraFront = @Vector(3, f64){ 0, 1, 0 };
 var cameraUp = @Vector(3, f64){ 0, 1, 0 };
 var pitch: f64 = 1;
 var yaw: f64 = 1;
-var height: u32 = 800;
-var width: u32 = 600;
+pub var height: u32 = 600;
+pub var width: u32 = 800;
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
@@ -48,10 +48,7 @@ pub fn main() !void {
     const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
     const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
     var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-    const seed = 0;
     std.debug.print("Bit size of Blocks: {d}\n", .{@bitSizeOf(Block)});
-
-    std.log.info("using seed {d}\n", .{seed});
 
     var MainWorldConfig: World.WorldConfig = undefined;
     var GeneratorConfig: DefaultGenerator.GenParams = undefined;
@@ -80,7 +77,8 @@ pub fn main() !void {
         .threadPool = undefined,
         .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
         .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
-        .Rand = rand.random(),
+        .random = rand.random(),
+        .prng = rand,
         .Config = MainWorldConfig,
         .Generator = generator.getGenerator(),
         .onEdit = null,
@@ -110,13 +108,12 @@ pub fn main() !void {
         _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
     }
     const window = try initWindowAndProcs(&proc);
-    var renderer = Renderer.init(&MainWorld, &proc, playerEntity, allocator) catch |err| {
+    var renderer = Renderer.init(&MainWorld, playerEntity, allocator) catch |err| {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
     MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
     MainWorld.threadPool = &renderer.pool;
-    renderer.window = window;
     try renderer.Start();
     try EntityTypes.LoadMeshes(allocator);
 
@@ -128,48 +125,48 @@ pub fn main() !void {
         glfw.terminate();
         MainWorld.Deinit();
         std.log.info("World Closed\n", .{});
-        renderer.window.destroy();
+        window.destroy();
         glfw.pollEvents(); //must be called to close the window
     }
 
-    try UserInput.init(&renderer);
-    _ = renderer.window.setCursorPosCallback(UserInput.MouseCallback);
-    _ = renderer.window.setSizeCallback(UserInput.glfwSizeCallback);
+    try UserInput.init(&renderer, window);
+    _ = window.setCursorPosCallback(UserInput.MouseCallback);
+    _ = window.setSizeCallback(glfwSizeCallback);
     gui.init(secondary_allocator);
     defer gui.deinit();
 
     var f3t: bool = true;
     var f3noholdt: bool = true;
     var fpsBox = try gui.Element.create(allocator, menu.fpsoptions);
-    const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+    const viewport_pixels: @Vector(2, f32) = GetViewportPixels(window);
     const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
     fpsBox.init(viewport_pixels, viewport_millimeters);
     defer fpsBox.deinit();
     var lastFps: ?f128 = null;
-    while (!renderer.window.shouldClose()) {
+    while (!window.shouldClose()) {
         const Frame = ztracy.ZoneNC(@src(), "Frame", 0xFFFFFFFF);
         defer Frame.End();
         const frameStart = std.time.nanoTimestamp();
         const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
         const playerPos = playerEntity.GetPos().?;
         waitforlock.End();
-        const drawn = try renderer.Draw();
-        const viewport_pixels_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), renderer.GetScreenDimensions()));
+        const viewport_pixels_loop: @Vector(2, f32) = GetViewportPixels(window);
         const viewport_millimeters_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
-        if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, renderer.window);
-        UserInput.menuDraw(viewport_pixels_loop, viewport_millimeters_loop);
+        const drawn = try renderer.Draw(viewport_pixels_loop);
+        if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, window);
+        UserInput.menuDraw(viewport_pixels_loop, viewport_millimeters_loop, window);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
         drawText.End();
         //unload meshes
         const swap = ztracy.ZoneNC(@src(), "swap", 456564);
-        renderer.window.swapBuffers();
+        window.swapBuffers();
         swap.End();
         const poll = ztracy.ZoneNC(@src(), "poll", 456564);
         glfw.pollEvents();
         poll.End();
         const prossesinput = ztracy.ZoneNC(@src(), "prossesinput", 456765);
-        try UserInput.processInput();
-        if (glfw.getKey(renderer.window, glfw.Key.F3) == .press) {
+        try UserInput.processInput(window);
+        if (glfw.getKey(window, glfw.Key.F3) == .press) {
             if (f3noholdt) f3t = !f3t;
             f3noholdt = false;
         } else f3noholdt = true; //TODO use this toggle type for fullscreen and other toggle settings
@@ -241,7 +238,7 @@ fn initWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
         glfw.windowHint(.client_api, .opengl_api);
         glfw.windowHint(.doublebuffer, true);
         glfw.windowHint(.samples, 8);
-        window = glfw.Window.create(800, 600, "terrafinity", null) catch continue;
+        window = glfw.Window.create(@intCast(width), @intCast(height), "terrafinity", null) catch continue;
         glfw.makeContextCurrent(window);
         if (proc_table.init(glfw.getProcAddress)) {
             std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });
@@ -254,7 +251,7 @@ fn initWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
     gl.makeProcTableCurrent(proc_table);
     const xz = window.?.getContentScale();
     gl.Enable(gl.MULTISAMPLE);
-    gl.Viewport(0, 0, @intFromFloat(800 * xz[0]), @intFromFloat(600 * xz[1]));
+    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(width)) * xz[0]), @intFromFloat(@as(f32, @floatFromInt(height)) * xz[1]));
     glfw.swapInterval(0);
     gl.Enable(gl.DEPTH_TEST);
     gl.Enable(gl.CULL_FACE);
@@ -277,4 +274,15 @@ fn loadZON(comptime T: type, file: std.fs.File, allocator: std.mem.Allocator) !s
     defer allocator.free(slice);
     @setEvalBranchQuota(100000000);
     return .{ .result = try std.zon.parse.fromSlice(T, arenAllocator, @ptrCast(slice), null, .{}), .arena = arena };
+}
+
+pub export fn glfwSizeCallback(window: *glfw.Window, w: c_int, h: c_int) void {
+    width = @intCast(w);
+    height = @intCast(h);
+    const xz = window.getContentScale();
+    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(w)) * xz[0]), @intFromFloat(@as(f32, @floatFromInt(h)) * xz[1]));
+}
+
+pub fn GetViewportPixels(window: *glfw.Window) @Vector(2, f32) {
+    return @Vector(2, f32){ (@as(f32, @floatFromInt(width)) * window.getContentScale()[0]), (@as(f32, @floatFromInt(height)) * window.getContentScale()[1]) };
 }

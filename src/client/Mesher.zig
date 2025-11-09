@@ -63,10 +63,10 @@ pub const Mesh = struct {
                         extendedBlocks[x][y][z + 1],
                         extendedBlocks[x][y][z - 1],
                     };
-                    const block_transparent = Block.Properties.transperent.get(block);
+                    const block_transparent = Block.Properties.transparent.get(block);
                     inline for (0..6) |i| {
                         inner: {
-                            if (!Block.Properties.transperent.get(neighboring_blocks[i])) break :inner;
+                            if (!Block.Properties.transparent.get(neighboring_blocks[i])) break :inner;
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{

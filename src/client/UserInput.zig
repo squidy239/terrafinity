@@ -1,4 +1,5 @@
 const std = @import("std");
+const root = @import("root");
 const World = @import("root").World;
 const Structures = World.Structures;
 
@@ -15,14 +16,13 @@ const Renderer = @import("Renderer.zig").Renderer;
 var render: *Renderer = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};
-
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
 var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
-pub fn init(ren: *Renderer) !void {
+pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out of this and redo user input handeling
     render = ren;
     worldEditor = .{
         .tempallocator = render.allocator,
@@ -78,7 +78,7 @@ pub fn init(ren: *Renderer) !void {
     };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
-    const viewport_pixels: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, u32), render.GetScreenDimensions()));
+    const viewport_pixels: @Vector(2, f32) = GetViewportPixels(window);
     const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize())); //TODO find a way to get the monitor that the window is on
     menu.init(viewport_pixels, viewport_millimeters);
     @as(*gui.Widgets.SlideData, @ptrCast(@alignCast(menu.children.?[2].customData.?))).onSlide = OnSlide;
@@ -139,7 +139,7 @@ fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, togg
         element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
         if (window.getMouseButton(glfw.MouseButton.left) == .press and ts.CursorEscaped) {
             ts.CursorEscaped = false;
-            _ = glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
+            _ = glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
         }
         element.update();
     } else {
@@ -168,10 +168,10 @@ var ts = ToggleSettings{
 var slideamount: f32 = 0.5;
 var childrenBuffer: [1]gui.Element.CreationOptions = undefined;
 
-pub fn menuDraw(viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32)) void {
-    if (ts.CursorEscaped) menu.Draw(viewport_pixels, viewport_millimeters, render.window);
+pub fn menuDraw(viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window) void {
+    if (ts.CursorEscaped) menu.Draw(viewport_pixels, viewport_millimeters, window);
 }
-pub fn processInput() !void {
+pub fn processInput(window: *glfw.Window) !void {
     std.debug.assert(isinit);
     const timestamp = std.time.microTimestamp();
     const dt = timestamp - lastmicrotime;
@@ -190,49 +190,49 @@ pub fn processInput() !void {
     if (ts.SuperSpeed) {
         cameraSpeed *= @splat(32);
     }
-    if (render.window.getKey(glfw.Key.w) == .press)
+    if (window.getKey(glfw.Key.w) == .press)
         posAdjustment += cameraSpeed * render.cameraFront;
-    if (render.window.getKey(glfw.Key.s) == .press)
+    if (window.getKey(glfw.Key.s) == .press)
         posAdjustment -= cameraSpeed * render.cameraFront;
-    if (render.window.getKey(glfw.Key.a) == .press) {
+    if (window.getKey(glfw.Key.a) == .press) {
         const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
         if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
             posAdjustment -= zm.vec.normalize(cross) * cameraSpeed;
     }
-    if (render.window.getKey(glfw.Key.d) == .press) {
+    if (window.getKey(glfw.Key.d) == .press) {
         const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
         if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
             posAdjustment += zm.vec.normalize(cross) * cameraSpeed;
     }
-    if (render.window.getKey(glfw.Key.F11) == .press and std.time.milliTimestamp() - lastfullscreentoggle > 500) {
+    if (window.getKey(glfw.Key.F11) == .press and std.time.milliTimestamp() - lastfullscreentoggle > 500) {
         if (ts.Fullscreen) {
-            render.window.setMonitor(null, 0, 0, @intCast(render.GetScreenDimensions()[0]), @intCast(render.GetScreenDimensions()[1]), 0);
+            window.setMonitor(null, 0, 0, 800, 600, 0); //TODO make it choose the correct moniter and have the right size
             ts.Fullscreen = false;
             lastfullscreentoggle = std.time.milliTimestamp();
         } else {
             const mon = glfw.getPrimaryMonitor().?;
             const dim = try mon.getPhysicalSize();
-            render.window.setMonitor(mon, 0, 0, dim[0], dim[1], 0);
+            window.setMonitor(mon, 0, 0, dim[0], dim[1], 0);
             ts.Fullscreen = true;
             lastfullscreentoggle = std.time.milliTimestamp();
         }
     }
-    if (render.window.getKey(glfw.Key.escape) == .press or render.window.getKey(glfw.Key.left_super) == .press) {
+    if (window.getKey(glfw.Key.escape) == .press or window.getKey(glfw.Key.left_super) == .press) {
         if (!ts.CursorEscaped) {
             ts.CursorEscaped = true;
-            _ = try glfw.Window.setInputMode(render.window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).normal);
+            _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).normal);
         }
     }
-    if (render.window.getKey(glfw.Key.left_control) == .press) {
+    if (window.getKey(glfw.Key.left_control) == .press) {
         ts.Sprinting = true;
     } else ts.Sprinting = false;
-    if (render.window.getKey(glfw.Key.left_shift) == .press) {
+    if (window.getKey(glfw.Key.left_shift) == .press) {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
-    if (render.window.getKey(glfw.Key.r) == .press)
+    if (window.getKey(glfw.Key.r) == .press)
         try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
-    if (render.window.getKey(glfw.Key.b) == .press) {
+    if (window.getKey(glfw.Key.b) == .press) {
         const cone = World.WorldEditor.Cone(f64).init(render.player.GetPos().?, render.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
@@ -240,11 +240,11 @@ pub fn processInput() !void {
         worldEditorLock.unlock();
     }
 
-    if (render.window.getKey(glfw.Key.g) == .press) {
+    if (window.getKey(glfw.Key.g) == .press) {
         try render.pool.spawn(genFractalTask, .{}, .High);
     }
 
-    if (render.window.getKey(glfw.Key.i) == .press) {
+    if (window.getKey(glfw.Key.i) == .press) {
         const playerPos = render.player.GetPos().?;
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
@@ -254,7 +254,7 @@ pub fn processInput() !void {
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
         worldEditor.ClearReader();
     }
-    if (render.window.getKey(glfw.Key.p) == .press) {
+    if (window.getKey(glfw.Key.p) == .press) {
         ts.Benchmark = true;
         benchmarkStartTime = std.time.microTimestamp();
     }
@@ -274,7 +274,7 @@ pub fn processInput() !void {
             ts.Benchmark = false;
         }
     }
-    if (render.window.getKey(glfw.Key.end) == .press) {
+    if (window.getKey(glfw.Key.end) == .press) {
         ts.Benchmark = false;
     }
 }
@@ -359,10 +359,6 @@ fn getDiff(a: @Vector(3, f32), b: @Vector(3, f32)) f32 {
     return diff;
 }
 
-pub export fn glfwSizeCallback(window: *glfw.Window, w: c_int, h: c_int) void {
-    std.debug.assert(isinit);
-    render.screen_dimensions[0] = @intCast(w);
-    render.screen_dimensions[1] = @intCast(h);
-    const xz = window.getContentScale();
-    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(w)) * xz[0]), @intFromFloat(@as(f32, @floatFromInt(h)) * xz[1]));
+pub fn GetViewportPixels(window: *glfw.Window) @Vector(2, f32) {
+    return @Vector(2, f32){ (@as(f32, @floatFromInt(root.width)) * window.getContentScale()[0]), (@as(f32, @floatFromInt(root.height)) * window.getContentScale()[1]) };
 }

@@ -44,16 +44,13 @@ pub const Renderer = struct {
     MeshDistance: [3]std.atomic.Value(u32),
     GenerateDistance: [3]std.atomic.Value(u32),
     LoadDistance: [3]std.atomic.Value(u32),
-    window: *glfw.Window,
-    proc_table: *gl.ProcTable,
-    screen_dimensions: [2]u32,
     renderScale: f32,
     loaderThread: ?std.Thread,
     unloaderThread: ?std.Thread,
     updateEntitiesThread: ?std.Thread,
 
     ///must be called on main thread
-    pub fn init(world: *World, proc_table_location: *gl.ProcTable, player: *Entity, allocator: std.mem.Allocator) !@This() {
+    pub fn init(world: *World, player: *Entity, allocator: std.mem.Allocator) !@This() {
         const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
         const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
         const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
@@ -81,9 +78,6 @@ pub const Renderer = struct {
             .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) },
             .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) }, //should be 2 or over gendistance
             .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
-            .window = undefined,
-            .proc_table = proc_table_location,
-            .screen_dimensions = [2]u32{ 800, 600 },
             .renderScale = 1.0,
             .loaderThread = null,
             .unloaderThread = null,
@@ -139,13 +133,6 @@ pub const Renderer = struct {
         std.log.info("renderer deinit", .{});
     }
 
-    pub fn GetScreenDimensions(self: *@This()) [2]u32 {
-        return [2]u32{ @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), @intFromFloat(@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
-    }
-
-    pub fn GetFloatScreenDimensions(self: *@This()) [2]f32 {
-        return [2]f32{ (@as(f32, @floatFromInt(self.screen_dimensions[0])) * self.window.getContentScale()[0]), (@as(f32, @floatFromInt(self.screen_dimensions[1])) * self.window.getContentScale()[1]) };
-    }
     fn CompileShaders(self: *@This()) !void {
         const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
         gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
@@ -227,7 +214,7 @@ pub const Renderer = struct {
         gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
     }
-    pub fn Draw(self: *@This()) ![2]u64 {
+    pub fn Draw(self: *@This(), viewport_pixels: @Vector(2, f32)) ![2]u64 {
         const playerPos = self.player.GetPos().?;
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
@@ -240,10 +227,10 @@ pub const Renderer = struct {
         clear.End();
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        const drawn = self.DrawChunks(playerPos, skyColor);
+        const drawn = self.DrawChunks(playerPos, skyColor, viewport_pixels);
         drawChunks.End();
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-        self.DrawEntities(playerPos);
+        self.DrawEntities(playerPos, viewport_pixels);
         drawEntities.End();
         const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
@@ -258,7 +245,7 @@ pub const Renderer = struct {
         }
         return drawn;
     }
-    fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32)) [2]u64 {
+    fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -266,7 +253,7 @@ pub const Renderer = struct {
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
         const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
-        const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(projdist));
+        const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
         const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
         gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
         gl.Uniform1f(self.uniforms.fogDensity, 0);
@@ -305,10 +292,10 @@ pub const Renderer = struct {
         return [2]u64{ drawnchunks, torenderchunks };
     }
 
-    pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64)) void {
+    pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) void {
         gl.FrontFace(gl.CCW);
         gl.UseProgram(self.entityshaderprogram);
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(self.screen_dimensions[0])) / @as(f32, @floatFromInt(self.screen_dimensions[1])), 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         const enbktamount = self.world.Entitys.buckets.len;
         for (0..enbktamount) |b| {
@@ -564,6 +551,7 @@ pub const Renderer = struct {
             if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
             const mesh = self.MeshesToLoad.popFirst() orelse break;
             defer FreeMesh(mesh, self.allocator);
+            defer _ = self.LoadingChunks.remove(mesh.Pos);
             std.debug.assert(mesh.TransperentFaces != null or mesh.faces != null);
             // if(outOfSquareRange(mesh.Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) }))continue;//causes a bug TODO fix
             self.ChunkRenderListLock.lockShared();
@@ -583,7 +571,6 @@ pub const Renderer = struct {
                     old_mesh.value.free();
                 }
             }
-            _ = self.LoadingChunks.remove(mesh.Pos);
         }
         return amount;
     }
@@ -736,6 +723,7 @@ pub const Renderer = struct {
                 if (self.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
                 if (self.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
                 if (self.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
+                gl.DeleteBuffers(1, @ptrCast(&self.UBO));
             }
         }
     };

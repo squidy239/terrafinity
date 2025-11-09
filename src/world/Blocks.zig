@@ -12,10 +12,10 @@ pub const Blocks = enum {
     Snow,
 
     pub const Properties = struct {
-        pub const transperent: std.EnumArray(Blocks, bool) = initTransperent();
+        pub const transparent: std.EnumArray(Blocks, bool) = initTransparent();
         pub const visible: std.EnumArray(Blocks, bool) = initVisible();
 
-        fn initTransperent() std.EnumArray(Blocks, bool) {
+        fn initTransparent() std.EnumArray(Blocks, bool) {
             var temptransperent = std.EnumArray(Blocks, bool).initUndefined();
             for (@typeInfo(Blocks).@"enum".fields) |blockInt| {
                 const blockType: Blocks = @enumFromInt(blockInt.value);

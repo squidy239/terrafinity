@@ -15,7 +15,8 @@ pub const World = struct {
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    Rand: std.Random,
+    prng: std.Random.DefaultPrng,
+    random: std.Random,
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
@@ -62,7 +63,7 @@ pub const World = struct {
     }
 
     pub fn SpawnEntity(self: *@This(), UUID: ?u128, entity: anytype) !*Entity {
-        const uuid = UUID orelse self.Rand.int(u128);
+        const uuid = UUID orelse self.random.int(u128);
         if (self.Entitys.contains(uuid)) return error.EntityAlreadyExists;
         const allocated_entity = try entity.MakeEntity(self.allocator);
         errdefer allocated_entity.fullfree(self.allocator);
@@ -76,7 +77,7 @@ pub const World = struct {
     }
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-        const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.Rand.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
+        const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
         const chunkPos = [2]i32{ @divFloor(pos[0], ChunkSize), @divFloor(pos[1], ChunkSize) };
         const posInChunk = [2]i32{ @mod(pos[0], ChunkSize), @mod(pos[1], ChunkSize) };
         const height = (try self.Generator.getTerrainHeight(&self.Generator, self, chunkPos))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
@@ -189,7 +190,7 @@ pub const World = struct {
         pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunkBlockPos = @mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
-            if (self.lastChunkReadCache == null or @reduce(.Or, self.lastChunkCache.?.Pos != chunkPos)) {
+            if (self.lastChunkReadCache == null or @reduce(.Or, self.lastChunkReadCache.?.Pos != chunkPos)) {
                 if (self.lastChunkReadCache != null) {
                     self.lastChunkReadCache.?.chunk.releaseAndUnlockShared();
                     self.lastChunkReadCache = null;
