@@ -115,7 +115,7 @@ pub const Mesh = struct {
         } else return null;
     }
 
-    pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn free(self: *const @This(), allocator: std.mem.Allocator) void {
         if (self.faces) |f| allocator.free(f);
         if (self.TransperentFaces) |f| allocator.free(f);
     }
@@ -176,4 +176,5 @@ pub const Mesh = struct {
             }
         }
     }
+    
 };

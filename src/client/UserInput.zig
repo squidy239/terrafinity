@@ -26,7 +26,7 @@ pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out o
     render = ren;
     worldEditor = .{
         .tempallocator = render.allocator,
-        .world = render.world,
+        .world = render.chunkManager.world,
     };
     lastmicrotime = std.time.microTimestamp();
     const textEscMenu = gui.Element.CreationOptions{
@@ -230,7 +230,7 @@ pub fn processInput(window: *glfw.Window) !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (window.getKey(glfw.Key.r) == .press)
-        try render.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
+        try render.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (window.getKey(glfw.Key.b) == .press) {
         const cone = World.WorldEditor.Cone(f64).init(render.player.GetPos().?, render.cameraFront, 1000, 100, 50);
@@ -241,13 +241,13 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
-        try render.pool.spawn(genFractalTask, .{}, .High);
+        try render.chunkManager.pool.spawn(genFractalTask, .{}, .High);
     }
 
     if (window.getKey(glfw.Key.i) == .press) {
         const playerPos = render.player.GetPos().?;
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
-        std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.world.Chunks.get(chpos) });
+        std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.chunkManager.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
         worldEditorLock.lock();
         defer worldEditorLock.unlock();
@@ -264,13 +264,13 @@ pub fn processInput(window: *glfw.Window) !void {
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
         const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(render.player.ptr));
-        playerptr.pos = std.math.lerp(playerptr.pos, render.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
+        playerptr.pos = std.math.lerp(playerptr.pos, render.chunkManager.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.chunkManager.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.chunkManager.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.chunkManager.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = playerptr.pos;
         render.player.lock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
-        if (render.world.Chunks.get(chpos) == null) {
+        if (render.chunkManager.world.Chunks.get(chpos) == null) {
             std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
-            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), render.world.Chunks.get(chpos) });
+            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), render.chunkManager.world.Chunks.get(chpos) });
             ts.Benchmark = false;
         }
     }

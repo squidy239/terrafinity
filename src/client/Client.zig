@@ -112,8 +112,7 @@ pub fn main() !void {
         std.debug.panic("Failed to initialize renderer: {}\n", .{err});
         return err;
     };
-    MainWorld.onEdit = .{ .onEditFn = Renderer.onEditFn, .onEditFnArgs = @ptrCast(&renderer) };
-    MainWorld.threadPool = &renderer.pool;
+    MainWorld.threadPool = &renderer.chunkManager.pool;
     try renderer.Start();
     try EntityTypes.LoadMeshes(allocator);
 
