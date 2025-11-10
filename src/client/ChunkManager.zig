@@ -3,7 +3,7 @@ const ConcurrentQueue = @import("root").ConcurrentQueue;
 const root = @import("root");
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
-const Game = root.Renderer.Game;
+const Game = @import("Game.zig").Game;
 const ThreadPool = @import("root").ThreadPool;
 
 const Block = @import("Block").Blocks;

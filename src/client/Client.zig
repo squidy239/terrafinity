@@ -18,7 +18,7 @@ pub const ThreadPool = @import("ThreadPool");
 pub const World = @import("World").World;
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-
+const Game = @import("Game.zig").Game;
 pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 pub const Loader = @import("Loader.zig").Loader;
 pub const menu = @import("menu.zig");
@@ -50,7 +50,7 @@ pub fn main() !void {
     const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
     const window = try initWindowAndProcs(&proc);
     
-    var game:Renderer.Game = undefined;
+    var game:Game = undefined;
     try game.init(allocator, secondary_allocator);
     try game.startThreads();
     try EntityTypes.LoadMeshes(allocator);

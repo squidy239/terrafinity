@@ -5,7 +5,7 @@ const ConcurrentQueue = @import("root").ConcurrentQueue;
 const DrawElementsIndirectCommand = root.Renderer.DrawElementsIndirectCommand;
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
-const Game = root.Renderer.Game;
+const Game = @import("Game.zig");
 const SetThreadPriority = @import("root").SetThreadPriority;
 const ThreadPool = @import("root").ThreadPool;
 const UBO = root.Renderer.UBO;
@@ -64,7 +64,7 @@ pub const Loader = struct {
     threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
     threadlocal var chunksToUnloadBufferPos: u16 = 0;
     ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
-    pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
+    pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
         _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
         std.debug.assert(game.player.type == .Player);
         while (game.running.load(.monotonic)) {
@@ -83,7 +83,7 @@ pub const Loader = struct {
         }
     }
 
-    pub fn ChunkUnloaderThread(game: *Game, intervel_ns: u64) void {
+    pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
         _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
         while (game.running.load(.monotonic)) {
             const playerPos = game.player.GetPos().?;
@@ -102,7 +102,7 @@ pub const Loader = struct {
     threadlocal var lastLoadPlayerChunkPos: ?@Vector(3, i32) = undefined;
     threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
 
-    fn LoadChunksSingleplayer(game: *Game, playerChunkPos: @Vector(3, i32), distance: @Vector(3, u32)) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+    fn LoadChunksSingleplayer(game: *Game.Game, playerChunkPos: @Vector(3, i32), distance: @Vector(3, u32)) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
         defer {
             lastLoadPlayerChunkPos = playerChunkPos;
             lastGenDistance = distance;
@@ -186,7 +186,7 @@ pub const Loader = struct {
         chunksToUnloadBufferPos = 0;
     }
 
-    pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
+    pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
         const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
         defer loadMeshes.End();
         const st = std.time.microTimestamp();
