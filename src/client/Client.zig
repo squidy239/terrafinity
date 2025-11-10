@@ -16,15 +16,14 @@ pub const Interpolation = @import("Interpolation");
 pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const ThreadPool = @import("ThreadPool");
 pub const World = @import("World").World;
-const DefaultGenerator = World.DefaultGenerator;
+pub const zm = @import("zm");
+pub const ztracy = @import("ztracy");
 
 pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 pub const Loader = @import("Loader.zig").Loader;
 pub const menu = @import("menu.zig");
 pub const Renderer = @import("Renderer.zig");
 const UserInput = @import("UserInput.zig");
-pub const ztracy = @import("ztracy");
-pub const zm = @import("zm");
 
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -49,88 +48,25 @@ pub fn main() !void {
     const smp_allocator = std.heap.smp_allocator;
     const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
     const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
-    var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-    std.debug.print("Bit size of Blocks: {d}\n", .{@bitSizeOf(Block)});
-
-    var MainWorldConfig: World.WorldConfig = undefined;
-    var GeneratorConfig: DefaultGenerator.GenParams = undefined;
-
-    const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
-    const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
-    const w = try loadZON(World.WorldConfig, worldConfigFile, secondary_allocator);
-    defer w.arena.deinit();
-    const g = try loadZON(DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator);
-    defer g.arena.deinit();
-    GeneratorConfig = g.result;
-    MainWorldConfig = w.result;
-    GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
-    GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
-    GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
-    GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-    GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-
-    var generator = World.DefaultGenerator{
-        .TerrainHeightCache = try .init(secondary_allocator, 4096),
-        .params = GeneratorConfig,
-    };
-
-    var MainWorld = World{
-        .allocator = allocator,
-        .threadPool = undefined,
-        .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
-        .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
-        .random = rand.random(),
-        .prng = rand,
-        .Config = MainWorldConfig,
-        .Generator = generator.getGenerator(),
-        .onEdit = null,
-    };
-    const tempPlayer: EntityTypes.Player = .{
-        .player_UUID = 0, //UUID 0 resurved for client
-        .player_name = .fromString("squid"),
-        .gameMode = .Spectator,
-        .OnGround = false,
-        .pos = try MainWorld.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
-        .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
-        .headRotationAxis = @Vector(2, f16){ 0, 0 },
-        .armSwings = [2]f16{ 0, 0 }, //right,left
-        .hitboxmin = @Vector(3, f64){ -1, 0.8, -1 },
-        .hitboxmax = @Vector(3, f64){ 1, 0.2, 1 },
-        .Velocity = @splat(0),
-    };
-    const playerEntity = try MainWorld.SpawnEntity(null, tempPlayer);
-
-    for (0..0) |_| {
-        const tempCube: EntityTypes.Cube = .{
-            .velocity = @splat(0),
-            .bodyRotationAxis = @splat(0),
-            .pos = tempPlayer.pos,
-            .timestamp = std.time.microTimestamp(),
-        };
-        _ = try MainWorld.SpawnEntity(rand.random().int(u128), tempCube);
-    }
     const window = try initWindowAndProcs(&proc);
-    var renderer = Renderer.Renderer.init(&MainWorld, playerEntity, allocator) catch |err| {
-        std.debug.panic("Failed to initialize renderer: {}\n", .{err});
-        return err;
-    };
-    MainWorld.threadPool = &renderer.chunkManager.pool;
-    try renderer.Start();
+    
+    var game:Renderer.Game = undefined;
+    try game.init(allocator, secondary_allocator);
+    try game.startThreads();
     try EntityTypes.LoadMeshes(allocator);
 
     defer {
         std.log.info("started closing\n", .{});
         UserInput.deinit();
-        renderer.deinit();
+        game.deinit();
         EntityTypes.FreeMeshes();
         glfw.terminate();
-        MainWorld.Deinit();
         std.log.info("World Closed\n", .{});
         window.destroy();
         glfw.pollEvents(); //must be called to close the window
     }
 
-    try UserInput.init(&renderer, window);
+    try UserInput.init(&game, window);
     _ = window.setCursorPosCallback(UserInput.MouseCallback);
     _ = window.setSizeCallback(glfwSizeCallback);
     gui.init(secondary_allocator);
@@ -149,11 +85,11 @@ pub fn main() !void {
         defer Frame.End();
         const frameStart = std.time.nanoTimestamp();
         const waitforlock = ztracy.ZoneNC(@src(), "waitforlock", 2222111);
-        const playerPos = playerEntity.GetPos().?;
+        const playerPos = game.player.GetPos().?;
         waitforlock.End();
         const viewport_pixels_loop: @Vector(2, f32) = GetViewportPixels(window);
         const viewport_millimeters_loop: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize()));
-        const drawn = try renderer.Draw(viewport_pixels_loop);
+        const drawn = try game.renderer.Draw(&game, viewport_pixels_loop);
         if (f3t) fpsBox.Draw(viewport_pixels_loop, viewport_millimeters_loop, window);
         UserInput.menuDraw(viewport_pixels_loop, viewport_millimeters_loop, window);
         const drawText = ztracy.ZoneNC(@src(), "DrawLargeText", 24342);
@@ -176,7 +112,7 @@ pub fn main() !void {
         if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);
         lastFps = fps;
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], MainWorld.Chunks.count() });
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], game.world.Chunks.count() });
         defer secondary_allocator.free(printText);
         try fpsBox.options.text.?.SetText(printText);
     }
@@ -262,19 +198,6 @@ fn initWindowAndProcs(proc_table: *gl.ProcTable) !*glfw.Window {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     return window.?;
-}
-
-fn loadZON(comptime T: type, file: std.fs.File, allocator: std.mem.Allocator) !struct { result: T, arena: std.heap.ArenaAllocator } {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    const arenAllocator = arena.allocator();
-    var readBuf: [1024]u8 = undefined;
-    const stat = try file.stat();
-
-    var reader = file.reader(&readBuf);
-    const slice = try reader.interface.readAlloc(allocator, stat.size);
-    defer allocator.free(slice);
-    @setEvalBranchQuota(100000000);
-    return .{ .result = try std.zon.parse.fromSlice(T, arenAllocator, @ptrCast(slice), null, .{}), .arena = arena };
 }
 
 pub export fn glfwSizeCallback(window: *glfw.Window, w: c_int, h: c_int) void {

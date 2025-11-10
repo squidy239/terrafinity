@@ -92,6 +92,7 @@ pub const Name = struct {
             .data = [_]u8{0} ** 64,
             .len = str.len,
         };
+        std.debug.assert(str.len < name.data.len);
         @memcpy(name.data[0..str.len], str);
         return name;
     }

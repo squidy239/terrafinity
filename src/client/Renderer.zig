@@ -24,11 +24,159 @@ const ztracy = @import("ztracy");
 const Frustum = @import("Frustum.zig").Frustum;
 const Mesher = @import("Mesher.zig");
 const Textures = @import("textures.zig");
+const utils = @import("utils.zig");
+
+pub const Game = struct {
+    allocator: std.mem.Allocator,
+    world: World,
+    player: *Entity,
+    pool: ThreadPool,
+    chunkManager: ChunkManager,
+    renderer: Renderer,
+    generator: World.DefaultGenerator,
+    world_config_arena: std.heap.ArenaAllocator,
+    gen_config_arena: std.heap.ArenaAllocator,
+
+    // Threads
+    loaderThread: ?std.Thread,
+    unloaderThread: ?std.Thread,
+    updateEntitiesThread: ?std.Thread,
+
+    // Distances
+    MeshDistance: [3]std.atomic.Value(u32),
+    GenerateDistance: [3]std.atomic.Value(u32),
+    LoadDistance: [3]std.atomic.Value(u32),
+
+    running: std.atomic.Value(bool),
+
+    pub fn init(game:*@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator) !void {
+        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
+
+        const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
+        defer worldConfigFile.close();
+        const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
+        defer generatorConfigFile.close();
+
+        const w = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator);
+        const g = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator);
+
+        var GeneratorConfig = g.result;
+        const MainWorldConfig = w.result;
+
+        GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
+        GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
+        GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
+        GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
+        GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
+
+        
+
+        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
+        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
+        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
+        game.* = @This(){
+            .allocator = allocator,
+            .world = undefined,
+            .player = undefined,
+            .chunkManager = undefined,
+            .renderer = undefined,
+            .generator = World.DefaultGenerator{
+                .TerrainHeightCache = try .init(secondary_allocator, 4096),
+                .params = GeneratorConfig,
+            },
+            .pool = undefined,
+            .world_config_arena = w.arena,
+            .gen_config_arena = g.arena,
+            .loaderThread = null,
+            .unloaderThread = null,
+            .updateEntitiesThread = null,
+            .running = .init(true),
+            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) },
+            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) },
+            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) },
+        };
+        const cpu_count = try std.Thread.getCpuCount();
+        try game.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
+        game.world = .{
+            .allocator = allocator,
+            .threadPool = &game.pool,
+            .Entitys = ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32).init(secondary_allocator),
+            .Chunks = ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32).init(secondary_allocator),
+            .random = rand.random(),
+            .prng = rand,
+            .Config = MainWorldConfig,
+            .Generator = game.generator.getGenerator(),
+            .onEdit = null,
+        };
+
+        game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
+            .player_UUID = 0, //UUID 0 resurved for client
+            .player_name = .fromString("squid"),
+            .gameMode = .Spectator,
+            .OnGround = false,
+            .pos = try game.world.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
+            .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
+            .headRotationAxis = @Vector(2, f16){ 0, 0 },
+            .armSwings = [2]f16{ 0, 0 }, //right,left
+            .hitboxmin = @Vector(3, f64){ -1, 0.8, -1 },
+            .hitboxmax = @Vector(3, f64){ 1, 0.2, 1 },
+            .Velocity = @splat(0),
+        });
+        game.chunkManager = .{
+            .pool = &game.pool,
+            .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
+            .ChunkRenderListLock = . {},
+            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+            .MeshesToLoad = try .init(allocator),
+            .world = &game.world,
+            .MeshesToUnload = try .init(allocator),
+            .allocator = allocator,
+        };
+        game.renderer = try .init(allocator, game.player);
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.running.store(false, .monotonic);
+        if (self.updateEntitiesThread) |thread| thread.join();
+        if (self.loaderThread) |thread| thread.join();
+        if (self.unloaderThread) |thread| thread.join();
+        std.log.info("stopped threads", .{});
+
+        self.renderer.deinit();
+
+        self.chunkManager.pool.deinit();
+        std.log.info("closed threadpool", .{});
+
+        self.chunkManager.ChunkRenderListLock.lock();
+        var it = self.chunkManager.ChunkRenderList.iterator();
+        while (it.next()) |mesh| {
+            mesh.value_ptr.free();
+        }
+        self.chunkManager.ChunkRenderList.deinit();
+        self.chunkManager.LoadingChunks.deinit();
+        while (self.chunkManager.MeshesToLoad.popFirst()) |mesh| {
+            mesh.free(self.allocator);
+        }
+        self.chunkManager.MeshesToLoad.deinit(true);
+        self.chunkManager.MeshesToUnload.deinit(true);
+
+        self.world.Deinit();
+
+        self.world_config_arena.deinit();
+        self.gen_config_arena.deinit();
+    }
+
+    pub fn startThreads(self: *@This()) !void {
+        self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ self, 5 * std.time.ns_per_ms });
+        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms, &self.running });
+        self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager) };
+    }
+};
 
 pub const Renderer = struct {
     pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,
-    running: std.atomic.Value(bool),
     facebuffer: c_uint,
     player: *Entity,
     cameraFront: @Vector(3, f64),
@@ -38,53 +186,20 @@ pub const Renderer = struct {
     shaderprogram: c_uint,
     blockAtlasTextureId: c_uint,
     uniforms: UniformLocations,
-    MeshDistance: [3]std.atomic.Value(u32),
-    GenerateDistance: [3]std.atomic.Value(u32),
-    LoadDistance: [3]std.atomic.Value(u32),
-    chunkManager: *ChunkManager,
-    loaderThread: ?std.Thread,
-    unloaderThread: ?std.Thread,
-    updateEntitiesThread: ?std.Thread,
 
-    ///must be called on main thread
-    pub fn init(world: *World, player: *Entity, allocator: std.mem.Allocator) !@This() {
-        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
-        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-        std.debug.assert(player.type == .Player);
+    pub fn init(allocator: std.mem.Allocator, player: *Entity) !@This() {
         _ = player.ref_count.fetchAdd(1, .seq_cst);
         var renderer = @This(){
             .allocator = allocator,
-            .running = .init(true),
             .mouseSensitivity = 0.2,
             .cameraFront = @Vector(3, f64){ 0.0001, -0.4, 0.001 },
             .facebuffer = undefined,
             .indecies = undefined,
             .shaderprogram = undefined,
             .entityshaderprogram = undefined,
-            .chunkManager = undefined, // Will be initialized below
             .blockAtlasTextureId = undefined,
             .uniforms = undefined,
             .player = player,
-
-            .GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) },
-            .LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) }, //should be 2 or over gendistance
-            .MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) }, //must 2 or over gendistance to prevent infinite loop of loading and unloading
-            .loaderThread = null,
-            .unloaderThread = null,
-            .updateEntitiesThread = null,
-        };
-
-        renderer.chunkManager = try allocator.create(ChunkManager);
-        renderer.chunkManager.* = .{
-            .pool = undefined,
-            .ChunkRenderList = std.AutoArrayHashMap([3]i32, MeshBufferIDs).init(allocator),
-            .ChunkRenderListLock = .{},
-            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
-            .MeshesToLoad = try .init(allocator),
-            .world = world,
-            .MeshesToUnload = try .init(allocator),
-            .allocator = allocator,
         };
 
         try renderer.CompileShaders();
@@ -94,43 +209,13 @@ pub const Renderer = struct {
         return renderer;
     }
 
-    pub fn Start(self: *@This()) !void {
-        const cpu_count = try std.Thread.getCpuCount();
-        try self.chunkManager.*.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = self.allocator });
-        self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms, self.player, &self.running });
-        self.unloaderThread = try std.Thread.spawn(.{}, Loader.ChunkUnloaderThread, .{ self.chunkManager.*.world, &self.LoadDistance, self.player, 5 * std.time.ns_per_ms, &self.running });
-        self.updateEntitiesThread = try std.Thread.spawn(.{}, UpdateEntitiesThread, .{ self.chunkManager.*.world, 5 * std.time.ns_per_ms, &self.running });
-        self.chunkManager.*.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(self.chunkManager) };
-    }
-
-    ///threadpool should be deinitualised before calling, dosent destroy window
     pub fn deinit(self: *@This()) void {
-        self.running.store(false, .monotonic);
-        if (self.updateEntitiesThread) |thread| thread.join();
-        if (self.loaderThread) |thread| thread.join();
-        if (self.unloaderThread) |thread| thread.join();
-        std.log.info("stopped threads", .{});
-        self.chunkManager.*.pool.deinit();
-        std.log.info("closed threadpool", .{});
         _ = self.player.ref_count.fetchSub(1, .seq_cst);
         gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
         gl.DeleteBuffers(1, @ptrCast(&self.indecies));
         gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
         gl.DeleteProgram(self.shaderprogram);
         gl.DeleteProgram(self.entityshaderprogram);
-        self.chunkManager.*.ChunkRenderListLock.lock();
-        var it = self.chunkManager.*.ChunkRenderList.iterator();
-        while (it.next()) |mesh| {
-            mesh.value_ptr.free();
-        }
-        self.chunkManager.*.ChunkRenderList.deinit();
-        self.chunkManager.*.LoadingChunks.deinit();
-        while (self.chunkManager.*.MeshesToLoad.popFirst()) |mesh| {
-            mesh.free(self.allocator);
-        }
-        self.chunkManager.*.MeshesToLoad.deinit(true);
-        self.chunkManager.*.MeshesToUnload.deinit(true);
-        self.allocator.destroy(self.chunkManager);
         std.log.info("renderer deinit", .{});
     }
 
@@ -215,7 +300,7 @@ pub const Renderer = struct {
         gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
         gl.EnableVertexAttribArray(0);
     }
-    pub fn Draw(self: *@This(), viewport_pixels: @Vector(2, f32)) ![2]u64 {
+    pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
         const playerPos = self.player.GetPos().?;
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
@@ -228,31 +313,31 @@ pub const Renderer = struct {
         clear.End();
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        const drawn = self.DrawChunks(playerPos, skyColor, viewport_pixels);
+        const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
         drawChunks.End();
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-        self.DrawEntities(playerPos, viewport_pixels);
+        self.DrawEntities(game, playerPos, viewport_pixels);
         drawEntities.End();
-        const meshDistance = [3]u32{ self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst), self.MeshDistance[2].load(.seq_cst) };
+        const meshDistance = [3]u32{ game.MeshDistance[0].load(.seq_cst), game.MeshDistance[1].load(.seq_cst), game.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
         const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-        Loader.UnloadMeshes(self.chunkManager, meshDistance, playerChunkPos);
+        Loader.UnloadMeshes(&game.chunkManager, meshDistance, playerChunkPos);
         unloadMeshes.End();
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
             defer if (glSync) |sync| gl.DeleteSync(sync);
-            _ = try Loader.LoadMeshes(self, glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+            _ = try Loader.LoadMeshes(self, game, glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
         }
         return drawn;
     }
-    fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
+    fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
-        const projdist = 2 * 32 * @max(@max(self.MeshDistance[0].load(.seq_cst), self.MeshDistance[1].load(.seq_cst)), self.MeshDistance[2].load(.seq_cst));
+        const projdist = 2 * 32 * @max(@max(game.MeshDistance[0].load(.seq_cst), game.MeshDistance[1].load(.seq_cst)), game.MeshDistance[2].load(.seq_cst));
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
         const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
@@ -260,10 +345,9 @@ pub const Renderer = struct {
         gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
         gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        self.chunkManager.*.ChunkRenderListLock.lockShared();
-        defer self.chunkManager.*.ChunkRenderListLock.unlockShared();
+        game.chunkManager.ChunkRenderListLock.lockShared();
+        defer game.chunkManager.ChunkRenderListLock.unlockShared();
 
-        //std.debug.print("{d}\n", .{MainWorld.ChunkMeshes.items.len});
         var drawnchunks: u64 = 0;
         var torenderchunks: u64 = 0;
         const millitimestamp = std.time.milliTimestamp();
@@ -274,7 +358,7 @@ pub const Renderer = struct {
             if (i == 1) gl.Disable(gl.CULL_FACE);
             defer gl.Enable(gl.CULL_FACE);
 
-            var it = self.chunkManager.*.ChunkRenderList.iterator();
+            var it = game.chunkManager.ChunkRenderList.iterator();
             while (it.next()) |item| {
                 torenderchunks += 1;
                 const buffer_ids = item.value_ptr;
@@ -293,29 +377,22 @@ pub const Renderer = struct {
         return [2]u64{ drawnchunks, torenderchunks };
     }
 
-    pub fn DrawEntities(self: *@This(), playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) void {
+    pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) void {
         gl.FrontFace(gl.CCW);
         gl.UseProgram(self.entityshaderprogram);
         const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
         gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        const enbktamount = self.chunkManager.*.world.Entitys.buckets.len;
+        const enbktamount = game.chunkManager.world.Entitys.buckets.len;
         for (0..enbktamount) |b| {
-            self.chunkManager.*.world.Entitys.buckets[b].lock.lockShared();
-            var it = self.chunkManager.*.world.Entitys.buckets[b].hash_map.valueIterator();
-            defer self.chunkManager.*.world.Entitys.buckets[b].lock.unlockShared();
+            game.chunkManager.world.Entitys.buckets[b].lock.lockShared();
+            var it = game.chunkManager.world.Entitys.buckets[b].hash_map.valueIterator();
+            defer game.chunkManager.world.Entitys.buckets[b].lock.unlockShared();
             while (it.next()) |c| {
-                // std.debug.print("drawn: {any}\n", .{c.*.*});
                 _ = c.*.ref_count.fetchAdd(1, .seq_cst);
                 defer _ = c.*.ref_count.fetchSub(1, .seq_cst);
                 try c.*.draw(playerPos, self);
             }
         }
-    }
-
-    fn getLen(arraylist: anytype, lock: *std.Thread.RwLock) usize {
-        lock.lockShared();
-        defer lock.unlockShared();
-        return arraylist.items.len;
     }
 };
 
@@ -334,8 +411,8 @@ pub const MeshBufferIDs = struct {
             if (self.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
             if (self.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
             if (self.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
-            gl.DeleteBuffers(1, @ptrCast(&self.UBO));
         }
+        gl.DeleteBuffers(1, @ptrCast(&self.UBO));
     }
 };
 

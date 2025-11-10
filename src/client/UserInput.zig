@@ -14,7 +14,7 @@ const ztracy = @import("ztracy");
 
 const Renderer = @import("Renderer.zig").Renderer;
 
-var render: *Renderer = undefined;
+var game: *Game = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
@@ -23,11 +23,11 @@ var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
-pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out of this and redo user input handeling
-    render = ren;
+pub fn init(g: *Game, window: *glfw.Window) !void { //TODO move menu out of this and redo user input handeling
+    game = g;
     worldEditor = .{
-        .tempallocator = render.allocator,
-        .world = render.chunkManager.world,
+        .tempallocator = game.allocator,
+        .world = &game.world,
     };
     lastmicrotime = std.time.microTimestamp();
     const textEscMenu = gui.Element.CreationOptions{
@@ -38,7 +38,7 @@ pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out o
             .height = .{ .yPercent = 75 },
         },
         .cornerPixelRadii = @splat(.{ .pixels = 25 }),
-        .children = &.{ .{
+        .children = &.{ .{ //TODO move menu out of this and redo user input handeling
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
             .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
             .size = .{
@@ -55,7 +55,7 @@ pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out o
             },
             .onHover = onHoverEsc,
             .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        }, .{
+        }, .{ //TODO move menu out of this and redo user input handeling
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
             .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
             .size = .{
@@ -72,7 +72,7 @@ pub fn init(ren: *Renderer, window: *glfw.Window) !void { //TODO move menu out o
             },
             .onHover = onHoverC,
             .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        }, gui.Widgets.Slider(.{
+        }, gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
             .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
             .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
         }, &childrenBuffer, .y) },
@@ -101,15 +101,15 @@ fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window
     var genDistf: @Vector(2, f32) = @Vector(2, f32){ 100, 100 };
     genDistf *= @splat(slideData.sliderPos);
     const genDist: @Vector(2, u32) = @intFromFloat(genDistf);
-    render.GenerateDistance[0].store(genDist[0], .monotonic);
-    render.GenerateDistance[1].store(genDist[1], .monotonic);
-    render.GenerateDistance[2].store(genDist[0], .monotonic);
-    render.LoadDistance[0].store(genDist[1] + 2, .monotonic);
-    render.LoadDistance[1].store(genDist[0] + 2, .monotonic);
-    render.LoadDistance[2].store(genDist[1] + 2, .monotonic);
-    render.MeshDistance[0].store(genDist[0] + 2, .monotonic);
-    render.MeshDistance[1].store(genDist[1] + 2, .monotonic);
-    render.MeshDistance[2].store(genDist[0] + 2, .monotonic);
+    game.GenerateDistance[0].store(genDist[0], .monotonic);
+    game.GenerateDistance[1].store(genDist[1], .monotonic);
+    game.GenerateDistance[2].store(genDist[0], .monotonic);
+    game.LoadDistance[0].store(genDist[1] + 2, .monotonic);
+    game.LoadDistance[1].store(genDist[0] + 2, .monotonic);
+    game.LoadDistance[2].store(genDist[1] + 2, .monotonic);
+    game.MeshDistance[0].store(genDist[0] + 2, .monotonic);
+    game.MeshDistance[1].store(genDist[1] + 2, .monotonic);
+    game.MeshDistance[2].store(genDist[0] + 2, .monotonic);
     std.debug.print("genDist: {d}\n", .{genDist});
 }
 
@@ -179,10 +179,10 @@ pub fn processInput(window: *glfw.Window) !void {
     lastmicrotime = timestamp;
     var posAdjustment: @Vector(3, f64) = @splat(0);
     defer {
-        render.player.lock.lock();
+        game.player.lock.lock();
         std.debug.assert(@reduce(.Or, posAdjustment == posAdjustment)); //posAdjustment is not NaN
-        @as(*EntityTypes.Player, @ptrCast(@alignCast(render.player.ptr))).pos += posAdjustment;
-        render.player.lock.unlock();
+        @as(*EntityTypes.Player, @ptrCast(@alignCast(game.player.ptr))).pos += posAdjustment;
+        game.player.lock.unlock();
     }
     var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.002, 0.002, 0.002 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (ts.Sprinting) {
@@ -192,16 +192,16 @@ pub fn processInput(window: *glfw.Window) !void {
         cameraSpeed *= @splat(32);
     }
     if (window.getKey(glfw.Key.w) == .press)
-        posAdjustment += cameraSpeed * render.cameraFront;
+        posAdjustment += cameraSpeed * game.renderer.cameraFront;
     if (window.getKey(glfw.Key.s) == .press)
-        posAdjustment -= cameraSpeed * render.cameraFront;
+        posAdjustment -= cameraSpeed * game.renderer.cameraFront;
     if (window.getKey(glfw.Key.a) == .press) {
-        const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
+        const cross = zm.vec.cross(game.renderer.cameraFront, Renderer.cameraUp);
         if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
             posAdjustment -= zm.vec.normalize(cross) * cameraSpeed;
     }
     if (window.getKey(glfw.Key.d) == .press) {
-        const cross = zm.vec.cross(render.cameraFront, Renderer.cameraUp);
+        const cross = zm.vec.cross(game.renderer.cameraFront, Renderer.cameraUp);
         if (@reduce(.Or, cross != @Vector(3, f64){ 0, 0, 0 }))
             posAdjustment += zm.vec.normalize(cross) * cameraSpeed;
     }
@@ -221,7 +221,7 @@ pub fn processInput(window: *glfw.Window) !void {
     if (window.getKey(glfw.Key.escape) == .press or window.getKey(glfw.Key.left_super) == .press) {
         if (!ts.CursorEscaped) {
             ts.CursorEscaped = true;
-            _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).normal);
+            _ = try glfw.Window.setInputMode(window, glfw.InputMode.cursor, .normal);
         }
     }
     if (window.getKey(glfw.Key.left_control) == .press) {
@@ -231,10 +231,10 @@ pub fn processInput(window: *glfw.Window) !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (window.getKey(glfw.Key.r) == .press)
-        try render.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(render.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
+        try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (window.getKey(glfw.Key.b) == .press) {
-        const cone = World.WorldEditor.Cone(f64).init(render.player.GetPos().?, render.cameraFront, 1000, 100, 50);
+        const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
@@ -242,14 +242,14 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
-        try render.chunkManager.pool.spawn(genFractalTask, .{}, .High);
+        try game.chunkManager.pool.spawn(genFractalTask, .{}, .High);
     }
 
     if (window.getKey(glfw.Key.i) == .press) {
-        const playerPos = render.player.GetPos().?;
+        const playerPos = game.player.GetPos().?;
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
-        std.debug.print("inspected: {any}, data: {any}", .{ chpos, render.chunkManager.world.Chunks.get(chpos) });
-        std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ render.cameraFront, Renderer.cameraUp });
+        std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
+        std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
         worldEditorLock.lock();
         defer worldEditorLock.unlock();
         std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
@@ -260,18 +260,18 @@ pub fn processInput(window: *glfw.Window) !void {
         benchmarkStartTime = std.time.microTimestamp();
     }
     if (ts.Benchmark) {
-        render.player.lock.lock();
+        game.player.lock.lock();
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
-        const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(render.player.ptr));
-        playerptr.pos = std.math.lerp(playerptr.pos, render.chunkManager.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try render.chunkManager.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(render.chunkManager.world.Config.SpawnCenterPos[0] + t), @intFromFloat(render.chunkManager.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
+        const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
+        playerptr.pos = std.math.lerp(playerptr.pos, game.chunkManager.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try game.chunkManager.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[0] + t), @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = playerptr.pos;
-        render.player.lock.unlock();
+        game.player.lock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
-        if (render.chunkManager.world.Chunks.get(chpos) == null) {
+        if (game.chunkManager.world.Chunks.get(chpos) == null) {
             std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
-            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), render.chunkManager.world.Chunks.get(chpos) });
+            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), game.chunkManager.world.Chunks.get(chpos) });
             ts.Benchmark = false;
         }
     }
@@ -309,7 +309,7 @@ fn genFractalTask() void {
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
     const tree = Structures.Tree{
-        .pos = @intFromFloat(render.player.GetPos().?),
+        .pos = @intFromFloat(game.player.GetPos().?),
         .baseRadius = 5,
         .rand = random.random(),
         .trunkHeight = 64,
@@ -327,12 +327,12 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;
     std.debug.assert(isinit);
     if (ts.CursorEscaped) return;
-    const xoffset: f64 = (xpos - last_mouse_pos[0]) * render.mouseSensitivity;
-    const yoffset: f64 = (ypos - last_mouse_pos[1]) * render.mouseSensitivity;
+    const xoffset: f64 = (xpos - last_mouse_pos[0]) * game.renderer.mouseSensitivity;
+    const yoffset: f64 = (ypos - last_mouse_pos[1]) * game.renderer.mouseSensitivity;
     last_mouse_pos[0] = xpos;
     last_mouse_pos[1] = ypos;
-    render.player.lock.lock();
-    const player: *EntityTypes.Player = @ptrCast(@alignCast(render.player.ptr));
+    game.player.lock.lock();
+    const player: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
     var newHeadRotationAxis = player.headRotationAxis;
     var newBodyRotationAxis = player.bodyRotationAxis;
     newHeadRotationAxis -= @Vector(2, f32){ @floatCast(yoffset), @floatCast(xoffset) };
@@ -343,13 +343,13 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
 
     player.headRotationAxis = newHeadRotationAxis;
     player.bodyRotationAxis = newBodyRotationAxis;
-    render.player.lock.unlock();
+    game.player.lock.unlock();
 
     var cameraFront: @Vector(3, f64) = undefined;
     cameraFront[0] = @floatCast(@sin(std.math.degreesToRadians(newHeadRotationAxis[1])) * @cos(std.math.degreesToRadians(newHeadRotationAxis[0])));
     cameraFront[1] = @floatCast(@sin(std.math.degreesToRadians(newHeadRotationAxis[0])));
     cameraFront[2] = @floatCast(@cos(std.math.degreesToRadians(newHeadRotationAxis[1])) * @cos(std.math.degreesToRadians(newHeadRotationAxis[0])));
-    render.cameraFront = zm.vec.normalize(cameraFront);
+    game.renderer.cameraFront = zm.vec.normalize(cameraFront);
 }
 
 fn getDiff(a: @Vector(3, f32), b: @Vector(3, f32)) f32 {
