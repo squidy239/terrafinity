@@ -65,8 +65,8 @@ pub const DefaultGenerator = struct {
         seed: u64,
         terrainScale: f32,
         genStructures: bool,
-        LargeTrees: []const World.Structures.Tree.Step,
-        MediumTrees: []const World.Structures.Tree.Step,
+        LargeTrees: []const World.Tree.Step,
+        MediumTrees: []const World.Tree.Step,
     };
 
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32), gen_params: GenParams, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -285,7 +285,7 @@ pub const DefaultGenerator = struct {
                     if (true and treeChance < 0.000002) {
                         const steps = genParams.LargeTrees;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        const tree = World.Structures.Tree{
+                        const tree = World.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 15,
                             .rand = rand,
@@ -303,7 +303,7 @@ pub const DefaultGenerator = struct {
                         const factor = rand.float(f32) + 0.5; //TODO replace a lot of rand with hashes
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const steps = genParams.MediumTrees;
-                        const tree = World.Structures.Tree{
+                        const tree = World.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 3 * factor,
                             .rand = rand,
@@ -316,22 +316,7 @@ pub const DefaultGenerator = struct {
                         };
 
                         _ = try tree.place(&worldEditor);
-                    } else if (false and treeChance < 0.0015) {
-                        structuresGenerated += 1;
-                        const factor = rand.float(f32) + 0.5;
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        try World.Structures.PlaceTree(&worldEditor, centerPos, rand, .{
-                            .height = @intFromFloat(25 * factor),
-                            .base_radius = @intFromFloat(@round(4 * factor)),
-                            .main_branches = 0,
-                            .branch_length = 0,
-                            .canopy_radius = @intFromFloat(12 * factor),
-                            .top_radius_factor = 0.75,
-                            .branch_start_height_factor = 0.90,
-                            .canopy_density = 0.7,
-                            .scale = genParams.terrainScale,
-                        });
-                    }
+                    } 
                 }
             }
         }

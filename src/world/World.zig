@@ -11,8 +11,9 @@ const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
 
 pub const World = struct {
-    pub const Structures = @import("Structures.zig");
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
+    pub const Tree = @import("structures/Tree.zig").Tree;
+    pub const TexturedSphere = @import("structures/TexturedSphere.zig");
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
     prng: std.Random.DefaultPrng,

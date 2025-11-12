@@ -2,7 +2,6 @@ const std = @import("std");
 const root = @import("root");
 const Game = @import("Game.zig").Game;
 const World = @import("root").World;
-const Structures = World.Structures;
 
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
 const EntityTypes = @import("EntityTypes");
@@ -239,10 +238,13 @@ pub fn processInput(window: *glfw.Window) !void {
         //_ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         //worldEditorLock.unlock();
         // 
-        
-        const sphere = World.Structures.TexturedSphere(f64, texture, void).init(game.player.GetPos().?, 128);
+        const noise = World.DefaultGenerator.Noise.Noise(f32){
+            .noise_type = .perlin,
+            .frequency = 0.1,
+        };
         worldEditorLock.lock();
-        try worldEditor.PlaceSamplerShape(.Air, sphere);
+        try World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 0.25, noise, .Air);
+        std.debug.print("placeing\n", .{});
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
     }
@@ -299,10 +301,10 @@ pub fn processInput(window: *glfw.Window) !void {
 }
 
 fn genFractalTask() void {
-    comptime var csteps: [20]Structures.Tree.Step = undefined;
+    comptime var csteps: [20]World.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
         step.* = switch (r) {
-            0 => Structures.Tree.Step{
+            0 => World.Tree.Step{
                 .lengthPercent = 1.0,
                 .radiusPercent = 1.0,
                 .branchCountMax = 32,
@@ -311,7 +313,7 @@ fn genFractalTask() void {
                 .block = .Stone,
                 .branchRandomness = 0.0,
             },
-            1...21 => Structures.Tree.Step{
+            1...21 => World.Tree.Step{
                 .lengthPercent = 0.75,
                 .radiusPercent = 0.5,
                 .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },
@@ -326,7 +328,7 @@ fn genFractalTask() void {
     };
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
-    const tree = Structures.Tree{
+    const tree = World.Tree{
         .pos = @intFromFloat(game.player.GetPos().?),
         .baseRadius = 5,
         .rand = random.random(),
@@ -341,16 +343,6 @@ fn genFractalTask() void {
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 
-fn texture(u:f64, v:f64, args:anytype)f64{
-    const noise = World.DefaultGenerator.Noise.Noise(f32){
-        .noise_type = .simplex,
-        .frequency = 4,
-        
-    };
-    _ = args;
-    const sampled = noise.genNoise2DRange(@floatCast(u),@floatCast(v), f32, 0, 1);
-    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0),@as(f32, 0.75)));
-}
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;
