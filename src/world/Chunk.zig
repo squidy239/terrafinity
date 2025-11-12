@@ -158,7 +158,7 @@ pub const Chunk = struct {
         }
     }
 
-    pub fn WaitForRefAmount(self: *const @This(), comptime amount: u32, comptime maxMicroTime: ?u64) bool {
+    pub fn WaitForRefAmount(self: *const @This(), amount: u32, maxMicroTime: ?u64) bool {
         const wait = ztracy.ZoneNC(@src(), "WaitForRefAmount", 5554);
         defer wait.End();
         if (self.ref_count.load(.seq_cst) == amount) return true;

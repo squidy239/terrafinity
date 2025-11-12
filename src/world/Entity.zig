@@ -11,7 +11,7 @@ threadlocal var UnloadingEntitiesPos: usize = 0;
 pub const EntityType = enum(u16) {
     Player = 0,
     Cube = 1,
-    OtherCube = 2,
+    Explosive = 2,
 };
 pub const Entity = struct {
     type: EntityType,
@@ -19,17 +19,17 @@ pub const Entity = struct {
     lock: std.Thread.RwLock = .{},
     ref_count: std.atomic.Value(u32),
     functions: struct {
-        updateFn: ?*const fn (ptr: *anyopaque, world: *World) void = null,
+        updateFn: ?*const fn (ptr: *anyopaque, world: *World, uuid:u128) void = null,
         freeFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void = null,
         getPosFn: ?*const fn (ptr: *anyopaque) @Vector(3, f64) = null,
         drawFn: ?*const fn (ptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) void = null,
     },
 
-    pub fn update(self: *@This(), world: *World) void {
+    pub fn update(self: *@This(), world: *World, uuid:u128) void {
         if (self.functions.updateFn) |updateFn| {
             self.lock.lock();
             defer self.lock.unlock();
-            return updateFn(self.ptr, world);
+            return updateFn(self.ptr, world, uuid);
         }
     }
 
@@ -55,7 +55,7 @@ pub const Entity = struct {
         }
     }
 
-    pub fn WaitForRefAmount(self: *@This(), comptime amount: u32, comptime maxMicroTime: ?u64) bool {
+    pub fn WaitForRefAmount(self: *@This(), amount: u32, comptime maxMicroTime: ?u64) bool {
         if (self.ref_count.load(.seq_cst) == amount) return true;
         const st = std.time.microTimestamp();
         while (self.ref_count.load(.seq_cst) != amount) {
@@ -72,7 +72,7 @@ pub const Entity = struct {
         switch (self.type) {
             EntityType.Cube => allocator.destroy(@as(*EntityTypes.Cube, @ptrCast(@alignCast(self.ptr)))),
             EntityType.Player => allocator.destroy(@as(*EntityTypes.Player, @ptrCast(@alignCast(self.ptr)))),
-            EntityType.OtherCube => allocator.destroy(@as(*EntityTypes.OtherCube, @ptrCast(@alignCast(self.ptr)))),
+            EntityType.Explosive => allocator.destroy(@as(*EntityTypes.Explosive, @ptrCast(@alignCast(self.ptr)))),
         }
     }
 
@@ -128,9 +128,9 @@ pub fn TickEntitiesBucketTask(world: *World, running: *std.atomic.Value(bool), c
     defer TickEntitiesTask.End();
     world.Entitys.buckets[bucket].lock.lockShared();
     defer world.Entitys.buckets[bucket].lock.unlockShared();
-    var it = world.Entitys.buckets[bucket].hash_map.valueIterator();
+    var it = world.Entitys.buckets[bucket].hash_map.iterator();
     while (it.next()) |c| {
-        c.*.update(world);
+        c.value_ptr.*.update(world, c.key_ptr.*);
     }
 }
 

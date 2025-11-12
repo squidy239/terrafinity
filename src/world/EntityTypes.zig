@@ -2,7 +2,7 @@ const std = @import("std");
 const Renderer = @import("root").Renderer;
 const World = @import("root").World;
 const zm = @import("root").zm;
-
+const Block = @import("root").Block;
 const Entity = @import("Entity").Entity;
 const EntityType = @import("Entity").EntityType;
 const gl = @import("gl");
@@ -156,7 +156,7 @@ pub const Cube = struct {
         const timestamp = self.timestamp;
         self.timestamp = std.time.microTimestamp();
         const dt: @Vector(3, f64) = @splat(@as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001);
-        self.velocity[world.Rand.intRangeAtMost(usize, 0, 2)] += 100 * (world.Rand.float(f64) - 0.5) * dt[0];
+        self.velocity[world.random.intRangeAtMost(usize, 0, 2)] += 100 * (world.random.float(f64) - 0.5) * dt[0];
         // const player = world.Entitys.getandaddref(0).?;
         //defer player.release();
         //  const diff = player.GetPos().? - self.pos;
@@ -173,7 +173,7 @@ pub const Cube = struct {
         return self.pos;
     }
 
-    pub fn draw(selfptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer) void {
+    pub fn draw(selfptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) void {
         const self: *@This() = @ptrCast(@alignCast(selfptr));
         // std.debug.print("d\n", .{});
         //     const timestamp = self.timestamp;
@@ -218,25 +218,96 @@ pub const Cube = struct {
         return entity;
     }
 };
-
-pub const OtherCube = struct {
-    pos: @Vector(3, f32),
+fn texture(u:f64, v:f64, args:anytype)f64{
+    const noise = World.DefaultGenerator.Noise.Noise(f32){
+        .noise_type = .simplex,
+        .frequency = 4,
+        
+    };
+    _ = args;
+    const sampled = noise.genNoise2DRange(@floatCast(u),@floatCast(v), f32, 0, 1);
+    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0),@as(f32, 0.75)));
+}
+pub const Explosive = struct {
+    pos: @Vector(3, f64),
+    velocity: @Vector(3, f64),
     timestamp: i64,
-    bodyRotationAxis: @Vector(3, f64),
+    explosionRadius:f64,
+    exploded:bool,
 
-    pub fn update(self: *@This()) !void {
+    pub fn update(selfptr: *anyopaque, world: *World, uuid: u128) void {
+        const self: *@This() = @ptrCast(@alignCast(selfptr));
         const timestamp = self.timestamp;
         self.timestamp = std.time.microTimestamp();
-        self.pos += @Vector(3, f64){ @floatFromInt(timestamp), @floatFromInt(timestamp), @floatFromInt(timestamp) };
+        const dt: @Vector(3, f64) = @splat(@as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001);
+        self.pos += self.velocity * dt;
+        var worldEditor = World.WorldEditor{
+            .editBuffer = .{},
+            .lastChunkCache = null,
+            .lastChunkReadCache = null,
+            .world = world,
+            .tempallocator = world.allocator,
+        };
+        defer worldEditor.ClearReader();
+        if(Block.Properties.visible.get(worldEditor.GetBlock(@intFromFloat(self.pos)) catch |err| std.debug.panic("err: {any}\n", .{err}))){
+            worldEditor.ClearReader();
+
+            const sphere = World.Structures.TexturedSphere(f64, texture, void).init(self.pos, self.explosionRadius);
+            _ = uuid;
+            worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+            
+        }
     }
 
-    pub fn getPos(self: anytype, args: anytype) @Vector(3, f32) {
-        _ = args;
-        return @floatCast(self.pos);
+    pub fn getPos(selfptr: *anyopaque) @Vector(3, f64) {
+        const self: *@This() = @ptrCast(@alignCast(selfptr));
+        return self.pos;
     }
 
-    pub fn getTimestamp(self: *@This(), args: anytype) i64 {
-        _ = args;
-        return self.timestamp;
+    pub fn draw(selfptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) void {
+        const self: *@This() = @ptrCast(@alignCast(selfptr));
+        // std.debug.print("d\n", .{});
+        //     const timestamp = self.timestamp;
+        //self.timestamp = std.time.microTimestamp();
+        //const dt = self.timestamp - timestamp;
+        //   self.update(playerPos);
+        const relativePos: @Vector(3, f32) = @floatCast(self.pos - playerPos);
+        //const md = @Vector(3, u32){ renderer.MeshDistance[0].load(.seq_cst), renderer.MeshDistance[1].load(.seq_cst), renderer.MeshDistance[2].load(.seq_cst) };
+        // if (@reduce(.Or, @abs(diff / @Vector(3, f64){ 32, 32, 32 }) > @as(@Vector(3, f64), (@floatFromInt(md))))) {
+        //   return;
+        //   }
+        //      const rotation = zm.Mat4f.rotation(@Vector(3, f32){ 0, 1, 0 }, @floatFromInt(30));
+        gl.Uniform3f(renderer.uniforms.relativeEntityposlocation, relativePos[0], relativePos[1], relativePos[2]);
+        //     gl.UniformMatrix4fv(renderer.uniforms.EntityRotationlocation, 1, gl.TRUE, @ptrCast(&(rotation.data)));
+        gl.BindVertexArray(EntityMeshes[@intFromEnum(EntityType.Cube)].?.vao);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, EntityMeshes[@intFromEnum(EntityType.Cube)].?.ebo);
+        gl.DrawElements(gl.TRIANGLES, EntityMeshesLen[@intFromEnum(EntityType.Cube)], gl.UNSIGNED_INT, 0);
+        // gl.DrawArrays(gl.TRIANGLES, 0, EntityMeshesLen[@intFromEnum(EntityType.Cube)]);
+        // gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, 0);
+    }
+    ///inits ref_count to 1
+    pub fn MakeEntity(self: @This(), allocator: std.mem.Allocator) !*Entity {
+        var mem = try allocator.create(@This());
+        mem.* = self;
+        _ = &mem;
+
+        const en = Entity{
+            .type = .Explosive,
+            .ptr = mem,
+            .lock = .{},
+            .ref_count = .init(1),
+            .functions = .{
+                .getPosFn = @This().getPos,
+                .updateFn = @This().update,
+                .drawFn = @This().draw,
+            },
+        };
+
+        var entity = try allocator.create(Entity);
+        entity.* = en;
+        _ = &entity;
+        return entity;
     }
 };
+

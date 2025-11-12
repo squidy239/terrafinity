@@ -34,7 +34,6 @@ pub const Game = struct {
 
     pub fn init(game:*@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator) !void {
         game.game_arena = .init(secondary_allocator);
-        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
 
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
         defer worldConfigFile.close();
@@ -70,13 +69,13 @@ pub const Game = struct {
             .threadPool = &game.pool,
             .Entitys = .init(secondary_allocator),
             .Chunks = .init(secondary_allocator),
-            .random = rand.random(),
-            .prng = rand,
+            .random = undefined,
+            .prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp())),
             .Config = MainWorldConfig,
             .Generator = game.generator.getGenerator(),
             .onEdit = null,
         };
-
+        game.world.random = game.world.prng.random();
         game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
             .player_UUID = 0, //UUID 0 resurved for client
             .player_name = .fromString("squid"),

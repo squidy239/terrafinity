@@ -11,7 +11,6 @@ const glfw = @import("zglfw");
 const gui = @import("gui");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
-
 const Renderer = @import("Renderer.zig").Renderer;
 
 var game: *Game = undefined;
@@ -234,11 +233,30 @@ pub fn processInput(window: *glfw.Window) !void {
         try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
 
     if (window.getKey(glfw.Key.b) == .press) {
+        //const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
+        //worldEditorLock.lock();
+        //try worldEditor.PlaceSamplerShape(.Stone, cone);
+        //_ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        //worldEditorLock.unlock();
+        // 
+        
+        const sphere = World.Structures.TexturedSphere(f64, texture, void).init(game.player.GetPos().?, 128);
+        worldEditorLock.lock();
+        try worldEditor.PlaceSamplerShape(.Air, sphere);
+        _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        worldEditorLock.unlock();
+    }
+    
+    
+    if (window.getKey(glfw.Key.f) == .press) {
         const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
+        
+        
+       // _ = try game.world.SpawnEntity(null, EntityTypes.Explosive{.pos = game.player.GetPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp(), .explosionRadius = 32, .exploded = false,});
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
@@ -321,6 +339,17 @@ fn genFractalTask() void {
     defer worldEditorLock.unlock();
     _ = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+}
+
+fn texture(u:f64, v:f64, args:anytype)f64{
+    const noise = World.DefaultGenerator.Noise.Noise(f32){
+        .noise_type = .simplex,
+        .frequency = 4,
+        
+    };
+    _ = args;
+    const sampled = noise.genNoise2DRange(@floatCast(u),@floatCast(v), f32, 0, 1);
+    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0),@as(f32, 0.75)));
 }
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {

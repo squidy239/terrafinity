@@ -193,9 +193,7 @@ pub const Tree = struct {
         return sample;
     }
 
-    inline fn vecLength(v: @Vector(3, f64)) f64 {
-        return @sqrt(@reduce(.Add, v * v));
-    }
+
 
     inline fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
         const scaled = @Vector(3, f64){
@@ -206,10 +204,6 @@ pub const Tree = struct {
         return vecNormalize(scaled);
     }
 
-    inline fn vecNormalize(v: @Vector(3, f64)) @Vector(3, f64) {
-        const len = vecLength(v);
-        return if (len > 0.00001) v / @as(@Vector(3, f64), @splat(len)) else v;
-    }
 
     inline fn vecCross(a: @Vector(3, f64), b: @Vector(3, f64)) @Vector(3, f64) {
         return @Vector(3, f64){
@@ -219,3 +213,43 @@ pub const Tree = struct {
         };
     }
 };
+
+pub fn TexturedSphere(comptime T:type, samplerFn: fn(x:T, y:T, args:anytype)T,samplerArgs:anytype)type{
+    return struct {
+        sphere: WorldEditor.Sphere(T),
+        boundingBox: @Vector(6, T),
+        pub fn init(pos: @Vector(3, T), radius: T)@This(){
+            var sphere: WorldEditor.Sphere(T) = .{
+                .position = pos,
+                .radius = radius,
+                .boundingBox = undefined,
+            };
+            sphere.updateBoundingBox();
+            return .{
+              .sphere = sphere,  
+              .boundingBox = sphere.boundingBox,
+            };
+        }
+        
+        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+            if(!self.sphere.isPointInside(P))return false;
+            const shapeP = P - self.sphere.position;
+            const lat = std.math.atan2(shapeP[2]/self.sphere.radius, shapeP[0]/self.sphere.radius);
+            const long = std.math.asin(shapeP[1]/self.sphere.radius);
+            const sampleAmount = samplerFn(lat, long, samplerArgs);
+            const sampleBlockPos = self.sphere.position + (shapeP / @as(@Vector(3, T), @splat(sampleAmount)));
+            return self.sphere.isPointInside(sampleBlockPos);
+        }
+    };
+    
+}
+
+
+
+inline fn vecNormalize(v: @Vector(3, f64)) @Vector(3, f64) {
+    const len = vecLength(v);
+    return if (len > 0.00001) v / @as(@Vector(3, f64), @splat(len)) else v;
+}
+inline fn vecLength(v: @Vector(3, f64)) f64 {
+    return @sqrt(@reduce(.Add, v * v));
+}

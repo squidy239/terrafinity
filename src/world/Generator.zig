@@ -8,10 +8,10 @@ const ChunkSize = Chunk.ChunkSize;
 const ztracy = @import("ztracy");
 
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
-const Noise = @import("fastnoise.zig");
 const World = @import("World.zig").World;
 
 pub const DefaultGenerator = struct {
+    pub const Noise = @import("fastnoise.zig");
     params: GenParams,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32),
 

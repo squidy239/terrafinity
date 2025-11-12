@@ -52,12 +52,19 @@ pub const World = struct {
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
     }
-    pub fn UnloadEntity(self: *@This(), entityUUID: u128) !void {
+    pub fn UnloadEntity(self: *@This(), entityUUID: u128) void {
         const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
-        en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
+        _ = en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
         en.lock.lock();
         lock.End();
+        //TODO save entity to disk
+        en.fullfree(self.allocator);
+    }
+    
+    pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount:u32) void {
+        const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
+        _ = en.WaitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
         //TODO save entity to disk
         en.fullfree(self.allocator);
     }
@@ -155,7 +162,9 @@ pub const World = struct {
         tempallocator: std.mem.Allocator,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
+        ///this also calls ClearReader to unlock any chunks that were read
         pub fn flush(self: *@This()) !void {
+            self.ClearReader();
             self.editBuffer.lockPointers();
             defer self.editBuffer.clearAndFree(self.tempallocator);
             defer self.editBuffer.unlockPointers();
@@ -374,3 +383,7 @@ pub const World = struct {
         self.Chunks.deinit();
     }
 };
+
+fn NormilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
+    return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
+}
