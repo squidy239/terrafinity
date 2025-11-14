@@ -54,14 +54,12 @@ pub fn main() !void {
     try game.init(allocator, secondary_allocator);
     try game.startThreads();
     try EntityTypes.LoadMeshes(allocator);
-
+    
     defer {
-        std.log.info("started closing\n", .{});
-        UserInput.deinit();
         game.deinit();
+        UserInput.deinit();
         EntityTypes.FreeMeshes();
         glfw.terminate();
-        std.log.info("World Closed\n", .{});
         window.destroy();
         glfw.pollEvents(); //must be called to close the window
     }

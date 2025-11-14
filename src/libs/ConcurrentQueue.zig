@@ -9,7 +9,7 @@ pub fn ConcurrentQueue(comptime DataType: type, comptime fragments: usize, compt
         allocators: [fragments]std.mem.Allocator,
         fragments: [fragments]std.DoublyLinkedList,
         fragmentLocks: [fragments]std.Thread.Mutex,
-        pub fn init(allocator: std.mem.Allocator) !@This() {
+        pub fn init(allocator: std.mem.Allocator) @This() {
             var queue = @This(){
                 .setfragmentindex = std.atomic.Value(u64).init(0),
                 .getfragmentindex = std.atomic.Value(u64).init(0),

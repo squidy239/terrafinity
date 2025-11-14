@@ -47,7 +47,7 @@ pub fn init(pool: *Pool, options: Options) !void {
     };
 
     for (&pool.run_queue) |*q| {
-        q.* = try ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false).init(allocator);
+        q.* = ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false).init(allocator);
     }
 
     const thread_count = options.n_jobs orelse @max(1, std.Thread.getCpuCount() catch 1);

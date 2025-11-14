@@ -21,9 +21,9 @@ pub const Game = struct {
     game_arena: std.heap.ArenaAllocator,
 
     // Threads
-    loaderThread: std.Thread,
-    unloaderThread: std.Thread,
-    updateEntitiesThread: std.Thread,
+    loaderThread: ?std.Thread,
+    unloaderThread: ?std.Thread,
+    updateEntitiesThread: ?std.Thread,
 
     // Distances
     MeshDistance: [3]std.atomic.Value(u32),
@@ -34,7 +34,7 @@ pub const Game = struct {
 
     pub fn init(game:*@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator) !void {
         game.game_arena = .init(secondary_allocator);
-
+        errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
         defer worldConfigFile.close();
         const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
@@ -58,12 +58,14 @@ pub const Game = struct {
             .TerrainHeightCache = try .init(secondary_allocator, 4096),
             .params = GeneratorConfig,
         };
+        errdefer game.generator.TerrainHeightCache.deinit();
         game.running = .init(true);
         game.GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) };
         game.LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) };
         game.MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) };
         const cpu_count = try std.Thread.getCpuCount();
         try game.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
+        errdefer game.pool.deinit();
         game.world = .{
             .allocator = allocator,
             .threadPool = &game.pool,
@@ -76,6 +78,7 @@ pub const Game = struct {
             .onEdit = null,
         };
         game.world.random = game.world.prng.random();
+        errdefer game.world.Deinit();
         game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
             .player_UUID = 0, //UUID 0 resurved for client
             .player_name = .fromString("squid"),
@@ -94,9 +97,9 @@ pub const Game = struct {
             .ChunkRenderList = std.AutoArrayHashMap([3]i32, Renderer.MeshBufferIDs).init(allocator),
             .ChunkRenderListLock = . {},
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
-            .MeshesToLoad = try .init(allocator),
+            .MeshesToLoad = .init(allocator),
             .world = &game.world,
-            .MeshesToUnload = try .init(allocator),
+            .MeshesToUnload = .init(allocator),
             .allocator = allocator,
         };
         game.renderer = try .init(allocator, game.player);
@@ -104,9 +107,9 @@ pub const Game = struct {
 
     pub fn deinit(self: *@This()) void {
         self.running.store(false, .monotonic);
-        self.updateEntitiesThread.join();
-        self.loaderThread.join();
-        self.unloaderThread.join();
+        if(self.updateEntitiesThread) |thread| thread.join();
+        if(self.loaderThread) |thread| thread.join();
+        if(self.unloaderThread) |thread| thread.join();
         std.log.info("stopped threads", .{});
 
         self.renderer.deinit();

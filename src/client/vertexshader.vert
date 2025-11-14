@@ -1,4 +1,4 @@
-#version 460 core
+#version 430 core
 layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
@@ -70,10 +70,8 @@ uint DecodeBlockType(uvec2 encodedBlock) {
     return (encodedBlock[1]) & uint(0xFFFFF); // 20-bit mask (0xFFFFF = 2^20 - 1)
 }
 vec3 rotateVertex(uint side, vec3 coords) {
-    // Center the vertex at the origin for easier rotation
-    coords -= vec3(0.5);
+    coords -= vec3(0.5); // center vertex
 
-    // Rotate based on the cube face (side)
     switch (side) {
         case 1:
         // -X face (left)
@@ -98,15 +96,13 @@ vec3 rotateVertex(uint side, vec3 coords) {
         break; // +Z face (front) requires no rotation
     }
 
-    // Translate back to the correct cube face position
     coords += vec3(0.5);
-
-    // Offset to position each face at the correct distance from the origin
     coords *= offsetmul[side];
     coords += offset[side];
 
     return coords;
 }
+
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -143,3 +139,7 @@ void main() {
 
     gl_Position = projview * vec4((coords * newscale) + (pos * scale) + (relativeChunkPos), 1);
 }
+
+
+
+//    float scale = mod(float(time) / 1000, 4) / max(0.000001,(((abs(pow(pow(vertexposition.x, 2.0) + pow(vertexposition.y, 2.0) + pow(vertexposition.z, 2.0),0.5))))));
