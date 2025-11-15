@@ -182,22 +182,22 @@ pub const World = struct {
             }
         }
 
-        pub fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
+        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const chunkBlockPos = @mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
-            if (self.lastChunkCache != null and @reduce(.And, self.lastChunkCache.?.Pos == chunkPos)) {
+            const chunkBlockPos:@Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
                 @branchHint(.likely);
-                self.lastChunkCache.?.blocks[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
+                self.lastChunkCache.?.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
                 return;
             }
 
             var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
-            chunk[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])] = block;
             self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
+            chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
 
         ///returns a block at the given position, ClearReader must be called after a series of calls to unlock the cached chunk
-        pub fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
+        pub inline fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunkBlockPos = @mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
             if (self.lastChunkReadCache == null or @reduce(.Or, self.lastChunkReadCache.?.Pos != chunkPos)) {
