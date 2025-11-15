@@ -111,7 +111,7 @@ pub const Chunk = struct {
         }
         var result: [ChunkSize][ChunkSize]Block = undefined;
         for (&result, 0..) |*row, i| {
-            for (row, 0..) |*item, j| {
+            inline for (row, 0..) |*item, j| {
                 item.* = switch (comptime face) {
                     .xPlus => cube[ChunkSize - 1][i][j],
                     .xMinus => cube[0][i][j],

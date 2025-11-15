@@ -36,44 +36,48 @@ pub fn init(g: *Game, window: *glfw.Window) !void { //TODO move menu out of this
             .height = .{ .yPercent = 75 },
         },
         .cornerPixelRadii = @splat(.{ .pixels = 25 }),
-        .children = &.{ .{ //TODO move menu out of this and redo user input handeling
-            .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
-            .size = .{
-                .width = .{ .xPercent = 60 },
-                .height = .{ .yPercent = 10 },
-            },
-            .textOptions = .{
-                .text = "Quit",
-                .scale = .{ .relative = 4 },
-                .startPosition = .{
-                    .x = .{ .xPercent = 45 },
-                    .y = .{ .yPercent = 100 },
+        .children = &.{
+            .{ //TODO move menu out of this and redo user input handeling
+                .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
+                .size = .{
+                    .width = .{ .xPercent = 60 },
+                    .height = .{ .yPercent = 10 },
                 },
-            },
-            .onHover = onHoverEsc,
-            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        }, .{ //TODO move menu out of this and redo user input handeling
-            .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
-            .size = .{
-                .width = .{ .xPercent = 60 },
-                .height = .{ .yPercent = 10 },
-            },
-            .textOptions = .{
-                .text = "Back to Game",
-                .scale = .{ .relative = 4 },
-                .startPosition = .{
-                    .x = .{ .xPercent = 35 },
-                    .y = .{ .yPercent = 100 },
+                .textOptions = .{
+                    .text = "Quit",
+                    .scale = .{ .relative = 4 },
+                    .startPosition = .{
+                        .x = .{ .xPercent = 45 },
+                        .y = .{ .yPercent = 100 },
+                    },
                 },
+                .onHover = onHoverEsc,
+                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
             },
-            .onHover = onHoverC,
-            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-        }, gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
-            .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
-            .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
-        }, &childrenBuffer, .y) },
+            .{ //TODO move menu out of this and redo user input handeling
+                .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
+                .size = .{
+                    .width = .{ .xPercent = 60 },
+                    .height = .{ .yPercent = 10 },
+                },
+                .textOptions = .{
+                    .text = "Back to Game",
+                    .scale = .{ .relative = 4 },
+                    .startPosition = .{
+                        .x = .{ .xPercent = 35 },
+                        .y = .{ .yPercent = 100 },
+                    },
+                },
+                .onHover = onHoverC,
+                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+            },
+            gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
+                .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
+                .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
+            }, &childrenBuffer, .y),
+        },
     };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
@@ -237,28 +241,26 @@ pub fn processInput(window: *glfw.Window) !void {
         //try worldEditor.PlaceSamplerShape(.Stone, cone);
         //_ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         //worldEditorLock.unlock();
-        // 
+        //
         const noise = World.DefaultGenerator.Noise.Noise(f32){
             .noise_type = .perlin,
             .frequency = 0.1,
         };
         worldEditorLock.lock();
-        try World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 0.25, noise, .Air);
+        try World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 1.0, noise, .Air);
         std.debug.print("placeing\n", .{});
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
     }
-    
-    
+
     if (window.getKey(glfw.Key.f) == .press) {
         const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         worldEditorLock.unlock();
-        
-        
-       // _ = try game.world.SpawnEntity(null, EntityTypes.Explosive{.pos = game.player.GetPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp(), .explosionRadius = 32, .exploded = false,});
+
+        // _ = try game.world.SpawnEntity(null, EntityTypes.Explosive{.pos = game.player.GetPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp(), .explosionRadius = 32, .exploded = false,});
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
@@ -342,7 +344,6 @@ fn genFractalTask() void {
     _ = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
-
 
 pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     _ = window;

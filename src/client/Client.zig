@@ -49,12 +49,12 @@ pub fn main() !void {
     const allocator = if (builtin.mode == .ReleaseFast) smp_allocator else main_debug_allocator.allocator();
     const secondary_allocator = if (builtin.mode == .ReleaseFast) smp_allocator else secondary_debug_allocator.allocator();
     const window = try initWindowAndProcs(&proc);
-    
-    var game:Game = undefined;
+
+    var game: Game = undefined;
     try game.init(allocator, secondary_allocator);
     try game.startThreads();
     try EntityTypes.LoadMeshes(allocator);
-    
+
     defer {
         game.deinit();
         UserInput.deinit();

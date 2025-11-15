@@ -26,8 +26,6 @@ const Mesher = @import("Mesher.zig");
 const Textures = @import("textures.zig");
 const utils = @import("utils.zig");
 
-
-
 pub const Renderer = struct {
     pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,

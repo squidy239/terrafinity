@@ -218,22 +218,21 @@ pub const Cube = struct {
         return entity;
     }
 };
-fn texture(u:f64, v:f64, args:anytype)f64{
+fn texture(u: f64, v: f64, args: anytype) f64 {
     const noise = World.DefaultGenerator.Noise.Noise(f32){
         .noise_type = .simplex,
         .frequency = 4,
-        
     };
     _ = args;
-    const sampled = noise.genNoise2DRange(@floatCast(u),@floatCast(v), f32, 0, 1);
-    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0),@as(f32, 0.75)));
+    const sampled = noise.genNoise2DRange(@floatCast(u), @floatCast(v), f32, 0, 1);
+    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0), @as(f32, 0.75)));
 }
 pub const Explosive = struct {
     pos: @Vector(3, f64),
     velocity: @Vector(3, f64),
     timestamp: i64,
-    explosionRadius:f64,
-    exploded:bool,
+    explosionRadius: f64,
+    exploded: bool,
 
     pub fn update(selfptr: *anyopaque, world: *World, uuid: u128) void {
         const self: *@This() = @ptrCast(@alignCast(selfptr));
@@ -249,14 +248,13 @@ pub const Explosive = struct {
             .tempallocator = world.allocator,
         };
         defer worldEditor.ClearReader();
-        if(Block.Properties.visible.get(worldEditor.GetBlock(@intFromFloat(self.pos)) catch |err| std.debug.panic("err: {any}\n", .{err}))){
+        if (Block.Properties.visible.get(worldEditor.GetBlock(@intFromFloat(self.pos)) catch |err| std.debug.panic("err: {any}\n", .{err}))) {
             worldEditor.ClearReader();
 
             const sphere = World.Structures.TexturedSphere(f64, texture, void).init(self.pos, self.explosionRadius);
             _ = uuid;
             worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-            
         }
     }
 
@@ -310,4 +308,3 @@ pub const Explosive = struct {
         return entity;
     }
 };
-

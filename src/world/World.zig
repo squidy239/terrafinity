@@ -24,6 +24,7 @@ pub const World = struct {
     Generator: ChunkGenerator,
     onEdit: ?struct {
         onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
+        callIfNeighborFacesChanged: bool,
         onEditFnArgs: *anyopaque,
     },
     pub const WorldConfig = struct {
@@ -62,8 +63,8 @@ pub const World = struct {
         //TODO save entity to disk
         en.fullfree(self.allocator);
     }
-    
-    pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount:u32) void {
+
+    pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
         const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
         _ = en.WaitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
         //TODO save entity to disk
@@ -165,26 +166,55 @@ pub const World = struct {
         ///applies the edits in the buffer to the world, frees any temporary allocations
         ///this also calls ClearReader to unlock any chunks that were read
         pub fn flush(self: *@This()) !void {
+            const flushh = ztracy.ZoneNC(@src(), "flush", 3563456);
+            defer flushh.End();
             self.ClearReader();
             self.editBuffer.lockPointers();
             defer self.editBuffer.clearAndFree(self.tempallocator);
             defer self.editBuffer.unlockPointers();
             var it = self.editBuffer.iterator();
+            var neghborsToRemesh: std.AutoHashMap([3]i32, void) = .init(self.tempallocator);
+            defer neghborsToRemesh.deinit();
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
                 const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false);
                 defer chunk.release();
+                var sides: [6][ChunkSize][ChunkSize]Block = undefined;
+                inline for (0..6) |side| {
+                    sides[side] = chunk.extractFace(@enumFromInt(side), false);
+                }
                 try chunk.Merge(encoding, self.world.allocator, true);
+                var sides2: [6][ChunkSize][ChunkSize]Block = undefined;
+                inline for (0..6) |side| {
+                    sides2[side] = chunk.extractFace(@enumFromInt(side), false);
+                }
+                try neghborsToRemesh.put(diffChunk.key_ptr.*, {});
+                if (self.world.onEdit.?.callIfNeighborFacesChanged) {
+                    for (0..6) |side| {
+                        if (!std.meta.eql(sides[side], sides2[side])) {
+                            const toRemeshPos = diffChunk.key_ptr.* + switch (side) {
+                                0 => @Vector(3, i32){ -1, 0, 0 },
+                                1 => @Vector(3, i32){ 1, 0, 0 },
+                                2 => @Vector(3, i32){ 0, -1, 0 },
+                                3 => @Vector(3, i32){ 0, 1, 0 },
+                                4 => @Vector(3, i32){ 0, 0, -1 },
+                                5 => @Vector(3, i32){ 0, 0, 1 },
+                                else => unreachable,
+                            };
+                            try neghborsToRemesh.put(toRemeshPos, {});
+                        }
+                    }
+                }
             }
-            it.index = 0;
-            while (it.next()) |diffChunk| {
-                if (self.world.onEdit) |onEdit| onEdit.onEditFn(diffChunk.key_ptr.*, onEdit.onEditFnArgs);
+            var rit = neghborsToRemesh.iterator();
+            while (rit.next()) |pos| {
+                if (self.world.onEdit) |onEdit| onEdit.onEditFn(pos.key_ptr.*, onEdit.onEditFnArgs);
             }
         }
 
         pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const chunkBlockPos:@Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
                 @branchHint(.likely);
                 self.lastChunkCache.?.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;

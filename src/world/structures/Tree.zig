@@ -2,7 +2,6 @@ const std = @import("std");
 const zm = @import("root").zm;
 const ztracy = @import("root").ztracy;
 
-
 const Block = @import("../World.zig").Block;
 const WorldEditor = @import("../World.zig").World.WorldEditor;
 
@@ -111,8 +110,6 @@ pub const Tree = struct {
         return sample;
     }
 
-
-
     inline fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
         const scaled = @Vector(3, f64){
             if (range[0] != 0) p[0] / range[0] else 0.0,
@@ -121,5 +118,4 @@ pub const Tree = struct {
         };
         return utils.vecNormalize(scaled);
     }
-
 };

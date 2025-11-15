@@ -316,7 +316,7 @@ pub const DefaultGenerator = struct {
                         };
 
                         _ = try tree.place(&worldEditor);
-                    } 
+                    }
                 }
             }
         }

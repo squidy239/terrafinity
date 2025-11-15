@@ -19,13 +19,13 @@ pub const Entity = struct {
     lock: std.Thread.RwLock = .{},
     ref_count: std.atomic.Value(u32),
     functions: struct {
-        updateFn: ?*const fn (ptr: *anyopaque, world: *World, uuid:u128) void = null,
+        updateFn: ?*const fn (ptr: *anyopaque, world: *World, uuid: u128) void = null,
         freeFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void = null,
         getPosFn: ?*const fn (ptr: *anyopaque) @Vector(3, f64) = null,
         drawFn: ?*const fn (ptr: *anyopaque, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) void = null,
     },
 
-    pub fn update(self: *@This(), world: *World, uuid:u128) void {
+    pub fn update(self: *@This(), world: *World, uuid: u128) void {
         if (self.functions.updateFn) |updateFn| {
             self.lock.lock();
             defer self.lock.unlock();

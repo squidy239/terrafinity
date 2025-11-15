@@ -176,5 +176,4 @@ pub const Mesh = struct {
             }
         }
     }
-    
 };
