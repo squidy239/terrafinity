@@ -42,6 +42,10 @@
             .url = "git+https://github.com/zigimg/zigimg.git#f5783e87627cbd9e0b45fad112e9f73503914f36",
             .hash = "zigimg-0.1.0-8_eo2vBrFQBhsrLpexdcDQY-zrlzkyFZfKuYX-Nry6KN",
         },
+        .ConcurrentQueue = .{
+            .url = "git+https://github.com/squidy239/ConcurrentQueue.git#d29d27911de4870109fbc1b852ff7199ca03c657",
+            .hash = "ConcurrentQueue-0.0.0-ucuqzmVCAADu6fxE3DlOnSeQFRVA6shg6O99amgwIodV",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.

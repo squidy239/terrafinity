@@ -76,15 +76,14 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("Entity", Entitys);
-    const ConcurrentQueue = b.addModule("ConcurrentQueue", .{
-        .root_source_file = b.path("src/libs/ConcurrentQueue.zig"),
+    const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
+        .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "ztracy", .module = ztracy.module("root") }},
     });
-    exe.root_module.addImport("ConcurrentQueue", ConcurrentQueue);
+    exe.root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
 
     const ThreadPool = b.addModule("ThreadPool", .{ .root_source_file = b.path("src/libs/ThreadPool.zig"), .optimize = optimize, .imports = &.{
-        .{ .name = "ConcurrentQueue", .module = ConcurrentQueue },
+        .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
         .{ .name = "ThreadPriority", .module = ThreadPriority },
     } });
     exe.root_module.addImport("ThreadPool", ThreadPool);
