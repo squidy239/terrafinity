@@ -31,6 +31,7 @@ pub const mainMenu = gui.Element.CreationOptions{ .elementBackground = .{ .solid
             .width = .{ .xPercent = 50 },
             .height = .{ .pixels = 50 },
         },
+        .onHover = openRenderer,
         .textOptions = .{
             .text = "singleplayer",
             .scale = .{ .absolute = 50 },
@@ -62,7 +63,23 @@ fn openOptionsMenu(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window
     _ = mousePos;
     _ = element;
     if (toggle and window.getMouseButton(.left) == .press) {
+        switchMenu(.optionsMenu) catch |err| std.debug.panic("err: {any}", .{err});
+    }
+}
+
+fn openRenderer(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = mousePos;
+    _ = element;
+    if (toggle and window.getMouseButton(.left) == .press) {
         switchMenu(.worldRender) catch |err| std.debug.panic("err: {any}", .{err});
+    }
+}
+
+fn openMainMenu(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = mousePos;
+    _ = element;
+    if (toggle and window.getMouseButton(.left) == .press) {
+        switchMenu(.mainMenu) catch |err| std.debug.panic("err: {any}", .{err});
     }
 }
 
@@ -106,4 +123,21 @@ pub const optionsMenu = gui.Element.CreationOptions{ .elementBackground = .{ .so
         },
         .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
     }, null, .x),
+    gui.Element.CreationOptions{
+        .position = .{ .x = .{ .xPercent = 100, .pixels = - 50}, .y = .{ .yPercent = 100, .pixels = - 50} },
+        .size = .{
+            .width = .{ .pixels = 50 },
+            .height = .{ .pixels = 50 },
+        },
+        .elementBackground = .{ .solid = .{1.0, 0.0 ,0.0,1.0} },
+        .onHover = openMainMenu,
+        .textOptions = .{
+            .text = "X",
+            .scale = .{ .absolute = 25 },
+            .startPosition = .{
+                .x = .{ .xPercent = 50 },
+                .y = .{ .yPercent = 50 },
+            },
+        },
+    }
 } };

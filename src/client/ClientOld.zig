@@ -31,8 +31,8 @@ var cameraFront = @Vector(3, f64){ 0, 1, 0 };
 var cameraUp = @Vector(3, f64){ 0, 1, 0 };
 var pitch: f64 = 1;
 var yaw: f64 = 1;
-pub var height: u32 = 600;
-pub var width: u32 = 800;
+pub var height: u32 = 900;
+pub var width: u32 = 506;
 
 pub fn main() !void {
     var proc: gl.ProcTable = undefined;
@@ -110,7 +110,7 @@ pub fn main() !void {
         if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);
         lastFps = fps;
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], game.world.Chunks.count() });
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\nwidth: {d}, heeight: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], game.world.Chunks.count(),width,height });
         defer secondary_allocator.free(printText);
         try fpsBox.options.text.?.SetText(printText);
     }

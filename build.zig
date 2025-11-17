@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/client/Client.zig"),
+            .root_source_file = b.path("src/client/App.zig"),
             .target = target,
             .optimize = optimize,
         }),

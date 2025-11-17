@@ -9,6 +9,8 @@ const utils = @import("utils.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const builtin = @import("builtin");
 const Loader = @import("Loader.zig");
+const UserInput = @import("UserInput.zig");
+const glfw = @import("zglfw");
 
 pub const Game = struct {
     allocator: std.mem.Allocator,
@@ -32,7 +34,7 @@ pub const Game = struct {
 
     running: std.atomic.Value(bool),
 
-    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator) !void {
+    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window:*glfw.Window) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
@@ -103,14 +105,26 @@ pub const Game = struct {
             .allocator = allocator,
         };
         game.renderer = try .init(allocator, game.player);
+        try UserInput.init(game);
+        _ = window.setCursorPosCallback(UserInput.MouseCallback);
+    }
+    
+    pub fn Frame(self:*@This(), viewport_pixels: @Vector(2,f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window)![2]u64{
+        try UserInput.processInput(window);
+        const r = try self.renderer.Draw(self, viewport_pixels);
+        UserInput.menuDraw(viewport_pixels, viewport_millimeters, window);
+        return r;
+
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), window: *glfw.Window) void {
         self.running.store(false, .monotonic);
         if (self.updateEntitiesThread) |thread| thread.join();
         if (self.loaderThread) |thread| thread.join();
         if (self.unloaderThread) |thread| thread.join();
         std.log.info("stopped threads", .{});
+        _ = window.setCursorPosCallback(null);
+        UserInput.deinit();
 
         self.renderer.deinit();
 

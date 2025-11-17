@@ -21,7 +21,7 @@ var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var benchmarkStartTime: i64 = 0;
-pub fn init(g: *Game, window: *glfw.Window) !void { //TODO move menu out of this and redo user input handeling
+pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input handeling
     game = g;
     worldEditor = .{
         .tempallocator = game.allocator,
@@ -81,8 +81,8 @@ pub fn init(g: *Game, window: *glfw.Window) !void { //TODO move menu out of this
     };
     //menu is temporay test code
     menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
-    const viewport_pixels: @Vector(2, f32) = GetViewportPixels(window);
-    const viewport_millimeters: @Vector(2, f32) = @floatFromInt(@as(@Vector(2, i32), try glfw.getPrimaryMonitor().?.getPhysicalSize())); //TODO find a way to get the monitor that the window is on
+    const viewport_pixels: @Vector(2, f32) = @splat(0);
+    const viewport_millimeters: @Vector(2, f32) = @splat(0);
     menu.init(viewport_pixels, viewport_millimeters);
     @as(*gui.Widgets.SlideData, @ptrCast(@alignCast(menu.children.?[2].customData.?))).onSlide = OnSlide;
     isinit = true;
