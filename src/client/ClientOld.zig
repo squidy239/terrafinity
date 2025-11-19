@@ -110,7 +110,7 @@ pub fn main() !void {
         if (lastFps != null) fps = std.math.lerp(fps, lastFps.?, 0.90);
         lastFps = fps;
         const printpos = @round(playerPos * @Vector(3, f64){ 100, 100, 100 }) / @Vector(3, f64){ 100, 100, 100 };
-        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\nwidth: {d}, heeight: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], game.world.Chunks.count(),width,height });
+        const printText = try std.fmt.allocPrint(secondary_allocator, "pos: {d}, {d}, {d}\nFPS: {d}\n{d}/{d} chunks drawn\ntotal chunks loaded: {d}\nwidth: {d}, heeight: {d}\n", .{ printpos[0], printpos[1], printpos[2], @round(fps), drawn[0], drawn[1], game.world.Chunks.count(), width, height });
         defer secondary_allocator.free(printText);
         try fpsBox.options.text.?.SetText(printText);
     }

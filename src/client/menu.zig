@@ -86,58 +86,53 @@ fn openMainMenu(element: *gui.Element, mousePos: [2]f64, window: *glfw.Window, t
 pub const optionsMenu = gui.Element.CreationOptions{ .elementBackground = .{ .solid = .{ 0.0, 0.0, 0.2, 0.3 } }, .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } }, .size = .{
     .width = .{ .xPercent = 100 },
     .height = .{ .yPercent = 100 },
-}, .children = &[_]gui.Element.CreationOptions{
-    gui.Widgets.Slider(.{
-        .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
-        .size = .{
-            .width = .{ .xPercent = 90 },
-            .height = .{ .yPercent = 5 },
+}, .children = &[_]gui.Element.CreationOptions{ gui.Widgets.Slider(.{
+    .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
+    .size = .{
+        .width = .{ .xPercent = 90 },
+        .height = .{ .yPercent = 5 },
+    },
+    .scrollerSize = .{
+        .width = .{ .xPercent = 5 },
+        .height = .{ .yPercent = 90 },
+    },
+    .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+}, null, .x), gui.Widgets.Slider(.{
+    .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+    .size = .{
+        .width = .{ .xPercent = 90 },
+        .height = .{ .yPercent = 5 },
+    },
+    .scrollerSize = .{
+        .width = .{ .xPercent = 5 },
+        .height = .{ .yPercent = 90 },
+    },
+    .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+}, null, .x), gui.Widgets.Slider(.{
+    .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 20 } },
+    .size = .{
+        .width = .{ .xPercent = 90 },
+        .height = .{ .yPercent = 5 },
+    },
+    .scrollerSize = .{
+        .width = .{ .xPercent = 5 },
+        .height = .{ .yPercent = 90 },
+    },
+    .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+}, null, .x), gui.Element.CreationOptions{
+    .position = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 100, .pixels = -50 } },
+    .size = .{
+        .width = .{ .pixels = 50 },
+        .height = .{ .pixels = 50 },
+    },
+    .elementBackground = .{ .solid = .{ 1.0, 0.0, 0.0, 1.0 } },
+    .onHover = openMainMenu,
+    .textOptions = .{
+        .text = "X",
+        .scale = .{ .absolute = 25 },
+        .startPosition = .{
+            .x = .{ .xPercent = 50 },
+            .y = .{ .yPercent = 50 },
         },
-        .scrollerSize = .{
-            .width = .{ .xPercent = 5 },
-            .height = .{ .yPercent = 90 },
-        },
-        .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-    }, null, .x),
-    gui.Widgets.Slider(.{
-        .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-        .size = .{
-            .width = .{ .xPercent = 90 },
-            .height = .{ .yPercent = 5 },
-        },
-        .scrollerSize = .{
-            .width = .{ .xPercent = 5 },
-            .height = .{ .yPercent = 90 },
-        },
-        .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-    }, null, .x),
-    gui.Widgets.Slider(.{
-        .centerPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 20 } },
-        .size = .{
-            .width = .{ .xPercent = 90 },
-            .height = .{ .yPercent = 5 },
-        },
-        .scrollerSize = .{
-            .width = .{ .xPercent = 5 },
-            .height = .{ .yPercent = 90 },
-        },
-        .scrollerStartPos = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-    }, null, .x),
-    gui.Element.CreationOptions{
-        .position = .{ .x = .{ .xPercent = 100, .pixels = - 50}, .y = .{ .yPercent = 100, .pixels = - 50} },
-        .size = .{
-            .width = .{ .pixels = 50 },
-            .height = .{ .pixels = 50 },
-        },
-        .elementBackground = .{ .solid = .{1.0, 0.0 ,0.0,1.0} },
-        .onHover = openMainMenu,
-        .textOptions = .{
-            .text = "X",
-            .scale = .{ .absolute = 25 },
-            .startPosition = .{
-                .x = .{ .xPercent = 50 },
-                .y = .{ .yPercent = 50 },
-            },
-        },
-    }
-} };
+    },
+} } };

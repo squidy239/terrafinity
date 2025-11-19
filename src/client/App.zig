@@ -121,7 +121,7 @@ pub fn main() !void {
     while (window.shouldClose() == false) {
         const viewport_pixels = GetViewportPixels(window);
         const viewport_millimeters: [2]f32 = @as(@Vector(2, f32), @floatFromInt(try GetViewportMillimeters(window)));
-        if (game != null){
+        if (game != null) {
             _ = try game.?.Frame(viewport_pixels, viewport_millimeters, window);
         }
         if (currentMenu) |m| {
@@ -155,7 +155,7 @@ const menuPage = enum {
 };
 
 pub fn SwitchMenu(newMenu: menuPage) !void {
-    std.log.debug("switching menu page from: {any} to {any}", .{currentMenuPage, newMenu});
+    std.log.debug("switching menu page from: {any} to {any}", .{ currentMenuPage, newMenu });
     std.debug.assert(currentMenuPage != newMenu);
     std.debug.assert((game == null) or currentMenuPage == .worldRender);
     currentMenu = switch (newMenu) {

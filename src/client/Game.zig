@@ -34,7 +34,7 @@ pub const Game = struct {
 
     running: std.atomic.Value(bool),
 
-    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window:*glfw.Window) !void {
+    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
@@ -108,13 +108,12 @@ pub const Game = struct {
         try UserInput.init(game);
         _ = window.setCursorPosCallback(UserInput.MouseCallback);
     }
-    
-    pub fn Frame(self:*@This(), viewport_pixels: @Vector(2,f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window)![2]u64{
+
+    pub fn Frame(self: *@This(), viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window) ![2]u64 {
         try UserInput.processInput(window);
         const r = try self.renderer.Draw(self, viewport_pixels);
         UserInput.menuDraw(viewport_pixels, viewport_millimeters, window);
         return r;
-
     }
 
     pub fn deinit(self: *@This(), window: *glfw.Window) void {
