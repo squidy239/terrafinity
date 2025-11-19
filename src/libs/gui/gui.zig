@@ -120,6 +120,7 @@ pub const Element = struct {
     pos: @Vector(2, f32),
     options: Options,
     children: ?[]Element,
+    onHoverArgs: ?*anyopaque,
     parent: ?*Element,
     customData: ?[]u8,
     isinit: bool = false,
@@ -160,6 +161,9 @@ pub const Element = struct {
         ///last bool is false if it is being called after drawing so the options can be reset if needed
         ///update must be called after any modifications to the element
         onHover: ?*const fn (*Element, [2]f64, *glfw.Window, bool) void = null,
+
+        onHoverArgs: ?*anyopaque = null,
+
         ///gets called before drawing before onHover
         ///update must be called after any modifications to the element
         onDraw: ?*const fn (*Element, [2]f64, *glfw.Window) void = null,
@@ -250,6 +254,7 @@ pub const Element = struct {
             .pos = undefined,
             .viewport_millimeters = undefined,
             .customData = if (creationOptions.customDataLen) |len| try allocator.alloc(u8, len) else null,
+            .onHoverArgs = creationOptions.onHoverArgs,
             .options = .{
                 .Visible = creationOptions.Visible,
                 .onHover = creationOptions.onHover,

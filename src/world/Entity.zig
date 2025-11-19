@@ -13,6 +13,7 @@ pub const EntityType = enum(u16) {
     Cube = 1,
     Explosive = 2,
 };
+//TODO rewrite how entities work after async is added
 pub const Entity = struct {
     type: EntityType,
     ptr: *anyopaque,

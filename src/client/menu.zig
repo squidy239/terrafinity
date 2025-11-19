@@ -136,3 +136,97 @@ pub const optionsMenu = gui.Element.CreationOptions{ .elementBackground = .{ .so
         },
     },
 } } };
+
+const ToggleSettings = @import("UserInput.zig").ToggleSettings;
+
+pub const textEscMenu = gui.Element.CreationOptions{
+    .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
+    .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
+    .size = .{
+        .width = .{ .xPercent = 75 },
+        .height = .{ .yPercent = 75 },
+    },
+    .cornerPixelRadii = @splat(.{ .pixels = 25 }),
+    .children = &.{
+        .{ //TODO move menu out of this and redo user input handeling
+            .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
+            .size = .{
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
+            },
+            .textOptions = .{
+                .text = "Quit",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .x = .{ .xPercent = 45 },
+                    .y = .{ .yPercent = 100 },
+                },
+            },
+            .onHover = onHoverEsc,
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+        },
+        .{ //TODO move menu out of this and redo user input handeling
+            .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
+            .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
+            .size = .{
+                .width = .{ .xPercent = 60 },
+                .height = .{ .yPercent = 10 },
+            },
+            .textOptions = .{
+                .text = "Back to Game",
+                .scale = .{ .relative = 4 },
+                .startPosition = .{
+                    .x = .{ .xPercent = 35 },
+                    .y = .{ .yPercent = 100 },
+                },
+            },
+            .onHover = onHoverC,
+            .cornerPixelRadii = @splat(.{ .pixels = 15 }),
+        },
+        gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
+            .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
+            .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
+        }, null, .y),
+    },
+};
+
+fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = mouse_pos;
+    if (toggle) {
+        element.options.size.height.pixels += 5;
+        element.options.size.width.pixels += 5;
+        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        if (window.getMouseButton(glfw.MouseButton.left) == .press) {
+            window.setShouldClose(true);
+        }
+        element.update();
+    } else {
+        element.options.size.height.pixels -= 5;
+        element.options.size.width.pixels -= 5;
+        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        element.update();
+    }
+}
+
+fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
+    _ = mouse_pos;
+    const ts: *ToggleSettings = @ptrCast(element.onHoverArgs.?);
+    if (toggle) {
+        element.options.size.width.pixels += 5;
+        element.options.size.height.pixels += 5;
+
+        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        if (window.getMouseButton(glfw.MouseButton.left) == .press and ts.CursorEscaped) {
+            ts.CursorEscaped = false;
+            _ = glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
+        }
+        element.update();
+    } else {
+        element.options.size.width.pixels -= 5;
+        element.options.size.height.pixels -= 5;
+
+        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
+        element.update();
+    }
+}

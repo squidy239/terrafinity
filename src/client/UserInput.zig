@@ -11,12 +11,12 @@ const gui = @import("gui");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 const Renderer = @import("Renderer.zig").Renderer;
-
 var game: *Game = undefined;
 var worldEditor: World.WorldEditor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
+const Menu = @import("menu.zig");
 var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
@@ -28,59 +28,12 @@ pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input h
         .world = &game.world,
     };
     lastmicrotime = std.time.microTimestamp();
-    const textEscMenu = gui.Element.CreationOptions{
-        .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },
-        .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 50 } },
-        .size = .{
-            .width = .{ .xPercent = 75 },
-            .height = .{ .yPercent = 75 },
-        },
-        .cornerPixelRadii = @splat(.{ .pixels = 25 }),
-        .children = &.{
-            .{ //TODO move menu out of this and redo user input handeling
-                .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
-                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
-                .size = .{
-                    .width = .{ .xPercent = 60 },
-                    .height = .{ .yPercent = 10 },
-                },
-                .textOptions = .{
-                    .text = "Quit",
-                    .scale = .{ .relative = 4 },
-                    .startPosition = .{
-                        .x = .{ .xPercent = 45 },
-                        .y = .{ .yPercent = 100 },
-                    },
-                },
-                .onHover = onHoverEsc,
-                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-            },
-            .{ //TODO move menu out of this and redo user input handeling
-                .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
-                .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
-                .size = .{
-                    .width = .{ .xPercent = 60 },
-                    .height = .{ .yPercent = 10 },
-                },
-                .textOptions = .{
-                    .text = "Back to Game",
-                    .scale = .{ .relative = 4 },
-                    .startPosition = .{
-                        .x = .{ .xPercent = 35 },
-                        .y = .{ .yPercent = 100 },
-                    },
-                },
-                .onHover = onHoverC,
-                .cornerPixelRadii = @splat(.{ .pixels = 15 }),
-            },
-            gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
-                .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
-                .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
-            }, &childrenBuffer, .y),
-        },
-    };
+
     //menu is temporay test code
-    menu = try gui.Element.create(std.heap.c_allocator, textEscMenu);
+    menu = try gui.Element.create(std.heap.c_allocator, Menu.textEscMenu);
+    menu.children.?[0].onHoverArgs = &ts;
+    menu.children.?[1].onHoverArgs = &ts;
+    std.debug.print("mo: {any}\n", .{menu.onHoverArgs});
     const viewport_pixels: @Vector(2, f32) = @splat(0);
     const viewport_millimeters: @Vector(2, f32) = @splat(0);
     menu.init(viewport_pixels, viewport_millimeters);
@@ -115,46 +68,7 @@ fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window
     std.debug.print("genDist: {d}\n", .{genDist});
 }
 
-fn onHoverEsc(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
-    _ = mouse_pos;
-    if (toggle) {
-        element.options.size.height.pixels += 5;
-        element.options.size.width.pixels += 5;
-        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        if (window.getMouseButton(glfw.MouseButton.left) == .press) {
-            window.setShouldClose(true);
-        }
-        element.update();
-    } else {
-        element.options.size.height.pixels -= 5;
-        element.options.size.width.pixels -= 5;
-        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        element.update();
-    }
-}
-
-fn onHoverC(element: *gui.Element, mouse_pos: [2]f64, window: *glfw.Window, toggle: bool) void {
-    _ = mouse_pos;
-    if (toggle) {
-        element.options.size.width.pixels += 5;
-        element.options.size.height.pixels += 5;
-
-        element.options.elementBackground.solid += @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        if (window.getMouseButton(glfw.MouseButton.left) == .press and ts.CursorEscaped) {
-            ts.CursorEscaped = false;
-            _ = glfw.Window.setInputMode(window, glfw.InputMode.cursor, glfw.InputMode.ValueType(glfw.InputMode.cursor).disabled) catch std.debug.panic("err cant set input mode\n", .{});
-        }
-        element.update();
-    } else {
-        element.options.size.width.pixels -= 5;
-        element.options.size.height.pixels -= 5;
-
-        element.options.elementBackground.solid -= @Vector(4, f32){ 0.1, 0.1, 0.1, 0.0 };
-        element.update();
-    }
-}
-
-const ToggleSettings = struct {
+pub const ToggleSettings = struct {
     Fullscreen: bool,
     Sprinting: bool,
     SuperSpeed: bool,
