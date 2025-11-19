@@ -5,7 +5,6 @@ const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
 const ztracy = @import("root").ztracy;
 const ConcurrentQueue = @import("ConcurrentQueue");
-const ThreadPriority = @import("ThreadPriority");
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
 run_queue: [7]ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false) = undefined,

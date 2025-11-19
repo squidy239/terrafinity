@@ -6,7 +6,6 @@ const DrawElementsIndirectCommand = root.Renderer.DrawElementsIndirectCommand;
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
 const Game = @import("Game.zig");
-const SetThreadPriority = @import("root").SetThreadPriority;
 const ThreadPool = @import("root").ThreadPool;
 const UBO = root.Renderer.UBO;
 
@@ -65,7 +64,6 @@ pub const Loader = struct {
     threadlocal var chunksToUnloadBufferPos: u16 = 0;
     ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
     pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
-        _ = SetThreadPriority(.THREAD_PRIORITY_BELOW_NORMAL);
         std.debug.assert(game.player.type == .Player);
         while (game.running.load(.monotonic)) {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -84,7 +82,6 @@ pub const Loader = struct {
     }
 
     pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
-        _ = SetThreadPriority(.THREAD_PRIORITY_IDLE);
         while (game.running.load(.monotonic)) {
             const playerPos = game.player.GetPos().?;
             const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);

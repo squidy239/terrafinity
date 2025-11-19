@@ -4,7 +4,6 @@ const ConcurrentQueue = @import("root").ConcurrentQueue.ConcurrentQueue;
 const root = @import("root");
 const ChunkManager = root.ChunkManager;
 const Loader = root.Loader;
-const SetThreadPriority = @import("root").SetThreadPriority;
 const ThreadPool = @import("root").ThreadPool;
 const Game = @import("Game.zig").Game;
 const Block = @import("Block").Blocks;

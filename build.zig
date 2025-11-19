@@ -66,8 +66,6 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/libs/gui/text/stb_truetype.c"),
     });
     exe.addObject(stb_truetype_object);
-    const ThreadPriority = b.addModule("ThreadPriority", .{ .root_source_file = b.path("src/libs/ThreadPriority.zig") });
-    exe.root_module.addImport("ThreadPriority", ThreadPriority);
 
     //    exe.root_module.addImport("cache", cache.module("cache"));
     var Entitys = b.addModule("Entity", .{
@@ -84,7 +82,6 @@ pub fn build(b: *std.Build) void {
 
     const ThreadPool = b.addModule("ThreadPool", .{ .root_source_file = b.path("src/libs/ThreadPool.zig"), .optimize = optimize, .imports = &.{
         .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
-        .{ .name = "ThreadPriority", .module = ThreadPriority },
     } });
     exe.root_module.addImport("ThreadPool", ThreadPool);
 

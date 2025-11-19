@@ -11,7 +11,6 @@ const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const ConcurrentQueue = @import("ConcurrentQueue");
 const Entity = @import("Entity").Entity;
-pub const SetThreadPriority = @import("ThreadPriority").setThreadPriority;
 pub const gui = @import("gui");
 pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig").Loader;
