@@ -15,34 +15,35 @@ pub const DefaultGenerator = struct {
     params: GenParams,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32),
 
-    pub fn getGenerator(self: *DefaultGenerator) World.ChunkGenerator {
+    pub fn getGenerator(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,
             .getTerrainHeight = &getTerrainHeightAtCoords,
-            .genChunkBlocks = &genChunkBlocks,
-            .afterGeneration = &genStructures,
+            .getBlocks = &genChunkBlocks,
+            .onLoad = &genStructures,
             .deinit = &deinit,
         };
     }
 
-    fn getTerrainHeightAtCoords(self: *World.ChunkGenerator, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
+    fn getTerrainHeightAtCoords(self: World.ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
         return GetTerrainHeight(Pos, generator.params, &generator.TerrainHeightCache);
     }
 
-    fn genChunkBlocks(self: *World.ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ GenerationError, OutOfMemory }!void {
+    fn genChunkBlocks(self: World.ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!bool {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
         try GenChunk(Pos, &generator.TerrainHeightCache, generator.params, blocks);
+        return true;
     }
 
-    fn genStructures(self: *World.ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void {
+    fn genStructures(self: World.ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void {
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
         try GenerateStructures(world, generator.params, chunk, Pos, &generator.TerrainHeightCache);
     }
 
-    fn deinit(self: *World.ChunkGenerator, world: *World) void {
+    fn deinit(self: World.ChunkSource, world: *World) void {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
         generator.TerrainHeightCache.deinit();
@@ -261,8 +262,7 @@ pub const DefaultGenerator = struct {
         var worldEditor = World.WorldEditor{ .world = self, .tempallocator = tempAllocator };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
-        if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
-        defer chunk.genstate.store(.StructuresGenerated, .seq_cst);
+        std.debug.assert(chunk.genstate.load(.seq_cst) == .TerrainGenerated);
         if (chunk.blocks != .blocks) return;
         if (!genParams.genStructures) return;
         const randomSeed = std.hash.Wyhash.hash(genParams.seed, std.mem.asBytes(&Pos));

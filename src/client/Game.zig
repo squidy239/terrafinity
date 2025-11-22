@@ -76,7 +76,7 @@ pub const Game = struct {
             .random = undefined,
             .prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp())),
             .Config = MainWorldConfig,
-            .Generator = game.generator.getGenerator(),
+            .ChunkSources = .{ null, null, null, game.generator.getGenerator() },
             .onEdit = null,
         };
         game.world.random = game.world.prng.random();

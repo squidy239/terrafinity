@@ -21,35 +21,65 @@ pub const World = struct {
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
-    Generator: ChunkGenerator,
+    ///tries each source in order until of priority, 0 is highest
+    ///if a source returns false, the next source will be tried
+    ///at least one source must be able to load the chunk
+    ChunkSources: [4]?ChunkSource,
+
     onEdit: ?struct {
         onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
         callIfNeighborFacesChanged: bool,
         onEditFnArgs: *anyopaque,
     },
+
     pub const WorldConfig = struct {
         SpawnCenterPos: @Vector(3, f64),
         SpawnRange: u32,
     };
 
-    pub const ChunkGenerator = struct {
-        ///onEditFn must be called on any modified chunks once all modifications are complete
-        ///this function is responsible for locking and adding refs to the chunk
-        ///must set chunk.genstate to StructuresGenerated
-        pub const AfterGenerationFunction = fn (self: *ChunkGenerator, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void;
-        ///generate the chunk blocks, this may be called multiple times on the same chunk position
-        pub const ChunkGenerationFunction = fn (self: *ChunkGenerator, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ OutOfMemory, GenerationError }!void;
-        ///must return the height of the terrain in blocks at the given chunk coordinates
-        pub const GetTerrainHeightAtPosFunction = fn (self: *ChunkGenerator, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32;
-
-        pub const DeinitFunction = fn (self: *ChunkGenerator, world: *World) void;
-
+    ///sources must be thread safe
+    pub const ChunkSource = struct {
+        ///holds any data for the chunk source
         data: *anyopaque,
-        genChunkBlocks: *const ChunkGenerationFunction,
-        afterGeneration: *const AfterGenerationFunction,
-        getTerrainHeight: *const GetTerrainHeightAtPosFunction,
-        deinit: *const DeinitFunction,
+
+        ///must generate the chunk blocks into the blocks array, this may be called multiple times on the same chunk position
+        ///returns true if the chunk was generated, false if it was unsuccessful, in which case the next chunk source will be tried
+        getBlocks: *const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!bool,
+
+        ///This function is called for every LoadChunk call, it will be called many times for each chunk
+        ///it is intended for structures or similar things
+        ///onEditFn must be called if chunks are modified on any modified chunks once all modifications are complete
+        ///this function is responsible for locking and adding refs to the chunk
+        onLoad: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void,
+
+        ///should return the height of the terrain in blocks at the given chunk coordinates
+        getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
+
+        ///should deinit the chunk source
+        deinit: *const fn (self: ChunkSource, world: *World) void,
     };
+
+    ///gets the chunks blocks from the sources in order, returns the first source that succeeds
+    fn getBlocks(self: *@This(), Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
+        for (self.ChunkSources) |source| {
+            if (source) |s| {
+                if (try s.getBlocks(s, self, blocks, Pos)) return;
+            }
+        }
+        return error.AllSourcesFailed;
+    }
+
+    fn onLoad(self: *@This(), chunk: *Chunk, Pos: [3]i32) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
+        for (self.ChunkSources) |source| {
+            if (source) |s| {
+                if (s.onLoad) |onLoadFn| {
+                    try onLoadFn(s, self, chunk, Pos);
+                    return;
+                }
+            }
+        }
+        return error.AllSourcesFailed;
+    }
 
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
         return std.hash.int(playerID);
@@ -87,9 +117,7 @@ pub const World = struct {
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-        const chunkPos = [2]i32{ @divFloor(pos[0], ChunkSize), @divFloor(pos[1], ChunkSize) };
-        const posInChunk = [2]i32{ @mod(pos[0], ChunkSize), @mod(pos[1], ChunkSize) };
-        const height = (try self.Generator.getTerrainHeight(&self.Generator, self, chunkPos))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = try self.GetTerrainHeightAtCoords(pos);
         std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
@@ -97,7 +125,8 @@ pub const World = struct {
     pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) !i64 {
         const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
         const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-        const height = (try self.Generator.getTerrainHeight(&self.Generator, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const genSource = self.ChunkSources[self.ChunkSources.len - 1] orelse undefined;
+        const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
 
@@ -121,24 +150,23 @@ pub const World = struct {
         }
     }
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{ OutOfMemory, GenerationError, Unrecoverable }!*Chunk {
+    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-            try self.Generator.genChunkBlocks(&self.Generator, self, &blocks, Pos);
+            try self.getBlocks(Pos, &blocks);
             const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
-            errdefer {
-                chunkptr.free(self.allocator);
-                self.allocator.destroy(chunkptr);
-            }
-            if (structures) { //TODO move structures to Generator
-                try self.Generator.afterGeneration(&self.Generator, self, chunkptr, Pos);
-            }
+            errdefer {}
+
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
-            const existing = try self.Chunks.putNoOverrideaddRef(Pos, chunkptr);
+            const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
+                chunkptr.free(self.allocator);
+                self.allocator.destroy(chunkptr);
+                return err;
+            };
             //chptr is in hashmap past this point
             if (existing) |d| {
                 chunkptr.release(); //ref was added before putting
@@ -146,10 +174,15 @@ pub const World = struct {
                 self.allocator.destroy(chunkptr);
                 return d;
             }
+            if (structures) { //TODO move structures to Generator
+                try onLoad(self, chunkptr, Pos);
+                chunkptr.genstate.store(.StructuresGenerated, .seq_cst);
+            }
             return chunkptr;
         } else {
             if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
-                try self.Generator.afterGeneration(&self.Generator, self, chunk.?, Pos);
+                try onLoad(self, chunk.?, Pos);
+                chunk.?.genstate.store(.StructuresGenerated, .seq_cst);
             }
             return chunk.?;
         }
@@ -410,7 +443,9 @@ pub const World = struct {
             }
         }
         self.Entitys.deinit();
-        self.Generator.deinit(&self.Generator, self);
+        for (self.ChunkSources) |source| {
+            if (source) |s| s.deinit(s, self);
+        }
         self.Chunks.deinit();
     }
 };
