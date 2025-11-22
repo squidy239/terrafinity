@@ -48,9 +48,14 @@ pub const World = struct {
 
         ///This function is called for every LoadChunk call, it will be called many times for each chunk
         ///it is intended for structures or similar things
+        ///all chunk sources will be tried
         ///onEditFn must be called if chunks are modified on any modified chunks once all modifications are complete
         ///this function is responsible for locking and adding refs to the chunk
         onLoad: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void,
+        
+        ///This function is called for every UnloadChunk call, it will be called many times for each chunk
+        ///all chunk sources will be tried
+        onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) void,
 
         ///should return the height of the terrain in blocks at the given chunk coordinates
         getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
@@ -69,16 +74,24 @@ pub const World = struct {
         return error.AllSourcesFailed;
     }
 
-    fn onLoad(self: *@This(), chunk: *Chunk, Pos: [3]i32) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
+    fn onLoad(self: *@This(), chunk: *Chunk, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
                 if (s.onLoad) |onLoadFn| {
                     try onLoadFn(s, self, chunk, Pos);
-                    return;
                 }
             }
         }
-        return error.AllSourcesFailed;
+    }
+    
+    fn onUnload(self: *@This(), chunk: *Chunk, Pos: [3]i32) void {
+        for (self.ChunkSources) |source| {
+            if (source) |s| {
+                if (s.onUnload) |onUnloadFn| {
+                    onUnloadFn(s, self, chunk, Pos);
+                }
+            }
+        }
     }
 
     pub fn PlayerIDtoEntityId(playerID: u128) u128 {
@@ -406,14 +419,15 @@ pub const World = struct {
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
         const chunk = self.Chunks.fetchremoveandaddref(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
-        _ = chunk.WaitForRefAmount(1, null);
-        chunk.free(self.allocator);
-        self.allocator.destroy(chunk);
+        self.UnloadChunkByPtr(chunk, Pos);
     }
+    
     ///dosent remove chunk from hashmap, just frees it
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk) void {
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: [3]i32) void {
+        onUnload(self, chunk, Pos);
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
+        self.allocator.destroy(chunk);
     }
 
     pub fn Deinit(self: *@This()) void {
@@ -424,11 +438,10 @@ pub const World = struct {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
             self.Chunks.buckets[b].lock.lock();
             lock.End();
-            var it = self.Chunks.buckets[b].hash_map.valueIterator();
+            var it = self.Chunks.buckets[b].hash_map.iterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                self.UnloadChunkByPtr(c.*);
-                self.allocator.destroy(c.*);
+                self.UnloadChunkByPtr(c.value_ptr.*, c.key_ptr.*);
             }
         }
         const enbktamount = self.Entitys.buckets.len;
