@@ -148,7 +148,7 @@ pub const textEscMenu = gui.Element.CreationOptions{
     },
     .cornerPixelRadii = @splat(.{ .pixels = 25 }),
     .children = &.{
-        .{ //TODO move menu out of this and redo user input handeling
+        .{ 
             .elementBackground = .{ .solid = .{ 0.8, 0.3, 0.3, 1 } },
             .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 60 } },
             .size = .{
@@ -166,7 +166,7 @@ pub const textEscMenu = gui.Element.CreationOptions{
             .onHover = onHoverEsc,
             .cornerPixelRadii = @splat(.{ .pixels = 15 }),
         },
-        .{ //TODO move menu out of this and redo user input handeling
+        .{ 
             .elementBackground = .{ .solid = .{ 0.3, 0.8, 0.3, 1 } },
             .position = .{ .x = .{ .xPercent = 50 }, .y = .{ .yPercent = 80 } },
             .size = .{
@@ -184,7 +184,7 @@ pub const textEscMenu = gui.Element.CreationOptions{
             .onHover = onHoverC,
             .cornerPixelRadii = @splat(.{ .pixels = 15 }),
         },
-        gui.Widgets.Slider(.{ //TODO move menu out of this and redo user input handeling
+        gui.Widgets.Slider(.{
             .size = .{ .height = .{ .yPercent = 100 }, .width = .{ .pixels = 50 } },
             .centerPos = .{ .x = .{ .xPercent = 100, .pixels = -50 }, .y = .{ .yPercent = 50 } },
         }, null, .y),

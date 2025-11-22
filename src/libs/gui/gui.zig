@@ -293,7 +293,7 @@ pub const Element = struct {
     }
 
     ///requires a valid opengl context, screen_dimentions MUST be multiplyed by fractional scailing
-    pub fn Draw(self: *@This(), viewport_pixels: [2]f32, viewport_millimeters: [2]f32, window: *glfw.Window) void { //TODO only have creation options, gl_clipdistance, and element matricies for rotation or projection
+    pub fn Draw(self: *@This(), viewport_pixels: [2]f32, viewport_millimeters: [2]f32, window: *glfw.Window) void { //TODO gl_clipdistance, and element matricies for rotation or projection
         std.debug.assert(self.isinit);
         std.debug.assert(isinit);
         if (!self.options.Visible) return;
