@@ -184,7 +184,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
 
             const res = self.hash_map.get(key);
             if (res) |r| {
-                r.add_ref();
+                _ = r.ref_count.fetchAdd(1, .seq_cst);
                 return r;
             }
             try self.hash_map.put(key, value);
@@ -198,7 +198,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             defer self.lock.unlockShared();
             const r = self.hash_map.get(key);
             if (r != null) {
-                r.?.add_ref();
+                _ = r.?.ref_count.fetchAdd(1, .seq_cst);
             } else return null;
             return r;
         }

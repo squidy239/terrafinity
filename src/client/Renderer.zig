@@ -152,7 +152,7 @@ pub const Renderer = struct {
         gl.EnableVertexAttribArray(0);
     }
     pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
-        const playerPos = self.player.GetPos().?;
+        const playerPos = self.player.getPos().?;
         //draw chunks
         const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
         const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
@@ -167,7 +167,7 @@ pub const Renderer = struct {
         const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
         drawChunks.End();
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-        self.DrawEntities(game, playerPos, viewport_pixels);
+        try self.DrawEntities(game, playerPos, viewport_pixels);
         drawEntities.End();
         const meshDistance = [3]u32{ game.MeshDistance[0].load(.seq_cst), game.MeshDistance[1].load(.seq_cst), game.MeshDistance[2].load(.seq_cst) };
         const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
@@ -230,7 +230,7 @@ pub const Renderer = struct {
         return [2]u64{ drawnchunks, torenderchunks };
     }
 
-    pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) void {
+    pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
         gl.FrontFace(gl.CCW);
         gl.UseProgram(self.entityshaderprogram);
         const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
@@ -238,12 +238,10 @@ pub const Renderer = struct {
         const enbktamount = game.chunkManager.world.Entitys.buckets.len;
         for (0..enbktamount) |b| {
             game.chunkManager.world.Entitys.buckets[b].lock.lockShared();
-            var it = game.chunkManager.world.Entitys.buckets[b].hash_map.valueIterator();
+            var it = game.chunkManager.world.Entitys.buckets[b].hash_map.iterator();
             defer game.chunkManager.world.Entitys.buckets[b].lock.unlockShared();
             while (it.next()) |c| {
-                _ = c.*.ref_count.fetchAdd(1, .seq_cst);
-                defer _ = c.*.ref_count.fetchSub(1, .seq_cst);
-                try c.*.draw(playerPos, self);
+                try c.value_ptr.*.draw(playerPos, c.key_ptr.*, &game.world, self);
             }
         }
     }

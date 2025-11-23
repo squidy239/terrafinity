@@ -67,7 +67,7 @@ pub const ChunkManager = struct {
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: [3]i32, genStructures: bool, cullOutsideGenDistance: bool) void {
         if (cullOutsideGenDistance) {
-            const playerPos = game.player.GetPos().?;
+            const playerPos = game.player.getPos().?;
             const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
             const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
             const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));

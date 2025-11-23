@@ -60,11 +60,7 @@ pub const Loader = struct {
     pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
         std.debug.assert(game.player.type == .Player);
         while (game.running.load(.monotonic)) {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            game.player.lock.lockShared();
-            lock.End();
-            const playerPos = game.player.GetPos().?;
-            game.player.lock.unlockShared();
+            const playerPos = game.player.getPos().?;
             const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
@@ -77,7 +73,7 @@ pub const Loader = struct {
 
     pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
         while (game.running.load(.monotonic)) {
-            const playerPos = game.player.GetPos().?;
+            const playerPos = game.player.getPos().?;
             const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));

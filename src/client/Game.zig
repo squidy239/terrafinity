@@ -25,7 +25,6 @@ pub const Game = struct {
     // Threads
     loaderThread: ?std.Thread,
     unloaderThread: ?std.Thread,
-    updateEntitiesThread: ?std.Thread,
 
     // Distances
     MeshDistance: [3]std.atomic.Value(u32),
@@ -69,6 +68,8 @@ pub const Game = struct {
         try game.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
         errdefer game.pool.deinit();
         game.world = .{
+            .running = .init(true),
+            .entityUpdaterThread = null,
             .allocator = allocator,
             .threadPool = &game.pool,
             .Entitys = .init(secondary_allocator),
@@ -81,9 +82,20 @@ pub const Game = struct {
         };
         game.world.random = game.world.prng.random();
         errdefer game.world.Deinit();
+
+        for (0..1) |_| {
+            _ = try game.world.SpawnEntity(null, EntityTypes.Cube{
+                .lock = .{},
+                .pos = @splat(0),
+                .velocity = @splat(0),
+                .timestamp = std.time.microTimestamp(),
+                .bodyRotationAxis = @splat(0),
+            });
+        }
+
         game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
-            .player_UUID = 0, //UUID 0 resurved for client
             .player_name = .fromString("squid"),
+            .lock = .{},
             .gameMode = .Spectator,
             .OnGround = false,
             .pos = try game.world.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
@@ -116,13 +128,14 @@ pub const Game = struct {
 
     pub fn deinit(self: *@This(), window: *glfw.Window) void {
         self.running.store(false, .monotonic);
-        if (self.updateEntitiesThread) |thread| thread.join();
+        self.world.stop();
         if (self.loaderThread) |thread| thread.join();
         if (self.unloaderThread) |thread| thread.join();
+
         std.log.info("stopped threads", .{});
         _ = window.setCursorPosCallback(null);
-        UserInput.deinit();
 
+        UserInput.deinit();
         self.renderer.deinit();
 
         self.chunkManager.pool.deinit();
@@ -152,7 +165,7 @@ pub const Game = struct {
     pub fn startThreads(self: *@This()) !void {
         self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 50 * std.time.ns_per_ms });
         self.unloaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkUnloaderThread, .{ self, 50 * std.time.ns_per_ms });
-        self.updateEntitiesThread = try std.Thread.spawn(.{}, Entity.TickEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms, &self.running });
+        self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }
 };

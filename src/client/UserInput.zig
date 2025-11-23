@@ -20,6 +20,8 @@ const Menu = @import("menu.zig");
 var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
+var lastbreak: i64 = 0;
+
 var benchmarkStartTime: i64 = 0;
 pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input handeling
     game = g;
@@ -94,11 +96,11 @@ pub fn processInput(window: *glfw.Window) !void {
     const dt = timestamp - lastmicrotime;
     lastmicrotime = timestamp;
     var posAdjustment: @Vector(3, f64) = @splat(0);
+    const player = @as(*EntityTypes.Player, @ptrCast(@alignCast(game.player.ptr)));
     defer {
-        game.player.lock.lock();
-        std.debug.assert(@reduce(.Or, posAdjustment == posAdjustment)); //posAdjustment is not NaN
-        @as(*EntityTypes.Player, @ptrCast(@alignCast(game.player.ptr))).pos += posAdjustment;
-        game.player.lock.unlock();
+        player.lock.lock();
+        player.pos += posAdjustment;
+        player.lock.unlock();
     }
     var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.002, 0.002, 0.002 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (ts.Sprinting) {
@@ -147,15 +149,17 @@ pub fn processInput(window: *glfw.Window) !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (window.getKey(glfw.Key.r) == .press)
-        try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true, true);
+        try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.getPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true, true);
 
     if (window.getKey(glfw.Key.b) == .press) {
-        try game.chunkManager.pool.spawn(placeSamplerSphereTask, .{}, .High);
-
+        if (std.time.microTimestamp() - lastbreak > 100 * std.time.us_per_ms) {
+            try game.chunkManager.pool.spawn(placeSamplerSphereTask, .{game.player.getPos().?}, .High);
+            lastbreak = std.time.microTimestamp();
+        }
     }
 
     if (window.getKey(glfw.Key.f) == .press) {
-        const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
+        const cone = World.WorldEditor.Cone(f64).init(game.player.getPos().?, game.renderer.cameraFront, 1000, 100, 50);
         worldEditorLock.lock();
         try worldEditor.PlaceSamplerShape(.Stone, cone);
         _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
@@ -169,7 +173,7 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.i) == .press) {
-        const playerPos = game.player.GetPos().?;
+        const playerPos = game.player.getPos().?;
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
@@ -183,14 +187,14 @@ pub fn processInput(window: *glfw.Window) !void {
         benchmarkStartTime = std.time.microTimestamp();
     }
     if (ts.Benchmark) {
-        game.player.lock.lock();
+        player.lock.lock();
         var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
         const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
         t *= ((t * speedUpFactor));
         const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
         playerptr.pos = std.math.lerp(playerptr.pos, game.chunkManager.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try game.chunkManager.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[0] + t), @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
         const pos = playerptr.pos;
-        game.player.lock.unlock();
+        player.lock.unlock();
         const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
         if (game.chunkManager.world.Chunks.get(chpos) == null) {
             std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
@@ -203,13 +207,13 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 }
 
-fn placeSamplerSphereTask() void{
+fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
     const noise = World.DefaultGenerator.Noise.Noise(f32){
         .noise_type = .perlin,
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
@@ -244,7 +248,7 @@ fn genFractalTask() void {
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
     const tree = World.Tree{
-        .pos = @intFromFloat(game.player.GetPos().?),
+        .pos = @intFromFloat(game.player.getPos().?),
         .baseRadius = 5,
         .rand = random.random(),
         .trunkHeight = 64,
@@ -266,8 +270,8 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     const yoffset: f64 = (ypos - last_mouse_pos[1]) * game.renderer.mouseSensitivity;
     last_mouse_pos[0] = xpos;
     last_mouse_pos[1] = ypos;
-    game.player.lock.lock();
     const player: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
+    player.lock.lock();
     var newHeadRotationAxis = player.headRotationAxis;
     var newBodyRotationAxis = player.bodyRotationAxis;
     newHeadRotationAxis -= @Vector(2, f32){ @floatCast(yoffset), @floatCast(xoffset) };
@@ -278,7 +282,7 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
 
     player.headRotationAxis = newHeadRotationAxis;
     player.bodyRotationAxis = newBodyRotationAxis;
-    game.player.lock.unlock();
+    player.lock.unlock();
 
     var cameraFront: @Vector(3, f64) = undefined;
     cameraFront[0] = @floatCast(@sin(std.math.degreesToRadians(newHeadRotationAxis[1])) * @cos(std.math.degreesToRadians(newHeadRotationAxis[0])));

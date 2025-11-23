@@ -14,10 +14,12 @@ pub const World = struct {
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
     pub const Tree = @import("structures/Tree.zig").Tree;
     pub const TexturedSphere = @import("structures/TexturedSphere.zig");
+    running: std.atomic.Value(bool),
+    entityUpdaterThread: ?std.Thread,
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
     prng: std.Random.DefaultPrng,
-    random: std.Random,
+    random: std.Random,//TODO make this threadsafe
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
@@ -94,9 +96,6 @@ pub const World = struct {
         }
     }
 
-    pub fn PlayerIDtoEntityId(playerID: u128) u128 {
-        return std.hash.int(playerID);
-    }
     pub fn UnloadEntity(self: *@This(), entityUUID: u128) void {
         const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
         _ = en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
@@ -114,17 +113,13 @@ pub const World = struct {
         en.fullfree(self.allocator);
     }
 
-    pub fn SpawnEntity(self: *@This(), UUID: ?u128, entity: anytype) !*Entity {
-        const uuid = UUID orelse self.random.int(u128);
-        if (self.Entitys.contains(uuid)) return error.EntityAlreadyExists;
-        const allocated_entity = try entity.MakeEntity(self.allocator);
-        errdefer allocated_entity.fullfree(self.allocator);
-        const existing = try self.Entitys.putNoOverrideaddRef(uuid, allocated_entity);
-        if (existing) |_| {
-            allocated_entity.fullfree(self.allocator);
-            return error.EntityAlreadyExists;
-        }
-
+    pub fn SpawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
+        const UUID = uuid orelse std.crypto.random.int(u128);
+        if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
+        const allocated_entity = try Entity.Make(entity, self.allocator);
+        errdefer allocated_entity.unload(self, UUID, self.allocator, false) catch unreachable;
+        const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
+        std.debug.assert(existing == null);
         return allocated_entity;
     }
 
@@ -143,25 +138,57 @@ pub const World = struct {
         return height;
     }
 
-    pub fn TickEntitys(self: *@This()) !void {
-        const bktamount = self.Entitys.buckets.len;
-        for (0..bktamount) |b| {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            self.Entitys.buckets[b].lock.lockShared();
-            lock.End();
-            var it = self.Entitys.buckets[b].hash_map.valueIterator();
-            defer self.Entitys.buckets[b].lock.unlockShared();
-            while (it.next()) |entity| {
-                entity.*.ref_count.fetchAdd(1, .seq_cst);
-                defer entity.*.ref_count.fetchSub(1, .seq_cst);
-                const locke = ztracy.ZoneNC(@src(), "lockEntity", 2222111);
-                entity.*.lock.lock();
-                locke.End();
-                defer entity.*.lock.unlock();
-                entity.GetActive().update();
+    pub fn TickEntitiesBucketTask(self: *@This(), complete: *bool, bucketindex: usize, allocator: std.mem.Allocator) void {
+        defer complete.* = true;
+        if (!self.running.load(.monotonic)) return;
+        const bucket = &self.Entitys.buckets[bucketindex];
+        const TickEntitiesTask = ztracy.ZoneNC(@src(), "TickEntitiesTask", 324);
+        defer TickEntitiesTask.End();
+        var keys: []u128 = undefined; //makes an array of keys not owned by the hashmap so update can unload the entity
+        {
+            bucket.lock.lockShared();
+            defer bucket.lock.unlockShared();
+            const keyit = bucket.hash_map.keyIterator();
+            keys = allocator.dupe(u128, keyit.items[0..keyit.len]) catch |err| std.debug.panic("err: {any}\n", .{err});
+        }
+        defer allocator.free(keys);
+        for (keys) |uuid| {
+            const entity = bucket.getandaddref(uuid);
+            if (entity) |en| {
+                en.update(self, uuid, allocator) catch |err| {
+                    switch (err) {
+                        error.TimedOut => continue,
+                        error.Unrecoverable => std.debug.panic("entity update err Unrecoverable\n", .{}),
+                    }
+                };
             }
         }
     }
+
+    pub fn UpdateEntitiesThread(self: *@This(), interval_ns: u64) void {
+        const enbktamount = self.Entitys.buckets.len;
+        var tasksComplete: [enbktamount]bool = @splat(true);
+        var st = std.time.nanoTimestamp();
+        while (self.running.load(.monotonic)) {
+            const AddEntitiesToTick = ztracy.ZoneNC(@src(), "AddEntitiesToTick", 45354345);
+            tasksComplete = @splat(false);
+            for (0..enbktamount) |bucket| {
+                self.threadPool.spawn(TickEntitiesBucketTask, .{ self, &tasksComplete[bucket], bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
+            }
+            AddEntitiesToTick.End();
+            std.Thread.sleep(interval_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
+            st = std.time.nanoTimestamp();
+            const WaitingForTasksToComplete = ztracy.ZoneNC(@src(), "WaitingForTasksToComplete", 2344326);
+            while (!@reduce(.And, @as(@Vector(enbktamount, bool), tasksComplete)) and self.running.load(.monotonic)) { //checks if all tasks finished before spawning new ones, check if running because the tasks exit if its not
+                std.Thread.yield() catch {};
+            }
+            WaitingForTasksToComplete.End();
+        }
+        while (!@reduce(.And, @as(@Vector(enbktamount, bool), tasksComplete))) { //wait for all tasks to finish before exiting so the taskscomplete ptr dosent become invalid
+            std.Thread.yield() catch {};
+        }
+    }
+
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
     pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
@@ -200,7 +227,8 @@ pub const World = struct {
             return chunk.?;
         }
     }
-
+    
+    
     pub const WorldEditor = struct {
         world: *World,
         lastChunkCache: ?struct { Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
@@ -430,9 +458,16 @@ pub const World = struct {
         self.allocator.destroy(chunk);
     }
 
+    pub fn stop(self: *@This()) void {
+        self.running.store(false, .monotonic);
+        if (self.entityUpdaterThread) |thread| thread.join();
+        self.entityUpdaterThread = null;
+    }
+
     pub fn Deinit(self: *@This()) void {
         const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
         defer deinitWorld.End();
+        self.stop();
         const bktamount = self.Chunks.buckets.len;
         for (0..bktamount) |b| {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -449,10 +484,10 @@ pub const World = struct {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
             self.Entitys.buckets[b].lock.lock();
             lock.End();
-            var it = self.Entitys.buckets[b].hash_map.valueIterator();
+            var it = self.Entitys.buckets[b].hash_map.iterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                c.*.fullfree(self.allocator);
+                c.value_ptr.*.unload(self, c.key_ptr.*, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
             }
         }
         self.Entitys.deinit();

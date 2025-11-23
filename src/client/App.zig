@@ -176,7 +176,6 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
             .game_arena = undefined,
             .loaderThread = undefined,
             .unloaderThread = undefined,
-            .updateEntitiesThread = undefined,
             .MeshDistance = undefined,
             .GenerateDistance = undefined,
             .LoadDistance = undefined,
