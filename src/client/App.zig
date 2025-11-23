@@ -126,6 +126,7 @@ pub fn main() !void {
         if (currentMenu) |m| {
             m.Draw(viewport_pixels, viewport_millimeters, window);
         }
+
         window.swapBuffers();
         glfw.pollEvents();
     }

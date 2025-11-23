@@ -38,8 +38,9 @@ pub const Mesh = struct {
     TransperentFaces: ?[]const Face,
     Pos: [3]i32,
     scale: f32,
+    animation: bool,
     ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, allocator: std.mem.Allocator) !?@This() {
+    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
@@ -111,6 +112,7 @@ pub const Mesh = struct {
                 .TransperentFaces = if (Tpos > 0) try allocator.dupe(Face, TransparentfaceBuffer[0..Tpos]) else null,
                 .Pos = ChunkPos,
                 .scale = scale,
+                .animation = animation,
             };
         } else return null;
     }

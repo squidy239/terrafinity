@@ -25,37 +25,31 @@ pub const Loader = struct {
     pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, playerChunkPos: @Vector(3, i32)) void {
         const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
         defer unload.End();
-        while (chunkManager.MeshesToUnload.popFirst()) |Pos| {
-            const meshIds = chunkManager.ChunkRenderList.fetchSwapRemove(Pos);
-            if (meshIds) |m| m.value.free();
-        }
 
         {
             const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
             defer loop.End();
-            chunkManager.ChunkRenderListLock.lockShared();
-            defer chunkManager.ChunkRenderListLock.unlockShared();
-            chunkManager.ChunkRenderList.lockPointers();
-            defer chunkManager.ChunkRenderList.unlockPointers();
-            const positions = chunkManager.ChunkRenderList.keys();
-            for (positions) |Pos| {
-                if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
-                    meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                    meshesToUnloadBufferPos += 1;
+            const bktamount = chunkManager.ChunkRenderList.buckets.len;
+            for (0..bktamount) |b| {
+                chunkManager.ChunkRenderList.buckets[b].lock.lock();
+                var it = chunkManager.ChunkRenderList.buckets[b].hash_map.keyIterator();
+                defer chunkManager.ChunkRenderList.buckets[b].lock.unlock();
+                while (it.next()) |key| {
+                    const Pos = key.*;
+                    if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
+                        meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+                        meshesToUnloadBufferPos += 1;
+                    }
                 }
             }
         }
         if (meshesToUnloadBufferPos > 0) {
             const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
             defer free.End();
-            if (!chunkManager.ChunkRenderListLock.tryLock()) {
-                return;
-            }
             for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-                const mesh = chunkManager.ChunkRenderList.fetchSwapRemove(Pos);
-                if (mesh) |m| m.value.free();
+                const mesh = chunkManager.ChunkRenderList.fetchremove(Pos);
+                if (mesh) |m| m.free();
             }
-            chunkManager.ChunkRenderListLock.unlock();
             meshesToUnloadBufferPos = 0;
         }
     }
@@ -132,11 +126,7 @@ pub const Loader = struct {
                     if (game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                         continue;
                     }
-                    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-                    game.chunkManager.ChunkRenderListLock.lockShared();
-                    lock.End();
                     const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
-                    game.chunkManager.ChunkRenderListLock.unlockShared();
                     if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                         amount_loaded += 1;
                         game.chunkManager.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
@@ -195,22 +185,24 @@ pub const Loader = struct {
             const mesh = game.chunkManager.MeshesToLoad.popFirst() orelse break;
             defer mesh.free(game.allocator);
             defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos);
-            std.debug.assert(mesh.TransperentFaces != null or mesh.faces != null);
-            game.chunkManager.ChunkRenderListLock.lockShared();
+            if (mesh.TransperentFaces == null and mesh.faces == null) {
+                _ = game.chunkManager.ChunkRenderList.remove(mesh.Pos);
+                continue;
+            }
             const ex = game.chunkManager.ChunkRenderList.get(mesh.Pos);
-            game.chunkManager.ChunkRenderListLock.unlockShared();
             defer amount += 1;
             var oldtime: ?i64 = null;
             if (ex) |m| {
                 oldtime = m.time;
             }
+            if (!mesh.animation) {
+                oldtime = 0;
+            }
             const mesh_buffer_ids = Loader.LoadMesh(renderer, mesh, oldtime);
             {
-                game.chunkManager.ChunkRenderListLock.lock();
-                defer game.chunkManager.ChunkRenderListLock.unlock();
                 const oldChunk = try game.chunkManager.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
                 if (oldChunk) |old_mesh| {
-                    old_mesh.value.free();
+                    old_mesh.free();
                 }
             }
         }

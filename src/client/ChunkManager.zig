@@ -21,15 +21,13 @@ pub const ChunkManager = struct {
     pool: *ThreadPool,
     LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
     MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
-    MeshesToUnload: ConcurrentQueue.ConcurrentQueue([3]i32, 32, true),
-    ChunkRenderListLock: std.Thread.RwLock,
     world: *World,
-    ChunkRenderList: std.AutoArrayHashMap([3]i32, MeshBufferIDs),
+    ChunkRenderList: ConcurrentHashMap([3]i32, MeshBufferIDs, std.hash_map.AutoContext([3]i32), 80, 32),
 
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     threadlocal var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool) !void {
+    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool, playAnimation: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
         const chunk = try self.world.LoadChunk(Pos, genStructures);
@@ -53,15 +51,16 @@ pub const ChunkManager = struct {
             },
         }
         exbl.End();
-        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, 1, self.allocator);
+        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, 1, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
             _ = try self.MeshesToLoad.append(m);
         } else {
-            self.ChunkRenderListLock.lockShared();
             const removeChunk = self.ChunkRenderList.contains(Pos);
-            self.ChunkRenderListLock.unlockShared();
-            if (removeChunk) _ = try self.MeshesToUnload.append(Pos);
+            if (removeChunk or true) {
+                const emptyMesh: Mesher.Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = 1, .animation = playAnimation };
+                _ = try self.MeshesToLoad.append(emptyMesh);
+            }
         }
     }
 
@@ -73,15 +72,15 @@ pub const ChunkManager = struct {
             const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
             const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
             if (game.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
-                game.chunkManager.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+                game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
             } else {
                 _ = game.chunkManager.LoadingChunks.remove(Pos);
             }
-        } else game.chunkManager.AddChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+        } else game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 
     pub fn onEditFn(chunkPos: [3]i32, args: *anyopaque) void {
         const manager = @as(*ChunkManager, @ptrCast(@alignCast(args)));
-        manager.AddChunkToRender(chunkPos, false) catch |err| std.log.err("err: {any}", .{err});
+        manager.AddChunkToRender(chunkPos, false, false) catch |err| std.log.err("err: {any}", .{err});
     }
 };

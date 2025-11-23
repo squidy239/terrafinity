@@ -178,7 +178,7 @@ pub const Renderer = struct {
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
             defer if (glSync) |sync| gl.DeleteSync(sync);
-            _ = try Loader.LoadMeshes(self, game, glSync, 1 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+            _ = try Loader.LoadMeshes(self, game, glSync, 5 * std.time.us_per_ms, 20 * std.time.us_per_ms);
         }
         return drawn;
     }
@@ -196,8 +196,6 @@ pub const Renderer = struct {
         gl.Uniform1f(self.uniforms.fogDensity, 0);
         gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
         gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-        game.chunkManager.ChunkRenderListLock.lockShared();
-        defer game.chunkManager.ChunkRenderListLock.unlockShared();
 
         var drawnchunks: u64 = 0;
         var torenderchunks: u64 = 0;
@@ -208,21 +206,25 @@ pub const Renderer = struct {
         inline for (0..2) |i| {
             if (i == 1) gl.Disable(gl.CULL_FACE);
             defer gl.Enable(gl.CULL_FACE);
-
-            var it = game.chunkManager.ChunkRenderList.iterator();
-            while (it.next()) |item| {
-                torenderchunks += 1;
-                const buffer_ids = item.value_ptr;
-                const Pos: @Vector(3, i32) = item.key_ptr.*;
-                const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
-                const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
-                const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-                if (!cull) continue;
-                drawnchunks += 1;
-                gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
-                gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
-                gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
-                gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
+            const bktamount = game.chunkManager.ChunkRenderList.buckets.len;
+            for (0..bktamount) |b| {
+                game.chunkManager.ChunkRenderList.buckets[b].lock.lock();
+                var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.iterator();
+                defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
+                while (it.next()) |item| {
+                    torenderchunks += 1;
+                    const buffer_ids = item.value_ptr;
+                    const Pos: @Vector(3, i32) = item.key_ptr.*;
+                    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
+                    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
+                    const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+                    if (!cull) continue;
+                    drawnchunks += 1;
+                    gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
+                    gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
+                    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
+                    gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
+                }
             }
         }
         return [2]u64{ drawnchunks, torenderchunks };

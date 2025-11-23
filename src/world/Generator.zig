@@ -14,7 +14,7 @@ pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
     params: GenParams,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32),
-    
+
     pub fn getGenerator(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,

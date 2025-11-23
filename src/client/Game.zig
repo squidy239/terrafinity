@@ -96,12 +96,10 @@ pub const Game = struct {
         });
         game.chunkManager = .{
             .pool = &game.pool,
-            .ChunkRenderList = std.AutoArrayHashMap([3]i32, Renderer.MeshBufferIDs).init(allocator),
-            .ChunkRenderListLock = .{},
+            .ChunkRenderList = .init(allocator),
             .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
             .MeshesToLoad = .init(allocator),
             .world = &game.world,
-            .MeshesToUnload = .init(allocator),
             .allocator = allocator,
         };
         game.renderer = try .init(allocator, game.player);
@@ -130,10 +128,14 @@ pub const Game = struct {
         self.chunkManager.pool.deinit();
         std.log.info("closed threadpool", .{});
 
-        self.chunkManager.ChunkRenderListLock.lock();
-        var it = self.chunkManager.ChunkRenderList.iterator();
-        while (it.next()) |mesh| {
-            mesh.value_ptr.free();
+        const bktamount = self.chunkManager.ChunkRenderList.buckets.len;
+        for (0..bktamount) |b| {
+            self.chunkManager.ChunkRenderList.buckets[b].lock.lock();
+            var it = self.chunkManager.ChunkRenderList.buckets[b].hash_map.valueIterator();
+            defer self.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
+            while (it.next()) |mesh| {
+                mesh.free();
+            }
         }
         self.chunkManager.ChunkRenderList.deinit();
         self.chunkManager.LoadingChunks.deinit();
@@ -141,7 +143,6 @@ pub const Game = struct {
             mesh.free(self.allocator);
         }
         self.chunkManager.MeshesToLoad.deinit(true);
-        self.chunkManager.MeshesToUnload.deinit(true);
 
         self.world.Deinit();
 
@@ -149,8 +150,8 @@ pub const Game = struct {
     }
 
     pub fn startThreads(self: *@This()) !void {
-        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 40 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkUnloaderThread, .{ self, 5 * std.time.ns_per_ms });
+        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 50 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkUnloaderThread, .{ self, 50 * std.time.ns_per_ms });
         self.updateEntitiesThread = try std.Thread.spawn(.{}, Entity.TickEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms, &self.running });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }

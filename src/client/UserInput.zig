@@ -147,24 +147,11 @@ pub fn processInput(window: *glfw.Window) !void {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
     if (window.getKey(glfw.Key.r) == .press)
-        try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true);
+        try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.GetPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true, true);
 
     if (window.getKey(glfw.Key.b) == .press) {
-        //const cone = World.WorldEditor.Cone(f64).init(game.player.GetPos().?, game.renderer.cameraFront, 1000, 100, 50);
-        //worldEditorLock.lock();
-        //try worldEditor.PlaceSamplerShape(.Stone, cone);
-        //_ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-        //worldEditorLock.unlock();
-        //
-        const noise = World.DefaultGenerator.Noise.Noise(f32){
-            .noise_type = .perlin,
-            .frequency = 0.1,
-        };
-        worldEditorLock.lock();
-        try World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 1.0, noise, .Air);
-        std.debug.print("placeing\n", .{});
-        _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-        worldEditorLock.unlock();
+        try game.chunkManager.pool.spawn(placeSamplerSphereTask, .{}, .High);
+
     }
 
     if (window.getKey(glfw.Key.f) == .press) {
@@ -214,6 +201,18 @@ pub fn processInput(window: *glfw.Window) !void {
     if (window.getKey(glfw.Key.end) == .press) {
         ts.Benchmark = false;
     }
+}
+
+fn placeSamplerSphereTask() void{
+    const noise = World.DefaultGenerator.Noise.Noise(f32){
+        .noise_type = .perlin,
+        .frequency = 0.1,
+    };
+    worldEditorLock.lock();
+    World.TexturedSphere.NoiseSphere(&worldEditor, game.player.GetPos().?, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
+    std.debug.print("placeing\n", .{});
+    _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+    worldEditorLock.unlock();
 }
 
 fn genFractalTask() void {

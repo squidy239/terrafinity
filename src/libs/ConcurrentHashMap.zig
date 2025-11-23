@@ -39,12 +39,12 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].getandaddref(key);
         }
 
-        pub fn fetchremoveandaddref(self: *Self, key: K) ?V {
+        pub fn fetchremove(self: *Self, key: K) ?V {
             //const hashget = ztracy.ZoneNC(@src(), "hashget", 0x9692d);
             //defer hashget.End();
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
-            return self.buckets[bucket_index].fetchremoveandaddref(key);
+            return self.buckets[bucket_index].fetchremove(key);
         }
 
         pub fn getandaddrefnolock(self: *Self, key: K) ?V {
@@ -149,8 +149,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             defer self.lock.unlockShared();
             return self.hash_map.get(key);
         }
-        ///dosent add a ref because one would have to be removed because is is being removed from the hashmap
-        pub fn fetchremoveandaddref(self: *Self, key: K) ?V {
+        pub fn fetchremove(self: *Self, key: K) ?V {
             //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
             //bktlock.End();
