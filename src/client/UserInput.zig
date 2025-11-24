@@ -159,13 +159,13 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.f) == .press) {
-        const cone = World.WorldEditor.Cone(f64).init(game.player.getPos().?, game.renderer.cameraFront, 1000, 100, 50);
-        worldEditorLock.lock();
-        try worldEditor.PlaceSamplerShape(.Stone, cone);
-        _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-        worldEditorLock.unlock();
+     //   const cone = World.WorldEditor.Cone(f64).init(game.player.getPos().?, game.renderer.cameraFront, 1000, 100, 50);
+     //   worldEditorLock.lock();
+     //   try worldEditor.PlaceSamplerShape(.Stone, cone);
+       // _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+       // worldEditorLock.unlock();
 
-        // _ = try game.world.SpawnEntity(null, EntityTypes.Explosive{.pos = game.player.GetPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp(), .explosionRadius = 32, .exploded = false,});
+        _ = try game.world.SpawnEntity(null, EntityTypes.Cube{.pos = game.player.getPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp()});
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
@@ -177,10 +177,8 @@ pub fn processInput(window: *glfw.Window) !void {
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
-        worldEditorLock.lock();
-        defer worldEditorLock.unlock();
-        std.debug.print("block: {any}\n", .{worldEditor.GetBlock(@intFromFloat(playerPos))});
-        worldEditor.ClearReader();
+        var worldReader = World.WorldReader{.world = &game.world};
+        std.debug.print("block: {any}\n", .{worldReader.GetBlockNoCache(@intFromFloat(playerPos))});
     }
     if (window.getKey(glfw.Key.p) == .press) {
         ts.Benchmark = true;

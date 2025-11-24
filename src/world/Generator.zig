@@ -263,7 +263,7 @@ pub const DefaultGenerator = struct {
         var worldEditor = World.WorldEditor{ .world = self, .tempallocator = tempAllocator };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
-        std.debug.assert(chunk.genstate.load(.seq_cst) == .TerrainGenerated);
+        if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         if (chunk.blocks != .blocks) return;
         if (!genParams.genStructures) return;
         const randomSeed = std.hash.Wyhash.hash(genParams.seed, std.mem.asBytes(&Pos));

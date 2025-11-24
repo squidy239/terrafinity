@@ -45,6 +45,8 @@ pub const Entity = struct {
     ///unloads the entity and frees all resorces allocated by it
     ///the entity ptr is not valid after this
     pub fn unload(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
+        const unloadEntity = ztracy.ZoneNC(@src(), "unloadEntity", 5657656);
+        defer unloadEntity.End();
         return self.vtable.unload(self, world, uuid, allocator, save);
     }
 

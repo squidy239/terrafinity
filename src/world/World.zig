@@ -97,13 +97,10 @@ pub const World = struct {
     }
 
     pub fn UnloadEntity(self: *@This(), entityUUID: u128) void {
-        const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
-        _ = en.WaitForRefAmount(1, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
-        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-        en.lock.lock();
-        lock.End();
-        //TODO save entity to disk
-        en.fullfree(self.allocator);
+        const en = self.Entitys.fetchremove(entityUUID) orelse return;
+        _ = en.WaitForRefAmount(1, null);
+        en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
+
     }
 
     pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
@@ -198,8 +195,6 @@ pub const World = struct {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
             try self.getBlocks(Pos, &blocks);
             const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
-            errdefer {}
-
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
             const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
@@ -227,22 +222,61 @@ pub const World = struct {
             return chunk.?;
         }
     }
-    
-    
+
+    pub const WorldReader = struct {
+        world:*World,
+        lastChunkReadCache: ?struct { Pos: [3]i32, chunk: *Chunk } = null,
+        ///returns a block at the given position, Clear must be called after a series of calls to unlock the cached chunk
+        ///better for many block reads
+        pub inline fn GetBlockCached(self: *@This(), blockpos: @Vector(3, i64)) !Block {
+            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos,chunkPos)) {
+                self.Clear();
+                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true) };
+                self.lastChunkReadCache.?.chunk.lock.lockShared();
+
+            }
+            const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
+            return switch (blockEncoding) {
+                .blocks => self.lastChunkReadCache.?.chunk.blocks.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+                .oneBlock => self.lastChunkReadCache.?.chunk.blocks.oneBlock,
+            };
+        }
+        
+        ///returns a block at the given position, better for fewer block reads
+        pub inline fn GetBlockNoCache(self: *@This(), blockpos: @Vector(3, i64)) !Block {
+            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+            const chunk = try self.world.LoadChunk(chunkPos, true);
+            chunk.lock.lockShared();
+            defer chunk.releaseAndUnlockShared();
+            const blockEncoding = chunk.blocks;
+            return switch (blockEncoding) {
+                .blocks => chunk.blocks.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+                .oneBlock => chunk.blocks.oneBlock,
+            };
+        }
+
+        pub fn Clear(self: *@This()) void {
+            if (self.lastChunkReadCache) |cache| {
+                cache.chunk.releaseAndUnlockShared();
+                self.lastChunkReadCache = null;
+            }
+        }
+    };
+
     pub const WorldEditor = struct {
         world: *World,
         lastChunkCache: ?struct { Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
-        lastChunkReadCache: ?struct { Pos: [3]i32, chunk: *Chunk } = null,
 
         editBuffer: std.AutoHashMapUnmanaged([3]i32, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
         tempallocator: std.mem.Allocator,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
-        ///this also calls ClearReader to unlock any chunks that were read
         pub fn flush(self: *@This()) !void {
             const flushh = ztracy.ZoneNC(@src(), "flush", 3563456);
             defer flushh.End();
-            self.ClearReader();
             self.editBuffer.lockPointers();
             defer self.editBuffer.clearAndFree(self.tempallocator);
             defer self.editBuffer.unlockPointers();
@@ -298,32 +332,6 @@ pub const World = struct {
             var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
             self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
-        }
-
-        ///returns a block at the given position, ClearReader must be called after a series of calls to unlock the cached chunk
-        pub inline fn GetBlock(self: *@This(), blockpos: @Vector(3, i64)) !Block {
-            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const chunkBlockPos = @mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize });
-            if (self.lastChunkReadCache == null or @reduce(.Or, self.lastChunkReadCache.?.Pos != chunkPos)) {
-                if (self.lastChunkReadCache != null) {
-                    self.lastChunkReadCache.?.chunk.releaseAndUnlockShared();
-                    self.lastChunkReadCache = null;
-                }
-                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true) };
-                self.lastChunkReadCache.?.chunk.lock.lockShared();
-            }
-            const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
-            return switch (blockEncoding) {
-                .blocks => self.lastChunkReadCache.?.chunk.blocks.blocks[@intCast(chunkBlockPos[0])][@intCast(chunkBlockPos[1])][@intCast(chunkBlockPos[2])],
-                .oneBlock => self.lastChunkReadCache.?.chunk.blocks.oneBlock,
-            };
-        }
-
-        pub fn ClearReader(self: *@This()) void {
-            if (self.lastChunkReadCache) |cache| {
-                cache.chunk.releaseAndUnlockShared();
-                self.lastChunkReadCache = null;
-            }
         }
 
         pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
@@ -487,7 +495,9 @@ pub const World = struct {
             var it = self.Entitys.buckets[b].hash_map.iterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
+                std.debug.print("unloading entity...\n", .{});
                 c.value_ptr.*.unload(self, c.key_ptr.*, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
+                std.debug.print("done\n", .{});
             }
         }
         self.Entitys.deinit();

@@ -83,13 +83,12 @@ pub const Game = struct {
         game.world.random = game.world.prng.random();
         errdefer game.world.Deinit();
 
-        for (0..1) |_| {
+        for (0..0) |_| {
             _ = try game.world.SpawnEntity(null, EntityTypes.Cube{
                 .lock = .{},
                 .pos = @splat(0),
                 .velocity = @splat(0),
                 .timestamp = std.time.microTimestamp(),
-                .bodyRotationAxis = @splat(0),
             });
         }
 

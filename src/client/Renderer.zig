@@ -178,7 +178,7 @@ pub const Renderer = struct {
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
             defer if (glSync) |sync| gl.DeleteSync(sync);
-            _ = try Loader.LoadMeshes(self, game, glSync, 5 * std.time.us_per_ms, 20 * std.time.us_per_ms);
+            _ = try Loader.LoadMeshes(self, game, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
         }
         return drawn;
     }
