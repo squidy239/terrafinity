@@ -12,14 +12,13 @@ const ztracy = @import("ztracy");
 
 pub const World = struct {
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
-    pub const Tree = @import("structures/Tree.zig").Tree;
-    pub const TexturedSphere = @import("structures/TexturedSphere.zig");
+    threadlocal var prng: std.Random.DefaultPrng = .init(0);
+
     running: std.atomic.Value(bool),
     entityUpdaterThread: ?std.Thread,
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    prng: std.Random.DefaultPrng,
-    random: std.Random,//TODO make this threadsafe
+    
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
@@ -98,9 +97,7 @@ pub const World = struct {
 
     pub fn UnloadEntity(self: *@This(), entityUUID: u128) void {
         const en = self.Entitys.fetchremove(entityUUID) orelse return;
-        _ = en.WaitForRefAmount(1, null);
         en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
-
     }
 
     pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
@@ -111,7 +108,7 @@ pub const World = struct {
     }
 
     pub fn SpawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
-        const UUID = uuid orelse std.crypto.random.int(u128);
+        const UUID = uuid orelse World.prng.random().int(u128);
         if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
         const allocated_entity = try Entity.Make(entity, self.allocator);
         errdefer allocated_entity.unload(self, UUID, self.allocator, false) catch unreachable;
@@ -121,7 +118,7 @@ pub const World = struct {
     }
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-        const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), self.random.intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
+        const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
         const height = try self.GetTerrainHeightAtCoords(pos);
         std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
@@ -134,7 +131,8 @@ pub const World = struct {
         const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
-
+    
+    //TODO replacee this with tick certen amount of entitys or certen amount of time
     pub fn TickEntitiesBucketTask(self: *@This(), complete: *bool, bucketindex: usize, allocator: std.mem.Allocator) void {
         defer complete.* = true;
         if (!self.running.load(.monotonic)) return;
@@ -224,18 +222,17 @@ pub const World = struct {
     }
 
     pub const WorldReader = struct {
-        world:*World,
+        world: *World,
         lastChunkReadCache: ?struct { Pos: [3]i32, chunk: *Chunk } = null,
         ///returns a block at the given position, Clear must be called after a series of calls to unlock the cached chunk
         ///better for many block reads
         pub inline fn GetBlockCached(self: *@This(), blockpos: @Vector(3, i64)) !Block {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos,chunkPos)) {
+            if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
                 self.Clear();
                 self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true) };
                 self.lastChunkReadCache.?.chunk.lock.lockShared();
-
             }
             const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
             return switch (blockEncoding) {
@@ -243,12 +240,12 @@ pub const World = struct {
                 .oneBlock => self.lastChunkReadCache.?.chunk.blocks.oneBlock,
             };
         }
-        
+
         ///returns a block at the given position, better for fewer block reads
         pub inline fn GetBlockNoCache(self: *@This(), blockpos: @Vector(3, i64)) !Block {
             const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const chunk = try self.world.LoadChunk(chunkPos, true);
+            const chunk = try self.world.LoadChunk(chunkPos, false);
             chunk.lock.lockShared();
             defer chunk.releaseAndUnlockShared();
             const blockEncoding = chunk.blocks;
@@ -267,6 +264,9 @@ pub const World = struct {
     };
 
     pub const WorldEditor = struct {
+        pub const Geometry = @import("structures/Geometry.zig");
+        pub const Tree = @import("structures/Tree.zig").Tree;
+        pub const TexturedSphere = @import("structures/TexturedSphere.zig");
         world: *World,
         lastChunkCache: ?struct { Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
 
@@ -356,101 +356,6 @@ pub const World = struct {
                 }
             }
         }
-
-        pub fn Cone(comptime T: type) type {
-            return struct {
-                position: @Vector(3, T), // top center of cone
-                axis: @Vector(3, T), // normalized axis (direction from top → base)
-                length: T,
-                radiusTop: T,
-                radiusBase: T,
-                boundingBox: @Vector(6, T),
-                pub fn init(pos: @Vector(3, T), axisVec: @Vector(3, T), coneLength: T, baseR: T, topR: T) @This() {
-                    // normalize axis
-                    const normAxis = axisVec / @as(@Vector(3, T), @splat(@sqrt(dot(axisVec, axisVec))));
-                    var cone: @This() = .{
-                        .position = pos,
-                        .axis = normAxis,
-                        .length = coneLength,
-                        .radiusTop = topR,
-                        .radiusBase = baseR,
-                        .boundingBox = undefined,
-                    };
-                    cone.updateBoundingBox();
-                    return cone;
-                }
-
-                pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
-                    const v = P - self.position;
-                    const t = dot(v, self.axis);
-
-                    if (t < 0 or t > self.length) return false;
-
-                    const len2 = dot(v, v);
-                    const perp2 = len2 - t * t;
-
-                    const r = self.radiusBase + (self.radiusTop - self.radiusBase) * (t / self.length);
-                    return perp2 < r * r;
-                }
-
-                pub fn updateBoundingBox(self: *@This()) void {
-                    const top = self.position;
-                    const base = self.position + self.axis * @as(@Vector(3, T), @splat(self.length));
-                    const rMax = @max(self.radiusTop, self.radiusBase);
-
-                    const minX = @floor(@min(top[0], base[0]) - rMax);
-                    const maxX = @ceil(@max(top[0], base[0]) + rMax);
-
-                    const minY = @floor(@min(top[1], base[1]) - rMax);
-                    const maxY = @ceil(@max(top[1], base[1]) + rMax);
-
-                    const minZ = @floor(@min(top[2], base[2]) - rMax);
-                    const maxZ = @ceil(@max(top[2], base[2]) + rMax);
-                    self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
-                }
-            };
-        }
-
-        pub fn Sphere(comptime T: type) type {
-            return struct {
-                position: @Vector(3, T),
-                radius: T,
-                boundingBox: @Vector(6, T),
-                pub fn init(pos: @Vector(3, T), radius: T) @This() {
-                    var sphere: @This() = .{
-                        .position = pos,
-                        .radius = radius,
-                        .boundingBox = undefined,
-                    };
-                    sphere.updateBoundingBox();
-                    return sphere;
-                }
-
-                pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
-                    const diff = P - self.position;
-                    const dist2 = dot(diff, diff);
-                    return dist2 <= self.radius * self.radius;
-                }
-
-                pub fn updateBoundingBox(self: *@This()) void {
-                    const r = self.radius;
-
-                    const minX = @floor(@min(self.position[0] - r, self.position[0] + r));
-                    const maxX = @ceil(@max(self.position[0] - r, self.position[0] + r));
-
-                    const minY = @floor(@min(self.position[1] - r, self.position[1] + r));
-                    const maxY = @ceil(@max(self.position[1] - r, self.position[1] + r));
-
-                    const minZ = @floor(@min(self.position[2] - r, self.position[2] + r));
-                    const maxZ = @ceil(@max(self.position[2] - r, self.position[2] + r));
-                    self.boundingBox = @Vector(6, T){ minX, maxX, minY, maxY, minZ, maxZ };
-                }
-            };
-        }
-
-        inline fn dot(a: anytype, b: @TypeOf(a)) @typeInfo(@TypeOf(a)).vector.child {
-            return @reduce(.Add, a * b);
-        }
     };
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
@@ -495,9 +400,7 @@ pub const World = struct {
             var it = self.Entitys.buckets[b].hash_map.iterator();
             defer self.Entitys.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                std.debug.print("unloading entity...\n", .{});
                 c.value_ptr.*.unload(self, c.key_ptr.*, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
-                std.debug.print("done\n", .{});
             }
         }
         self.Entitys.deinit();

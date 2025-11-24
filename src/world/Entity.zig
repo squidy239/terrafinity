@@ -47,6 +47,7 @@ pub const Entity = struct {
     pub fn unload(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
         const unloadEntity = ztracy.ZoneNC(@src(), "unloadEntity", 5657656);
         defer unloadEntity.End();
+        std.debug.assert(self.WaitForRefAmount(1, 10 * std.time.us_per_s));
         return self.vtable.unload(self, world, uuid, allocator, save);
     }
 

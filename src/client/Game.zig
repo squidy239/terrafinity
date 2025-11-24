@@ -65,7 +65,7 @@ pub const Game = struct {
         game.LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) };
         game.MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) };
         const cpu_count = try std.Thread.getCpuCount();
-        try game.pool.init(.{ .n_jobs = cpu_count - 1, .allocator = secondary_allocator });
+        try game.pool.init(.{ .n_jobs = cpu_count , .allocator = secondary_allocator });
         errdefer game.pool.deinit();
         game.world = .{
             .running = .init(true),
@@ -74,13 +74,10 @@ pub const Game = struct {
             .threadPool = &game.pool,
             .Entitys = .init(secondary_allocator),
             .Chunks = .init(secondary_allocator),
-            .random = undefined,
-            .prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp())),
             .Config = MainWorldConfig,
             .ChunkSources = .{ null, null, null, game.generator.getGenerator() },
             .onEdit = null,
         };
-        game.world.random = game.world.prng.random();
         errdefer game.world.Deinit();
 
         for (0..0) |_| {

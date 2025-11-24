@@ -159,13 +159,13 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.f) == .press) {
-     //   const cone = World.WorldEditor.Cone(f64).init(game.player.getPos().?, game.renderer.cameraFront, 1000, 100, 50);
-     //   worldEditorLock.lock();
-     //   try worldEditor.PlaceSamplerShape(.Stone, cone);
-       // _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-       // worldEditorLock.unlock();
+        //   const cone = World.WorldEditor.Cone(f64).init(game.player.getPos().?, game.renderer.cameraFront, 1000, 100, 50);
+        //   worldEditorLock.lock();
+        //   try worldEditor.PlaceSamplerShape(.Stone, cone);
+        // _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+        // worldEditorLock.unlock();
 
-        _ = try game.world.SpawnEntity(null, EntityTypes.Cube{.pos = game.player.getPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){100,100,100}, .timestamp = std.time.microTimestamp()});
+        _ = try game.world.SpawnEntity(null, EntityTypes.Cube{ .pos = game.player.getPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){ 100, 100, 100 }, .timestamp = std.time.microTimestamp() });
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
@@ -177,7 +177,7 @@ pub fn processInput(window: *glfw.Window) !void {
         const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
         std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
         std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
-        var worldReader = World.WorldReader{.world = &game.world};
+        var worldReader = World.WorldReader{ .world = &game.world };
         std.debug.print("block: {any}\n", .{worldReader.GetBlockNoCache(@intFromFloat(playerPos))});
     }
     if (window.getKey(glfw.Key.p) == .press) {
@@ -211,17 +211,17 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.WorldEditor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
 }
 
 fn genFractalTask() void {
-    comptime var csteps: [20]World.Tree.Step = undefined;
+    comptime var csteps: [20]World.WorldEditor.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
         step.* = switch (r) {
-            0 => World.Tree.Step{
+            0 => World.WorldEditor.Tree.Step{
                 .lengthPercent = 1.0,
                 .radiusPercent = 1.0,
                 .branchCountMax = 32,
@@ -230,7 +230,7 @@ fn genFractalTask() void {
                 .block = .Stone,
                 .branchRandomness = 0.0,
             },
-            1...21 => World.Tree.Step{
+            1...21 => World.WorldEditor.Tree.Step{
                 .lengthPercent = 0.75,
                 .radiusPercent = 0.5,
                 .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },
@@ -245,7 +245,7 @@ fn genFractalTask() void {
     };
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
-    const tree = World.Tree{
+    const tree = World.WorldEditor.Tree{
         .pos = @intFromFloat(game.player.getPos().?),
         .baseRadius = 5,
         .rand = random.random(),

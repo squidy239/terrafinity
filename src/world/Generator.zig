@@ -67,8 +67,8 @@ pub const DefaultGenerator = struct {
         seed: u64,
         terrainScale: f32,
         genStructures: bool,
-        LargeTrees: []const World.Tree.Step,
-        MediumTrees: []const World.Tree.Step,
+        LargeTrees: []const World.WorldEditor.Tree.Step,
+        MediumTrees: []const World.WorldEditor.Tree.Step,
     };
 
     pub fn GenChunk(Pos: [3]i32, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32), gen_params: GenParams, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -286,7 +286,7 @@ pub const DefaultGenerator = struct {
                     if (true and treeChance < 0.000002) {
                         const steps = genParams.LargeTrees;
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        const tree = World.Tree{
+                        const tree = World.WorldEditor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 15,
                             .rand = rand,
@@ -304,7 +304,7 @@ pub const DefaultGenerator = struct {
                         const factor = rand.float(f32) + 0.5; //TODO replace a lot of rand with hashes
                         const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const steps = genParams.MediumTrees;
-                        const tree = World.Tree{
+                        const tree = World.WorldEditor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 3 * factor,
                             .rand = rand,

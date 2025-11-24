@@ -208,9 +208,9 @@ pub const Renderer = struct {
             defer gl.Enable(gl.CULL_FACE);
             const bktamount = game.chunkManager.ChunkRenderList.buckets.len;
             for (0..bktamount) |b| {
-                game.chunkManager.ChunkRenderList.buckets[b].lock.lock();
+                game.chunkManager.ChunkRenderList.buckets[b].lock.lockShared();
                 var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.iterator();
-                defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
+                defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlockShared();
                 while (it.next()) |item| {
                     torenderchunks += 1;
                     const buffer_ids = item.value_ptr;

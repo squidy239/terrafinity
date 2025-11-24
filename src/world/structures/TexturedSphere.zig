@@ -9,20 +9,20 @@ const World = @import("../World.zig").World;
 
 pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype) T, samplerArgsType: type) type {
     return struct {
-        sphere: World.WorldEditor.Sphere(T),
-        innerSphere: World.WorldEditor.Sphere(T),
+        sphere: World.WorldEditor.Geometry.Sphere(T),
+        innerSphere: World.WorldEditor.Geometry.Sphere(T),
         boundingBox: @Vector(6, T),
         samplerArgs: samplerArgsType,
 
         pub fn init(pos: @Vector(3, T), radius: T, samplerArgs: samplerArgsType, minRadiusFraction: T) @This() {
-            var sphere: World.WorldEditor.Sphere(T) = .{
+            var sphere: World.WorldEditor.Geometry.Sphere(T) = .{
                 .position = pos,
                 .radius = radius,
                 .boundingBox = undefined,
             };
             sphere.updateBoundingBox();
 
-            var innersphere: World.WorldEditor.Sphere(T) = .{
+            var innersphere: World.WorldEditor.Geometry.Sphere(T) = .{
                 .position = pos,
                 .radius = radius * minRadiusFraction,
                 .boundingBox = undefined,

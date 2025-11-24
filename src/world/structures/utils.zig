@@ -13,3 +13,7 @@ pub inline fn vecCross(a: @Vector(3, f64), b: @Vector(3, f64)) @Vector(3, f64) {
         a[0] * b[1] - a[1] * b[0],
     };
 }
+
+pub inline fn dot(a: anytype, b: @TypeOf(a)) @typeInfo(@TypeOf(a)).vector.child {
+    return @reduce(.Add, a * b);
+}

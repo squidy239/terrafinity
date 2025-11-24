@@ -56,7 +56,7 @@ pub const Tree = struct {
                 }
             } else {
                 branchesCount += 1;
-                const branch = WorldEditor.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
+                const branch = WorldEditor.Geometry.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
                 try editor.PlaceSamplerShape(step.block, branch);
                 const newPos = pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
                 branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);

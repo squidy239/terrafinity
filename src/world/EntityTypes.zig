@@ -7,6 +7,7 @@ const Entity = @import("Entity").Entity;
 const EntityType = @import("Entity").Entity.Type;
 const gl = @import("gl");
 const obj = @import("obj");
+const ztracy = @import("root").ztracy;
 
 const pack = "default";
 const EntityMeshBufferIDs = struct {
@@ -117,8 +118,6 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-
-
     pub fn unload(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
         _ = save;
         _ = uuid;
@@ -151,41 +150,36 @@ pub const Cube = struct {
     timestamp: i64,
 
     pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {
+        const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
+        defer u.End();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
+        const l = ztracy.ZoneNC(@src(), "lock", 6553);
         self.lock.lock();
+        l.End();
         const timestamp = self.timestamp;
         self.timestamp = std.time.microTimestamp();
         const dt: @Vector(3, f64) = @splat(@as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001);
         //self.velocity[world.random.intRangeAtMost(usize, 0, 2)] += 100 * (world.random.float(f64) - 0.5) * dt[0];
         self.pos += self.velocity * dt;
         self.lock.unlock();
-        var worldReader = World.WorldReader{.world = world};
+        var worldReader = World.WorldReader{ .world = world };
+        const g = ztracy.ZoneNC(@src(), "getblock", 56565);
         if ((worldReader.GetBlockNoCache(@intFromFloat(self.pos)) catch unreachable) != .Air) {
+            g.End();
             var worldEditor = World.WorldEditor{
-             .world = world,
-            .tempallocator = allocator,
-            
-             };
-            const sphere = World.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
+                .world = world,
+                .tempallocator = allocator,
+            };
+            const sphere = World.WorldEditor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
             //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
             worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-           // _ = uuid;
+             //_ = uuid;
             _ = entity.ref_count.fetchSub(1, .seq_cst);
-           world.UnloadEntity(uuid);
-            if(world.random.float(f32) > 44){
-                _ = world.SpawnEntity(null, Cube{
-                    .lock = .{},
-                    .pos = self.pos,
-                    .velocity = self.velocity,
-                    .timestamp = std.time.microTimestamp(),
-                }) catch return error.Unrecoverable;
-            }
+            world.UnloadEntity(uuid);
             return;
-        }
+        } else g.End();
         _ = entity.ref_count.fetchSub(1, .seq_cst);
-
-        
     }
 
     pub fn unload(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
