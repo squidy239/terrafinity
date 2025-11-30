@@ -1,7 +1,7 @@
 const std = @import("std");
 const ThreadPool = @import("root").ThreadPool;
 
-pub const Block = @import("Block").Blocks;
+pub const Block = @import("Block").Block;
 const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
@@ -18,7 +18,7 @@ pub const World = struct {
     entityUpdaterThread: ?std.Thread,
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
-    
+
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
     Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
     Config: WorldConfig,
@@ -131,7 +131,7 @@ pub const World = struct {
         const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
-    
+
     //TODO replacee this with tick certen amount of entitys or certen amount of time
     pub fn TickEntitiesBucketTask(self: *@This(), complete: *bool, bucketindex: usize, allocator: std.mem.Allocator) void {
         defer complete.* = true;
@@ -231,7 +231,7 @@ pub const World = struct {
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
                 self.Clear();
-                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, true) };
+                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, false) };
                 self.lastChunkReadCache.?.chunk.lock.lockShared();
             }
             const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;

@@ -8,6 +8,7 @@ const EntityType = @import("Entity").Entity.Type;
 const gl = @import("gl");
 const obj = @import("obj");
 const ztracy = @import("root").ztracy;
+const Physics = @import("Physics.zig");
 
 const pack = "default";
 const EntityMeshBufferIDs = struct {
@@ -81,17 +82,11 @@ pub fn FreeMeshes() void {
 }
 
 pub const Player = struct {
-    lock: std.Thread.RwLock,
     player_name: Name,
     gameMode: GameMode,
-    OnGround: bool,
-    pos: @Vector(3, f64),
-    bodyRotationAxis: @Vector(3, f32),
     headRotationAxis: @Vector(2, f32),
-    armSwings: [2]f16, //right,left
-    hitboxmin: @Vector(3, f64),
-    hitboxmax: @Vector(3, f64),
-    Velocity: @Vector(3, f64),
+    headRotationAxisLock: std.Thread.RwLock = .{},
+    physics: Physics.getInterface(struct { gravity: Physics.Gravity, mover: Physics.Mover }),
 
     pub const Name = struct {
         data: [64]u8,
@@ -129,9 +124,14 @@ pub const Player = struct {
 
     pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
-        return self.pos;
+        return self.physics.getPos();
+    }
+
+    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {
+        _ = uuid;
+        defer _ = entity.ref_count.fetchSub(1, .seq_cst);
+        const self: *@This() = @ptrCast(@alignCast(entity.ptr));
+        self.physics.update(world, allocator) catch return error.Unrecoverable;
     }
 
     pub fn getInterface(self: *const @This()) Entity.interface {
@@ -139,6 +139,7 @@ pub const Player = struct {
         return .{
             .getPos = getPos,
             .unload = unload,
+            .update = update,
         };
     }
 };
@@ -153,11 +154,11 @@ pub const Cube = struct {
         const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
         defer u.End();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
+        const timestamp = self.timestamp;
+        self.timestamp = std.time.microTimestamp();
         const l = ztracy.ZoneNC(@src(), "lock", 6553);
         self.lock.lock();
         l.End();
-        const timestamp = self.timestamp;
-        self.timestamp = std.time.microTimestamp();
         const dt: @Vector(3, f64) = @splat(@as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001);
         //self.velocity[world.random.intRangeAtMost(usize, 0, 2)] += 100 * (world.random.float(f64) - 0.5) * dt[0];
         self.pos += self.velocity * dt;
@@ -174,7 +175,7 @@ pub const Cube = struct {
             //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
             worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-             //_ = uuid;
+            //_ = uuid;
             _ = entity.ref_count.fetchSub(1, .seq_cst);
             world.UnloadEntity(uuid);
             return;

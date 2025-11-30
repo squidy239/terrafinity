@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Block = @import("Block").Blocks;
+const Block = @import("Block").Block;
 const ztracy = @import("ztracy");
 
 pub const Chunk = struct {

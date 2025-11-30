@@ -65,7 +65,7 @@ pub const Game = struct {
         game.LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) };
         game.MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) };
         const cpu_count = try std.Thread.getCpuCount();
-        try game.pool.init(.{ .n_jobs = cpu_count , .allocator = secondary_allocator });
+        try game.pool.init(.{ .n_jobs = cpu_count, .allocator = secondary_allocator });
         errdefer game.pool.deinit();
         game.world = .{
             .running = .init(true),
@@ -91,16 +91,20 @@ pub const Game = struct {
 
         game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
             .player_name = .fromString("squid"),
-            .lock = .{},
+            .physics = .{
+                .elements = .{
+                    .mover = .{
+                        .collisions = true,
+                        .boundingBox = .init(.{ -0.5, -2, -0.5 }, .{ 0.5, 2, 0.5 }),
+                    },
+                    .gravity = .{},
+                },
+                .pos = try game.world.GetPlayerSpawnPos(),
+                .velocity = @splat(0),
+                .updateTimer = try .start(),
+            },
             .gameMode = .Spectator,
-            .OnGround = false,
-            .pos = try game.world.GetPlayerSpawnPos() + @Vector(3, f64){ 0, 0, 0 },
-            .bodyRotationAxis = @Vector(3, f16){ 0, 0, 0 },
             .headRotationAxis = @Vector(2, f16){ 0, 0 },
-            .armSwings = [2]f16{ 0, 0 }, //right,left
-            .hitboxmin = @Vector(3, f64){ -1, 0.8, -1 },
-            .hitboxmax = @Vector(3, f64){ 1, 0.2, 1 },
-            .Velocity = @splat(0),
         });
         game.chunkManager = .{
             .pool = &game.pool,

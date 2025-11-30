@@ -98,9 +98,7 @@ pub fn processInput(window: *glfw.Window) !void {
     var posAdjustment: @Vector(3, f64) = @splat(0);
     const player = @as(*EntityTypes.Player, @ptrCast(@alignCast(game.player.ptr)));
     defer {
-        player.lock.lock();
-        player.pos += posAdjustment;
-        player.lock.unlock();
+        _ = player.physics.fetchAddVelocity(posAdjustment);
     }
     var cameraSpeed: @Vector(3, f64) = @Vector(3, f64){ 0.002, 0.002, 0.002 } * @as(@Vector(3, f64), @splat(@as(f64, @floatFromInt(dt)) * 0.01)); // adjust accordingly
     if (ts.Sprinting) {
@@ -184,22 +182,7 @@ pub fn processInput(window: *glfw.Window) !void {
         ts.Benchmark = true;
         benchmarkStartTime = std.time.microTimestamp();
     }
-    if (ts.Benchmark) {
-        player.lock.lock();
-        var t: f64 = @floatFromInt(std.time.microTimestamp() - benchmarkStartTime);
-        const speedUpFactor = 0.000000000005; //the bigger this number is the faster the acceleration
-        t *= ((t * speedUpFactor));
-        const playerptr: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
-        playerptr.pos = std.math.lerp(playerptr.pos, game.chunkManager.world.Config.SpawnCenterPos + @Vector(3, f64){ t, @floatFromInt(100 + try game.chunkManager.world.GetTerrainHeightAtCoords(@Vector(2, i64){ @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[0] + t), @intFromFloat(game.chunkManager.world.Config.SpawnCenterPos[2]) })), 0.0 }, @Vector(3, f64){ 1, 0.2, 1 });
-        const pos = playerptr.pos;
-        player.lock.unlock();
-        const chpos: @Vector(3, i32) = @intFromFloat(@round(pos / @as(@Vector(3, f64), @splat(ChunkSize))));
-        if (game.chunkManager.world.Chunks.get(chpos) == null) {
-            std.debug.print("benchmark finished, reached: {d}, chunk: {d}\n", .{ (t), chpos });
-            std.debug.print("ended on: {any}, data: {any}", .{ (chpos), game.chunkManager.world.Chunks.get(chpos) });
-            ts.Benchmark = false;
-        }
-    }
+
     if (window.getKey(glfw.Key.end) == .press) {
         ts.Benchmark = false;
     }
@@ -269,18 +252,14 @@ pub export fn MouseCallback(window: *glfw.Window, xpos: f64, ypos: f64) void {
     last_mouse_pos[0] = xpos;
     last_mouse_pos[1] = ypos;
     const player: *EntityTypes.Player = @ptrCast(@alignCast(game.player.ptr));
-    player.lock.lock();
+    player.headRotationAxisLock.lock();
     var newHeadRotationAxis = player.headRotationAxis;
-    var newBodyRotationAxis = player.bodyRotationAxis;
     newHeadRotationAxis -= @Vector(2, f32){ @floatCast(yoffset), @floatCast(xoffset) };
     newHeadRotationAxis[0] = @max(-89.99999, newHeadRotationAxis[0]);
     newHeadRotationAxis[0] = @min(89.99999, newHeadRotationAxis[0]);
 
-    if (getDiff(@Vector(3, f32){ newHeadRotationAxis[0], newHeadRotationAxis[1], 0 }, newBodyRotationAxis) > 20) newBodyRotationAxis = @Vector(3, f32){ newHeadRotationAxis[0], newHeadRotationAxis[1], 0 }; //adjust degrees, currently at 20
-
     player.headRotationAxis = newHeadRotationAxis;
-    player.bodyRotationAxis = newBodyRotationAxis;
-    player.lock.unlock();
+    player.headRotationAxisLock.unlock();
 
     var cameraFront: @Vector(3, f64) = undefined;
     cameraFront[0] = @floatCast(@sin(std.math.degreesToRadians(newHeadRotationAxis[1])) * @cos(std.math.degreesToRadians(newHeadRotationAxis[0])));

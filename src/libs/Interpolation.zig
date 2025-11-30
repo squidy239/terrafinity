@@ -94,9 +94,9 @@ pub const NaturalCubicInterpolator3D = struct {
 
     pub fn sampleComptimeXZ(interp: *const Self, comptime x: f32, y: f32, comptime z: f32) f32 {
         // Step 1: X interpolation
-        var xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
+        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x));
         // Step 2: Y interpolation
-        const yresult = splineEvalSimd(f32, 4, &xresult, &interp.coeffs_y_vectorized, y);
+        const yresult = splineEvalSimd(f32, 4, xresult, interp.coeffs_y_vectorized, y);
         // Step 3: Z interpolation
         return splineEvalComptimeT(f32, yresult, interp.coeffs_z_vectorized, z);
     }
@@ -148,7 +148,7 @@ pub const NaturalCubicInterpolator3D = struct {
         return result;
     }
 
-    pub inline fn splineEvalSimd(comptime T: type, comptime len: usize, values: *const [4]@Vector(len, T), m: *const [4][len]T, t: T) @Vector(len, T) {
+    pub inline fn splineEvalSimd(comptime T: type, comptime len: usize, values: [4]@Vector(len, T), m: [4][len]T, t: T) @Vector(len, T) {
         const i: usize = @intFromFloat(@min(@floor(t * 3), 2));
         const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = @splat(localT);
@@ -203,7 +203,7 @@ pub const NaturalCubicInterpolator3D = struct {
         };
     }
 
-    pub inline fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: *const [4][len]T, m: *const [4][len]T, comptime t: T) @Vector(len, T) {
+    pub inline fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: [4][len]T, m: [4][len]T, comptime t: T) @Vector(len, T) {
         const i: usize = comptime @intFromFloat(@min(@floor(t * 3), 2));
         const localT: T = comptime t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = comptime @splat(localT);

@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("EntityTypes", EntityTypes);
 
     const Block = b.addModule("Block", .{
-        .root_source_file = b.path("src/world/Blocks.zig"),
+        .root_source_file = b.path("src/world/Block.zig"),
         .optimize = optimize,
     });
     exe.root_module.addImport("Block", Block);
