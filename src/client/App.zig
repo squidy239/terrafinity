@@ -61,7 +61,7 @@ fn InitWindowAndProcs(proc_table: *gl.ProcTable) !void {
         glfw.windowHint(.client_api, .opengl_api);
         glfw.windowHint(.doublebuffer, true);
         glfw.windowHint(.samples, 8);
-        createdWindow = glfw.Window.create(@intCast(width), @intCast(height), "voxelgame", null) catch continue;
+        createdWindow = glfw.Window.create(@intCast(width), @intCast(height), "terrafinity", null) catch continue;
         glfw.makeContextCurrent(createdWindow.?);
         if (proc_table.init(glfw.getProcAddress)) {
             std.log.info("using OpenGL version {d}.{d}\n", .{ version[0], version[1] });

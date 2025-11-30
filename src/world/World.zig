@@ -132,9 +132,9 @@ pub const World = struct {
         return height;
     }
 
-    //TODO replacee this with tick certen amount of entitys or certen amount of time
-    pub fn TickEntitiesBucketTask(self: *@This(), complete: *bool, bucketindex: usize, allocator: std.mem.Allocator) void {
-        defer complete.* = true;
+    //TODO replace this with tick certen amount of entitys or certen amount of time
+    pub fn TickEntitiesBucketTask(self: *@This(), complete: *std.atomic.Value(u32), bucketindex: usize, allocator: std.mem.Allocator) void {
+        defer _ = complete.fetchAdd(1, .seq_cst);
         if (!self.running.load(.monotonic)) return;
         const bucket = &self.Entitys.buckets[bucketindex];
         const TickEntitiesTask = ztracy.ZoneNC(@src(), "TickEntitiesTask", 324);
@@ -159,28 +159,31 @@ pub const World = struct {
             }
         }
     }
+    threadlocal var tasksComplete: std.atomic.Value(u32) = .init(0);
 
+    //TODO use async when it is added instead of this
     pub fn UpdateEntitiesThread(self: *@This(), interval_ns: u64) void {
         const enbktamount = self.Entitys.buckets.len;
-        var tasksComplete: [enbktamount]bool = @splat(true);
         var st = std.time.nanoTimestamp();
-        while (self.running.load(.monotonic)) {
+        while (self.running.load(.seq_cst)) {
             const AddEntitiesToTick = ztracy.ZoneNC(@src(), "AddEntitiesToTick", 45354345);
-            tasksComplete = @splat(false);
+            tasksComplete.store(0, .seq_cst);
             for (0..enbktamount) |bucket| {
-                self.threadPool.spawn(TickEntitiesBucketTask, .{ self, &tasksComplete[bucket], bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
+                self.threadPool.spawn(TickEntitiesBucketTask, .{ self, &tasksComplete, bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
             }
             AddEntitiesToTick.End();
             std.Thread.sleep(interval_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
             st = std.time.nanoTimestamp();
             const WaitingForTasksToComplete = ztracy.ZoneNC(@src(), "WaitingForTasksToComplete", 2344326);
-            while (!@reduce(.And, @as(@Vector(enbktamount, bool), tasksComplete)) and self.running.load(.monotonic)) { //checks if all tasks finished before spawning new ones, check if running because the tasks exit if its not
+            var c:u32 = 0;
+            while (tasksComplete.load(.seq_cst) < enbktamount and self.running.load(.monotonic)) { //checks if all tasks finished before spawning new ones, check if running because the tasks exit if its not
                 std.Thread.yield() catch {};
+                c += 1;
+                if(c > 10000)break;//temporary very bad workaround for a bug in the threadpool
+                                   //I think the bug is that popFirst in the queue might not return an item if their is one if it got out of sync
+                                   //Im not fixing it now because I will switch to the Io async when 0.16 is released, entity updates will happen every frame for clients while chunks are being drawn and meshes loaded
             }
             WaitingForTasksToComplete.End();
-        }
-        while (!@reduce(.And, @as(@Vector(enbktamount, bool), tasksComplete))) { //wait for all tasks to finish before exiting so the taskscomplete ptr dosent become invalid
-            std.Thread.yield() catch {};
         }
     }
 
@@ -392,6 +395,7 @@ pub const World = struct {
                 self.UnloadChunkByPtr(c.value_ptr.*, c.key_ptr.*);
             }
         }
+        std.log.info("chunks unloaded", .{});
         const enbktamount = self.Entitys.buckets.len;
         for (0..enbktamount) |b| {
             const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -404,10 +408,13 @@ pub const World = struct {
             }
         }
         self.Entitys.deinit();
+        std.log.info("entitys unloaded", .{});
         for (self.ChunkSources) |source| {
             if (source) |s| s.deinit(s, self);
         }
+
         self.Chunks.deinit();
+        std.log.info("world closed", .{});
     }
 };
 
