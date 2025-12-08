@@ -9,7 +9,7 @@ pub const Chunk = struct {
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    pub const BlockEncoding = union(enum) {
+    pub const BlockEncoding = union(enum(u4)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         oneBlock: Block,
     };

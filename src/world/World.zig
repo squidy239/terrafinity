@@ -175,13 +175,13 @@ pub const World = struct {
             std.Thread.sleep(interval_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
             st = std.time.nanoTimestamp();
             const WaitingForTasksToComplete = ztracy.ZoneNC(@src(), "WaitingForTasksToComplete", 2344326);
-            var c:u32 = 0;
+            var c: u32 = 0;
             while (tasksComplete.load(.seq_cst) < enbktamount and self.running.load(.monotonic)) { //checks if all tasks finished before spawning new ones, check if running because the tasks exit if its not
                 std.Thread.yield() catch {};
                 c += 1;
-                if(c > 10000)break;//temporary very bad workaround for a bug in the threadpool
-                                   //I think the bug is that popFirst in the queue might not return an item if their is one if it got out of sync
-                                   //Im not fixing it now because I will switch to the Io async when 0.16 is released, entity updates will happen every frame for clients while chunks are being drawn and meshes loaded
+                if (c > 10000) break; //temporary very bad workaround for a bug in the threadpool
+                //I think the bug is that popFirst in the queue might not return an item if their is one if it got out of sync
+                //Im not fixing it now because I will switch to the Io async when 0.16 is released, entity updates will happen every frame for clients while chunks are being drawn and meshes loaded
             }
             WaitingForTasksToComplete.End();
         }

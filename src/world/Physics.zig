@@ -83,7 +83,7 @@ pub const Mover = struct {
             posOffset -= move;
             var newPos = physics.fetchAddPos(move);
 
-            while (try self.collision(newPos, &reader))|mtv| {
+            while (try self.collision(newPos, &reader)) |mtv| {
                 newPos = physics.fetchAddPos(-mtv);
                 physics.velocityLock.lock();
                 if (mtv[0] != 0.0) physics.velocity[0] = 0.0;
@@ -102,7 +102,7 @@ pub const Mover = struct {
         var bestMagnitude: f64 = 0.0;
         var found: bool = false;
         const size = self.boundingBox.size();
-        const checkDistance:i16 = @intFromFloat(@ceil(@max(size[0], size[1], size[2])/2));
+        const checkDistance: i16 = @intFromFloat(@ceil(@max(size[0], size[1], size[2]) / 2));
         var x: i16 = -@as(i16, checkDistance);
         while (x <= checkDistance) : (x += 1) {
             var y: i16 = -@as(i16, checkDistance);
