@@ -1,7 +1,7 @@
 const std = @import("std");
 const ThreadPool = @import("root").ThreadPool;
 
-pub const Block = @import("Block").Block;
+pub const Block = @import("Chunk").Block;
 const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;

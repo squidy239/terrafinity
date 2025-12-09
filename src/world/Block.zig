@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Block = enum {
+pub const Block = enum(u16) {
     Null,
     Air,
     Stone,

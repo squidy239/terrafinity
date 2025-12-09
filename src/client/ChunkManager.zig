@@ -6,7 +6,7 @@ const Renderer = root.Renderer;
 const Game = @import("Game.zig").Game;
 const ThreadPool = @import("root").ThreadPool;
 
-const Block = @import("Block").Block;
+const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;

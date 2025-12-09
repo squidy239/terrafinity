@@ -1,7 +1,7 @@
 const std = @import("std");
 const Interpolation = @import("root").Interpolation;
 
-const Block = @import("Block").Block;
+const Block = @import("Chunk").Block;
 const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;

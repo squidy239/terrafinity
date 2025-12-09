@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Block = @import("Block").Block;
+const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const Obj = @import("obj");

@@ -1,7 +1,6 @@
 const std = @import("std");
 
-const Block = @import("Block").Block;
-const ztracy = @import("ztracy");
+pub const Block = @import("Block.zig").Block;
 
 pub const Chunk = struct {
     pub const ChunkSize = 32;
@@ -21,8 +20,6 @@ pub const Chunk = struct {
 
     ///Returns a chunk made from a given block array. The blocks and returned chunk are allocated by the allocator.
     pub fn FromBlocks(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !*@This() {
-        const fb = ztracy.ZoneNC(@src(), "chunkFromBlocks", 76465434);
-        defer fb.End();
         const oneBlock = IsOneBlock(blocks);
         var blockEncoding: BlockEncoding = undefined;
         if (oneBlock) |block| {
@@ -41,11 +38,21 @@ pub const Chunk = struct {
         };
         return chunk;
     }
+    
+    ///Returns a chunk thats all one block. The returned chunk is allocated by the allocator.
+    pub fn FromOneBlock(block: Block, allocator: std.mem.Allocator) !*@This() {
+        const chunk = try allocator.create(@This());
+        chunk.* = .{
+            .blocks = .{.oneBlock = block},
+            .lock = .{},
+            .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
+            .ref_count = std.atomic.Value(u32).init(1),
+        };
+        return chunk;
+    }
 
     ///checks if the block array is all the same block
     pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
-        const issOneBlock = ztracy.ZoneNC(@src(), "isOneBlock", 354354);
-        defer issOneBlock.End();
         const firstBlockVec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(blockArray[0][0][0]));
         var isOneBlock: @Vector(ChunkSize, bool) = comptime @splat(true);
         const linearBlockArray: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
@@ -55,8 +62,6 @@ pub const Chunk = struct {
 
     ///merges the chunk with the mergeBlocks, copies all non null mergeBlocks to blocks
     pub fn Merge(self: *@This(), mergeBlocks: BlockEncoding, allocator: std.mem.Allocator, comptime lock: bool) !void {
-        const merge = ztracy.ZoneNC(@src(), "Merge", 756657567);
-        defer merge.End();
         self.add_ref();
         defer self.release();
         if (lock) self.lock.lock();
@@ -78,8 +83,6 @@ pub const Chunk = struct {
                 }
             },
             .blocks => {
-                const bl = ztracy.ZoneNC(@src(), "Blocks", 642342342);
-                defer bl.End();
                 _ = try self.ToBlocks(allocator, false);
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self.blocks.blocks);
                 const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(mergeBlocks.blocks);
@@ -128,8 +131,6 @@ pub const Chunk = struct {
         }
     }
     pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
-        const ef = ztracy.ZoneNC(@src(), "ExtractFace", 9999);
-        defer ef.End();
         self.addAndLockShared();
         defer {
             if (removeRef) self.release();
@@ -159,8 +160,6 @@ pub const Chunk = struct {
     }
     ///returns true if the chunk was converted to blocks, false if it was already blocks
     pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator, comptime lock: bool) !bool {
-        const toblocks = ztracy.ZoneNC(@src(), "toBlocks", 645);
-        defer toblocks.End();
         self.add_ref();
         defer self.release();
         if (lock) self.lock.lock();
@@ -179,8 +178,6 @@ pub const Chunk = struct {
     ///the chunk must only be 1 ref before calling, use WaitForRefAmount
     ///locks the chunk
     pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
-        const freeChunk = ztracy.ZoneNC(@src(), "freeChunk", 11999);
-        defer freeChunk.End();
         std.debug.assert(self.ref_count.load(.seq_cst) == 1);
         self.lock.lock();
         switch (self.blocks) {
@@ -192,8 +189,6 @@ pub const Chunk = struct {
     }
 
     pub fn WaitForRefAmount(self: *const @This(), amount: u32, maxMicroTime: ?u64) bool {
-        const wait = ztracy.ZoneNC(@src(), "WaitForRefAmount", 5554);
-        defer wait.End();
         if (self.ref_count.load(.seq_cst) == amount) return true;
         const st = std.time.microTimestamp();
         while (self.ref_count.load(.seq_cst) != amount) {
