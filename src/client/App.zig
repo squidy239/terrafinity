@@ -186,7 +186,7 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        try game.?.init(primary_allocator, secondary_allocator, window,try std.fs.cwd().openDir("testWorld", .{ .iterate = true }));
+        try game.?.init(primary_allocator, secondary_allocator, window, try std.fs.cwd().openDir("testWorld", .{ .iterate = true }));
         try game.?.startThreads();
     }
     currentMenuPage = newMenu;
