@@ -3,7 +3,6 @@ const std = @import("std");
 const Block = @import("Chunk.zig").Block;
 const Chunk = @import("Chunk.zig").Chunk;
 
-
 //TODO handle structures, they get regenerateedd by fromBlocks and fromOneBlock
 pub const Region = struct {
     pub const Size = 8;
@@ -35,40 +34,57 @@ pub const Region = struct {
     pub const FullHeader = struct {
         header: Header,
         chunkHeader: [Size][Size][Size]?ChunkHeader,
+        
+        
+        fn fromChunks(chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk)!FullHeader{
+            const header: Header = .{
+                .version = .{ .major = version.major, .minor = version.minor, .patch = version.patch },
+                .chunkSectionEncoding = chunkSectionEncoding,
+            };
+            var flatChunkHeader: [Size * Size * Size]?ChunkHeader = undefined;
+            const flatChunks: *const [Size * Size * Size]?*Chunk = @ptrCast(&chunks);
+            for (flatChunks, &flatChunkHeader) |chunk, *headerPtr| {
+                var chunkHeader: ?ChunkHeader = null;
+                if (chunk) |c| {
+                    c.lock.lockShared();
+                    chunkHeader = .{
+                        .memEncoding = c.blocks,
+                        .metdata = switch (c.blocks) {
+                            .oneBlock => .{ .oneBlock = c.blocks.oneBlock },
+                            else => .{ .none = 0 },
+                        },
+                    };
+                    c.lock.unlockShared();
+                }
+                headerPtr.* = chunkHeader;
+            }
+            return .{.header = header, .chunkHeader = @bitCast(flatChunkHeader)};
+        }
     };
-
+    
+    ///overwrites the Region file with the provided chunks
     pub fn write(writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk) !void {
         try writeHeader(writer, chunkSectionEncoding, chunks);
         try writeChunks(writer, chunkSectionEncoding, chunks);
     }
-
-    fn writeHeader(writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk) !void {
-        const header: Header = .{
-            .version = .{ .major = version.major, .minor = version.minor, .patch = version.patch },
-            .chunkSectionEncoding = chunkSectionEncoding,
-        };
-        var flatChunkHeader: [Size * Size * Size]?ChunkHeader = undefined;
-        const flatChunks: *const [Size * Size * Size]?*Chunk = @ptrCast(&chunks);
-        for (flatChunks, &flatChunkHeader) |chunk, *headerPtr| {
-            var chunkHeader: ?ChunkHeader = null;
-            if (chunk) |c| {
-                c.lock.lockShared();
-                chunkHeader = .{
-                    .memEncoding = c.blocks,
-                    .metdata = switch (c.blocks) {
-                        .oneBlock => .{ .oneBlock = c.blocks.oneBlock },
-                        else => .{ .none = 0 },
-                    },
-                };
-                c.lock.unlockShared();
-            }
-            headerPtr.* = chunkHeader;
+    
+    ///merges the Region file with the provided chunks
+    pub fn merge(reader: *std.Io.Reader, writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk)!void{
+        var header = readHeader(reader) catch null;
+        const mergeheader = try FullHeader.fromChunks(chunkSectionEncoding, chunks);
+        for(@as(*[Size*Size*Size]?ChunkHeader, @ptrCast(&header.chunkHeader)), @as(*[Size*Size*Size]?ChunkHeader, @ptrCast(&mergeheader.chunkHeader)))|*h1, h2|{
+            if(h2 != null)h1.* = h2;
         }
-        try writer.writeStruct(header, .little);
-        try writer.writeSliceEndian(?ChunkHeader, &flatChunkHeader, .little);
+        
+        
+    }
+
+    fn writeHeader(writer: *std.Io.Writer, fullHeader:FullHeader) !void {
+        try writer.writeStruct(fullHeader.header, .little);
+        try writer.writeSliceEndian(?ChunkHeader, &@ptrCast(fullHeader.chunkHeader), .little);
         try writer.flush();
     }
-    
+
     ///Region file is assumed to be valid
     pub fn readHeader(reader: *std.Io.Reader) !FullHeader {
         const header = try reader.takeStruct(Header, .little);
@@ -77,12 +93,17 @@ pub const Region = struct {
         try reader.readSliceEndian(?ChunkHeader, @ptrCast(&chunkHeader), .little);
         return .{ .header = header, .chunkHeader = chunkHeader };
     }
+
     
-    fn writeChunks(writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk) !void {
-        std.debug.assert(chunkSectionEncoding == .Raw); //TODO compression
-        const encodedWriter: *std.Io.Writer = writer;
+    fn mergeChunks(reader: *std.Io.Reader, writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding,chunkHeader: [Size][Size][Size]?ChunkHeader, chunks: [Size][Size][Size]?*Chunk) !void {
+        std.debug.assert(chunkSectionEncoding == .Raw); 
+        const encodedWriter: *std.Io.Writer = writer;//TODO compression
+        const encodedReader: *std.Io.Reader = reader;//idk if its safe to read and write at the same time especially if its compressed
+        
         const flatChunks: *const [Size * Size * Size]?*Chunk = @ptrCast(&chunks);
-        for (flatChunks) |chunk| {
+        const flatChunkHeader: *const [Size*Size*Size]?ChunkHeader = @ptrCast(&chunkHeader);
+        
+        for (flatChunks, flatChunkHeader) |chunk, chunkheader| {
             if (chunk) |c| {
                 switch (c.blocks) {
                     .blocks => {
@@ -92,11 +113,21 @@ pub const Region = struct {
                     .oneBlock => {},
                 }
             }
+            else if(chunkheader)|h|{
+                switch (h.memEncoding) {
+                    .blocks => {
+                        const flatblockArray: [Chunk.ChunkSize * Chunk.ChunkSize * Chunk.ChunkSize]Block = undefined;
+                        try encodedReader.readSliceEndian(Block, &flatblockArray, .little);
+                        try encodedWriter.writeSliceEndian(Block, &flatblockArray, .little);
+                    },
+                    .oneBlock => {},
+                }
+            }
         }
         try encodedWriter.flush();
         try writer.flush();
     }
-    
+
     ///Region file is assumed to be valid
     pub fn loadAllBlockChunks(reader: *std.Io.Reader, fullHeader: FullHeader, allocator: std.mem.Allocator) ![Size][Size][Size]?*Chunk {
         const encodedReader: *std.Io.Reader = reader;
@@ -104,7 +135,7 @@ pub const Region = struct {
         var blocks: [Chunk.ChunkSize * Chunk.ChunkSize * Chunk.ChunkSize]Block = undefined;
         for (&flatChunks, @as([Size * Size * Size]?ChunkHeader, @bitCast(fullHeader.chunkHeader))) |*chunk, header| {
             if (header) |h| {
-                if(h.memEncoding != .blocks)continue;
+                if (h.memEncoding != .blocks) continue;
                 try encodedReader.readSliceEndian(Block, &blocks, .little);
                 chunk.* = try Chunk.FromBlocks(@ptrCast(&blocks), allocator);
             }
@@ -112,11 +143,11 @@ pub const Region = struct {
         return @bitCast(flatChunks);
     }
     ///Region file is assumed to be valid
-    pub fn loadAllOneBlockChunks(fullHeader:FullHeader, allocator: std.mem.Allocator)![Size][Size][Size]?*Chunk{
+    pub fn loadAllOneBlockChunks(fullHeader: FullHeader, allocator: std.mem.Allocator) ![Size][Size][Size]?*Chunk {
         var flatChunks: [Size * Size * Size]?*Chunk = @splat(null);
         for (&flatChunks, @as([Size * Size * Size]?ChunkHeader, @bitCast(fullHeader.chunkHeader))) |*chunk, header| {
             if (header) |h| {
-                if(h.memEncoding != .oneBlock)continue;
+                if (h.memEncoding != .oneBlock) continue;
                 chunk.* = try Chunk.FromOneBlock(h.metdata.oneBlock, allocator);
             }
         }
@@ -131,24 +162,20 @@ test "write" {
     var writer = file.writer(&writeBuf);
 
     var blocks: [Chunk.ChunkSize][Chunk.ChunkSize][Chunk.ChunkSize]Block = @splat(@splat(@splat(Block.Dirt)));
-    
-    
-
 
     const tchunk = try Chunk.FromBlocks(&blocks, std.testing.allocator);
-    
 
     blocks[4][5][8] = .Water;
     blocks[9][3][1] = .Snow;
-    
+
     const tchunk2 = try Chunk.FromBlocks(&blocks, std.testing.allocator);
 
     var chunks: [Region.Size][Region.Size][Region.Size]?*Chunk = @splat(@splat(@splat(null)));
-    
+
     chunks[0][0][0] = tchunk2;
     chunks[0][5][0] = tchunk2;
     chunks[0][0][2] = tchunk2;
-    
+
     chunks[0][2][0] = tchunk;
     chunks[1][4][2] = tchunk;
 
@@ -163,18 +190,17 @@ test "write" {
 
 test "read" {
     var readBuf: [65536]u8 = undefined;
-    const file = try std.fs.cwd().openFile("test.tfr", .{ .mode = .read_only, .lock = .exclusive });
+    const file = try std.fs.cwd().createFile("test.tfr", .{ .mode = .read_only, .lock = .exclusive });
     defer file.close();
     var reader = file.reader(&readBuf);
     const h = try Region.readHeader(&reader.interface);
     const o = try Region.loadAllOneBlockChunks(h, std.testing.allocator);
     const c = try Region.loadAllBlockChunks(&reader.interface, h, std.testing.allocator);
-    
-    
-    for(o)|x|{
-        for(x)|y|{
-            for(y)|z|{
-                if(z != null){
+
+    for (o) |x| {
+        for (x) |y| {
+            for (y) |z| {
+                if (z != null) {
                     std.debug.print("h: {any}\n", .{z.?.blocks.oneBlock});
                     z.?.free(std.testing.allocator);
                     std.testing.allocator.destroy(z.?);
@@ -182,11 +208,11 @@ test "read" {
             }
         }
     }
-    
-    for(c)|x|{
-        for(x)|y|{
-            for(y)|z|{
-                if(z != null){
+
+    for (c) |x| {
+        for (x) |y| {
+            for (y) |z| {
+                if (z != null) {
                     std.debug.print("h: {any}\n", .{z.?.blocks.blocks});
                     z.?.free(std.testing.allocator);
                     std.testing.allocator.destroy(z.?);

@@ -38,12 +38,12 @@ pub const Chunk = struct {
         };
         return chunk;
     }
-    
+
     ///Returns a chunk thats all one block. The returned chunk is allocated by the allocator.
     pub fn FromOneBlock(block: Block, allocator: std.mem.Allocator) !*@This() {
         const chunk = try allocator.create(@This());
         chunk.* = .{
-            .blocks = .{.oneBlock = block},
+            .blocks = .{ .oneBlock = block },
             .lock = .{},
             .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
             .ref_count = std.atomic.Value(u32).init(1),

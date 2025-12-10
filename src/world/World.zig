@@ -11,6 +11,7 @@ const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
 
 pub const World = struct {
+    pub const WorldStorage = @import("WorldStorage.zig");
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
     threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
@@ -45,7 +46,7 @@ pub const World = struct {
 
         ///must generate the chunk blocks into the blocks array, this may be called multiple times on the same chunk position
         ///returns true if the chunk was generated, false if it was unsuccessful, in which case the next chunk source will be tried
-        getBlocks: *const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!bool,
+        getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!bool,
 
         ///This function is called for every LoadChunk call, it will be called many times for each chunk
         ///it is intended for structures or similar things
@@ -56,7 +57,7 @@ pub const World = struct {
 
         ///This function is called for every UnloadChunk call, it will be called many times for each chunk
         ///all chunk sources will be tried
-        onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) void,
+        onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{Unrecoverable}!void,
 
         ///should return the height of the terrain in blocks at the given chunk coordinates
         getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
@@ -69,7 +70,9 @@ pub const World = struct {
     fn getBlocks(self: *@This(), Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
-                if (try s.getBlocks(s, self, blocks, Pos)) return;
+                if (s.getBlocks) |getBlocksFn| {
+                    if (try getBlocksFn(s, self, blocks, Pos)) return;
+                }
             }
         }
         return error.AllSourcesFailed;
@@ -85,11 +88,11 @@ pub const World = struct {
         }
     }
 
-    fn onUnload(self: *@This(), chunk: *Chunk, Pos: [3]i32) void {
+    fn onUnload(self: *@This(), chunk: *Chunk, Pos: [3]i32) !void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
                 if (s.onUnload) |onUnloadFn| {
-                    onUnloadFn(s, self, chunk, Pos);
+                    try onUnloadFn(s, self, chunk, Pos);
                 }
             }
         }
@@ -159,7 +162,7 @@ pub const World = struct {
             }
         }
     }
-    threadlocal var tasksComplete: std.atomic.Value(u32) = .init(0);
+    var tasksComplete: std.atomic.Value(u32) = .init(0);
 
     //TODO use async when it is added instead of this
     pub fn UpdateEntitiesThread(self: *@This(), interval_ns: u64) void {
@@ -363,12 +366,12 @@ pub const World = struct {
 
     pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
-        self.UnloadChunkByPtr(chunk, Pos);
+        try self.UnloadChunkByPtr(chunk, Pos);
     }
 
     ///dosent remove chunk from hashmap, just frees it
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: [3]i32) void {
-        onUnload(self, chunk, Pos);
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: [3]i32) !void {
+        try onUnload(self, chunk, Pos);
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
         self.allocator.destroy(chunk);
@@ -392,7 +395,7 @@ pub const World = struct {
             var it = self.Chunks.buckets[b].hash_map.iterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                self.UnloadChunkByPtr(c.value_ptr.*, c.key_ptr.*);
+                self.UnloadChunkByPtr(c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
             }
         }
         std.log.info("chunks unloaded", .{});

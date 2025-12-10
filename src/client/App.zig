@@ -180,8 +180,13 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
             .GenerateDistance = undefined,
             .LoadDistance = undefined,
             .running = undefined,
+            .region_storage = undefined,
         };
-        try game.?.init(primary_allocator, secondary_allocator, window);
+        std.fs.cwd().makeDir("testWorld") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        try game.?.init(primary_allocator, secondary_allocator, window,try std.fs.cwd().openDir("testWorld", .{ .iterate = true }));
         try game.?.startThreads();
     }
     currentMenuPage = newMenu;

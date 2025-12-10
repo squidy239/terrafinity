@@ -20,6 +20,7 @@ pub const Game = struct {
     chunkManager: ChunkManager,
     renderer: Renderer.Renderer,
     generator: World.DefaultGenerator,
+    region_storage: World.WorldStorage.RegionStorage,
     game_arena: std.heap.ArenaAllocator,
 
     // Threads
@@ -33,7 +34,7 @@ pub const Game = struct {
 
     running: std.atomic.Value(bool),
 
-    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window) !void {
+    pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window, game_path: std.fs.Dir) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
@@ -58,6 +59,15 @@ pub const Game = struct {
         game.generator = World.DefaultGenerator{
             .TerrainHeightCache = try .init(secondary_allocator, 4096),
             .params = GeneratorConfig,
+        };
+
+        game_path.makeDir("RegionStorage") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        game.region_storage = .{
+            .params = .{ .path = try game_path.openDir("RegionStorage", .{ .iterate = true }) },
         };
         errdefer game.generator.TerrainHeightCache.deinit();
         game.running = .init(true);

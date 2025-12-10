@@ -169,7 +169,7 @@ pub fn build(b: *std.Build) void {
 
     const world_module = b.addModule("World", .{
         .root_source_file = b.path("src/world/World.zig"),
-        .imports = &.{ .{ .name = "Chunk", .module = Chunk },  .{ .name = "Entity", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "Cache", .module = Cache }, .{
+        .imports = &.{ .{ .name = "Chunk", .module = Chunk }, .{ .name = "Entity", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "Cache", .module = Cache }, .{
             .name = "ztracy",
             .module = ztracy.module("root"),
         } },
