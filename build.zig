@@ -47,25 +47,6 @@ pub fn build(b: *std.Build) void {
     //       .optimize = optimize,
     // });
     //
-    const stb_truetype_bindings = b.addTranslateC(.{
-        .root_source_file = b.path("src/libs/gui/text/stb_truetype.h"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
-    const stb_truetype_object = b.addObject(.{
-        .name = "stb_truetype",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    stb_truetype_object.addCSourceFile(.{
-        .file = b.path("src/libs/gui/text/stb_truetype.c"),
-    });
-    exe.addObject(stb_truetype_object);
 
     //    exe.root_module.addImport("cache", cache.module("cache"));
     var Entitys = b.addModule("Entity", .{
@@ -108,17 +89,17 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("zglfw", zglfw.module("root"));
 
-    const gui = b.addModule("gui", .{
-        .root_source_file = b.path("src/libs/gui/gui.zig"),
+    const gui = b.dependency("zgui", .{
+        .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "TrueType", .module = stb_truetype_bindings.createModule() },
-            .{ .name = "gl", .module = gl_bindings },
-            .{ .name = "glfw", .module = zglfw.module("root") },
-        },
     });
 
-    exe.root_module.addImport("gui", gui);
+    const gui_mod = gui.module("zgui");
+
+    gui_mod.addImport("gl", gl_bindings);
+    gui_mod.addImport("glfw", zglfw.module("root"));
+
+    exe.root_module.addImport("gui", gui_mod);
 
     const EntityTypes = b.addModule("EntityTypes", .{
         .root_source_file = b.path("src/world/EntityTypes.zig"),

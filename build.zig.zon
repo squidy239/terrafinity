@@ -19,16 +19,16 @@
 
     .dependencies = .{
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#6034a5623312c58bf5e64c1a2b686691c28575f4",
-            .hash = "zglfw-0.10.0-dev-zgVDNPKyIQCBi-wv_vxkvIQq1u0bP4D56Wszx_2mszc7",
+            .url = "git+https://github.com/zig-gamedev/zglfw#15bf6ec59a4e1399d0c753455f69b28f09e41791",
+            .hash = "zglfw-0.10.0-dev-zgVDNHO2IQDy_fSdwY5U4z42rHUuKgt7T9f-qmQ3FnuL",
         },
         .zm = .{
             .url = "git+https://github.com/griush/zm#b5d70485dfc78baa9251a06a844d860fd00e9bcf",
             .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
         },
         .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#3cc6a4a1502fdea2e4d3869099e39d9c5e8b98a5",
-            .hash = "ztracy-0.14.0-dev-zHJSq8SJGADr475eGiGJzmX_-P5sDoU564IQSVfZxmYC",
+            .url = "git+https://github.com/zig-gamedev/ztracy#e7b401dea9ce006f8b236e3a2ca1a9f3d5c3e896",
+            .hash = "ztracy-0.14.0-dev-zHJSq78GGQC904aYvBPn6OOvRVOq_opAwDfeHZdvQyej",
         },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen.git#b624cc7d2e984f61c63a83a3d0ad6c686782f961",
@@ -39,12 +39,16 @@
             .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
         },
         .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg.git#b53e228986e127df1223975227969ed6a50126e7",
-            .hash = "zigimg-0.1.0-8_eo2rwbFgCSVcvqipgjAQueoazrTAiIvqk0F2bKYpE1",
+            .url = "git+https://github.com/zigimg/zigimg.git#eab2522c023b9259db8b13f2f90d609b7437e5f6",
+            .hash = "zigimg-0.1.0-8_eo2vUZFgAAtN1c6dAO5DdqL0d4cEWHtn6iR5ucZJti",
         },
         .ConcurrentQueue = .{
-            .url = "git+https://github.com/squidy239/ConcurrentQueue.git#d29d27911de4870109fbc1b852ff7199ca03c657",
-            .hash = "ConcurrentQueue-0.0.0-ucuqzmVCAADu6fxE3DlOnSeQFRVA6shg6O99amgwIodV",
+            .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#6ea86b57368ff851ab83fe2d625ef458f5ec9748",
+            .hash = "ConcurrentQueue-0.0.0-ucuqzmhCAAA_6XdltRtFrG2vzkb00c7PG78qvfeasffP",
+        },
+        .zgui = .{
+            .url = "git+https://codeberg.org/glowsquid/zgui.git#27a3b4f8ad0dec8ad5265ac5bb5574c24ea5faa7",
+            .hash = "zgui-0.0.0-5-RVg2MX5AAT1ZhkbAy6gCCIwCjUx4EvmDAS5fBzVdxT",
         },
     },
 
