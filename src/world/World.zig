@@ -63,7 +63,7 @@ pub const World = struct {
         getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
 
         ///should deinit the chunk source
-        deinit: *const fn (self: ChunkSource, world: *World) void,
+        deinit: ?*const fn (self: ChunkSource, world: *World) void,
     };
 
     ///gets the chunks blocks from the sources in order, returns the first source that succeeds
@@ -369,9 +369,20 @@ pub const World = struct {
         try self.UnloadChunkByPtr(chunk, Pos);
     }
 
+    pub fn UnloadChunkNoSave(self: *@This(), Pos: [3]i32) void {
+        const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
+        self.UnloadChunkByPtrNoSave(chunk);
+    }
+
     ///dosent remove chunk from hashmap, just frees it
     pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: [3]i32) !void {
         try onUnload(self, chunk, Pos);
+        _ = chunk.WaitForRefAmount(1, null);
+        _ = chunk.free(self.allocator);
+        self.allocator.destroy(chunk);
+    }
+
+    pub fn UnloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
         self.allocator.destroy(chunk);
@@ -413,7 +424,7 @@ pub const World = struct {
         self.Entitys.deinit();
         std.log.info("entitys unloaded", .{});
         for (self.ChunkSources) |source| {
-            if (source) |s| s.deinit(s, self);
+            if (source) |s| if (s.deinit) |deinit| deinit(s, self);
         }
 
         self.Chunks.deinit();

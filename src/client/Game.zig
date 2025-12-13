@@ -85,7 +85,7 @@ pub const Game = struct {
             .Entitys = .init(secondary_allocator),
             .Chunks = .init(secondary_allocator),
             .Config = MainWorldConfig,
-            .ChunkSources = .{ null, null, null, game.generator.getGenerator() },
+            .ChunkSources = .{ null, null, game.region_storage.getSource(), game.generator.getSource() },
             .onEdit = null,
         };
         errdefer game.world.Deinit();

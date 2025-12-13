@@ -15,7 +15,7 @@ pub const DefaultGenerator = struct {
     params: GenParams,
     TerrainHeightCache: Cache([2]i32, [ChunkSize][ChunkSize]i32),
 
-    pub fn getGenerator(self: *DefaultGenerator) World.ChunkSource {
+    pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,
             .getTerrainHeight = &getTerrainHeightAtCoords,
