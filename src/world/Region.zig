@@ -60,14 +60,16 @@ pub const Region = struct {
         }
     };
 
-    ///fully overwrites the Region with the provided chunks, destroys any existing region data
+    ///fully overwrites the Region with the provided chunks, destroys any existing region data. chunks may not be all null
     pub fn write(writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk) !void {
+        std.debug.assert(!std.meta.eql(chunks, @splat(@splat(@splat(null)))));
         try writeHeader(writer, try .fromChunks(chunkSectionEncoding, chunks));
         try writeChunks(writer, chunkSectionEncoding, chunks);
     }
 
-    ///merges the Region with the provided chunks, replaces existing if the same chunk is provided
+    ///merges the Region with the provided chunks, replaces existing if the same chunk is provided. chunks may not be all null
     pub fn merge(reader: *std.Io.Reader, writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunks: [Size][Size][Size]?*Chunk) !void {
+        std.debug.assert(!std.meta.eql(chunks, @splat(@splat(@splat(null)))));
         const header = readHeader(reader) catch null;
         var mergeheader = try FullHeader.fromChunks(chunkSectionEncoding, chunks);
         if (header != null) {
@@ -99,9 +101,10 @@ pub const Region = struct {
 
     fn mergeChunks(reader: *std.Io.Reader, writer: *std.Io.Writer, chunkSectionEncoding: ChunkSectionEncoding, chunkHeader: [Size][Size][Size]?ChunkHeader, chunks: [Size][Size][Size]?*Chunk) !void {
         std.debug.assert(chunkSectionEncoding == .Raw);
+        
         const encodedWriter: *std.Io.Writer = writer; //TODO compression
         const encodedReader: *std.Io.Reader = reader; //idk if its safe to read and write at the same time especially if its compressed
-
+        
         const flatChunks: *const [Size * Size * Size]?*Chunk = @ptrCast(&chunks);
         const flatChunkHeader: *const [Size * Size * Size]?ChunkHeader = @ptrCast(&chunkHeader);
 
@@ -215,7 +218,7 @@ test "write" {
 
 test "read" {
     var readBuf: [65536]u8 = undefined;
-    const file = try std.fs.cwd().openFile("testWorld/RegionStorage/{{ -1, -1, -1 }}.tfr", .{ .mode = .read_only, .lock = .exclusive });
+    const file = try std.fs.cwd().openFile("testWorld/RegionStorage/{ -1, -1, -1 }.tfr", .{ .mode = .read_only, .lock = .exclusive });
     defer file.close();
     var reader = file.reader(&readBuf);
     const h = try Region.readHeader(&reader.interface);
