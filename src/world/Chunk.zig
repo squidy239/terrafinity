@@ -8,9 +8,27 @@ pub const Chunk = struct {
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
+    
+    last_access: std.time.Instant = undefined, //TODO
+    ///if last_modified is null if the chunk has not been modified after its load
+    last_modified: ?std.time.Instant = undefined, //TODO
+    
     pub const BlockEncoding = union(enum(u4)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         oneBlock: Block,
+        ///Returns a block encoding made from a given block array owned by the allocator.
+        pub fn fromBlocks(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !BlockEncoding {
+            const oneBlock = IsOneBlock(blocks);
+            var blockEncoding: BlockEncoding = undefined;
+            if (oneBlock) |block| {
+                blockEncoding = BlockEncoding{ .oneBlock = block };
+            } else {
+                const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
+                mem.* = blocks.*;
+                blockEncoding = BlockEncoding{ .blocks = mem };
+            }
+            return blockEncoding;
+        }
     };
 
     pub const Genstate = enum(u8) {
@@ -18,32 +36,11 @@ pub const Chunk = struct {
         StructuresGenerated,
     };
 
-    ///Returns a chunk made from a given block array. The blocks and returned chunk are allocated by the allocator.
-    pub fn FromBlocks(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, allocator: std.mem.Allocator) !*@This() {
-        const oneBlock = IsOneBlock(blocks);
-        var blockEncoding: BlockEncoding = undefined;
-        if (oneBlock) |block| {
-            blockEncoding = BlockEncoding{ .oneBlock = block };
-        } else {
-            const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
-            mem.* = blocks.*;
-            blockEncoding = BlockEncoding{ .blocks = mem };
-        }
+    ///Returns a chunk made from a given blockencoding. The blocks and returned chunk are allocated by the allocator.
+    pub fn from(blockEncoding: BlockEncoding, allocator: std.mem.Allocator) !*@This() {
         const chunk = try allocator.create(@This());
         chunk.* = .{
             .blocks = blockEncoding,
-            .lock = .{},
-            .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
-            .ref_count = std.atomic.Value(u32).init(1),
-        };
-        return chunk;
-    }
-
-    ///Returns a chunk thats all one block. The returned chunk is allocated by the allocator.
-    pub fn FromOneBlock(block: Block, allocator: std.mem.Allocator) !*@This() {
-        const chunk = try allocator.create(@This());
-        chunk.* = .{
-            .blocks = .{ .oneBlock = block },
             .lock = .{},
             .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
             .ref_count = std.atomic.Value(u32).init(1),

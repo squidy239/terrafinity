@@ -198,7 +198,7 @@ pub const World = struct {
         if (chunk == null) {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
             try self.getBlocks(Pos, &blocks);
-            const chunkptr: *Chunk = try .FromBlocks(&blocks, self.allocator);
+            const chunkptr: *Chunk = try .from(try .fromBlocks(&blocks, self.allocator), self.allocator);
             _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
             const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
