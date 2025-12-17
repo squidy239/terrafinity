@@ -43,22 +43,22 @@ pub const World = struct {
         ///the division level of the chunk, 0 is one chunk is one block, 1 is 0.5 chunks is one block id 1D, etc
         level: i32,
         position: @Vector(3, i32),
-        
+
         pub fn levelToBlockRatio(level: i32) i64 {
             return std.math.powi(i32, TreeDivisions, level) catch |err| switch (err) {
                 error.Overflow => unreachable,
                 error.Underflow => 1,
             };
         }
-        
+
         pub fn levelToBlockRatioFloat(level: i32) f64 {
             return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level));
         }
-        
+
         pub fn toScale(level: i32) f64 {
             return levelToBlockRatioFloat(level) / ChunkSize;
         }
-        
+
         pub inline fn toBlockPos(self: ChunkPos) BlockPos {
             return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
         }
@@ -66,7 +66,7 @@ pub const World = struct {
         pub inline fn fromBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
             return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))), .level = level };
         }
-        
+
         pub inline fn add(self: ChunkPos, pos: @Vector(3, i32)) ChunkPos {
             return .{ .position = self.position + pos, .level = self.level };
         }
@@ -160,9 +160,9 @@ pub const World = struct {
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-       // const height = try self.GetTerrainHeightAtCoords(pos);
-        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], 10000, pos[1] });
-        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(10000), @floatFromInt(pos[1]) };
+        // const height = try self.GetTerrainHeightAtCoords(pos);
+        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], 1000, pos[1] });
+        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(1000), @floatFromInt(pos[1]) };
     }
 
     pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) !i64 {
@@ -365,7 +365,7 @@ pub const World = struct {
             }
         }
 
-        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level:i32) !void {
+        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
             const chunkPos: ChunkPos = .fromBlockPos(pos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
@@ -379,7 +379,7 @@ pub const World = struct {
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
 
-        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, level:i32) !void {
+        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
             const place = ztracy.ZoneNC(@src(), "PlaceSamplerShape", 6544564);
             defer place.End();
             const boundingBox = shape.boundingBox;

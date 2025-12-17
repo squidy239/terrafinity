@@ -146,8 +146,8 @@ pub fn processInput(window: *glfw.Window) !void {
     if (window.getKey(glfw.Key.left_shift) == .press) {
         ts.SuperSpeed = true;
     } else ts.SuperSpeed = false;
-    if (window.getKey(glfw.Key.r) == .press){}
-        //try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.getPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true, true);
+    if (window.getKey(glfw.Key.r) == .press) {}
+    //try game.chunkManager.AddChunkToRender(@divFloor(@as(@Vector(3, i32), @intFromFloat(game.player.getPos().?)), @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize }), true, true);
 
     if (window.getKey(glfw.Key.b) == .press) {
         if (std.time.microTimestamp() - lastbreak > 100 * std.time.us_per_ms) {
@@ -171,12 +171,12 @@ pub fn processInput(window: *glfw.Window) !void {
     }
 
     if (window.getKey(glfw.Key.i) == .press) {
-      //  const playerPos = game.player.getPos().?;
-      //  const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
-     //   std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
-     //   std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
-//var worldReader = World.WorldReader{ .world = &game.world };
-       // std.debug.print("block: {any}\n", .{worldReader.GetBlockNoCache(@intFromFloat(playerPos))});
+        //  const playerPos = game.player.getPos().?;
+        //  const chpos: @Vector(3, i32) = @intFromFloat(@round(playerPos / @as(@Vector(3, f64), @splat(ChunkSize))));
+        //   std.debug.print("inspected: {any}, data: {any}", .{ chpos, game.chunkManager.world.Chunks.get(chpos) });
+        //   std.debug.print("cameraFront: {any}, cameraUp: {any}\n", .{ game.renderer.cameraFront, Renderer.cameraUp });
+        //var worldReader = World.WorldReader{ .world = &game.world };
+        // std.debug.print("block: {any}\n", .{worldReader.GetBlockNoCache(@intFromFloat(playerPos))});
     }
     if (window.getKey(glfw.Key.p) == .press) {
         ts.Benchmark = true;

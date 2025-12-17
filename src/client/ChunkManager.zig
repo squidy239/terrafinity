@@ -51,7 +51,7 @@ pub const ChunkManager = struct {
             },
         }
         exbl.End();
-        const scale:f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
+        const scale: f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
         const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
@@ -68,15 +68,15 @@ pub const ChunkManager = struct {
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool, cullOutsideGenDistance: bool) void {
         if (cullOutsideGenDistance) {
-         //   const playerPos = game.player.getPos().?;
-          //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-          //  const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
-        //    const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
-           // if (game.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
-                game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
-                //  } else {
-          //      _ = game.chunkManager.LoadingChunks.remove(Pos);
-          //   }
+            //   const playerPos = game.player.getPos().?;
+            //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+            //  const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
+            //    const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
+            // if (game.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
+            game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+            //  } else {
+            //      _ = game.chunkManager.LoadingChunks.remove(Pos);
+            //   }
         } else game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 
