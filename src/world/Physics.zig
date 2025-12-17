@@ -82,7 +82,6 @@ pub const Mover = struct {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
             var newPos = physics.fetchAddPos(move);
-
             while (try self.collision(newPos, &reader)) |mtv| {
                 newPos = physics.fetchAddPos(-mtv);
                 physics.velocityLock.lock();

@@ -51,14 +51,15 @@ pub const ChunkManager = struct {
             },
         }
         exbl.End();
-        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, 1, playAnimation, self.allocator);
+        const scale:f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
+        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
             _ = try self.MeshesToLoad.append(m);
         } else {
             const removeChunk = self.ChunkRenderList.contains(Pos);
             if (removeChunk or true) {
-                const emptyMesh: Mesher.Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = 1, .animation = playAnimation };
+                const emptyMesh: Mesher.Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = scale, .animation = playAnimation };
                 _ = try self.MeshesToLoad.append(emptyMesh);
             }
         }

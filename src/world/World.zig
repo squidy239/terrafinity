@@ -44,7 +44,7 @@ pub const World = struct {
         level: i32,
         position: @Vector(3, i32),
         
-        pub fn levelToBlockRatio(level: i32) i32 {
+        pub fn levelToBlockRatio(level: i32) i64 {
             return std.math.powi(i32, TreeDivisions, level) catch |err| switch (err) {
                 error.Overflow => unreachable,
                 error.Underflow => 1,
@@ -60,7 +60,7 @@ pub const World = struct {
         }
         
         pub inline fn toBlockPos(self: ChunkPos) BlockPos {
-            return self.position * @as(@Vector(3, i32), @splat(levelToBlockRatio(self.level)));
+            return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
         }
 
         pub inline fn fromBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
@@ -160,9 +160,9 @@ pub const World = struct {
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-        const height = try self.GetTerrainHeightAtCoords(pos);
-        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
-        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
+       // const height = try self.GetTerrainHeightAtCoords(pos);
+        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], 10000, pos[1] });
+        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(10000), @floatFromInt(pos[1]) };
     }
 
     pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) !i64 {

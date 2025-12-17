@@ -67,8 +67,11 @@ pub const Loader = struct {
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
             const genDistance = @Vector(3, u32){ game.GenerateDistance[0].load(.monotonic), game.GenerateDistance[1].load(.monotonic), game.GenerateDistance[2].load(.monotonic) };
-            const eyePosChunk = @as(@Vector(3, i32), @intFromFloat(@round(playerPos / @Vector(3, f64){ ChunkSize, ChunkSize, ChunkSize })));
-            LoadChunksSingleplayer(game, eyePosChunk, genDistance);
+            const levels = [_]i32 {5,7, 9, 12};
+            LoadChunksSingleplayer(game,@intFromFloat(playerPos), genDistance,@splat(0), @intCast(levels[0]));
+            LoadChunksSingleplayer(game,@intFromFloat(playerPos), genDistance,@splat(1), @intCast(levels[1]));
+            LoadChunksSingleplayer(game,@intFromFloat(playerPos), genDistance,@splat(1), @intCast(levels[2]));
+            LoadChunksSingleplayer(game,@intFromFloat(playerPos), genDistance,@splat(1), @intCast(levels[3]));
             addChunkstoLoad.End();
         }
     }
@@ -90,17 +93,19 @@ pub const Loader = struct {
     }
 
     ///loads chunks from top to bottom and in a spiral on a y level
-    threadlocal var lastLoadPlayerChunkPos: ?@Vector(3, i32) = undefined;
-    threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
+   // threadlocal var lastLoadPlayerPos: ?@Vector(3, i64) = undefined;
+   // threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
 
-    fn LoadChunksSingleplayer(game: *Game.Game, playerChunkPos: @Vector(3, i32), distance: @Vector(3, u32)) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
-        defer {
-            lastLoadPlayerChunkPos = playerChunkPos;
-            lastGenDistance = distance;
-        }
-        if (lastLoadPlayerChunkPos != null and lastGenDistance != null) {
-            if (@reduce(.And, lastLoadPlayerChunkPos.? == playerChunkPos) and @reduce(.And, lastGenDistance.? == distance)) return;
-        }
+    fn LoadChunksSingleplayer(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32),  innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+        const playerChunkPos = World.ChunkPos.fromBlockPos((@splat(0)), level);
+        _ = playerPos;
+      //  defer {
+        //    lastLoadPlayerPos = playerPos;
+          //  lastGenDistance = distance;
+          //  }
+        //if (lastLoadPlayerPos != null and lastGenDistance != null) {
+        //    if (@reduce(.And, lastLoadPlayerPos.? == playerPos) and @reduce(.And, lastGenDistance.? == distance)) return;
+        // }
 
         var amount_loaded: u64 = 0;
         var amount_tested: u64 = 0;
@@ -122,8 +127,9 @@ pub const Loader = struct {
                 var y: i32 = -@as(i32, @intCast(distance[1]));
                 while (y < distance[1]) {
                     defer y += 1;
-                    const ChunkPos:World.ChunkPos = .{.position = [3]i32{ xz[0] + playerChunkPos[0], y + playerChunkPos[1], xz[1] + playerChunkPos[2] }, .level = 5};
-                    if (game.chunkManager.LoadingChunks.contains(ChunkPos)) {
+                    const ChunkPos:World.ChunkPos = .{.position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level};
+                    
+                    if (game.chunkManager.LoadingChunks.contains(ChunkPos) or @reduce(.And, @Vector(3, u32){@abs(xz[0]), @abs(y), @abs(xz[1])} < innerdistance)) {
                         continue;
                     }
                     

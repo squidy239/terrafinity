@@ -30,7 +30,7 @@ pub const DefaultGenerator = struct {
     fn getTerrainHeightAtCoords(self: World.ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        return GetTerrainHeight(Pos, generator.params, &generator.TerrainHeightCache);
+        return GetTerrainHeight(Pos,5, generator.params, &generator.TerrainHeightCache);
     }
 
     fn genChunkBlocks(self: World.ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
@@ -75,7 +75,7 @@ pub const DefaultGenerator = struct {
     pub fn GenChunk(Pos: ChunkPos, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32), gen_params: GenParams, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
         const chunkscale = ChunkPos.levelToBlockRatioFloat(Pos.level);
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
-        const heights = GetTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, gen_params, TerrainHeightCache);
+        const heights = GetTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] },Pos.level, gen_params, TerrainHeightCache);
         //  std.debug.print("hit/miss percent: {d}%, theoretical percent: {d}%                 \r", .{ @as(f32, @floatFromInt(cacheHits.load(.seq_cst))) / @as(f32, @floatFromInt(cacheMisses.load(.seq_cst) + cacheHits.load(.seq_cst))), 20.0 / 21.0 });
         gc.End();
         var rng = std.Random.DefaultPrng.init(gen_params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position)))));//TODO make this more deterministic especially at diffrent scales
@@ -190,16 +190,16 @@ pub const DefaultGenerator = struct {
         return null;
     }
 
-    pub fn GetTerrainHeight(Pos: [2]i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32)) [ChunkSize][ChunkSize]i32 {
+    pub fn GetTerrainHeight(Pos: [2]i32,level:i32, params: GenParams, TerrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32)) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
-        if (GetHeightsFromCache(Pos, TerrainHeightCache)) |cachedHeight| return cachedHeight;
-        const generatedHeights = GenTerrainHeight(params, Pos);
+       // if (GetHeightsFromCache(Pos, TerrainHeightCache)) |cachedHeight| return cachedHeight;
+        const generatedHeights = GenTerrainHeight(params,level, Pos);
         TerrainHeightCache.put(Pos, generatedHeights) catch |err| std.debug.panic("{any}\n", .{err});
         return generatedHeights;
     }
 
-    fn GenTerrainHeight(params: GenParams, Pos: [2]i32) [ChunkSize][ChunkSize]i32 {
+    fn GenTerrainHeight(params: GenParams,level:i32, Pos: [2]i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
         const floatpos = @Vector(2, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]) };
@@ -208,7 +208,7 @@ pub const DefaultGenerator = struct {
         const floatmin: f32 = @floatFromInt(params.terrainmin);
         const floatmax: f32 = @floatFromInt(params.terrainmax);
         const floatBounds = [2]f32{ floatmin, floatmax };
-        const oneDterrainscale: f32 = 1.0 / params.terrainScale;
+        const oneDterrainscale: f32 = 1.0 / (params.terrainScale * @as(f32, @floatCast(World.ChunkPos.toScale(level))));
         for (0..ChunkSize) |ux| {
             const x: f32 = ((@as(f32, @floatFromInt(ux)) * d32) + floatpos[0]) * oneDterrainscale;
             for (0..ChunkSize) |uz| {

@@ -188,7 +188,7 @@ pub const Renderer = struct {
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
-        const projdist = 2 * 32 * @max(@max(game.MeshDistance[0].load(.seq_cst), game.MeshDistance[1].load(.seq_cst)), game.MeshDistance[2].load(.seq_cst));
+        const projdist = 100000;
         const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
         const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
@@ -214,6 +214,7 @@ pub const Renderer = struct {
                 while (it.next()) |item| {
                     torenderchunks += 1;
                     const buffer_ids = item.value_ptr;
+                  //  std.debug.print("{any}\n", .{playerPos});
                     //const Pos = item.key_ptr.*;
                     //const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
                     //const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
