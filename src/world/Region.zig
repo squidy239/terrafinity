@@ -102,10 +102,10 @@ pub const Region = struct {
         std.debug.assert(chunkSectionEncoding == .Raw);
 
         const encodedWriter: *std.Io.Writer = writer; //TODO compression
-        const encodedReader: *std.Io.Reader = reader; 
+        const encodedReader: *std.Io.Reader = reader;
         const flatChunks: *const [Size * Size * Size]?*Chunk = @ptrCast(&chunks);
         const flatChunkHeader: *const [Size * Size * Size]?ChunkHeader = @ptrCast(&chunkHeader);
-        
+
         for (flatChunks, flatChunkHeader) |chunk, chunkheader| {
             if (chunk) |c| {
                 switch (c.blocks) {
@@ -161,13 +161,13 @@ pub const Region = struct {
                         encoding.* = try Chunk.BlockEncoding.fromBlocks(@ptrCast(&blocks), allocator);
                     },
                     .oneBlock => {
-                        encoding.* = Chunk.BlockEncoding{.oneBlock = h.metdata.oneBlock};
+                        encoding.* = Chunk.BlockEncoding{ .oneBlock = h.metdata.oneBlock };
                     },
                 }
             }
         }
         return @bitCast(flatEncodings);
-    }    
+    }
 };
 
 test "write" {

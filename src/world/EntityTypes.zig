@@ -165,7 +165,7 @@ pub const Cube = struct {
         self.lock.unlock();
         var worldReader = World.WorldReader{ .world = world };
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
-        if ((worldReader.GetBlockNoCache(@intFromFloat(self.pos)) catch unreachable) != .Air) {
+        if ((worldReader.GetBlockNoCache(@intFromFloat(self.pos), 5) catch unreachable) != .Air) {
             g.End();
             var worldEditor = World.WorldEditor{
                 .world = world,
@@ -173,7 +173,7 @@ pub const Cube = struct {
             };
             const sphere = World.WorldEditor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
             //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
-            worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            worldEditor.PlaceSamplerShape(.Air, sphere, 5) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
             //_ = uuid;
             _ = entity.ref_count.fetchSub(1, .seq_cst);

@@ -19,25 +19,25 @@ const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 pub const ChunkManager = struct {
     allocator: std.mem.Allocator,
     pool: *ThreadPool,
-    LoadingChunks: ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32),
+    LoadingChunks: ConcurrentHashMap(World.ChunkPos, bool, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
     MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
     world: *World,
-    ChunkRenderList: ConcurrentHashMap([3]i32, MeshBufferIDs, std.hash_map.AutoContext([3]i32), 80, 32),
+    ChunkRenderList: ConcurrentHashMap(World.ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
 
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     threadlocal var Tempcube: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    pub fn AddChunkToRender(self: *@This(), Pos: [3]i32, genStructures: bool, playAnimation: bool) !void {
+    pub fn AddChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool, playAnimation: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
         const chunk = try self.world.LoadChunk(Pos, genStructures);
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 1, 0, 0 }, false)).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ -1, 0, 0 }, false)).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 1, 0 }, false)).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, -1, 0 }, false)).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, 1 }, false)).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos + @Vector(3, i32){ 0, 0, -1 }, false)).extractFace(.zPlus, true),
+            (try self.world.LoadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
+            (try self.world.LoadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
+            (try self.world.LoadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
+            (try self.world.LoadChunk(Pos.add(.{ 0, -1, 0 }), false)).extractFace(.yPlus, true),
+            (try self.world.LoadChunk(Pos.add(.{ 0, 0, 1 }), false)).extractFace(.zMinus, true),
+            (try self.world.LoadChunk(Pos.add(.{ 0, 0, -1 }), false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -65,21 +65,21 @@ pub const ChunkManager = struct {
     }
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
-    pub fn AddChunkToRenderTask(game: *Game, Pos: [3]i32, genStructures: bool, cullOutsideGenDistance: bool) void {
+    pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool, cullOutsideGenDistance: bool) void {
         if (cullOutsideGenDistance) {
-            const playerPos = game.player.getPos().?;
-            const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
-            const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
-            if (game.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
+         //   const playerPos = game.player.getPos().?;
+          //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(ChunkSize));
+          //  const GenDistance = [3]u32{ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
+        //    const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(@round(floatPlayerChunkPos)));
+           // if (game.running.load(.monotonic) and !outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(GenDistance[0] + 2), @intCast(GenDistance[1] + 2), @intCast(GenDistance[2] + 2) })) {
                 game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
-            } else {
-                _ = game.chunkManager.LoadingChunks.remove(Pos);
-            }
+                //  } else {
+          //      _ = game.chunkManager.LoadingChunks.remove(Pos);
+          //   }
         } else game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 
-    pub fn onEditFn(chunkPos: [3]i32, args: *anyopaque) void {
+    pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) void {
         const manager = @as(*ChunkManager, @ptrCast(@alignCast(args)));
         manager.AddChunkToRender(chunkPos, false, false) catch |err| std.log.err("err: {any}", .{err});
     }

@@ -48,9 +48,9 @@ pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype
     };
 }
 
-pub fn NoiseSphere(editor: *World.WorldEditor, centerPos: @Vector(3, f64), radius: f64, minRadiusFactor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block) !void {
+pub fn NoiseSphere(editor: *World.WorldEditor, centerPos: @Vector(3, f64), radius: f64, minRadiusFactor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block, level: i32) !void {
     const explosionSphere = TexturedSphere(f64, noiseTexture, NoiseParams).init(centerPos, radius, NoiseParams{ .noise = noise, .minRadius = minRadiusFactor }, minRadiusFactor);
-    try editor.PlaceSamplerShape(block, explosionSphere);
+    try editor.PlaceSamplerShape(block, explosionSphere, level);
 }
 const NoiseParams = struct {
     noise: World.DefaultGenerator.Noise.Noise(f32),

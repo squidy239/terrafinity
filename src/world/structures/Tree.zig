@@ -23,13 +23,13 @@ pub const Tree = struct {
     minLength: f32 = 2.0,
     scale: f32 = 1.0,
 
-    pub fn place(self: *const @This(), editor: *WorldEditor) !u64 {
+    pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, self.rand, -0.05, 0.05);
-        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0);
+        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0, level);
     }
 
-    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize) !u64 {
+    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize, level: i32) !u64 {
         const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
         defer pstep.End();
 
@@ -50,16 +50,16 @@ pub const Tree = struct {
                         var z = -halfLeaf;
                         while (z <= halfLeaf) : (z += 1) {
                             const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
-                            try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })));
+                            try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
                         }
                     }
                 }
             } else {
                 branchesCount += 1;
                 const branch = WorldEditor.Geometry.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
-                try editor.PlaceSamplerShape(step.block, branch);
+                try editor.PlaceSamplerShape(step.block, branch, level);
                 const newPos = pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
-                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
+                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1, level);
             }
         }
         return branchesCount;

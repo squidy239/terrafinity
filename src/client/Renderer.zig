@@ -202,7 +202,7 @@ pub const Renderer = struct {
         const millitimestamp = std.time.milliTimestamp();
         gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
         gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
-        const frustrum = Frustum.extractFrustumPlanes(projview);
+        //const frustrum = Frustum.extractFrustumPlanes(projview);
         inline for (0..2) |i| {
             if (i == 1) gl.Disable(gl.CULL_FACE);
             defer gl.Enable(gl.CULL_FACE);
@@ -214,11 +214,11 @@ pub const Renderer = struct {
                 while (it.next()) |item| {
                     torenderchunks += 1;
                     const buffer_ids = item.value_ptr;
-                    const Pos: @Vector(3, i32) = item.key_ptr.*;
-                    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
-                    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
-                    const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-                    if (!cull) continue;
+                    //const Pos = item.key_ptr.*;
+                    //const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
+                    //const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
+                    //const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+                   // if (!cull) continue;
                     drawnchunks += 1;
                     gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
                     gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);

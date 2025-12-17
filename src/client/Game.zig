@@ -51,9 +51,9 @@ pub const Game = struct {
         GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
         GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
 
-        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
-        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
+        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 5, 5 } else [2]u32{ 20, 20 }; //x,y
+        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 7, 7 } else [2]u32{ 22, 22 }; //x,y
+        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 7, 7 } else [2]u32{ 22, 22 }; //x,y
 
         game.allocator = allocator;
         game.generator = World.DefaultGenerator{
@@ -119,7 +119,7 @@ pub const Game = struct {
         game.chunkManager = .{
             .pool = &game.pool,
             .ChunkRenderList = .init(allocator),
-            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+            .LoadingChunks = .init(allocator),
             .MeshesToLoad = .init(allocator),
             .world = &game.world,
             .allocator = allocator,

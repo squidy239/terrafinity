@@ -21,7 +21,8 @@ pub const World = struct {
     threadPool: *ThreadPool,
 
     Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
-    Chunks: ConcurrentHashMap([3]i32, *Chunk, std.hash_map.AutoContext([3]i32), 80, 32),
+
+    Chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 32),
     Config: WorldConfig,
     ///tries each source in order until of priority, 0 is highest
     ///if a source returns false, the next source will be tried
@@ -29,10 +30,47 @@ pub const World = struct {
     ChunkSources: [4]?ChunkSource,
 
     onEdit: ?struct {
-        onEditFn: *const fn (chunkPos: [3]i32, args: *anyopaque) void,
+        onEditFn: *const fn (chunkPos: ChunkPos, args: *anyopaque) void,
         callIfNeighborFacesChanged: bool,
         onEditFnArgs: *anyopaque,
     },
+    ///the amount of divisions per axis in the tree structure
+    pub const TreeDivisions = 2;
+    pub const BlockPos = @Vector(3, i64);
+    pub const ChunkPos = struct {
+        ///the level where one block in a chunk is one block
+        const standardLevel = std.math.log(i32, TreeDivisions, ChunkSize);
+        ///the division level of the chunk, 0 is one chunk is one block, 1 is 0.5 chunks is one block id 1D, etc
+        level: i32,
+        position: @Vector(3, i32),
+        
+        pub fn levelToBlockRatio(level: i32) i32 {
+            return std.math.powi(i32, TreeDivisions, level) catch |err| switch (err) {
+                error.Overflow => unreachable,
+                error.Underflow => 1,
+            };
+        }
+        
+        pub fn levelToBlockRatioFloat(level: i32) f64 {
+            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level));
+        }
+        
+        pub fn toScale(level: i32) f64 {
+            return levelToBlockRatioFloat(level) / ChunkSize;
+        }
+        
+        pub inline fn toBlockPos(self: ChunkPos) BlockPos {
+            return self.position * @as(@Vector(3, i32), @splat(levelToBlockRatio(self.level)));
+        }
+
+        pub inline fn fromBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
+            return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))), .level = level };
+        }
+        
+        pub inline fn add(self: ChunkPos, pos: @Vector(3, i32)) ChunkPos {
+            return .{ .position = self.position + pos, .level = self.level };
+        }
+    };
 
     pub const WorldConfig = struct {
         SpawnCenterPos: @Vector(3, f64),
@@ -46,18 +84,18 @@ pub const World = struct {
 
         ///must generate the chunk blocks into the blocks array, this may be called multiple times on the same chunk position
         ///returns true if the chunk was generated, false if it was unsuccessful, in which case the next chunk source will be tried
-        getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!bool,
+        getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool,
 
         ///This function is called for every LoadChunk call, it will be called many times for each chunk
         ///it is intended for structures or similar things
         ///all chunk sources will be tried
         ///onEditFn must be called if chunks are modified on any modified chunks once all modifications are complete
         ///this function is responsible for locking and adding refs to the chunk
-        onLoad: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{ OutOfMemory, Unrecoverable }!void,
+        onLoad: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void,
 
         ///This function is called for every UnloadChunk call, it will be called many times for each chunk
         ///all chunk sources will be tried
-        onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: [3]i32) error{Unrecoverable}!void,
+        onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{Unrecoverable}!void,
 
         ///should return the height of the terrain in blocks at the given chunk coordinates
         getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
@@ -67,7 +105,7 @@ pub const World = struct {
     };
 
     ///gets the chunks blocks from the sources in order, returns the first source that succeeds
-    fn getBlocks(self: *@This(), Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
+    fn getBlocks(self: *@This(), Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
                 if (s.getBlocks) |getBlocksFn| {
@@ -78,7 +116,7 @@ pub const World = struct {
         return error.AllSourcesFailed;
     }
 
-    fn onLoad(self: *@This(), chunk: *Chunk, Pos: [3]i32) error{ Unrecoverable, OutOfMemory }!void {
+    fn onLoad(self: *@This(), chunk: *Chunk, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
                 if (s.onLoad) |onLoadFn| {
@@ -88,7 +126,7 @@ pub const World = struct {
         }
     }
 
-    fn onUnload(self: *@This(), chunk: *Chunk, Pos: [3]i32) !void {
+    fn onUnload(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
         for (self.ChunkSources) |source| {
             if (source) |s| {
                 if (s.onUnload) |onUnloadFn| {
@@ -191,7 +229,7 @@ pub const World = struct {
     }
 
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: [3]i32, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
+    pub fn LoadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
         const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
         defer loadChunk.End();
         const chunk = self.Chunks.getandaddref(Pos);
@@ -229,11 +267,11 @@ pub const World = struct {
 
     pub const WorldReader = struct {
         world: *World,
-        lastChunkReadCache: ?struct { Pos: [3]i32, chunk: *Chunk } = null,
+        lastChunkReadCache: ?struct { Pos: ChunkPos, chunk: *Chunk } = null,
         ///returns a block at the given position, Clear must be called after a series of calls to unlock the cached chunk
         ///better for many block reads
-        pub inline fn GetBlockCached(self: *@This(), blockpos: @Vector(3, i64)) !Block {
-            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+        pub inline fn GetBlockCached(self: *@This(), blockpos: BlockPos, level: i32) !Block {
+            const chunkPos: ChunkPos = .fromBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
                 self.Clear();
@@ -248,8 +286,8 @@ pub const World = struct {
         }
 
         ///returns a block at the given position, better for fewer block reads
-        pub inline fn GetBlockNoCache(self: *@This(), blockpos: @Vector(3, i64)) !Block {
-            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+        pub inline fn GetBlockNoCache(self: *@This(), blockpos: BlockPos, level: i32) !Block {
+            const chunkPos: ChunkPos = .fromBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunk = try self.world.LoadChunk(chunkPos, false);
             chunk.lock.lockShared();
@@ -274,9 +312,9 @@ pub const World = struct {
         pub const Tree = @import("structures/Tree.zig").Tree;
         pub const TexturedSphere = @import("structures/TexturedSphere.zig");
         world: *World,
-        lastChunkCache: ?struct { Pos: [3]i32, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
+        lastChunkCache: ?struct { Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
 
-        editBuffer: std.AutoHashMapUnmanaged([3]i32, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
+        editBuffer: std.AutoHashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
         tempallocator: std.mem.Allocator,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
@@ -287,8 +325,9 @@ pub const World = struct {
             defer self.editBuffer.clearAndFree(self.tempallocator);
             defer self.editBuffer.unlockPointers();
             var it = self.editBuffer.iterator();
-            var neghborsToRemesh: std.AutoHashMap([3]i32, void) = .init(self.tempallocator);
+            var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
             defer neghborsToRemesh.deinit();
+            //TODO improve this
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
                 const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false);
@@ -306,7 +345,7 @@ pub const World = struct {
                 if (self.world.onEdit.?.callIfNeighborFacesChanged) {
                     for (0..6) |side| {
                         if (!std.meta.eql(sides[side], sides2[side])) {
-                            const toRemeshPos = diffChunk.key_ptr.* + switch (side) {
+                            const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + switch (side) {
                                 0 => @Vector(3, i32){ -1, 0, 0 },
                                 1 => @Vector(3, i32){ 1, 0, 0 },
                                 2 => @Vector(3, i32){ 0, -1, 0 },
@@ -314,7 +353,7 @@ pub const World = struct {
                                 4 => @Vector(3, i32){ 0, 0, -1 },
                                 5 => @Vector(3, i32){ 0, 0, 1 },
                                 else => unreachable,
-                            };
+                            } };
                             try neghborsToRemesh.put(toRemeshPos, {});
                         }
                     }
@@ -326,8 +365,8 @@ pub const World = struct {
             }
         }
 
-        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
-            const chunkPos: @Vector(3, i32) = @intCast(@divFloor(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level:i32) !void {
+            const chunkPos: ChunkPos = .fromBlockPos(pos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
                 @branchHint(.likely);
@@ -340,7 +379,7 @@ pub const World = struct {
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
 
-        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
+        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, level:i32) !void {
             const place = ztracy.ZoneNC(@src(), "PlaceSamplerShape", 6544564);
             defer place.End();
             const boundingBox = shape.boundingBox;
@@ -356,7 +395,7 @@ pub const World = struct {
                                 .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                                 else => unreachable,
                             };
-                            try self.PlaceBlock(block, i64blockpos);
+                            try self.PlaceBlock(block, i64blockpos, level);
                         }
                     }
                 }
@@ -364,18 +403,18 @@ pub const World = struct {
         }
     };
 
-    pub fn UnloadChunk(self: *@This(), Pos: [3]i32) !void {
+    pub fn UnloadChunk(self: *@This(), Pos: ChunkPos) !void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
         try self.UnloadChunkByPtr(chunk, Pos);
     }
 
-    pub fn UnloadChunkNoSave(self: *@This(), Pos: [3]i32) void {
+    pub fn UnloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
         self.UnloadChunkByPtrNoSave(chunk);
     }
 
     ///dosent remove chunk from hashmap, just frees it
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: [3]i32) !void {
+    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
         try onUnload(self, chunk, Pos);
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);

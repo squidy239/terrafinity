@@ -8,11 +8,11 @@ pub const Chunk = struct {
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
-    
+
     last_access: std.time.Instant = undefined, //TODO
     ///if last_modified is null if the chunk has not been modified after its load
     last_modified: ?std.time.Instant = undefined, //TODO
-    
+
     pub const BlockEncoding = union(enum(u4)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         oneBlock: Block,

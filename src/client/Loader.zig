@@ -23,35 +23,37 @@ pub const Loader = struct {
     threadlocal var meshesToUnloadBuffer: [1024][3]i32 = undefined;
     threadlocal var meshesToUnloadBufferPos: usize = 0;
     pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, playerChunkPos: @Vector(3, i32)) void {
-        const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
-        defer unload.End();
-
-        {
-            const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
-            defer loop.End();
-            const bktamount = chunkManager.ChunkRenderList.buckets.len;
-            for (0..bktamount) |b| {
-                chunkManager.ChunkRenderList.buckets[b].lock.lock();
-                var it = chunkManager.ChunkRenderList.buckets[b].hash_map.keyIterator();
-                defer chunkManager.ChunkRenderList.buckets[b].lock.unlock();
-                while (it.next()) |key| {
-                    const Pos = key.*;
-                    if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
-                        meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                        meshesToUnloadBufferPos += 1;
-                    }
-                }
-            }
-        }
-        if (meshesToUnloadBufferPos > 0) {
-            const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
-            defer free.End();
-            for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-                const mesh = chunkManager.ChunkRenderList.fetchremove(Pos);
-                if (mesh) |m| m.free();
-            }
-            meshesToUnloadBufferPos = 0;
-        }
+       // const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
+      //  defer unload.End();
+      _ = meshDistance;
+      _ = playerChunkPos;
+      _ = chunkManager;
+     //   {
+      //      const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
+      //      defer loop.End();
+      //      const bktamount = chunkManager.ChunkRenderList.buckets.len;
+      //      for (0..bktamount) |b| {
+      //          chunkManager.ChunkRenderList.buckets[b].lock.lock();
+      //          var it = chunkManager.ChunkRenderList.buckets[b].hash_map.keyIterator();
+      //          defer chunkManager.ChunkRenderList.buckets[b].lock.unlock();
+       //         while (it.next()) |key| {
+       //             const Pos = key.*;
+      //              if (meshesToUnloadBufferPos < meshesToUnloadBuffer.len and outOfSquareRange(Pos - playerChunkPos, [3]i32{ @intCast(meshDistance[0]), @intCast(meshDistance[1]), @intCast(meshDistance[2]) })) {
+       //                 meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+       //                 meshesToUnloadBufferPos += 1;
+       //             }
+       //         }
+       //      }
+       //    }
+     //   if (meshesToUnloadBufferPos > 0) {
+       //     const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
+      //      defer free.End();
+        //    for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
+        //        const mesh = chunkManager.ChunkRenderList.fetchremove(Pos);
+      //          if (mesh) |m| m.free();
+                //     }
+       //     meshesToUnloadBufferPos = 0;
+            //  }
     }
 
     threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
@@ -72,17 +74,19 @@ pub const Loader = struct {
     }
 
     pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
-        while (game.running.load(.monotonic)) {
-            const playerPos = game.player.getPos().?;
-            const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-            const st = std.time.nanoTimestamp();
-            defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-            const loadDistance = @Vector(3, u32){ game.LoadDistance[0].load(.monotonic), game.LoadDistance[1].load(.monotonic), game.LoadDistance[2].load(.monotonic) };
-            const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
-            const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-            UnloadChunks(&game.world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
-            unloadChunks.End();
-        }
+        _ = game;
+        _ = intervel_ns;
+       // while (game.running.load(.monotonic)) {
+       //     const playerPos = game.player.getPos().?;
+         //   const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
+        //    const st = std.time.nanoTimestamp();
+          //  defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
+          //  const loadDistance = @Vector(3, u32){ game.LoadDistance[0].load(.monotonic), game.LoadDistance[1].load(.monotonic), game.LoadDistance[2].load(.monotonic) };
+          //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
+           // const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
+            //UnloadChunks(&game.world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
+           // unloadChunks.End();
+           //  }
     }
 
     ///loads chunks from top to bottom and in a spiral on a y level
@@ -118,10 +122,11 @@ pub const Loader = struct {
                 var y: i32 = -@as(i32, @intCast(distance[1]));
                 while (y < distance[1]) {
                     defer y += 1;
-                    const ChunkPos = [3]i32{ xz[0] + playerChunkPos[0], y + playerChunkPos[1], xz[1] + playerChunkPos[2] };
+                    const ChunkPos:World.ChunkPos = .{.position = [3]i32{ xz[0] + playerChunkPos[0], y + playerChunkPos[1], xz[1] + playerChunkPos[2] }, .level = 5};
                     if (game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                         continue;
                     }
+                    
                     const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
                     if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                         amount_loaded += 1;
@@ -212,16 +217,16 @@ pub const Loader = struct {
             .count = [2]u32{ 0, 0 },
             .drawCommand = [2]?c_uint{ null, null },
             .UBO = undefined,
-            .pos = mesh.Pos,
+            .pos = mesh.Pos.position,
             .time = 0,
-            .scale = mesh.scale,
+            .scale = @floatCast(World.ChunkPos.toScale(mesh.Pos.level)),
         };
 
         gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
         gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
         const UniformBuffer = UBO{
-            .chunkPos = mesh.Pos,
-            .scale = 1,
+            .chunkPos = mesh.Pos.position,
+            .scale = @floatCast(World.ChunkPos.toScale(mesh.Pos.level)),
             .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
             ._0 = undefined,
         };

@@ -3,6 +3,7 @@ const std = @import("std");
 const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
+const ChunkPos = @import("root").World.ChunkPos;
 const Obj = @import("obj");
 const ztracy = @import("ztracy");
 
@@ -36,11 +37,11 @@ threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Blo
 pub const Mesh = struct {
     faces: ?[]const Face,
     TransperentFaces: ?[]const Face,
-    Pos: [3]i32,
+    Pos: ChunkPos,
     scale: f32,
     animation: bool,
     ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
+    pub fn MeshFromChunks(chunkPos: ChunkPos, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
@@ -110,7 +111,7 @@ pub const Mesh = struct {
             return @This(){
                 .faces = if (pos > 0) try allocator.dupe(Face, faceBuffer[0..pos]) else null,
                 .TransperentFaces = if (Tpos > 0) try allocator.dupe(Face, TransparentfaceBuffer[0..Tpos]) else null,
-                .Pos = ChunkPos,
+                .Pos = chunkPos,
                 .scale = scale,
                 .animation = animation,
             };
