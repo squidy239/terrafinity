@@ -169,10 +169,9 @@ pub const Renderer = struct {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         try self.DrawEntities(game, playerPos, viewport_pixels);
         drawEntities.End();
-        const meshDistance = [3]u32{ game.MeshDistance[0].load(.seq_cst), game.MeshDistance[1].load(.seq_cst), game.MeshDistance[2].load(.seq_cst) };
-        const genDistance = @Vector(3, u32){ game.GenerateDistance[0].load(.seq_cst), game.GenerateDistance[1].load(.seq_cst), game.GenerateDistance[2].load(.seq_cst) };
+        const gen_distance = game.getGenDistance() + @Vector(2, u32){ 2, 2 };
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-        Loader.UnloadMeshes(&game.chunkManager, meshDistance, genDistance, @intFromFloat(playerPos), game.SmallestLevel);
+        Loader.UnloadMeshes(&game.chunkManager, gen_distance, @intFromFloat(playerPos), game.SmallestLevel);
         unloadMeshes.End();
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;

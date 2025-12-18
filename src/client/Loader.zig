@@ -22,13 +22,14 @@ const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 pub const Loader = struct {
     threadlocal var meshesToUnloadBuffer: [1024]World.ChunkPos = undefined;
     threadlocal var meshesToUnloadBufferPos: usize = 0;
-    pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, genDistance: @Vector(3, u32), playerPos: @Vector(3, i64), smallestLevel: i32) void {
+    pub fn UnloadMeshes(chunkManager: *ChunkManager, gen_distance: @Vector(2, u32), playerPos: @Vector(3, i64), smallestLevel: i32) void {
         const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
         defer unload.End();
+        const mesh_distance = gen_distance + @Vector(2, u32){ 2, 2 };
         {
             const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
             defer loop.End();
-            const innerRadius = getInnerRadius(genDistance);
+            const innerRadius = getInnerRadius(.{ mesh_distance[0], mesh_distance[0], mesh_distance[1] });
             const bktamount = chunkManager.ChunkRenderList.buckets.len;
             outer: for (0..bktamount) |b| {
                 chunkManager.ChunkRenderList.buckets[b].lock.lock();
@@ -37,7 +38,7 @@ pub const Loader = struct {
                 while (it.next()) |key| {
                     const Pos = key.*;
                     if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
-                    const keep = keepLoaded(playerPos, Pos, if (Pos.level <= smallestLevel) @splat(0) else innerRadius, meshDistance);
+                    const keep = keepLoaded(playerPos, Pos, if (Pos.level <= smallestLevel) @splat(0) else innerRadius, .{ mesh_distance[0], mesh_distance[0], mesh_distance[1] });
                     if (keep) continue;
                     meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
                     meshesToUnloadBufferPos += 1;
@@ -84,12 +85,12 @@ pub const Loader = struct {
             const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-            const genDistance = @Vector(3, u32){ game.GenerateDistance[0].load(.monotonic), game.GenerateDistance[1].load(.monotonic), game.GenerateDistance[2].load(.monotonic) };
-            const innerRadius = getInnerRadius(genDistance);
+            const genDistance = game.getGenDistance();
+            const innerRadius = getInnerRadius(.{ genDistance[0], genDistance[0], genDistance[1] });
             var level = game.levels[0];
             while (level < game.levels[1]) : (level += 1) {
                 const currentInnerRadius: @Vector(3, u32) = if (level <= game.SmallestLevel) @splat(0) else innerRadius;
-                LoadChunksSpiral(game, @intFromFloat(playerPos), genDistance, currentInnerRadius, level);
+                LoadChunksSpiral(game, @intFromFloat(playerPos), .{ genDistance[0], genDistance[0], genDistance[1] }, currentInnerRadius, level);
             }
 
             addChunkstoLoad.End();
@@ -139,7 +140,7 @@ pub const Loader = struct {
                     if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                         amount_loaded += 1;
                         game.chunkManager.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
-                        game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true, true }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
+                        game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                     }
                 }
             }

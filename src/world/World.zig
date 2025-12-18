@@ -56,15 +56,15 @@ pub const World = struct {
             };
         }
 
-        pub inline fn levelToBlockRatioFloat(level: i32) f64 {
-            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level - ChunkLevel));
+        pub inline fn levelToBlockRatioFloat(level: i32) f32 {
+            return std.math.pow(f32, @floatFromInt(TreeDivisions), @floatFromInt(level - ChunkLevel));
         }
 
         pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
             return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level1 - level2));
         }
 
-        pub inline fn toScale(level: i32) f64 {
+        pub inline fn toScale(level: i32) f32 {
             return levelToBlockRatioFloat(level) / ChunkSize;
         }
 
@@ -266,7 +266,7 @@ pub const World = struct {
                 self.allocator.destroy(chunkptr);
                 return d;
             }
-            if (structures) { //TODO move structures to Generator
+            if (structures) {
                 try onLoad(self, chunkptr, Pos);
                 chunkptr.genstate.store(.StructuresGenerated, .seq_cst);
             }

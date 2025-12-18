@@ -57,17 +57,7 @@ fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window
     _ = window;
     var genDistf: @Vector(2, f32) = @Vector(2, f32){ 100, 100 };
     genDistf *= @splat(slideData.sliderPos);
-    const genDist: @Vector(2, u32) = @intFromFloat(genDistf);
-    game.GenerateDistance[0].store(genDist[0], .monotonic);
-    game.GenerateDistance[1].store(genDist[1], .monotonic);
-    game.GenerateDistance[2].store(genDist[0], .monotonic);
-    game.LoadDistance[0].store(genDist[1] + 2, .monotonic);
-    game.LoadDistance[1].store(genDist[0] + 2, .monotonic);
-    game.LoadDistance[2].store(genDist[1] + 2, .monotonic);
-    game.MeshDistance[0].store(genDist[0] + 2, .monotonic);
-    game.MeshDistance[1].store(genDist[1] + 2, .monotonic);
-    game.MeshDistance[2].store(genDist[0] + 2, .monotonic);
-    std.debug.print("genDist: {d}\n", .{genDist});
+    unreachable; //not working
 }
 
 pub const ToggleSettings = struct {

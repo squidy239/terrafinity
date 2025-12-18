@@ -21,7 +21,7 @@ pub const DefaultGenerator = struct {
             .data = self,
             .getTerrainHeight = &getTerrainHeightAtCoords,
             .getBlocks = &genChunkBlocks,
-            .onLoad = null, //TODO
+            .onLoad = genStructures, //TODO
             .deinit = &deinit,
             .onUnload = null,
         };
@@ -40,9 +40,10 @@ pub const DefaultGenerator = struct {
         return true;
     }
 
-    fn genStructures(self: World.ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void {
-        const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        try GenerateStructures(world, generator.params, chunk, Pos, &generator.TerrainHeightCache);
+    fn genStructures(source: World.ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void {
+        const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
+        if (Pos.level != World.StandardLevel) return; //dont generate structures on non LOD chunks for now
+        try self.GenerateStructures(world, chunk, Pos);
     }
 
     fn deinit(self: World.ChunkSource, world: *World) void {
@@ -246,43 +247,42 @@ pub const DefaultGenerator = struct {
         return r;
     }
     threadlocal var editorBuffer: [1_000_000]u8 = undefined;
-    fn GenerateStructures(self: *World, genParams: GenParams, chunk: *Chunk, Pos: ChunkPos, terrainHeightCache: *Cache([2]i32, [ChunkSize][ChunkSize]i32)) !void {
+    fn GenerateStructures(self: *DefaultGenerator, world: *World, chunk: *Chunk, Pos: ChunkPos) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
         chunk.addAndLockShared();
         var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
             .buffer = &editorBuffer,
-            .fallback_allocator = self.allocator,
+            .fallback_allocator = world.allocator,
             .fixed_buffer_allocator = undefined,
         };
         const tempAllocator = bfa.get();
-        var worldEditor = World.WorldEditor{ .world = self, .tempallocator = tempAllocator };
+        var worldEditor = World.WorldEditor{ .world = world, .tempallocator = tempAllocator };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         if (chunk.blocks != .blocks) return;
-        if (!genParams.genStructures) return;
-        const randomSeed = std.hash.Wyhash.hash(genParams.seed, std.mem.asBytes(&Pos));
+        if (!self.params.genStructures) return;
+        const randomSeed = std.hash.Wyhash.hash(self.params.seed, std.mem.asBytes(&Pos));
         var random = std.Random.DefaultPrng.init(randomSeed);
         const rand = random.random();
-        //TODO make work with LODS
-        const heights = GetTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, genParams, terrainHeightCache); //should still be in the cache
-
+        const heights = self.GetTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level); //should still be in the cache
+        const scale: f32 = self.params.terrainScale * (1.0 / ChunkPos.toScale(Pos.level));
         var structuresGenerated: u32 = 0;
 
         for (heights, 0..) |row, x| {
             for (row, 0..) |height, z| {
-                const realX: f32 = @as(f32, @floatFromInt((Pos[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / genParams.terrainScale;
-                const realZ: f32 = @as(f32, @floatFromInt((Pos[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / genParams.terrainScale;
-                if (@divFloor(height, ChunkSize) != Pos[1] or height < genParams.SeaLevel) continue;
+                const realX: f32 = @as(f32, @floatFromInt((Pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
+                const realZ: f32 = @as(f32, @floatFromInt((Pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
+                if (@divFloor(height, ChunkSize) != Pos.position[1] or height < self.params.SeaLevel) continue;
                 const y: usize = @intCast(@mod(height, ChunkSize));
 
                 if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
                     //TODO find a way to make it deterministi becuase a diffrent thread may remove grass or dirt blocks
-                    const treeChance: f64 = rand.float(f64) * genParams.terrainScale; //TODO advance rng to make tree placement the same
+                    const treeChance: f64 = rand.float(f64) * scale; //TODO advance rng to make tree placement the same
                     if (true and treeChance < 0.000002) {
-                        const steps = genParams.LargeTrees;
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
+                        const steps = self.params.LargeTrees;
+                        const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
                         const tree = World.WorldEditor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 15,
@@ -291,16 +291,16 @@ pub const DefaultGenerator = struct {
                             .maxRecursionDepth = 8,
                             .leafDensity = 0.5,
                             .leafSize = 6,
-                            .scale = genParams.terrainScale,
+                            .scale = scale,
                             .steps = steps,
                         };
 
-                        _ = try tree.place(&worldEditor);
-                    } else if (genParams.TreeNoise.genNoise2D(realX, realZ) < -0.99995) {
+                        _ = try tree.place(&worldEditor, Pos.level);
+                    } else if (self.params.TreeNoise.genNoise2D(realX, realZ) < -0.99995) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5; //TODO replace a lot of rand with hashes
-                        const centerPos = ((Pos * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        const steps = genParams.MediumTrees;
+                        const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                        const steps = self.params.MediumTrees;
                         const tree = World.WorldEditor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 3 * factor,
@@ -309,11 +309,11 @@ pub const DefaultGenerator = struct {
                             .steps = steps,
                             .maxRecursionDepth = 6,
                             .leafDensity = 0.5,
-                            .scale = genParams.terrainScale,
+                            .scale = scale,
                             .leafSize = 3,
                         };
 
-                        _ = try tree.place(&worldEditor);
+                        _ = try tree.place(&worldEditor, Pos.level);
                     }
                 }
             }
