@@ -86,7 +86,7 @@ pub const DefaultGenerator = struct {
         genterra.End();
         var oneBlock = Chunk.IsOneBlock(blocks);
         if (oneBlock == null or oneBlock.? == Block.Stone or oneBlock.? == Block.Water) {
-            //GenerateCaves(blocks, Pos, &heights, &gen_params);
+            GenerateCaves(blocks, Pos, &heights, @floatCast(chunkscale), self.params);
             oneBlock = Chunk.IsOneBlock(blocks);
         }
         gen.End();
@@ -110,13 +110,14 @@ pub const DefaultGenerator = struct {
         }
     }
     ///generates caves in the chunk, returns true if the chunk is one block
-    fn GenerateCaves(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams) void {
+    fn GenerateCaves(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale:f32, gen_params: GenParams) void {
         const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
         defer caves.End();
         var grid: [4][4][4]f32 = undefined;
-        const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos[0]), @floatFromInt(Pos[1]), @floatFromInt(Pos[2]) };
+        const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos.position[0]), @floatFromInt(Pos.position[1]), @floatFromInt(Pos.position[2]) };
         const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
-        const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / gen_params.terrainScale);
+        const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrainScale * chunkScale));
+        if(oneDterrainScaleVec[0] > 8)return;//scale is too high, don't generate caves
         const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
         // Sample at 4x4x4 points across the chunk area
         for (0..4) |x| {
