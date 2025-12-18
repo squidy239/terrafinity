@@ -32,6 +32,12 @@ pub const Game = struct {
     GenerateDistance: [3]std.atomic.Value(u32),
     LoadDistance: [3]std.atomic.Value(u32),
 
+    ///the smallest level for general world generation
+    SmallestLevel: i32 = 0,
+
+    ///start, end
+    levels: [2]i32,
+
     running: std.atomic.Value(bool),
 
     pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window, game_path: std.fs.Dir) !void {
@@ -54,13 +60,12 @@ pub const Game = struct {
         const GenDist: [2]u32  = [2]u32{ 6, 6 };
         const LoadDist: [2]u32 = [2]u32{ 8, 8 };
         const MeshDist: [2]u32 = [2]u32{ 8, 8 };
-
         game.allocator = allocator;
         game.generator = World.DefaultGenerator{
             .TerrainHeightCache = try .init(secondary_allocator, 4096),
             .params = GeneratorConfig,
         };
-
+        game.levels = [2]i32{ 0, 16 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,

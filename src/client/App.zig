@@ -179,6 +179,7 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
             .MeshDistance = undefined,
             .GenerateDistance = undefined,
             .LoadDistance = undefined,
+            .levels = undefined,
             .running = undefined,
             .region_storage = undefined,
         };

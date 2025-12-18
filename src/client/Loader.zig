@@ -22,15 +22,13 @@ const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 pub const Loader = struct {
     threadlocal var meshesToUnloadBuffer: [1024]World.ChunkPos = undefined;
     threadlocal var meshesToUnloadBufferPos: usize = 0;
-    pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, playerPos: @Vector(3, i64)) void {
+    pub fn UnloadMeshes(chunkManager: *ChunkManager, meshDistance: [3]u32, genDistance: @Vector(3, u32), playerPos: @Vector(3, i64), smallestLevel: i32) void {
         const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
         defer unload.End();
-        //_ = meshDistance;
-        //_ = playerChunkPos;
-        //_ = chunkManager;
         {
             const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
             defer loop.End();
+            const innerRadius = getInnerRadius(genDistance);
             const bktamount = chunkManager.ChunkRenderList.buckets.len;
             outer: for (0..bktamount) |b| {
                 chunkManager.ChunkRenderList.buckets[b].lock.lock();
@@ -39,7 +37,7 @@ pub const Loader = struct {
                 while (it.next()) |key| {
                     const Pos = key.*;
                     if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
-                    const keep = keepLoaded(playerPos, Pos, if(Pos.level == 5)@splat(0) else @splat(3), meshDistance);
+                    const keep = keepLoaded(playerPos, Pos, if (Pos.level <= smallestLevel) @splat(0) else innerRadius, meshDistance);
                     if (keep) continue;
                     meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
                     meshesToUnloadBufferPos += 1;
@@ -78,7 +76,7 @@ pub const Loader = struct {
 
     threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
     threadlocal var chunksToUnloadBufferPos: u16 = 0;
-    ///Loads all chunks in gendistance and unloads all chunks out of loaddistance
+    ///Loads all chunks in gendistance and unloads all chunks out of loadistance
     pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
         std.debug.assert(game.player.type == .Player);
         while (game.running.load(.monotonic)) {
@@ -87,19 +85,20 @@ pub const Loader = struct {
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
             const genDistance = @Vector(3, u32){ game.GenerateDistance[0].load(.monotonic), game.GenerateDistance[1].load(.monotonic), game.GenerateDistance[2].load(.monotonic) };
-            const levels = [_]i32{ 5, 6, 7, 8, 9, 10, 11, 12, 13 };
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(0), @intCast(levels[0]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[1]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[2]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[3]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[4]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[5]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[6]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[7]));
-            LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, @splat(3), @intCast(levels[8]));
+            const innerRadius = getInnerRadius(genDistance);
+            var level = game.levels[0];
+            while (level < game.levels[1]) {
+                const currentInnerRadius: @Vector(3, u32) = if (level <= game.SmallestLevel) @splat(0) else innerRadius;
+                LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, currentInnerRadius, level);
+                level += 1;
+            }
 
             addChunkstoLoad.End();
         }
+    }
+
+    fn getInnerRadius(genDistance: @Vector(3, u32)) @Vector(3, u32) {
+        return (genDistance / @Vector(3, u32){ World.TreeDivisions, World.TreeDivisions, World.TreeDivisions }) -| @Vector(3, u32){ 1, 1, 1 };
     }
 
     pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
@@ -153,8 +152,9 @@ pub const Loader = struct {
                 while (y < distance[1]) {
                     defer y += 1;
                     const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
-
-                    if (game.chunkManager.LoadingChunks.contains(ChunkPos) or @reduce(.And, @Vector(3, u32){ @abs(xz[0]), @abs(y), @abs(xz[1]) } < innerdistance)) {
+                    const insideInner = @reduce(.And, @Vector(3, u32){ @abs(xz[0]), @abs(y), @abs(xz[1]) } < innerdistance);
+                    
+                    if (insideInner or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                         continue;
                     }
 

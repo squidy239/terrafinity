@@ -34,33 +34,48 @@ pub const World = struct {
         callIfNeighborFacesChanged: bool,
         onEditFnArgs: *anyopaque,
     },
+
+    ///the level where one block in a chunk is one block
+    pub const StandardLevel = 0;
+
     ///the amount of divisions per axis in the tree structure
     pub const TreeDivisions = 2;
     pub const BlockPos = @Vector(3, i64);
+    ///the level where one chunk is one block
+    pub const ChunkLevel = -std.math.log(i32, TreeDivisions, ChunkSize);
+    
     pub const ChunkPos = struct {
-        ///the level where one block in a chunk is one block
-        const standardLevel = std.math.log(i32, TreeDivisions, ChunkSize);
         ///the division level of the chunk, 0 is one chunk is one block, 1 is 0.5 chunks is one block id 1D, etc
         level: i32,
         position: @Vector(3, i32),
 
-        pub fn levelToBlockRatio(level: i32) i64 {
-            return std.math.powi(i32, TreeDivisions, level) catch |err| switch (err) {
+        pub inline fn levelToBlockRatio(level: i32) i64 {
+            return std.math.powi(i32, TreeDivisions, level - ChunkLevel) catch |err| switch (err) {
                 error.Overflow => unreachable,
                 error.Underflow => 1,
             };
         }
 
-        pub fn levelToBlockRatioFloat(level: i32) f64 {
-            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level));
+        pub inline fn levelToBlockRatioFloat(level: i32) f64 {
+            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level - ChunkLevel));
         }
 
-        pub fn toScale(level: i32) f64 {
+        pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
+            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level1 - level2));
+        }
+
+        pub inline fn toScale(level: i32) f64 {
             return levelToBlockRatioFloat(level) / ChunkSize;
         }
 
         pub inline fn toBlockPos(self: ChunkPos) BlockPos {
             return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
+        }
+
+        pub inline fn toLevel(self: ChunkPos, level: i32) ChunkPos {
+            const ratiovec: @Vector(3, f64) = @splat(levelToBlockRatioFloat(level));
+            const posvec: @Vector(3, f64) = @floatFromInt(self.position);
+            return .{ .position = @intFromFloat(posvec * ratiovec), .level = level };
         }
 
         pub inline fn fromBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
