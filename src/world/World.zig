@@ -20,9 +20,9 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     threadPool: *ThreadPool,
 
-    Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32),
+    Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256),
 
-    Chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 32),
+    Chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 256),
     Config: WorldConfig,
     ///tries each source in order until of priority, 0 is highest
     ///if a source returns false, the next source will be tried
@@ -308,7 +308,7 @@ pub const World = struct {
             }
         }
     }
-    
+
     pub fn ChunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
         while (self.running.load(.monotonic)) {
             const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);

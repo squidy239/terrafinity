@@ -8,6 +8,7 @@ const EntityTypes = @import("EntityTypes");
 const utils = @import("utils.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const builtin = @import("builtin");
+const Chunk = @import("Chunk").Chunk;
 const Loader = @import("Loader.zig");
 const UserInput = @import("UserInput.zig");
 const glfw = @import("zglfw");
@@ -61,11 +62,13 @@ pub const Game = struct {
         const LoadDist: [2]u32 = [2]u32{ 8, 8 };
         const MeshDist: [2]u32 = [2]u32{ 8, 8 };
         game.allocator = allocator;
+        const terrain_height_cache_memory = 10_000_000; //10 mb
+        const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
         game.generator = World.DefaultGenerator{
-            .TerrainHeightCache = try .init(secondary_allocator, 4096),
+            .TerrainHeightCache = try .init(secondary_allocator, thc_size),
             .params = GeneratorConfig,
         };
-        game.levels = [2]i32{ 0, 8 };
+        game.levels = [2]i32{ 0, 1 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -178,8 +181,8 @@ pub const Game = struct {
     }
 
     pub fn startThreads(self: *@This()) !void {
-        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 50 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 50 * std.time.ns_per_ms, 10 * std.time.us_per_s });
+        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, 10 * std.time.us_per_s });
         self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }

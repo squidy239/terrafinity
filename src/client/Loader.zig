@@ -1,13 +1,12 @@
 const std = @import("std");
+const ConcurrentQueue = @import("root").ConcurrentQueue;
 const root = @import("root");
 const ChunkManager = root.ChunkManager;
-const ConcurrentQueue = @import("root").ConcurrentQueue;
 const DrawElementsIndirectCommand = root.Renderer.DrawElementsIndirectCommand;
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
-const Game = @import("Game.zig");
-const ThreadPool = @import("root").ThreadPool;
 const UBO = root.Renderer.UBO;
+const ThreadPool = @import("root").ThreadPool;
 
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
@@ -16,6 +15,7 @@ const gl = @import("gl");
 const World = @import("World").World;
 const ztracy = @import("ztracy");
 
+const Game = @import("Game.zig");
 const Mesher = @import("Mesher.zig");
 const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 
@@ -87,10 +87,9 @@ pub const Loader = struct {
             const genDistance = @Vector(3, u32){ game.GenerateDistance[0].load(.monotonic), game.GenerateDistance[1].load(.monotonic), game.GenerateDistance[2].load(.monotonic) };
             const innerRadius = getInnerRadius(genDistance);
             var level = game.levels[0];
-            while (level < game.levels[1]) {
+            while (level < game.levels[1]) : (level += 1) {
                 const currentInnerRadius: @Vector(3, u32) = if (level <= game.SmallestLevel) @splat(0) else innerRadius;
-                LoadChunksSingleplayer(game, @intFromFloat(playerPos), genDistance, currentInnerRadius, level);
-                level += 1;
+                LoadChunksSpiral(game, @intFromFloat(playerPos), genDistance, currentInnerRadius, level);
             }
 
             addChunkstoLoad.End();
@@ -101,21 +100,14 @@ pub const Loader = struct {
         return (genDistance / @Vector(3, u32){ World.TreeDivisions, World.TreeDivisions, World.TreeDivisions }) -| @Vector(3, u32){ 1, 1, 1 };
     }
 
+    fn isInside(pos: @Vector(3, i32), distance: @Vector(3, u32)) bool {
+        const abs_pos = @Vector(3, u32){ @intCast(@abs(pos[0])), @intCast(@abs(pos[1])), @intCast(@abs(pos[2])) };
+        return abs_pos[0] < distance[0] and abs_pos[1] < distance[1] and abs_pos[2] < distance[2];
+    }
 
     ///loads chunks from top to bottom and in a spiral on a y level
-    // threadlocal var lastLoadPlayerPos: ?@Vector(3, i64) = undefined;
-    // threadlocal var lastGenDistance: ?@Vector(3, u32) = undefined;
-
-    fn LoadChunksSingleplayer(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32), innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+    fn LoadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32), innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
         const playerChunkPos = World.ChunkPos.fromBlockPos((playerPos), level);
-        //  defer {
-        //    lastLoadPlayerPos = playerPos;
-        //  lastGenDistance = distance;
-        //  }
-        //if (lastLoadPlayerPos != null and lastGenDistance != null) {
-        //    if (@reduce(.And, lastLoadPlayerPos.? == playerPos) and @reduce(.And, lastGenDistance.? == distance)) return;
-        // }
-
         var amount_loaded: u64 = 0;
         var amount_tested: u64 = 0;
 
@@ -137,7 +129,7 @@ pub const Loader = struct {
                 while (y < distance[1]) {
                     defer y += 1;
                     const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
-                    const insideInner = @reduce(.And, @Vector(3, u32){ @abs(xz[0]), @abs(y), @abs(xz[1]) } < innerdistance);
+                    const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, innerdistance);
 
                     if (insideInner or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                         continue;
@@ -146,6 +138,32 @@ pub const Loader = struct {
                     const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
                     if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                         amount_loaded += 1;
+                        game.chunkManager.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
+                        game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true, true }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
+                    }
+                }
+            }
+        }
+    }
+
+    fn LoadChunksLinear(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32), innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
+        const playerChunkPos = World.ChunkPos.fromBlockPos((playerPos), level);
+
+        var x: i32 = -@as(i32, @intCast(distance[0]));
+        while (x < distance[0]) : (x += 1) {
+            var y: i32 = -@as(i32, @intCast(distance[1]));
+            while (y < distance[1]) : (y += 1) {
+                var z: i32 = -@as(i32, @intCast(distance[2]));
+                while (z < distance[2]) : (z += 1) {
+                    const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ x + playerChunkPos.position[0], y + playerChunkPos.position[1], z + playerChunkPos.position[2] }, .level = level };
+                    const insideInner = isInside(@Vector(3, i32){ x, y, z }, innerdistance);
+
+                    if (insideInner or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
+                        continue;
+                    }
+
+                    const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
+                    if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                         game.chunkManager.LoadingChunks.put(ChunkPos, true) catch |err| std.debug.panic("err:{any}\n", .{err});
                         game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true, true }, .Medium) catch |err| std.debug.panic("pool spawn failed: {any}\n", .{err});
                     }
