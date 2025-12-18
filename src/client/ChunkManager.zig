@@ -41,7 +41,7 @@ pub const ChunkManager = struct {
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-        chunk.lock.lockShared();
+        chunk.lockShared();
         lock.End();
         switch (chunk.blocks) {
             .blocks => blocks = chunk.blocks.blocks,

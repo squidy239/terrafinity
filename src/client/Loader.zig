@@ -101,21 +101,6 @@ pub const Loader = struct {
         return (genDistance / @Vector(3, u32){ World.TreeDivisions, World.TreeDivisions, World.TreeDivisions }) -| @Vector(3, u32){ 1, 1, 1 };
     }
 
-    pub fn ChunkUnloaderThread(game: *Game.Game, intervel_ns: u64) void {
-        _ = game;
-        _ = intervel_ns;
-        // while (game.running.load(.monotonic)) {
-        //     const playerPos = game.player.getPos().?;
-        //   const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-        //    const st = std.time.nanoTimestamp();
-        //  defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-        //  const loadDistance = @Vector(3, u32){ game.LoadDistance[0].load(.monotonic), game.LoadDistance[1].load(.monotonic), game.LoadDistance[2].load(.monotonic) };
-        //  const floatPlayerChunkPos = playerPos / @as(@Vector(3, f64), @splat(32));
-        // const playerChunkPos = @as(@Vector(3, i32), @intFromFloat(floatPlayerChunkPos));
-        //UnloadChunks(&game.world, playerChunkPos, loadDistance) catch |err| std.debug.panic("err:{any}\n", .{err});
-        // unloadChunks.End();
-        //  }
-    }
 
     ///loads chunks from top to bottom and in a spiral on a y level
     // threadlocal var lastLoadPlayerPos: ?@Vector(3, i64) = undefined;
@@ -153,7 +138,7 @@ pub const Loader = struct {
                     defer y += 1;
                     const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
                     const insideInner = @reduce(.And, @Vector(3, u32){ @abs(xz[0]), @abs(y), @abs(xz[1]) } < innerdistance);
-                    
+
                     if (insideInner or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                         continue;
                     }
@@ -167,42 +152,6 @@ pub const Loader = struct {
                 }
             }
         }
-    }
-
-    threadlocal var lastPlayerChunkPos: ?@Vector(3, i32) = undefined;
-    threadlocal var lastloadDistance: ?@Vector(3, u32) = undefined;
-    threadlocal var bufferFull: bool = false;
-    fn UnloadChunks(world: *World, playerChunkPos: @Vector(3, i32), loadDistance: @Vector(3, u32)) !void {
-        const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
-        defer unloadChunks.End();
-        defer {
-            lastPlayerChunkPos = playerChunkPos;
-            lastloadDistance = loadDistance;
-        }
-        if (lastPlayerChunkPos != null and lastPlayerChunkPos != null) {
-            if (@reduce(.And, lastPlayerChunkPos.? == playerChunkPos) and @reduce(.And, lastloadDistance.? == loadDistance) and !bufferFull) return;
-        }
-        const bktamount = world.Chunks.buckets.len;
-        var chunks: u64 = 0;
-        for (0..bktamount) |b| {
-            const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-            world.Chunks.buckets[b].lock.lockShared();
-            lock.End();
-            var it = world.Chunks.buckets[b].hash_map.iterator();
-            defer world.Chunks.buckets[b].lock.unlockShared();
-            while (it.next()) |c| {
-                chunks += 1;
-                if (chunksToUnloadBufferPos < chunksToUnloadBuffer.len and outOfSquareRange(c.key_ptr.* - playerChunkPos, [3]i32{ @intCast(loadDistance[0]), @intCast(loadDistance[1]), @intCast(loadDistance[2]) })) {
-                    chunksToUnloadBuffer[chunksToUnloadBufferPos] = c.key_ptr.*;
-                    chunksToUnloadBufferPos += 1;
-                }
-            }
-        }
-        for (chunksToUnloadBuffer[0..chunksToUnloadBufferPos]) |Pos| {
-            try world.UnloadChunk(Pos);
-        }
-        bufferFull = chunksToUnloadBufferPos == chunksToUnloadBuffer.len;
-        chunksToUnloadBufferPos = 0;
     }
 
     pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {

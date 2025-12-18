@@ -9,9 +9,11 @@ pub const Chunk = struct {
     genstate: std.atomic.Value(Genstate),
     ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
 
-    last_access: std.time.Instant = undefined, //TODO
-    ///if last_modified is null if the chunk has not been modified after its load
-    last_modified: ?std.time.Instant = undefined, //TODO
+    ///time is in us
+    last_access: std.atomic.Value(i64),
+    ///if last_modified is null if the chunk has not been modified after its load, time is in us,
+    ///if this is negitive it means the chunk has not been modified after its load
+    last_modified: std.atomic.Value(i64) = .init(-1),
 
     pub const BlockEncoding = union(enum(u4)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
@@ -42,6 +44,7 @@ pub const Chunk = struct {
         chunk.* = .{
             .blocks = blockEncoding,
             .lock = .{},
+            .last_access = .init(std.time.microTimestamp()),
             .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
             .ref_count = std.atomic.Value(u32).init(1),
         };
@@ -61,8 +64,8 @@ pub const Chunk = struct {
     pub fn Merge(self: *@This(), mergeBlocks: BlockEncoding, allocator: std.mem.Allocator, comptime lock: bool) !void {
         self.add_ref();
         defer self.release();
-        if (lock) self.lock.lock();
-        defer if (lock) self.lock.unlock();
+        if (lock) self.lockExclusive();
+        defer if (lock) self.unlockExclusive();
         if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .Null)) return;
         switch (mergeBlocks) {
             .oneBlock => {
@@ -159,8 +162,8 @@ pub const Chunk = struct {
     pub fn ToBlocks(self: *Chunk, allocator: std.mem.Allocator, comptime lock: bool) !bool {
         self.add_ref();
         defer self.release();
-        if (lock) self.lock.lock();
-        defer if (lock) self.lock.unlock();
+        if (lock) self.lockExclusive();
+        defer if (lock) self.unlockExclusive();
         if (self.blocks != .oneBlock) return false;
         var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         @memset(&blocks, @splat(@splat(self.blocks.oneBlock)));
@@ -176,7 +179,7 @@ pub const Chunk = struct {
     ///locks the chunk
     pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
         std.debug.assert(self.ref_count.load(.seq_cst) == 1);
-        self.lock.lock();
+        self.lockExclusive();
         switch (self.blocks) {
             .blocks => {
                 allocator.destroy(self.blocks.blocks);
@@ -194,29 +197,62 @@ pub const Chunk = struct {
         }
         return true;
     }
+
+    pub fn touch(self: *@This()) void {
+        self.last_access.store(std.time.microTimestamp(), .monotonic);
+    }
+
+    pub fn touchModify(self: *@This()) void {
+        self.touch();
+        self.last_modified.store(std.time.microTimestamp(), .monotonic);
+    }
+
     pub fn add_ref(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .seq_cst);
+        self.touch();
     }
 
     pub fn release(self: *@This()) void {
         _ = self.ref_count.fetchSub(1, .seq_cst);
+        self.touch();
     }
+
+    pub fn lockExclusive(self: *@This()) void {
+        self.lock.lock();
+        self.touchModify();
+    }
+
+    pub fn unlockExclusive(self: *@This()) void {
+        self.lock.unlock();
+        self.touchModify();
+    }
+
+    pub fn lockShared(self: *@This()) void {
+        self.lock.lockShared();
+        self.touch();
+    }
+
+    pub fn unlockShared(self: *@This()) void {
+        self.lock.unlockShared();
+        self.touch();
+    }
+
     pub fn addAndLockShared(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .seq_cst);
-        self.lock.lockShared();
+        self.lockShared();
     }
     pub fn addAndlock(self: *@This()) void {
         _ = self.ref_count.fetchAdd(1, .seq_cst);
-        self.lock.lock();
+        self.lockExclusive();
     }
 
     pub fn releaseAndUnlock(self: *@This()) void {
-        self.lock.unlock();
+        self.unlockExclusive();
         _ = self.ref_count.fetchSub(1, .seq_cst);
     }
 
     pub fn releaseAndUnlockShared(self: *@This()) void {
-        self.lock.unlockShared();
+        self.unlockShared();
         _ = self.ref_count.fetchSub(1, .seq_cst);
     }
 };

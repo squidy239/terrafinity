@@ -43,7 +43,7 @@ pub const World = struct {
     pub const BlockPos = @Vector(3, i64);
     ///the level where one chunk is one block
     pub const ChunkLevel = -std.math.log(i32, TreeDivisions, ChunkSize);
-    
+
     pub const ChunkPos = struct {
         ///the division level of the chunk, 0 is one chunk is one block, 1 is 0.5 chunks is one block id 1D, etc
         level: i32,
@@ -252,7 +252,7 @@ pub const World = struct {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
             try self.getBlocks(Pos, &blocks);
             const chunkptr: *Chunk = try .from(try .fromBlocks(&blocks, self.allocator), self.allocator);
-            _ = chunkptr.ref_count.fetchAdd(1, .seq_cst);
+            _ = chunkptr.add_ref();
             std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
             const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
                 chunkptr.free(self.allocator);
@@ -280,6 +280,45 @@ pub const World = struct {
         }
     }
 
+    pub fn UnloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
+        const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
+        defer unloadChunks.End();
+        const bktamount = self.Chunks.buckets.len;
+        var chunks: u64 = 0;
+
+        var unload_chunk_buffer: [128]ChunkPos = undefined;
+        for (0..bktamount) |b| {
+            var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
+            {
+                self.Chunks.buckets[b].lock.lockShared();
+                defer self.Chunks.buckets[b].lock.unlockShared();
+
+                var it = self.Chunks.buckets[b].hash_map.iterator();
+                const currenttime = std.time.microTimestamp();
+                while (it.next()) |c| {
+                    chunks += 1;
+                    const chunk = c.value_ptr.*;
+                    const lastaccess = chunk.last_access.load(.monotonic);
+                    if (currenttime - lastaccess < unload_timeout) continue;
+                    tounload.appendBounded(c.key_ptr.*) catch break;
+                }
+            }
+            while (tounload.pop()) |Pos| {
+                try self.UnloadChunk(Pos);
+            }
+        }
+    }
+    
+    pub fn ChunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
+        while (self.running.load(.monotonic)) {
+            const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
+            defer unloadChunks.End();
+            const st = std.time.nanoTimestamp();
+            defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
+            self.UnloadUnusedChunks(unload_timeout) catch |err| std.debug.panic("err:{any}\n", .{err});
+        }
+    }
+
     pub const WorldReader = struct {
         world: *World,
         lastChunkReadCache: ?struct { Pos: ChunkPos, chunk: *Chunk } = null,
@@ -291,7 +330,7 @@ pub const World = struct {
             if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
                 self.Clear();
                 self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, false) };
-                self.lastChunkReadCache.?.chunk.lock.lockShared();
+                self.lastChunkReadCache.?.chunk.lockShared();
             }
             const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
             return switch (blockEncoding) {
@@ -305,7 +344,7 @@ pub const World = struct {
             const chunkPos: ChunkPos = .fromBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunk = try self.world.LoadChunk(chunkPos, false);
-            chunk.lock.lockShared();
+            chunk.lockShared();
             defer chunk.releaseAndUnlockShared();
             const blockEncoding = chunk.blocks;
             return switch (blockEncoding) {

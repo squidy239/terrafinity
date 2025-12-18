@@ -57,7 +57,7 @@ pub const Game = struct {
         GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
         GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
 
-        const GenDist: [2]u32  = [2]u32{ 6, 6 };
+        const GenDist: [2]u32 = [2]u32{ 6, 6 };
         const LoadDist: [2]u32 = [2]u32{ 8, 8 };
         const MeshDist: [2]u32 = [2]u32{ 8, 8 };
         game.allocator = allocator;
@@ -65,7 +65,7 @@ pub const Game = struct {
             .TerrainHeightCache = try .init(secondary_allocator, 4096),
             .params = GeneratorConfig,
         };
-        game.levels = [2]i32{ 0, 16 };
+        game.levels = [2]i32{ 0, 8 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -179,7 +179,7 @@ pub const Game = struct {
 
     pub fn startThreads(self: *@This()) !void {
         self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 50 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkUnloaderThread, .{ self, 50 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 50 * std.time.ns_per_ms, 10 * std.time.us_per_s });
         self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }
