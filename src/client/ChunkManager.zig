@@ -30,14 +30,14 @@ pub const ChunkManager = struct {
     pub fn AddChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool, playAnimation: bool) !void {
         const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
         defer GenMeshAndAdd.End();
-        const chunk = try self.world.LoadChunk(Pos, genStructures);
+        const chunk = try self.world.loadChunk(Pos, genStructures);
         const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-            (try self.world.LoadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
-            (try self.world.LoadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
-            (try self.world.LoadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
-            (try self.world.LoadChunk(Pos.add(.{ 0, -1, 0 }), false)).extractFace(.yPlus, true),
-            (try self.world.LoadChunk(Pos.add(.{ 0, 0, 1 }), false)).extractFace(.zMinus, true),
-            (try self.world.LoadChunk(Pos.add(.{ 0, 0, -1 }), false)).extractFace(.zPlus, true),
+            (try self.world.loadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
+            (try self.world.loadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
+            (try self.world.loadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
+            (try self.world.loadChunk(Pos.add(.{ 0, -1, 0 }), false)).extractFace(.yPlus, true),
+            (try self.world.loadChunk(Pos.add(.{ 0, 0, 1 }), false)).extractFace(.zMinus, true),
+            (try self.world.loadChunk(Pos.add(.{ 0, 0, -1 }), false)).extractFace(.zPlus, true),
         };
         const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
         const lock = ztracy.ZoneNC(@src(), "lock", 2222111);

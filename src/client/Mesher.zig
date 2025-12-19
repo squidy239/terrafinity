@@ -27,6 +27,7 @@ pub const Face = packed struct(u64) {
     BlockType: u20,
     _: u12,
 };
+//TODO remove threadlocal vars to prepare for async
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
@@ -47,6 +48,7 @@ pub const Mesh = struct {
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
         GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
         comptime std.debug.assert(@bitSizeOf(Block) <= 20);
+
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
         var Tpos: usize = 0;

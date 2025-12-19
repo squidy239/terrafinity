@@ -7,13 +7,13 @@ pub const Chunk = struct {
     blocks: BlockEncoding,
     lock: std.Thread.RwLock,
     genstate: std.atomic.Value(Genstate),
-    ref_count: std.atomic.Value(u32), //must count being in a hashmap as a refrence
+    ref_count: std.atomic.Value(u32),
 
     ///time is in us
     last_access: std.atomic.Value(i64),
-    ///if last_modified is null if the chunk has not been modified after its load, time is in us,
-    ///if this is negitive it means the chunk has not been modified after its load
-    last_modified: std.atomic.Value(i64) = .init(-1),
+
+    ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
+    modified: std.atomic.Value(bool) = .init(false),
 
     pub const BlockEncoding = union(enum(u4)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
@@ -204,7 +204,7 @@ pub const Chunk = struct {
 
     pub fn touchModify(self: *@This()) void {
         self.touch();
-        self.last_modified.store(std.time.microTimestamp(), .monotonic);
+        self.modified.store(true, .seq_cst);
     }
 
     pub fn add_ref(self: *@This()) void {

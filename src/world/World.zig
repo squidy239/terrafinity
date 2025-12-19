@@ -60,6 +60,10 @@ pub const World = struct {
             return std.math.pow(f32, @floatFromInt(TreeDivisions), @floatFromInt(level - ChunkLevel));
         }
 
+        pub inline fn parent(self: ChunkPos) ChunkPos {
+            return .{ .level = self.level + 1, .position = @divFloor(self.position, @as(@Vector(3, i32), @splat(TreeDivisions))) };
+        }
+
         pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
             return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level1 - level2));
         }
@@ -67,19 +71,33 @@ pub const World = struct {
         pub inline fn toScale(level: i32) f32 {
             return levelToBlockRatioFloat(level) / ChunkSize;
         }
-
-        pub inline fn toBlockPos(self: ChunkPos) BlockPos {
+        
+        ///returns the global block position of the chunk where one block is one block at default level
+        pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
             return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
+        }
+        
+        pub inline fn posInParent(self: ChunkPos) @Vector(3, u8) {
+            return @intCast(@mod(self.position, @Vector(3, i32){ TreeDivisions, TreeDivisions, TreeDivisions }));
+        }
+        
+        ///returns the local block pos of the chunk where one block is one block at the chunks level
+        pub inline fn toLocalBlockPos(self: ChunkPos) BlockPos {
+            return self.position * @as(@Vector(3, i64), @splat(ChunkSize));
         }
 
         pub inline fn toLevel(self: ChunkPos, level: i32) ChunkPos {
-            const ratiovec: @Vector(3, f64) = @splat(levelToBlockRatioFloat(level));
+            const ratiovec: @Vector(3, f64) = @splat(levelToLevelRatio(self.level, level));
             const posvec: @Vector(3, f64) = @floatFromInt(self.position);
             return .{ .position = @intFromFloat(posvec * ratiovec), .level = level };
         }
 
-        pub inline fn fromBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
+        pub inline fn fromGlobalBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
             return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))), .level = level };
+        }
+        
+        pub inline fn fromLocalBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
+            return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(ChunkSize)))), .level = level };
         }
 
         pub inline fn add(self: ChunkPos, pos: @Vector(3, i32)) ChunkPos {
@@ -244,9 +262,9 @@ pub const World = struct {
     }
 
     ///adds a ref and returns a chunk, generates it if it dosent exist and puts the chunk in the world hashmap. ref must be removed if not using chunk
-    pub fn LoadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
-        const loadChunk = ztracy.ZoneNC(@src(), "loadChunk", 222222);
-        defer loadChunk.End();
+    pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable }!*Chunk {
+        const lc = ztracy.ZoneNC(@src(), "loadChunk", 222222);
+        defer lc.End();
         const chunk = self.Chunks.getandaddref(Pos);
         if (chunk == null) {
             var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
@@ -285,7 +303,7 @@ pub const World = struct {
         defer unloadChunks.End();
         const bktamount = self.Chunks.buckets.len;
         var chunks: u64 = 0;
-
+        if (1 == 1) return;//if this is still here i frogot to remov it
         var unload_chunk_buffer: [128]ChunkPos = undefined;
         for (0..bktamount) |b| {
             var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
@@ -319,17 +337,17 @@ pub const World = struct {
         }
     }
 
-    pub const WorldReader = struct {
+    pub const Reader = struct {
         world: *World,
         lastChunkReadCache: ?struct { Pos: ChunkPos, chunk: *Chunk } = null,
         ///returns a block at the given position, Clear must be called after a series of calls to unlock the cached chunk
         ///better for many block reads
         pub inline fn GetBlockCached(self: *@This(), blockpos: BlockPos, level: i32) !Block {
-            const chunkPos: ChunkPos = .fromBlockPos(blockpos, level);
+            const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
                 self.Clear();
-                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.LoadChunk(chunkPos, false) };
+                self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.loadChunk(chunkPos, false) };
                 self.lastChunkReadCache.?.chunk.lockShared();
             }
             const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
@@ -341,9 +359,9 @@ pub const World = struct {
 
         ///returns a block at the given position, better for fewer block reads
         pub inline fn GetBlockNoCache(self: *@This(), blockpos: BlockPos, level: i32) !Block {
-            const chunkPos: ChunkPos = .fromBlockPos(blockpos, level);
+            const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            const chunk = try self.world.LoadChunk(chunkPos, false);
+            const chunk = try self.world.loadChunk(chunkPos, false);
             chunk.lockShared();
             defer chunk.releaseAndUnlockShared();
             const blockEncoding = chunk.blocks;
@@ -361,15 +379,16 @@ pub const World = struct {
         }
     };
 
-    pub const WorldEditor = struct {
+    pub const Editor = struct {
         pub const Geometry = @import("structures/Geometry.zig");
         pub const Tree = @import("structures/Tree.zig").Tree;
         pub const TexturedSphere = @import("structures/TexturedSphere.zig");
         world: *World,
         lastChunkCache: ?struct { Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
-
+        propagateChanges: bool = true,
         editBuffer: std.AutoHashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
         tempallocator: std.mem.Allocator,
+        level: i32,
 
         ///applies the edits in the buffer to the world, frees any temporary allocations
         pub fn flush(self: *@This()) !void {
@@ -381,16 +400,25 @@ pub const World = struct {
             var it = self.editBuffer.iterator();
             var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
             defer neghborsToRemesh.deinit();
-            //TODO improve this
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
-                const chunk = try self.world.LoadChunk(diffChunk.key_ptr.*, false);
+                const chunk = try self.world.loadChunk(diffChunk.key_ptr.*, false);
                 defer chunk.release();
                 var sides: [6][ChunkSize][ChunkSize]Block = undefined;
                 inline for (0..6) |side| {
                     sides[side] = chunk.extractFace(@enumFromInt(side), false);
                 }
                 try chunk.Merge(encoding, self.world.allocator, true);
+
+                if (self.propagateChanges) {
+                    var coords = diffChunk.key_ptr.*;
+                    for (0..3) |_| {
+                        var propagationEditor: @This() = .{ .propagateChanges = false, .level = coords.level + 1, .world = self.world, .tempallocator = self.tempallocator };
+                        try propagationEditor.propagateToParentByCoords(coords);
+                        try propagationEditor.flush();
+                        coords = coords.parent();
+                    }
+                }
                 var sides2: [6][ChunkSize][ChunkSize]Block = undefined;
                 inline for (0..6) |side| {
                     sides2[side] = chunk.extractFace(@enumFromInt(side), false);
@@ -419,8 +447,8 @@ pub const World = struct {
             }
         }
 
-        pub inline fn PlaceBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
-            const chunkPos: ChunkPos = .fromBlockPos(pos, level);
+        pub inline fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
+            const chunkPos: ChunkPos = .fromLocalBlockPos(pos, self.level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
                 @branchHint(.likely);
@@ -433,7 +461,7 @@ pub const World = struct {
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
 
-        pub fn PlaceSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
+        pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype) !void {
             const place = ztracy.ZoneNC(@src(), "PlaceSamplerShape", 6544564);
             defer place.End();
             const boundingBox = shape.boundingBox;
@@ -449,11 +477,114 @@ pub const World = struct {
                                 .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                                 else => unreachable,
                             };
-                            try self.PlaceBlock(block, i64blockpos, level);
+                            try self.placeBlock(block, i64blockpos);
                         }
                     }
                 }
             }
+        }
+
+        const simplified_size = ChunkSize / TreeDivisions;
+
+        pub fn propagateToParent(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
+            const parent_pos = Pos.parent();
+            std.debug.assert(self.level == parent_pos.level);
+            var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
+            var isoneblock: bool = false;
+            chunk.lockShared();
+            defer chunk.unlockShared();
+            switch (chunk.blocks) {
+                .blocks => |blocks| {
+                    simplified_blocks = simplifyBlocksAvg(blocks);
+                },
+                .oneBlock => |block| {
+                    simplified_blocks = @splat(@splat(@splat(block)));
+                    isoneblock = true;
+                },
+            }
+            const block_pos = parent_pos.toLocalBlockPos() + Pos.posInParent() * @as(@Vector(3, u8), @splat(simplified_size));
+            const parent = try self.world.loadChunk(parent_pos, false);
+            if (isoneblock) {
+                parent.lockShared();
+                defer parent.unlockShared();
+                if (parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return;
+            }
+            parent.lockExclusive();
+            defer parent.releaseAndUnlock();
+            _ = try parent.ToBlocks(self.world.allocator, false);
+            for (0..simplified_size) |x| {
+                for (0..simplified_size) |y| {
+                    for (0..simplified_size) |z| {
+                        const world_pos = @Vector(3, i64){ block_pos[0] + @as(i64, @intCast(x)), block_pos[1] + @as(i64, @intCast(y)), block_pos[2] + @as(i64, @intCast(z)) };
+                        try self.placeBlock(simplified_blocks[x][y][z], world_pos);
+                    }
+                }
+            }
+        }
+
+        pub fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !void {
+            const chunk = try self.world.loadChunk(chunk_pos, false);
+            try self.propagateToParent(chunk, chunk_pos);
+        }
+
+        fn simplifyBlocksAvg(
+            blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block,
+        ) [simplified_size][simplified_size][simplified_size]Block {
+            var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
+
+            for (0..simplified_size) |sx| {
+                for (0..simplified_size) |sy| {
+                    for (0..simplified_size) |sz| {
+                        var unique_blocks: [8]Block = undefined;
+                        var counts: [8]u8 = [_]u8{0} ** 8;
+                        var unique_len: u8 = 0;
+
+                        const bx0 = sx * TreeDivisions;
+                        const by0 = sy * TreeDivisions;
+                        const bz0 = sz * TreeDivisions;
+
+                        for (0..TreeDivisions) |dx| {
+                            for (0..TreeDivisions) |dy| {
+                                for (0..TreeDivisions) |dz| {
+                                    const b = blocks[bx0 + dx][by0 + dy][bz0 + dz];
+
+                                    var found = false;
+                                    var i: u8 = 0;
+                                    while (i < unique_len) : (i += 1) {
+                                        if (unique_blocks[i] == b) {
+                                            counts[i] += 1;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (!found) {
+                                        unique_blocks[unique_len] = b;
+                                        counts[unique_len] = 1;
+                                        unique_len += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        // find most common
+                        var best_i: u8 = 0;
+                        var best_count: u8 = 0;
+
+                        var i: u8 = 0;
+                        while (i < unique_len) : (i += 1) {
+                            if (counts[i] > best_count) {
+                                best_count = counts[i];
+                                best_i = i;
+                            }
+                        }
+
+                        simplified[sx][sy][sz] = unique_blocks[best_i];
+                    }
+                }
+            }
+
+            return simplified;
         }
     };
 

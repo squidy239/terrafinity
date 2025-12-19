@@ -69,8 +69,8 @@ pub const DefaultGenerator = struct {
         seed: u64,
         terrainScale: f32,
         genStructures: bool,
-        LargeTrees: []const World.WorldEditor.Tree.Step,
-        MediumTrees: []const World.WorldEditor.Tree.Step,
+        LargeTrees: []const World.Editor.Tree.Step,
+        MediumTrees: []const World.Editor.Tree.Step,
     };
 
     pub fn GenChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -118,7 +118,7 @@ pub const DefaultGenerator = struct {
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos.position[0]), @floatFromInt(Pos.position[1]), @floatFromInt(Pos.position[2]) };
         const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
         const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrainScale * chunkScale));
-        if (oneDterrainScaleVec[0] > 8) return; //scale is too high, don't generate caves
+        if (oneDterrainScaleVec[0] > 8) return; //scale is too high, don't generate caves TODO make the option to generate full resolution caves
         const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
         // Sample at 4x4x4 points across the chunk area
         for (0..4) |x| {
@@ -228,7 +228,7 @@ pub const DefaultGenerator = struct {
 
                 //      std.debug.print("ltn:{any}, n:{any}, mix: {any}, o: {any}\n", .{largeterrainNoise, terrainNoise, noise, params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ)});
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
-                const block_height: i32 = @intFromFloat(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
+                const block_height: i32 = @intFromFloat(@round(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale));
                 height[ux][uz] = block_height;
             }
         }
@@ -257,7 +257,7 @@ pub const DefaultGenerator = struct {
             .fixed_buffer_allocator = undefined,
         };
         const tempAllocator = bfa.get();
-        var worldEditor = World.WorldEditor{ .world = world, .tempallocator = tempAllocator };
+        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .level = Pos.level };
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
@@ -283,7 +283,7 @@ pub const DefaultGenerator = struct {
                     if (true and treeChance < 0.000002) {
                         const steps = self.params.LargeTrees;
                         const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        const tree = World.WorldEditor.Tree{
+                        const tree = World.Editor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 15,
                             .rand = rand,
@@ -295,13 +295,13 @@ pub const DefaultGenerator = struct {
                             .steps = steps,
                         };
 
-                        _ = try tree.place(&worldEditor, Pos.level);
+                        _ = try tree.place(&worldEditor);
                     } else if (self.params.TreeNoise.genNoise2D(realX, realZ) < -0.99995) {
                         structuresGenerated += 1;
                         const factor = rand.float(f32) + 0.5; //TODO replace a lot of rand with hashes
                         const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const steps = self.params.MediumTrees;
-                        const tree = World.WorldEditor.Tree{
+                        const tree = World.Editor.Tree{
                             .pos = @intCast(centerPos),
                             .baseRadius = 3 * factor,
                             .rand = rand,
@@ -313,7 +313,7 @@ pub const DefaultGenerator = struct {
                             .leafSize = 3,
                         };
 
-                        _ = try tree.place(&worldEditor, Pos.level);
+                        _ = try tree.place(&worldEditor);
                     }
                 }
             }

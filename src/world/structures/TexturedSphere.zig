@@ -9,20 +9,20 @@ const World = @import("../World.zig").World;
 
 pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype) T, samplerArgsType: type) type {
     return struct {
-        sphere: World.WorldEditor.Geometry.Sphere(T),
-        innerSphere: World.WorldEditor.Geometry.Sphere(T),
+        sphere: World.Editor.Geometry.Sphere(T),
+        innerSphere: World.Editor.Geometry.Sphere(T),
         boundingBox: @Vector(6, T),
         samplerArgs: samplerArgsType,
 
         pub fn init(pos: @Vector(3, T), radius: T, samplerArgs: samplerArgsType, minRadiusFraction: T) @This() {
-            var sphere: World.WorldEditor.Geometry.Sphere(T) = .{
+            var sphere: World.Editor.Geometry.Sphere(T) = .{
                 .position = pos,
                 .radius = radius,
                 .boundingBox = undefined,
             };
             sphere.updateBoundingBox();
 
-            var innersphere: World.WorldEditor.Geometry.Sphere(T) = .{
+            var innersphere: World.Editor.Geometry.Sphere(T) = .{
                 .position = pos,
                 .radius = radius * minRadiusFraction,
                 .boundingBox = undefined,
@@ -48,9 +48,9 @@ pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype
     };
 }
 
-pub fn NoiseSphere(editor: *World.WorldEditor, centerPos: @Vector(3, f64), radius: f64, minRadiusFactor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block, level: i32) !void {
+pub fn NoiseSphere(editor: *World.Editor, centerPos: @Vector(3, f64), radius: f64, minRadiusFactor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block) !void {
     const explosionSphere = TexturedSphere(f64, noiseTexture, NoiseParams).init(centerPos, radius, NoiseParams{ .noise = noise, .minRadius = minRadiusFactor }, minRadiusFactor);
-    try editor.PlaceSamplerShape(block, explosionSphere, level);
+    try editor.placeSamplerShape(block, explosionSphere);
 }
 const NoiseParams = struct {
     noise: World.DefaultGenerator.Noise.Noise(f32),

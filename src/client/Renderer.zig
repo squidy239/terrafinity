@@ -169,7 +169,7 @@ pub const Renderer = struct {
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         try self.DrawEntities(game, playerPos, viewport_pixels);
         drawEntities.End();
-        const gen_distance = game.getGenDistance() + @Vector(2, u32){ 2, 2 };
+        const gen_distance = game.getGenDistance();
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
         Loader.UnloadMeshes(&game.chunkManager, gen_distance, @intFromFloat(playerPos), game.SmallestLevel);
         unloadMeshes.End();

@@ -29,7 +29,7 @@ pub const Game = struct {
     unloaderThread: ?std.Thread,
 
     //The radius in which chunk generate chunks to generate horizontal, vertical
-    GenerateDistance: std.atomic.Value(packed struct { xz: u32, y: u32}),
+    GenerateDistance: std.atomic.Value(packed struct { xz: u32, y: u32 }),
 
     ///the smallest level for general world generation
     SmallestLevel: i32 = 0,
@@ -56,7 +56,7 @@ pub const Game = struct {
         GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
         GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
 
-        const GenDist: [2]u32 = [2]u32{ 10, 10 };
+        const GenDist: [2]u32 = [2]u32{ 6, 6 };
         game.allocator = allocator;
         const terrain_height_cache_memory = 10_000_000; //10 mb
         const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
@@ -64,7 +64,7 @@ pub const Game = struct {
             .TerrainHeightCache = try .init(secondary_allocator, thc_size),
             .params = GeneratorConfig,
         };
-        game.levels = [2]i32{ 0, 5 };
+        game.levels = [2]i32{ 0, 3 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -130,12 +130,12 @@ pub const Game = struct {
         try UserInput.init(game);
         _ = window.setCursorPosCallback(UserInput.MouseCallback);
     }
-    
+
     pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
         const dist = self.GenerateDistance.load(.monotonic);
         return .{ dist.xz, dist.y };
     }
-    
+
     pub fn Frame(self: *@This(), viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window) ![2]u64 {
         try UserInput.processInput(window);
         const r = try self.renderer.Draw(self, viewport_pixels);
@@ -181,7 +181,7 @@ pub const Game = struct {
 
     pub fn startThreads(self: *@This()) !void {
         self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, 10 * std.time.us_per_s });
+        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 5000 * std.time.ns_per_ms, 10 * std.time.us_per_s });
         self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }

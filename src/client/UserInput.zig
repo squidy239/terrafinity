@@ -12,7 +12,7 @@ const zm = @import("zm");
 const ztracy = @import("ztracy");
 const Renderer = @import("Renderer.zig").Renderer;
 var game: *Game = undefined;
-var worldEditor: World.WorldEditor = undefined;
+var worldEditor: World.Editor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
@@ -28,6 +28,7 @@ pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input h
     worldEditor = .{
         .tempallocator = game.allocator,
         .world = &game.world,
+        .level = World.StandardLevel,
     };
     lastmicrotime = std.time.microTimestamp();
 
@@ -184,17 +185,17 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.WorldEditor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air, 5) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
 }
 
 fn genFractalTask() void {
-    comptime var csteps: [20]World.WorldEditor.Tree.Step = undefined;
+    comptime var csteps: [20]World.Editor.Tree.Step = undefined;
     comptime for (&csteps, 0..) |*step, r| {
         step.* = switch (r) {
-            0 => World.WorldEditor.Tree.Step{
+            0 => World.Editor.Tree.Step{
                 .lengthPercent = 1.0,
                 .radiusPercent = 1.0,
                 .branchCountMax = 32,
@@ -203,7 +204,7 @@ fn genFractalTask() void {
                 .block = .Stone,
                 .branchRandomness = 0.0,
             },
-            1...21 => World.WorldEditor.Tree.Step{
+            1...21 => World.Editor.Tree.Step{
                 .lengthPercent = 0.75,
                 .radiusPercent = 0.5,
                 .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },
@@ -218,7 +219,7 @@ fn genFractalTask() void {
     };
     const steps = csteps;
     var random = std.Random.DefaultPrng.init(0);
-    const tree = World.WorldEditor.Tree{
+    const tree = World.Editor.Tree{
         .pos = @intFromFloat(game.player.getPos().?),
         .baseRadius = 5,
         .rand = random.random(),
@@ -229,7 +230,7 @@ fn genFractalTask() void {
     };
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
-    _ = tree.place(&worldEditor, 5) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+    _ = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 

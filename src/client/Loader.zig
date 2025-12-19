@@ -20,16 +20,16 @@ const Mesher = @import("Mesher.zig");
 const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 
 pub const Loader = struct {
-    threadlocal var meshesToUnloadBuffer: [1024]World.ChunkPos = undefined;
-    threadlocal var meshesToUnloadBufferPos: usize = 0;
     pub fn UnloadMeshes(chunkManager: *ChunkManager, gen_distance: @Vector(2, u32), playerPos: @Vector(3, i64), smallestLevel: i32) void {
         const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
         defer unload.End();
+        var meshesToUnloadBuffer: [256]World.ChunkPos = undefined;
+        var meshesToUnloadBufferPos: usize = 0;
         const mesh_distance = gen_distance + @Vector(2, u32){ 2, 2 };
         {
             const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
             defer loop.End();
-            const innerRadius = getInnerRadius(.{ mesh_distance[0], mesh_distance[0], mesh_distance[1] });
+            const innerRadius = getInnerRadius(.{ mesh_distance[0], mesh_distance[0], mesh_distance[1] }) - @Vector(3, u32){ 1, 1, 1 };
             const bktamount = chunkManager.ChunkRenderList.buckets.len;
             outer: for (0..bktamount) |b| {
                 chunkManager.ChunkRenderList.buckets[b].lock.lock();
@@ -57,7 +57,7 @@ pub const Loader = struct {
     }
 
     pub fn keepLoaded(playerPos: World.BlockPos, Pos: World.ChunkPos, innerChunkRange: @Vector(3, u32), outerChunkRange: @Vector(3, u32)) bool {
-        const playerChunkPos = World.ChunkPos.fromBlockPos(playerPos, Pos.level);
+        const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(playerPos, Pos.level);
         const inner: @Vector(3, i32) = @intCast(innerChunkRange);
         const outer: @Vector(3, i32) = @intCast(outerChunkRange);
 
@@ -75,8 +75,6 @@ pub const Loader = struct {
         return !insideInner and !outsideOuter;
     }
 
-    threadlocal var chunksToUnloadBuffer: [1024][3]i32 = undefined;
-    threadlocal var chunksToUnloadBufferPos: u16 = 0;
     ///Loads all chunks in gendistance and unloads all chunks out of loadistance
     pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
         std.debug.assert(game.player.type == .Player);
@@ -108,7 +106,7 @@ pub const Loader = struct {
 
     ///loads chunks from top to bottom and in a spiral on a y level
     fn LoadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32), innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
-        const playerChunkPos = World.ChunkPos.fromBlockPos((playerPos), level);
+        const playerChunkPos = World.ChunkPos.fromGlobalBlockPos((playerPos), level);
         var amount_loaded: u64 = 0;
         var amount_tested: u64 = 0;
 
@@ -148,7 +146,7 @@ pub const Loader = struct {
     }
 
     fn LoadChunksLinear(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(3, u32), innerdistance: @Vector(3, u32), level: i32) void { //TODO optimize by spliting into stages and make hashmap calls happen with a array under one lock
-        const playerChunkPos = World.ChunkPos.fromBlockPos((playerPos), level);
+        const playerChunkPos = World.ChunkPos.fromGlobalBlockPos((playerPos), level);
 
         var x: i32 = -@as(i32, @intCast(distance[0]));
         while (x < distance[0]) : (x += 1) {
