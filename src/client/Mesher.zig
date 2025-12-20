@@ -47,7 +47,7 @@ pub const Mesh = struct {
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
         GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
-        comptime std.debug.assert(@bitSizeOf(Block) <= 20);
+        if(@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
 
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;

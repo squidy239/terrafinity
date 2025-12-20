@@ -131,7 +131,7 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
                 if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
                     try game.chunkManager.LoadingChunks.put(ChunkPos, true);
-                    const priority:ThreadPool.Priority = switch (level) {
+                    const priority: ThreadPool.Priority = switch (level) {
                         0...1 => .High,
                         else => .Medium,
                     };

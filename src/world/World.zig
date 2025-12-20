@@ -308,7 +308,6 @@ pub const World = struct {
         defer unloadChunks.End();
         const bktamount = self.Chunks.buckets.len;
         var chunks: u64 = 0;
-        if (1 == 1) return; //if this is still here i frogot to remov it
         var unload_chunk_buffer: [128]ChunkPos = undefined;
         for (0..bktamount) |b| {
             var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
@@ -513,13 +512,14 @@ pub const World = struct {
             }
             const block_pos = parent_pos.toLocalBlockPos() + Pos.posInParent() * @as(@Vector(3, u8), @splat(simplified_size));
             const parent = try self.world.loadChunk(parent_pos, false);
+            defer parent.release();
             if (isoneblock) {
                 parent.lockShared();
                 defer parent.unlockShared();
                 if (parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return;
             }
             parent.lockExclusive();
-            defer parent.releaseAndUnlock();
+            defer parent.unlockExclusive();
             _ = try parent.ToBlocks(self.world.allocator, false);
             for (0..simplified_size) |x| {
                 for (0..simplified_size) |y| {
@@ -533,6 +533,7 @@ pub const World = struct {
 
         fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !void {
             const chunk = try self.world.loadChunk(chunk_pos, false);
+            defer chunk.release();
             try self.propagateToParent(chunk, chunk_pos);
         }
 
