@@ -388,9 +388,9 @@ pub const World = struct {
         pub const Tree = @import("structures/Tree.zig").Tree;
         pub const TexturedSphere = @import("structures/TexturedSphere.zig");
         world: *World,
-        lastChunkCache: ?struct { Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
+        lastChunkCache: ?struct { Pos: @Vector(3, i32), blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
         propagateChanges: bool = true,
-        editBuffer: std.AutoHashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
+        editBuffer: std.AutoHashMapUnmanaged(@Vector(3, i32), [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
         tempallocator: std.mem.Allocator,
         level: i32,
 
@@ -404,18 +404,22 @@ pub const World = struct {
             var it = self.editBuffer.iterator();
             var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
             defer neghborsToRemesh.deinit();
+            const callIfNeighborFacesChanged = if(self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
-                const chunk = try self.world.loadChunk(diffChunk.key_ptr.*, false);
+                const chunk = try self.world.loadChunk(.{ .level = self.level, .position = diffChunk.key_ptr.* }, false);
                 defer chunk.release();
                 var sides: [6][ChunkSize][ChunkSize]Block = undefined;
-                inline for (0..6) |side| {
-                    sides[side] = chunk.extractFace(@enumFromInt(side), false);
+                if (callIfNeighborFacesChanged) {
+                    inline for (0..6) |side| {
+                        sides[side] = chunk.extractFace(@enumFromInt(side), false);
+                    }
                 }
                 try chunk.Merge(encoding, self.world.allocator, true);
 
                 if (self.propagateChanges) {
-                    var coords = diffChunk.key_ptr.*;
+                    var coords: ChunkPos = .{ .level = self.level, .position = diffChunk.key_ptr.* };
+                    //TODO improve this one editor per layer instead of one editor per chunk and not fixed amount of layers to propagate
                     for (0..10) |_| {
                         var propagationEditor: @This() = .{ .propagateChanges = false, .level = coords.level + 1, .world = self.world, .tempallocator = self.tempallocator };
                         try propagationEditor.propagateToParentByCoords(coords);
@@ -424,14 +428,15 @@ pub const World = struct {
                     }
                 }
                 var sides2: [6][ChunkSize][ChunkSize]Block = undefined;
-                inline for (0..6) |side| {
-                    sides2[side] = chunk.extractFace(@enumFromInt(side), false);
+                if (callIfNeighborFacesChanged) {
+                    inline for (0..6) |side| {
+                        sides2[side] = chunk.extractFace(@enumFromInt(side), false);
+                    }
                 }
-                try neghborsToRemesh.put(diffChunk.key_ptr.*, {});
-                if (self.world.onEdit.?.callIfNeighborFacesChanged) {
+                if (callIfNeighborFacesChanged) {
                     for (0..6) |side| {
                         if (!std.meta.eql(sides[side], sides2[side])) {
-                            const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + switch (side) {
+                            const toRemeshPos: ChunkPos = .{ .level = self.level, .position = diffChunk.key_ptr.* + switch (side) {
                                 0 => @Vector(3, i32){ -1, 0, 0 },
                                 1 => @Vector(3, i32){ 1, 0, 0 },
                                 2 => @Vector(3, i32){ 0, -1, 0 },
@@ -445,6 +450,10 @@ pub const World = struct {
                     }
                 }
             }
+            it.index = 0;
+            while (it.next()) |pos| {
+                if (self.world.onEdit) |onEdit| onEdit.onEditFn(.{ .level = self.level, .position = pos.key_ptr.* }, onEdit.onEditFnArgs);
+            }
             var rit = neghborsToRemesh.iterator();
             while (rit.next()) |pos| {
                 if (self.world.onEdit) |onEdit| onEdit.onEditFn(pos.key_ptr.*, onEdit.onEditFnArgs);
@@ -454,14 +463,14 @@ pub const World = struct {
         pub inline fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64)) !void {
             const chunkPos: ChunkPos = .fromLocalBlockPos(pos, self.level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-            if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
+            if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos.position)) {
                 @branchHint(.likely);
                 self.lastChunkCache.?.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
                 return;
             }
 
-            var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
-            self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
+            var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos.position, comptime @splat(@splat(@splat(.Null))))).value_ptr;
+            self.lastChunkCache = .{ .Pos = chunkPos.position, .blocks = chunk };
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
 
