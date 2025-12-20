@@ -5,7 +5,7 @@ const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
 const Game = @import("Game.zig").Game;
 const ThreadPool = @import("root").ThreadPool;
-
+const Loader = @import("Loader.zig");
 const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
@@ -67,6 +67,9 @@ pub const ChunkManager = struct {
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool) void {
+        const inside_range = Loader.keepLoaded(@intFromFloat(game.player.getPos().?), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
+        const running = game.running.load(.monotonic);
+        if (!inside_range or !running) return;
         game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 

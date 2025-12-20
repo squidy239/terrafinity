@@ -13,7 +13,7 @@ pub const ConcurrentQueue = @import("ConcurrentQueue");
 const Entity = @import("Entity").Entity;
 pub const gui = @import("gui");
 pub const ThreadPool = @import("ThreadPool");
-pub const Loader = @import("Loader.zig").Loader;
+pub const Loader = @import("Loader.zig");
 pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 
 pub const World = @import("World").World;

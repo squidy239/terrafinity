@@ -10,6 +10,10 @@ const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
 
+///The main world object, this should not handle any rendering tasks
+///chunks use LODs for better performance
+///all LODs should be stored since with infinite level every level combined
+///would only use 14.28571% more space then one LOD
 pub const World = struct {
     pub const WorldStorage = @import("WorldStorage.zig");
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
@@ -38,8 +42,9 @@ pub const World = struct {
     ///the level where one block in a chunk is one block
     pub const StandardLevel = 0;
 
-    ///the amount of divisions per axis in the tree structure
+    ///the amount of divisions per axis in the tree structure, this should be 2
     pub const TreeDivisions = 2;
+
     pub const BlockPos = @Vector(3, i64);
     ///the level where one chunk is one block
     pub const ChunkLevel = -std.math.log(i32, TreeDivisions, ChunkSize);
@@ -71,16 +76,16 @@ pub const World = struct {
         pub inline fn toScale(level: i32) f32 {
             return levelToBlockRatioFloat(level) / ChunkSize;
         }
-        
+
         ///returns the global block position of the chunk where one block is one block at default level
         pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
             return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
         }
-        
+
         pub inline fn posInParent(self: ChunkPos) @Vector(3, u8) {
             return @intCast(@mod(self.position, @Vector(3, i32){ TreeDivisions, TreeDivisions, TreeDivisions }));
         }
-        
+
         ///returns the local block pos of the chunk where one block is one block at the chunks level
         pub inline fn toLocalBlockPos(self: ChunkPos) BlockPos {
             return self.position * @as(@Vector(3, i64), @splat(ChunkSize));
@@ -95,7 +100,7 @@ pub const World = struct {
         pub inline fn fromGlobalBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
             return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))), .level = level };
         }
-        
+
         pub inline fn fromLocalBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
             return .{ .position = @intCast(@divFloor(blockPos, @as(@Vector(3, i64), @splat(ChunkSize)))), .level = level };
         }
@@ -303,7 +308,7 @@ pub const World = struct {
         defer unloadChunks.End();
         const bktamount = self.Chunks.buckets.len;
         var chunks: u64 = 0;
-        if (1 == 1) return;//if this is still here i frogot to remov it
+        if (1 == 1) return; //if this is still here i frogot to remov it
         var unload_chunk_buffer: [128]ChunkPos = undefined;
         for (0..bktamount) |b| {
             var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
@@ -412,7 +417,7 @@ pub const World = struct {
 
                 if (self.propagateChanges) {
                     var coords = diffChunk.key_ptr.*;
-                    for (0..3) |_| {
+                    for (0..10) |_| {
                         var propagationEditor: @This() = .{ .propagateChanges = false, .level = coords.level + 1, .world = self.world, .tempallocator = self.tempallocator };
                         try propagationEditor.propagateToParentByCoords(coords);
                         try propagationEditor.flush();
@@ -484,6 +489,10 @@ pub const World = struct {
             }
         }
 
+        const SimplifiedBlocks = union {
+            //TODO should contain simplified_size grid, simplified_size/2, simplified_size/4 etc up until one block
+        };
+
         const simplified_size = ChunkSize / TreeDivisions;
 
         pub fn propagateToParent(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
@@ -522,7 +531,7 @@ pub const World = struct {
             }
         }
 
-        pub fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !void {
+        fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !void {
             const chunk = try self.world.loadChunk(chunk_pos, false);
             try self.propagateToParent(chunk, chunk_pos);
         }

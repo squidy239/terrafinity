@@ -64,7 +64,7 @@ pub const Game = struct {
             .TerrainHeightCache = try .init(secondary_allocator, thc_size),
             .params = GeneratorConfig,
         };
-        game.levels = [2]i32{ 0, 3 };
+        game.levels = [2]i32{ 0, 10 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -136,6 +136,20 @@ pub const Game = struct {
         return .{ dist.xz, dist.y };
     }
 
+    pub fn getRenderDistance(self: *@This()) @Vector(2, u32) {
+        return self.getGenDistance() + @Vector(2, u32){ 2, 2 };
+    }
+
+    pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
+        if (level <= World.StandardLevel) return @splat(0);
+        const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.TreeDivisions, World.TreeDivisions };
+        return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
+    }
+
+    pub fn getInnerRenderRadius(self: *@This(), level: i32) @Vector(2, u32) {
+        return self.getInnerGenRadius(level) -| @Vector(2, u32){ 1, 1 };
+    }
+
     pub fn Frame(self: *@This(), viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window) ![2]u64 {
         try UserInput.processInput(window);
         const r = try self.renderer.Draw(self, viewport_pixels);
@@ -180,7 +194,7 @@ pub const Game = struct {
     }
 
     pub fn startThreads(self: *@This()) !void {
-        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
+        self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
         self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 5000 * std.time.ns_per_ms, 10 * std.time.us_per_s });
         self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
