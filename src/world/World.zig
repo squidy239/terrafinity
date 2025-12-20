@@ -537,59 +537,21 @@ pub const World = struct {
             try self.propagateToParent(chunk, chunk_pos);
         }
 
-        fn simplifyBlocksAvg(
-            blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block,
-        ) [simplified_size][simplified_size][simplified_size]Block {
+        fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
             var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
+            var unique_blocks: [TreeDivisions][TreeDivisions][TreeDivisions]Block = undefined;
 
             for (0..simplified_size) |sx| {
                 for (0..simplified_size) |sy| {
                     for (0..simplified_size) |sz| {
-                        var unique_blocks: [8]Block = undefined;
-                        var counts: [8]u8 = [_]u8{0} ** 8;
-                        var unique_len: u8 = 0;
-
-                        const bx0 = sx * TreeDivisions;
-                        const by0 = sy * TreeDivisions;
-                        const bz0 = sz * TreeDivisions;
-
-                        for (0..TreeDivisions) |dx| {
-                            for (0..TreeDivisions) |dy| {
-                                for (0..TreeDivisions) |dz| {
-                                    const b = blocks[bx0 + dx][by0 + dy][bz0 + dz];
-
-                                    var found = false;
-                                    var i: u8 = 0;
-                                    while (i < unique_len) : (i += 1) {
-                                        if (unique_blocks[i] == b) {
-                                            counts[i] += 1;
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-
-                                    if (!found) {
-                                        unique_blocks[unique_len] = b;
-                                        counts[unique_len] = 1;
-                                        unique_len += 1;
-                                    }
+                        inline for (0..TreeDivisions) |dx| {
+                            inline for (0..TreeDivisions) |dy| {
+                                inline for (0..TreeDivisions) |dz| {
+                                    unique_blocks[dx][dy][dz] = blocks[sx * TreeDivisions + dx][sy * TreeDivisions + dy][sz * TreeDivisions + dz];
                                 }
                             }
                         }
-
-                        // find most common
-                        var best_i: u8 = 0;
-                        var best_count: u8 = 0;
-
-                        var i: u8 = 0;
-                        while (i < unique_len) : (i += 1) {
-                            if (counts[i] > best_count) {
-                                best_count = counts[i];
-                                best_i = i;
-                            }
-                        }
-
-                        simplified[sx][sy][sz] = unique_blocks[best_i];
+                        simplified[sx][sy][sz] = getBestBlock(@bitCast(unique_blocks));
                     }
                 }
             }
@@ -597,6 +559,26 @@ pub const World = struct {
             return simplified;
         }
     };
+
+    inline fn getBestBlock(blocks: [TreeDivisions * TreeDivisions * TreeDivisions]Block) Block {
+        var best: Block = blocks[0];
+        var best_count: f32 = 1;
+
+        inline for (0..blocks.len) |i| {
+            const block = blocks[i];
+            const weight = block.getPropagationWeight();
+            var count: f32 = weight;
+            inline for ((i + 1)..8) |j| {
+                if (block == blocks[j]) count += weight;
+            }
+
+            if (count > best_count) {
+                best = blocks[i];
+                best_count = count;
+            }
+        }
+        return best;
+    }
 
     pub fn UnloadChunk(self: *@This(), Pos: ChunkPos) !void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out

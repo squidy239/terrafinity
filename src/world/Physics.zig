@@ -112,7 +112,7 @@ pub const Mover = struct {
                     const blockPos = base + offset;
 
                     const block = try reader.GetBlockCached(@intFromFloat(blockPos), World.StandardLevel);
-                    if (!Block.Properties.solid.get(block)) continue;
+                    if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });
 

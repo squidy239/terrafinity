@@ -47,7 +47,7 @@ pub const Mesh = struct {
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
         GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
-        if(@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
+        if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
 
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
@@ -58,7 +58,7 @@ pub const Mesh = struct {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
                     const block = extendedBlocks[x][y][z];
-                    if (!Block.Properties.visible.get(block)) continue;
+                    if (!block.isVisible()) continue;
                     const neighboring_blocks = [6]Block{
                         extendedBlocks[x + 1][y][z],
                         extendedBlocks[x - 1][y][z],
@@ -67,10 +67,10 @@ pub const Mesh = struct {
                         extendedBlocks[x][y][z + 1],
                         extendedBlocks[x][y][z - 1],
                     };
-                    const block_transparent = Block.Properties.transparent.get(block);
+                    const block_transparent = block.isTransparent();
                     inline for (0..6) |i| {
                         inner: {
-                            if (!Block.Properties.transparent.get(neighboring_blocks[i])) break :inner;
+                            if (!neighboring_blocks[i].isTransparent()) break :inner;
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{
