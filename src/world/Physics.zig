@@ -74,10 +74,14 @@ pub const Mover = struct {
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = allocator;
+        var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
+        if(!self.collisions) {
+            _ = physics.fetchAddPos(posOffset);
+            return;
+        }
         const maxMove: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
         defer reader.Clear();
-        var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;

@@ -56,7 +56,7 @@ pub const Game = struct {
         GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
         GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
 
-        const GenDist: [2]u32 = [2]u32{ 6, 6 };
+        const GenDist: [2]u32 = [2]u32{ 10, 10 };
         game.allocator = allocator;
         const terrain_height_cache_memory = 10_000_000; //10 mb
         const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
@@ -64,7 +64,7 @@ pub const Game = struct {
             .TerrainHeightCache = try .init(secondary_allocator, thc_size),
             .params = GeneratorConfig,
         };
-        game.levels = [2]i32{ 0, 10 };
+        game.levels = [2]i32{ 0, 7 };
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,

@@ -80,7 +80,7 @@ void main()
     //  result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
     //if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
-    FragColor = vec4((0.2 + diffuse) * FragColor.xyz, FragColor[3]);
+    FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
 }
 //    FragColor = vec4((sin(pow(cos(fragpos / coordss), tan(fragpos * -coordss)))+1)/2, 1);
