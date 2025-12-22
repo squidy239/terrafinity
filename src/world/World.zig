@@ -136,7 +136,7 @@ pub const World = struct {
         onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{Unrecoverable}!void,
 
         ///should return the height of the terrain in blocks at the given chunk coordinates
-        getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
+        getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
 
         ///should deinit the chunk source
         deinit: ?*const fn (self: ChunkSource, world: *World) void,
@@ -162,6 +162,17 @@ pub const World = struct {
                 }
             }
         }
+    }
+    
+    fn getBlockHeight(self: *@This(), block_pos: BlockPos, level: i32) !i64 {
+        for (self.ChunkSources) |source| {
+            if (source) |s| {
+                if (s.getTerrainHeight) |getTerrainHeight| {
+                    return try getTerrainHeight(s, self, block_pos, level);
+                }
+            }
+        }
+        return error.AllSourcesFailed;
     }
 
     fn onUnload(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
@@ -198,16 +209,16 @@ pub const World = struct {
 
     pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-        // const height = try self.GetTerrainHeightAtCoords(pos);
-        std.debug.print("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], 1000, pos[1] });
-        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(1000), @floatFromInt(pos[1]) };
+        const height = try self.GetTerrainHeightAtCoords(pos, World.StandardLevel);
+        std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
+        return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
-    pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64)) !i64 {
+    pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
         const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
         const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
         const genSource = self.ChunkSources[self.ChunkSources.len - 1] orelse undefined;
-        const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
+        const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }, level))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
         return height;
     }
 

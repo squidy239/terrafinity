@@ -21,16 +21,16 @@ pub const DefaultGenerator = struct {
             .data = self,
             .getTerrainHeight = &getTerrainHeightAtCoords,
             .getBlocks = &genChunkBlocks,
-            .onLoad = genStructures, //TODO
+            .onLoad = genStructures,
             .deinit = &deinit,
             .onUnload = null,
         };
     }
 
-    fn getTerrainHeightAtCoords(source: World.ChunkSource, world: *World, Pos: @Vector(2, i32)) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
+    fn getTerrainHeightAtCoords(source: World.ChunkSource, world: *World, Pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
         _ = world;
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        return self.GetTerrainHeight(Pos, 0);
+        return self.GetTerrainHeight(Pos, level);
     }
 
     fn genChunkBlocks(source: World.ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
