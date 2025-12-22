@@ -42,8 +42,10 @@ pub const DefaultGenerator = struct {
 
     fn genStructures(source: World.ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        if (Pos.level != World.StandardLevel) return; //dont generate structures on non LOD chunks for now
-        try self.GenerateStructures(world, chunk, Pos);
+        //if (Pos.level != World.StandardLevel) return; //dont generate structures on non LOD chunks for now
+        self.GenerateStructures(world, chunk, Pos) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
     }
 
     fn deinit(self: World.ChunkSource, world: *World) void {
@@ -69,8 +71,18 @@ pub const DefaultGenerator = struct {
         seed: u64,
         terrainScale: f32,
         genStructures: bool,
-        LargeTrees: []const World.Editor.Tree.Step,
-        MediumTrees: []const World.Editor.Tree.Step,
+        trees: []TreeConfig,
+    };
+
+    pub const TreeConfig = struct {
+        enabled: bool = true,
+        steps: []World.Editor.Tree.Step,
+        baseRadius: f32,
+        baseRadiusVariation: f32,
+        trunkHeight: f32,
+        trunkHeightVariation: f32,
+        leafDensity: f32,
+        leafSize: f32,
     };
 
     pub fn GenChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -170,7 +182,7 @@ pub const DefaultGenerator = struct {
         _ = heights;
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
-                for(0..ChunkSize) |z| {
+                for (0..ChunkSize) |z| {
                     const xyz = @Vector(3, f32){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) } / @as(@Vector(3, f32), @splat(ChunkSize));
                     const pos = (floatPos + xyz) * oneDterrainScaleVec;
                     const noise = gen_params.CaveNoise.genNoise3D(pos[0], pos[1], pos[2]);
@@ -267,11 +279,11 @@ pub const DefaultGenerator = struct {
         }
         return r;
     }
-    threadlocal var editorBuffer: [1_000_000]u8 = undefined;
     fn GenerateStructures(self: *DefaultGenerator, world: *World, chunk: *Chunk, Pos: ChunkPos) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
         chunk.addAndLockShared();
+        var editorBuffer: [100_000]u8 = undefined;
         var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
             .buffer = &editorBuffer,
             .fallback_allocator = world.allocator,
@@ -284,60 +296,70 @@ pub const DefaultGenerator = struct {
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         if (chunk.blocks != .blocks) return;
         if (!self.params.genStructures) return;
-        const randomSeed = std.hash.Wyhash.hash(self.params.seed, std.mem.asBytes(&Pos));
-        var random = std.Random.DefaultPrng.init(randomSeed);
-        const rand = random.random();
         const heights = self.GetTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level); //should still be in the cache
         const scale: f32 = self.params.terrainScale * (1.0 / ChunkPos.toScale(Pos.level));
-        var structuresGenerated: u32 = 0;
 
         for (heights, 0..) |row, x| {
             for (row, 0..) |height, z| {
-                const realX: f32 = @as(f32, @floatFromInt((Pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
-                const realZ: f32 = @as(f32, @floatFromInt((Pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
                 if (@divFloor(height, ChunkSize) != Pos.position[1] or height < self.params.SeaLevel) continue;
                 const y: usize = @intCast(@mod(height, ChunkSize));
+                if (!chunk.blocks.blocks[x][y][z].plantsCanGrow()) continue;
 
-                if (chunk.blocks.blocks[x][y][z] == .Grass or chunk.blocks.blocks[x][y][z] == .Dirt) {
-                    //TODO find a way to make it deterministi becuase a diffrent thread may remove grass or dirt blocks
-                    const treeChance: f64 = rand.float(f64) * scale; //TODO advance rng to make tree placement the same
-                    if (true and treeChance < 0.000002) {
-                        const steps = self.params.LargeTrees;
-                        const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) } + @Vector(3, i32){ 0, -10, 0 };
-                        const tree = World.Editor.Tree{
-                            .pos = @intCast(centerPos),
-                            .baseRadius = 15,
-                            .rand = rand,
-                            .trunkHeight = 100,
-                            .maxRecursionDepth = 8,
-                            .leafDensity = 0.5,
-                            .leafSize = 6,
-                            .scale = scale,
-                            .steps = steps,
-                        };
+                const realX: f32 = @as(f32, @floatFromInt((Pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
+                const realZ: f32 = @as(f32, @floatFromInt((Pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
 
-                        _ = try tree.place(&worldEditor);
-                    } else if (self.params.TreeNoise.genNoise2D(realX, realZ) < -0.99995) {
-                        structuresGenerated += 1;
-                        const factor = rand.float(f32) + 0.5; //TODO replace a lot of rand with hashes
+                const noise = self.params.TreeNoise.genNoise2D(realX, realZ);
+
+                for (self.params.trees) |tree_conf| {
+                    if (!tree_conf.enabled) continue;
+                    if (isTree(noise, scale)) {
                         const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        const steps = self.params.MediumTrees;
-                        const tree = World.Editor.Tree{
-                            .pos = @intCast(centerPos),
-                            .baseRadius = 3 * factor,
-                            .rand = rand,
-                            .trunkHeight = 25 * factor,
-                            .steps = steps,
-                            .maxRecursionDepth = 6,
-                            .leafDensity = 0.5,
-                            .scale = scale,
-                            .leafSize = 3,
-                        };
-
-                        _ = try tree.place(&worldEditor);
+                        if (Pos.level > 2) {
+                            try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight);
+                        } else {
+                            const realY: f32 = @as(f32, @floatFromInt((Pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
+                            const realPos = @Vector(3, f32){ realX, realY, realZ };
+                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed);
+                        }
                     }
                 }
             }
         }
+    }
+
+    fn placeTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, real_pos: @Vector(3, f32), conf: TreeConfig, seed: u64) !void {
+        const round_to: @Vector(3, f32) = @splat(1.0 / 5.0); //round so slight pos diffrences dont change tree properties
+        const rounded_pos = @round(real_pos * round_to);
+        const randomSeed = std.hash.Wyhash.hash(seed, std.mem.asBytes(&rounded_pos));
+        var random = std.Random.DefaultPrng.init(randomSeed);
+        const rand = random.random();
+        const factor = ((rand.float(f32) - 0.5) * (conf.baseRadiusVariation));
+        var placetree: World.Editor.Tree = .{
+            .pos = @intCast(pos),
+            .scale = scale,
+            .rand = rand,
+            .leafSize = conf.leafSize,
+            .leafDensity = conf.leafDensity,
+            .maxRecursionDepth = conf.steps.len - 1,
+            .steps = conf.steps,
+            .trunkHeight = conf.trunkHeight + conf.trunkHeight * factor,
+            .baseRadius = conf.baseRadius + conf.baseRadius * factor,
+        };
+        _ = try placetree.place(editor);
+    }
+
+    fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32) !void {
+        const radius: f32 = (height * scale);
+        if (radius < 0.5) {
+            try editor.placeBlock(.Leaves, pos + @Vector(3, i64){ 0, 1, 0 });
+            return;
+        }
+        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius), 0 }), radius);
+        _ = try editor.placeSamplerShape(.Leaves, sphere);
+    }
+
+    fn isTree(noise: f32, scale: f32) bool {
+        const cutoff = 0.0001; //any noise less than this will be a tree, if this is too high trees will be stacked on top of each other
+        return noise < -1.0 + cutoff / scale;
     }
 };

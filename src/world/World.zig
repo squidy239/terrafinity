@@ -404,7 +404,7 @@ pub const World = struct {
             var it = self.editBuffer.iterator();
             var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
             defer neghborsToRemesh.deinit();
-            const callIfNeighborFacesChanged = if(self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+            const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
             while (it.next()) |diffChunk| {
                 const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
                 const chunk = try self.world.loadChunk(.{ .level = self.level, .position = diffChunk.key_ptr.* }, false);

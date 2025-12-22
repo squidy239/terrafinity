@@ -32,11 +32,18 @@ pub const Block = enum(u16) {
         };
     }
 
-    pub inline fn getPropagationWeight(block: Block) f32 {
-        return switch (block) {
+    pub inline fn getPropagationWeight(self: Block) f32 {
+        return switch (self) {
             .Grass => 1.1,
             .Air => 0.1,
             else => 1,
+        };
+    }
+
+    pub inline fn plantsCanGrow(self: Block) bool {
+        return switch (self) {
+            .Grass, .Dirt => true,
+            else => false,
         };
     }
 };

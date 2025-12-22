@@ -75,7 +75,7 @@ pub const Mover = struct {
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = allocator;
         var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
-        if(!self.collisions) {
+        if (!self.collisions) {
             _ = physics.fetchAddPos(posOffset);
             return;
         }

@@ -22,6 +22,7 @@ pub const Tree = struct {
     minRadius: f32 = 0.75,
     minLength: f32 = 2.0,
     scale: f32 = 1.0,
+    squareEndScale: bool = true,
 
     pub fn place(self: *const @This(), editor: *WorldEditor) !u64 {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
@@ -36,13 +37,14 @@ pub const Tree = struct {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const step = self.steps[recursionDepth];
         const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
+        const halfLeaf = self.leafSize * 0.5;
+        const lenscale = if (self.squareEndScale) self.scale * self.scale else self.scale;
         var branchesCount: u64 = 0;
         for (0..firstBranches) |i| {
             const branchVec = branchDirection(i, direction, step.branchRange, firstBranches) + rand3Vec(f32, self.rand, -step.branchRandomness, step.branchRandomness);
             const length = lastLength * step.lengthPercent + self.rand.float(f32) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f32) * step.radiusPercentRandomness;
-            if (length < self.minLength * self.scale or recursionDepth >= self.maxRecursionDepth) {
-                const halfLeaf = self.leafSize * self.scale * 0.5;
+            if (length < self.minLength * lenscale or recursionDepth >= self.maxRecursionDepth) {
                 var y = -halfLeaf;
                 while (y < halfLeaf) : (y += 1) {
                     var x = -halfLeaf;
