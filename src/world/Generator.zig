@@ -290,7 +290,7 @@ pub const DefaultGenerator = struct {
             .fixed_buffer_allocator = undefined,
         };
         const tempAllocator = bfa.get();
-        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .level = Pos.level };
+        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator};
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
@@ -315,11 +315,11 @@ pub const DefaultGenerator = struct {
                     if (isTree(noise, scale)) {
                         const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         if (Pos.level > 2) {
-                            try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight);
+                            try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight, Pos.level);
                         } else {
                             const realY: f32 = @as(f32, @floatFromInt((Pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
                             const realPos = @Vector(3, f32){ realX, realY, realZ };
-                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed);
+                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed, Pos.level);
                         }
                     }
                 }
@@ -327,7 +327,7 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    fn placeTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, real_pos: @Vector(3, f32), conf: TreeConfig, seed: u64) !void {
+    fn placeTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, real_pos: @Vector(3, f32), conf: TreeConfig, seed: u64, level: i32) !void {
         const round_to: @Vector(3, f32) = @splat(1.0 / 5.0); //round so slight pos diffrences dont change tree properties
         const rounded_pos = @round(real_pos * round_to);
         const randomSeed = std.hash.Wyhash.hash(seed, std.mem.asBytes(&rounded_pos));
@@ -345,17 +345,17 @@ pub const DefaultGenerator = struct {
             .trunkHeight = conf.trunkHeight + conf.trunkHeight * factor,
             .baseRadius = conf.baseRadius + conf.baseRadius * factor,
         };
-        _ = try placetree.place(editor);
+        _ = try placetree.place(editor, level);
     }
 
-    fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32) !void {
+    fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
         const radius: f32 = (height * scale);
         if (radius < 0.5) {
-            try editor.placeBlock(.Leaves, pos + @Vector(3, i64){ 0, 1, 0 });
+            try editor.placeBlock(.Leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
         }
         const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius), 0 }), radius);
-        _ = try editor.placeSamplerShape(.Leaves, sphere);
+        _ = try editor.placeSamplerShape(.Leaves, sphere, level);
     }
 
     fn isTree(noise: f32, scale: f32) bool {

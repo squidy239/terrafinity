@@ -170,11 +170,10 @@ pub const Cube = struct {
             var worldEditor = World.Editor{
                 .world = world,
                 .tempallocator = allocator,
-                .level = World.StandardLevel,
             };
             const sphere = World.Editor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
             //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
-            worldEditor.placeSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            worldEditor.placeSamplerShape(.Air, sphere, World.StandardLevel) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
             //_ = uuid;
             _ = entity.ref_count.fetchSub(1, .seq_cst);

@@ -28,7 +28,6 @@ pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input h
     worldEditor = .{
         .tempallocator = game.allocator,
         .world = &game.world,
-        .level = World.StandardLevel,
     };
     lastmicrotime = std.time.microTimestamp();
 
@@ -185,7 +184,7 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air, World.StandardLevel) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
@@ -230,7 +229,7 @@ fn genFractalTask() void {
     };
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
-    _ = tree.place(&worldEditor) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+    _ = tree.place(&worldEditor, World.StandardLevel) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 
