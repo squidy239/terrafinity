@@ -9,12 +9,11 @@ const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
-
+const World = @This();
 ///The main world object, this should not handle any rendering tasks
 ///chunks use LODs for better performance
 ///all LODs should be stored since with infinite level every level combined
 ///would only use 14.28571% more space then one LOD
-pub const World = struct {
     pub const WorldStorage = @import("WorldStorage.zig");
     pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
     threadlocal var prng: std.Random.DefaultPrng = .init(0);
@@ -40,14 +39,15 @@ pub const World = struct {
     },
 
     ///the level where one block in a chunk is one block
-    pub const StandardLevel = 0;
+    pub const standard_level = 0;
 
-    ///the amount of divisions per axis in the tree structure, this should be 2
-    pub const TreeDivisions = 2;
+    ///the factor that each chunk is scaled each level
+    pub const scale_factor = 2;
 
-    pub const BlockPos = @Vector(3, i64);
     ///the level where one chunk is one block
-    pub const ChunkLevel = -std.math.log(i32, TreeDivisions, ChunkSize);
+    pub const chunk_level = -std.math.log(i32, scale_factor, ChunkSize);
+    
+    pub const BlockPos = @Vector(3, i64);
 
     pub const ChunkPos = struct {
         ///the division level of the chunk, 0 is one chunk is one block, 1 is 0.5 chunks is one block id 1D, etc
@@ -55,22 +55,22 @@ pub const World = struct {
         position: @Vector(3, i32),
 
         pub inline fn levelToBlockRatio(level: i32) i64 {
-            return std.math.powi(i32, TreeDivisions, level - ChunkLevel) catch |err| switch (err) {
+            return std.math.powi(i32, scale_factor, level - chunk_level) catch |err| switch (err) {
                 error.Overflow => unreachable,
                 error.Underflow => 1,
             };
         }
 
         pub inline fn levelToBlockRatioFloat(level: i32) f32 {
-            return std.math.pow(f32, @floatFromInt(TreeDivisions), @floatFromInt(level - ChunkLevel));
+            return std.math.pow(f32, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
         }
 
         pub inline fn parent(self: ChunkPos) ChunkPos {
-            return .{ .level = self.level + 1, .position = @divFloor(self.position, @as(@Vector(3, i32), @splat(TreeDivisions))) };
+            return .{ .level = self.level + 1, .position = @divFloor(self.position, @as(@Vector(3, i32), @splat(scale_factor))) };
         }
 
         pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
-            return std.math.pow(f64, @floatFromInt(TreeDivisions), @floatFromInt(level1 - level2));
+            return std.math.pow(f64, @floatFromInt(scale_factor), @floatFromInt(level1 - level2));
         }
 
         pub inline fn toScale(level: i32) f32 {
@@ -83,7 +83,7 @@ pub const World = struct {
         }
 
         pub inline fn posInParent(self: ChunkPos) @Vector(3, u8) {
-            return @intCast(@mod(self.position, @Vector(3, i32){ TreeDivisions, TreeDivisions, TreeDivisions }));
+            return @intCast(@mod(self.position, @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
         }
 
         ///returns the local block pos of the chunk where one block is one block at the chunks level
@@ -185,19 +185,19 @@ pub const World = struct {
         }
     }
 
-    pub fn UnloadEntity(self: *@This(), entityUUID: u128) void {
+    pub fn unloadEntity(self: *@This(), entityUUID: u128) void {
         const en = self.Entitys.fetchremove(entityUUID) orelse return;
         en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
     }
 
-    pub fn UnloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
+    pub fn unloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
         const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
         _ = en.WaitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
         //TODO save entity to disk
         en.fullfree(self.allocator);
     }
 
-    pub fn SpawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
+    pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
         const UUID = uuid orelse World.prng.random().int(u128);
         if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
         const allocated_entity = try Entity.Make(entity, self.allocator);
@@ -207,14 +207,14 @@ pub const World = struct {
         return allocated_entity;
     }
 
-    pub fn GetPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
+    pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
         const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-        const height = try self.GetTerrainHeightAtCoords(pos, World.StandardLevel);
+        const height = try self.getTerrainHeightAtCoords(pos, World.standard_level);
         std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
         return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
     }
 
-    pub fn GetTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
+    pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
         const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
         const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
         const genSource = self.ChunkSources[self.ChunkSources.len - 1] orelse undefined;
@@ -223,7 +223,7 @@ pub const World = struct {
     }
 
     //TODO replace this with tick certen amount of entitys or certen amount of time
-    pub fn TickEntitiesBucketTask(self: *@This(), complete: *std.atomic.Value(u32), bucketindex: usize, allocator: std.mem.Allocator) void {
+    pub fn tickEntitiesBucketTask(self: *@This(), complete: *std.atomic.Value(u32), bucketindex: usize, allocator: std.mem.Allocator) void {
         defer _ = complete.fetchAdd(1, .seq_cst);
         if (!self.running.load(.monotonic)) return;
         const bucket = &self.Entitys.buckets[bucketindex];
@@ -252,14 +252,14 @@ pub const World = struct {
     var tasksComplete: std.atomic.Value(u32) = .init(0);
 
     //TODO use async when it is added instead of this
-    pub fn UpdateEntitiesThread(self: *@This(), interval_ns: u64) void {
+    pub fn updateEntitiesThread(self: *@This(), interval_ns: u64) void {
         const enbktamount = self.Entitys.buckets.len;
         var st = std.time.nanoTimestamp();
         while (self.running.load(.seq_cst)) {
             const AddEntitiesToTick = ztracy.ZoneNC(@src(), "AddEntitiesToTick", 45354345);
             tasksComplete.store(0, .seq_cst);
             for (0..enbktamount) |bucket| {
-                self.threadPool.spawn(TickEntitiesBucketTask, .{ self, &tasksComplete, bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
+                self.threadPool.spawn(tickEntitiesBucketTask, .{ self, &tasksComplete, bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
             }
             AddEntitiesToTick.End();
             std.Thread.sleep(interval_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
@@ -314,7 +314,7 @@ pub const World = struct {
         }
     }
 
-    pub fn UnloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
+    pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
         defer unloadChunks.End();
         const bktamount = self.Chunks.buckets.len;
@@ -337,18 +337,18 @@ pub const World = struct {
                 }
             }
             while (tounload.pop()) |Pos| {
-                try self.UnloadChunk(Pos);
+                try self.unloadChunk(Pos);
             }
         }
     }
 
-    pub fn ChunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
+    pub fn chunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
         while (self.running.load(.monotonic)) {
             const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
             defer unloadChunks.End();
             const st = std.time.nanoTimestamp();
             defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-            self.UnloadUnusedChunks(unload_timeout) catch |err| std.debug.panic("err:{any}\n", .{err});
+            self.unloadUnusedChunks(unload_timeout) catch |err| std.debug.panic("err:{any}\n", .{err});
         }
     }
 
@@ -357,11 +357,11 @@ pub const World = struct {
         lastChunkReadCache: ?struct { Pos: ChunkPos, chunk: *Chunk } = null,
         ///returns a block at the given position, Clear must be called after a series of calls to unlock the cached chunk
         ///better for many block reads
-        pub inline fn GetBlockCached(self: *@This(), blockpos: BlockPos, level: i32) !Block {
+        pub inline fn getBlock(self: *@This(), blockpos: BlockPos, level: i32) !Block {
             const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
-                self.Clear();
+                self.clear();
                 self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.loadChunk(chunkPos, false) };
                 self.lastChunkReadCache.?.chunk.lockShared();
             }
@@ -373,7 +373,7 @@ pub const World = struct {
         }
 
         ///returns a block at the given position, better for fewer block reads
-        pub inline fn GetBlockNoCache(self: *@This(), blockpos: BlockPos, level: i32) !Block {
+        pub inline fn getBlockUncached(self: *@This(), blockpos: BlockPos, level: i32) !Block {
             const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
             const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
             const chunk = try self.world.loadChunk(chunkPos, false);
@@ -386,7 +386,7 @@ pub const World = struct {
             };
         }
 
-        pub fn Clear(self: *@This()) void {
+        pub fn clear(self: *@This()) void {
             if (self.lastChunkReadCache) |cache| {
                 cache.chunk.releaseAndUnlockShared();
                 self.lastChunkReadCache = null;
@@ -509,7 +509,7 @@ pub const World = struct {
             }
         }
         
-        const simplified_size = ChunkSize / TreeDivisions;
+        const simplified_size = ChunkSize / scale_factor;
 
         ///returns true if the parent chunk was changed
         pub fn propagateToParent(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !bool {
@@ -556,7 +556,7 @@ pub const World = struct {
         }
 
         ///returns true if the parent chunk was changed
-        fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !bool {
+        pub fn propagateToParentByCoords(self: *@This(), chunk_pos: ChunkPos) !bool {
             const chunk = try self.world.loadChunk(chunk_pos, false);
             defer chunk.release();
             return try self.propagateToParent(chunk, chunk_pos);
@@ -564,15 +564,15 @@ pub const World = struct {
 
         fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
             var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
-            var unique_blocks: [TreeDivisions][TreeDivisions][TreeDivisions]Block = undefined;
+            var unique_blocks: [scale_factor][scale_factor][scale_factor]Block = undefined;
 
             for (0..simplified_size) |sx| {
                 for (0..simplified_size) |sy| {
                     for (0..simplified_size) |sz| {
-                        inline for (0..TreeDivisions) |dx| {
-                            inline for (0..TreeDivisions) |dy| {
-                                inline for (0..TreeDivisions) |dz| {
-                                    unique_blocks[dx][dy][dz] = blocks[sx * TreeDivisions + dx][sy * TreeDivisions + dy][sz * TreeDivisions + dz];
+                        inline for (0..scale_factor) |dx| {
+                            inline for (0..scale_factor) |dy| {
+                                inline for (0..scale_factor) |dz| {
+                                    unique_blocks[dx][dy][dz] = blocks[sx * scale_factor + dx][sy * scale_factor + dy][sz * scale_factor + dz];
                                 }
                             }
                         }
@@ -585,7 +585,7 @@ pub const World = struct {
         }
     };
 
-    inline fn getBestBlock(blocks: [TreeDivisions * TreeDivisions * TreeDivisions]Block) Block {
+    inline fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
         var best: Block = blocks[0];
         var best_count: f32 = 1;
 
@@ -605,25 +605,25 @@ pub const World = struct {
         return best;
     }
 
-    pub fn UnloadChunk(self: *@This(), Pos: ChunkPos) !void {
+    pub fn unloadChunk(self: *@This(), Pos: ChunkPos) !void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
-        try self.UnloadChunkByPtr(chunk, Pos);
+        try self.unloadChunkByPtr(chunk, Pos);
     }
 
-    pub fn UnloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
+    pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
         const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
-        self.UnloadChunkByPtrNoSave(chunk);
+        self.unloadChunkByPtrNoSave(chunk);
     }
 
     ///dosent remove chunk from hashmap, just frees it
-    pub fn UnloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
+    pub fn unloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
         try onUnload(self, chunk, Pos);
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
         self.allocator.destroy(chunk);
     }
 
-    pub fn UnloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
+    pub fn unloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
         _ = chunk.WaitForRefAmount(1, null);
         _ = chunk.free(self.allocator);
         self.allocator.destroy(chunk);
@@ -635,7 +635,7 @@ pub const World = struct {
         self.entityUpdaterThread = null;
     }
 
-    pub fn Deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
         defer deinitWorld.End();
         self.stop();
@@ -647,7 +647,7 @@ pub const World = struct {
             var it = self.Chunks.buckets[b].hash_map.iterator();
             defer self.Chunks.buckets[b].lock.unlock();
             while (it.next()) |c| {
-                self.UnloadChunkByPtr(c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
+                self.unloadChunkByPtr(c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
             }
         }
         std.log.info("chunks unloaded", .{});
@@ -665,14 +665,13 @@ pub const World = struct {
         self.Entitys.deinit();
         std.log.info("entitys unloaded", .{});
         for (self.ChunkSources) |source| {
-            if (source) |s| if (s.deinit) |deinit| deinit(s, self);
+            if (source) |s| if (s.deinit) |de| de(s, self);
         }
 
         self.Chunks.deinit();
         std.log.info("world closed", .{});
     }
-};
 
-fn NormilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
+fn normilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
     return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
 }

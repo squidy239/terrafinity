@@ -5,7 +5,7 @@ const zm = @import("root").zm;
 const ztracy = @import("root").ztracy;
 
 const Block = @import("../World.zig").Block;
-const World = @import("../World.zig").World;
+const World = @import("../World.zig");
 
 pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype) T, samplerArgsType: type) type {
     return struct {

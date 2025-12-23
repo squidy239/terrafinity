@@ -16,7 +16,7 @@ pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
 pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 
-pub const World = @import("World").World;
+pub const World = @import("World");
 pub const Interpolation = @import("Interpolation");
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");

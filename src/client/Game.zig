@@ -1,5 +1,5 @@
 const std = @import("std");
-const World = @import("World").World;
+const World = @import("World");
 const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 const Renderer = @import("Renderer.zig");
 const ThreadPool = @import("root").ThreadPool;
@@ -106,10 +106,10 @@ pub const Game = struct {
             .ChunkSources = .{ null, null, game.region_storage.getSource(), game.generator.getSource() },
             .onEdit = null,
         };
-        errdefer game.world.Deinit();
+        errdefer game.world.deinit();
 
         for (0..0) |_| {
-            _ = try game.world.SpawnEntity(null, EntityTypes.Cube{
+            _ = try game.world.spawnEntity(null, EntityTypes.Cube{
                 .lock = .{},
                 .pos = @splat(0),
                 .velocity = @splat(0),
@@ -117,7 +117,7 @@ pub const Game = struct {
             });
         }
 
-        game.player = try game.world.SpawnEntity(null, EntityTypes.Player{
+        game.player = try game.world.spawnEntity(null, EntityTypes.Player{
             .player_name = .fromString("squid"),
             .physics = .{
                 .elements = .{
@@ -127,7 +127,7 @@ pub const Game = struct {
                     },
                     .gravity = .{},
                 },
-                .pos = try game.world.GetPlayerSpawnPos(),
+                .pos = try game.world.getPlayerSpawnPos(),
                 .velocity = @splat(0),
                 .updateTimer = try .start(),
             },
@@ -154,8 +154,8 @@ pub const Game = struct {
 
 
     pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
-        if (level <= World.StandardLevel) return @splat(0);
-        const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.TreeDivisions, World.TreeDivisions };
+        if (level <= World.standard_level) return @splat(0);
+        const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
         return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
     }
 
@@ -197,15 +197,15 @@ pub const Game = struct {
         }
         self.chunkManager.MeshesToLoad.deinit(true);
 
-        self.world.Deinit();
+        self.world.deinit();
 
         self.game_arena.deinit();
     }
 
     pub fn startThreads(self: *@This()) !void {
         self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, self.chunk_timeout * std.time.us_per_s });
-        self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, self.chunk_timeout * std.time.us_per_s });
+        self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }
 };

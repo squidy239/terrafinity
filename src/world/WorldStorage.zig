@@ -4,7 +4,7 @@ const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const Region = @import("Region.zig").Region;
-const World = @import("World.zig").World;
+const World = @import("World.zig");
 const ztracy = @import("ztracy");
 
 pub const RegionStorage = struct {

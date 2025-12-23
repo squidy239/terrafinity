@@ -8,7 +8,7 @@ const ChunkSize = Chunk.ChunkSize;
 const ztracy = @import("ztracy");
 
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
-const World = @import("World.zig").World;
+const World = @import("World.zig");
 const ChunkPos = World.ChunkPos;
 
 pub const DefaultGenerator = struct {
@@ -261,7 +261,7 @@ pub const DefaultGenerator = struct {
 
                 //      std.debug.print("ltn:{any}, n:{any}, mix: {any}, o: {any}\n", .{largeterrainNoise, terrainNoise, noise, params.LargeTerrainNoise.genNoise2D(largegenX, largegenZ)});
                 //uses lower or upper terrain height bound depending on if noise is less or greater than 0
-                const block_height: i32 = @intFromFloat(@round(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale));
+                const block_height: i32 = @intFromFloat(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
                 height[ux][uz] = block_height;
             }
         }
@@ -362,6 +362,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn isTree(noise: f32, scale: f32) bool {
+        //TODO better tree system that is not so finicky
         const cutoff = 0.0001; //any noise less than this will be a tree, if this is too high trees will be stacked on top of each other
         return noise < -1.0 + cutoff / scale;
     }

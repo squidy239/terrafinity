@@ -12,7 +12,7 @@ const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const Entity = @import("Entity").Entity;
 const gl = @import("gl");
-const World = @import("World").World;
+const World = @import("World");
 const ztracy = @import("ztracy");
 
 const Game = @import("Game.zig");

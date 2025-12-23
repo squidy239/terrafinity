@@ -153,7 +153,7 @@ pub fn processInput(window: *glfw.Window) !void {
         // _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
         // worldEditorLock.unlock();
 
-        _ = try game.world.SpawnEntity(null, EntityTypes.Cube{ .pos = game.player.getPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){ 100, 100, 100 }, .timestamp = std.time.microTimestamp() });
+        _ = try game.world.spawnEntity(null, EntityTypes.Cube{ .pos = game.player.getPos().?, .velocity = game.renderer.cameraFront * @Vector(3, f64){ 100, 100, 100 }, .timestamp = std.time.microTimestamp() });
     }
 
     if (window.getKey(glfw.Key.g) == .press) {
@@ -184,7 +184,7 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .air, World.StandardLevel) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .air, World.standard_level) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
@@ -229,7 +229,7 @@ fn genFractalTask() void {
     };
     worldEditorLock.lock();
     defer worldEditorLock.unlock();
-    _ = tree.place(&worldEditor, World.StandardLevel) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
+    _ = tree.place(&worldEditor, World.standard_level) catch |err| std.debug.panic("failed to place tree: {any}\n", .{err});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
 }
 

@@ -81,7 +81,7 @@ pub const Mover = struct {
         }
         const maxMove: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
-        defer reader.Clear();
+        defer reader.clear();
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
@@ -98,7 +98,7 @@ pub const Mover = struct {
     }
 
     pub fn collision(self: *const @This(), pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
-        defer reader.Clear();
+        defer reader.clear();
 
         const base = @floor(pos); // floor entity pos once
         var bestMtv: @Vector(3, f64) = @splat(0.0);
@@ -115,7 +115,7 @@ pub const Mover = struct {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.GetBlockCached(@intFromFloat(blockPos), World.StandardLevel);
+                    const block = try reader.getBlock(@intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });

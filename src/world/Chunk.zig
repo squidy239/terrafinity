@@ -84,9 +84,11 @@ pub const Chunk = struct {
             },
             .blocks => {
                 _ = try self.ToBlocks(allocator, false);
-                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self.blocks.blocks);
-                const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(mergeBlocks.blocks);
-                fastMerge(@typeInfo(Block).@"enum".tag_type, @intFromEnum(Block.null), flatArray, flatMergeArray);
+                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks.blocks);
+                const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
+                for(flatArray, flatMergeArray) |*item, mergeItem| {
+                    if (mergeItem != .null) item.* = mergeItem;
+                }
                 if (IsOneBlock(self.blocks.blocks)) |block| {
                     allocator.free(self.blocks.blocks);
                     self.blocks = .{ .oneBlock = block };
@@ -94,42 +96,7 @@ pub const Chunk = struct {
             },
         }
     }
-
-    fn fastMerge(comptime T: type, comptime skipValue: T, array: []T, merge: []const T) void {
-        const bits = @bitSizeOf(T);
-
-        if (bits >= 8) {
-            for (array, merge) |*item, mergeItem| {
-                if (mergeItem != skipValue) item.* = mergeItem;
-            }
-            return;
-        }
-
-        const ByteVec = @Vector(32, u8);
-        const array_bytes = std.mem.sliceAsBytes(array);
-        const merge_bytes = std.mem.sliceAsBytes(merge);
-
-        const skip_byte: u8 = skipValue;
-        const skip_vec: ByteVec = @splat(skip_byte);
-
-        const vec_len = array_bytes.len / 32;
-        var i: usize = 0;
-
-        while (i < vec_len) : (i += 1) {
-            const arr_vec: ByteVec = array_bytes[i * 32 ..][0..32].*;
-            const merge_vec: ByteVec = merge_bytes[i * 32 ..][0..32].*;
-
-            const is_not_skip = merge_vec != skip_vec;
-
-            const result = @select(u8, is_not_skip, merge_vec, arr_vec);
-            array_bytes[i * 32 ..][0..32].* = result;
-        }
-
-        const remainder_start = vec_len * 32;
-        for (array_bytes[remainder_start..], merge_bytes[remainder_start..]) |*a, m| {
-            if (m != skip_byte) a.* = m;
-        }
-    }
+    
     pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
         self.addAndLockShared();
         defer {

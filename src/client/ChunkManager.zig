@@ -10,7 +10,7 @@ const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const World = @import("World").World;
+const World = @import("World");
 const ztracy = @import("ztracy");
 
 const Mesher = @import("Mesher.zig");
