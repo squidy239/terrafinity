@@ -3,7 +3,7 @@ const zm = @import("root").zm;
 const ztracy = @import("root").ztracy;
 
 const Block = @import("../World.zig").Block;
-const WorldEditor = @import("../World.zig").World.WorldEditor;
+const WorldEditor = @import("../World.zig").World.Editor;
 
 const utils = @import("utils.zig");
 
@@ -19,30 +19,32 @@ pub const Tree = struct {
     steps: []const Step,
     rand: std.Random,
     branchCounter: usize = 0,
-    minRadius: f32 = 0.75,
+    minRadius: f32 = 0.5,
     minLength: f32 = 2.0,
     scale: f32 = 1.0,
+    squareEndScale: bool = true,
 
-    pub fn place(self: *const @This(), editor: *WorldEditor) !u64 {
+    pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, self.rand, -0.05, 0.05);
-        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0);
+        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0, level);
     }
 
-    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize) !u64 {
+    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize, level: i32) !u64 {
         const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
         defer pstep.End();
 
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         const step = self.steps[recursionDepth];
         const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
+        const halfLeaf = self.leafSize * 0.5;
+        const lenscale = if (self.squareEndScale) self.scale * self.scale else self.scale;
         var branchesCount: u64 = 0;
         for (0..firstBranches) |i| {
             const branchVec = branchDirection(i, direction, step.branchRange, firstBranches) + rand3Vec(f32, self.rand, -step.branchRandomness, step.branchRandomness);
             const length = lastLength * step.lengthPercent + self.rand.float(f32) * step.lengthPercentRandomness;
             const radius = lastRadius * step.radiusPercent + self.rand.float(f32) * step.radiusPercentRandomness;
-            if (length < self.minLength * self.scale or recursionDepth >= self.maxRecursionDepth) {
-                const halfLeaf = self.leafSize * self.scale * 0.5;
+            if (length < self.minLength * lenscale or recursionDepth >= self.maxRecursionDepth) {
                 var y = -halfLeaf;
                 while (y < halfLeaf) : (y += 1) {
                     var x = -halfLeaf;
@@ -50,16 +52,16 @@ pub const Tree = struct {
                         var z = -halfLeaf;
                         while (z <= halfLeaf) : (z += 1) {
                             const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
-                            try editor.PlaceBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })));
+                            try editor.placeBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
                         }
                     }
                 }
             } else {
                 branchesCount += 1;
                 const branch = WorldEditor.Geometry.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
-                try editor.PlaceSamplerShape(step.block, branch);
+                try editor.placeSamplerShape(step.block, branch, level);
                 const newPos = pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
-                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1);
+                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1, level);
             }
         }
         return branchesCount;

@@ -121,7 +121,7 @@ void main() {
 
     float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
 
-    vec3 vertexposition = coords * scale + ((pos * scale) + (chunkPos.xyz * ChunkSize * scale));
+    vec3 vertexposition = coords * scale + ((vec3(pos) * scale) + (vec3(chunkPos.xyz) * ChunkSize * scale));
 
     if (blocktype == 7) {
         float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
@@ -132,12 +132,12 @@ void main() {
     float animationMs = 2500;
     float animationSpeed = 0.25;
     float chunktime = float(time - creationTime);
-    vec3 relativeChunkPos = vec3(dvec3(chunkPos.xyz * ChunkSize * scale) - playerPos);
+    dvec3 relativeChunkPos = (dvec3(dvec3(chunkPos.xyz) * double(ChunkSize) * double(scale)) - playerPos);
    // coords.y += pow((animationMs - min(chunktime, animationMs))/animationMs, 2) * animationMs * animationSpeed; //replace with pos.y for other aniamtion
     float newscale = scale;
-    newscale *= 1 - (pow((animationMs - min(chunktime, animationMs))/animationMs, 2)); //replace with pos.y for other aniamtion
+   // newscale *= 1 - (pow((animationMs - min(chunktime, animationMs))/animationMs, 2)); //replace with pos.y for other aniamtion
 
-    gl_Position = projview * vec4((coords * newscale) + (pos * scale) + (relativeChunkPos), 1);
+    gl_Position = vec4(dmat4(projview) * dvec4(dvec4(dvec3(coords * newscale) + dvec3(pos * scale) + (relativeChunkPos), 1)));
 }
 
 

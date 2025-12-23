@@ -11,48 +11,39 @@ pub const Block = enum(u16) {
     Water, //id is 7 hardcoded for waves, TODO make this a property
     Snow,
 
-    pub const Properties = struct {
-        pub const transparent: std.EnumArray(Block, bool) = initTransparent();
-        pub const visible: std.EnumArray(Block, bool) = initVisible();
-        pub const solid: std.EnumArray(Block, bool) = initSolid();
+    pub inline fn isTransparent(self: Block) bool {
+        return switch (self) {
+            .Air, .Water, .Leaves, .Null => true,
+            else => false,
+        };
+    }
 
-        fn initTransparent() std.EnumArray(Block, bool) {
-            var temptransperent = std.EnumArray(Block, bool).initUndefined();
-            for (@typeInfo(Block).@"enum".fields) |blockInt| {
-                const blockType: Block = @enumFromInt(blockInt.value);
-                const istransparent = switch (blockType) {
-                    .Air, .Water, .Leaves, .Null => true,
-                    else => false,
-                };
-                temptransperent.set(blockType, istransparent);
-            }
-            return temptransperent;
-        }
+    pub inline fn isSolid(self: Block) bool {
+        return switch (self) {
+            .Air, .Water, .Null => false,
+            else => true,
+        };
+    }
 
-        fn initSolid() std.EnumArray(Block, bool) {
-            var tempsolid = std.EnumArray(Block, bool).initUndefined();
-            for (@typeInfo(Block).@"enum".fields) |blockInt| {
-                const blockType: Block = @enumFromInt(blockInt.value);
-                const issolid = switch (blockType) {
-                    .Air, .Water, .Null => false,
-                    else => true,
-                };
-                tempsolid.set(blockType, issolid);
-            }
-            return tempsolid;
-        }
+    pub inline fn isVisible(self: Block) bool {
+        return switch (self) {
+            .Air, .Null => false,
+            else => true,
+        };
+    }
 
-        fn initVisible() std.EnumArray(Block, bool) {
-            var tempvisible = std.EnumArray(Block, bool).initUndefined();
-            for (@typeInfo(Block).@"enum".fields) |blockInt| {
-                const blockType: Block = @enumFromInt(blockInt.value);
-                const isVisible = switch (blockType) {
-                    .Air, .Null => false,
-                    else => true,
-                };
-                tempvisible.set(blockType, isVisible);
-            }
-            return tempvisible;
-        }
-    };
+    pub inline fn getPropagationWeight(self: Block) f32 {
+        return switch (self) {
+            .Grass => 1.1,
+            .Air => 0.1,
+            else => 1,
+        };
+    }
+
+    pub inline fn plantsCanGrow(self: Block) bool {
+        return switch (self) {
+            .Grass, .Dirt => true,
+            else => false,
+        };
+    }
 };

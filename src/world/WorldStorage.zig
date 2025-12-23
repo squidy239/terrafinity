@@ -14,10 +14,10 @@ pub const RegionStorage = struct {
         return .{
             .data = self,
             .getTerrainHeight = null,
-            .getBlocks = getBlocks,
+            .getBlocks = null,
             .onLoad = null,
             .deinit = null,
-            .onUnload = onUnload,
+            .onUnload = null,
         };
     }
     ///should technically work but is very very very very very bad, TODO make better
@@ -26,11 +26,11 @@ pub const RegionStorage = struct {
         const regionPos = @divFloor(Pos, @Vector(3, i32){ Region.Size, Region.Size, Region.Size });
         const posInRegion = @mod(Pos, @Vector(3, i32){ Region.Size, Region.Size, Region.Size });
         const d = (getOneChunk(self, world, regionPos, posInRegion) catch return false) orelse return false;
-        if (d == .blocks){
+        if (d == .blocks) {
             @memcpy(blocks, d.blocks);
             return true;
         }
-        if (d == .oneBlock){
+        if (d == .oneBlock) {
             @memset(blocks, @splat(@splat(d.oneBlock)));
             return true;
         }
@@ -86,26 +86,25 @@ pub const RegionStorage = struct {
         var reader = file.reader(&read_buf);
         const fullheader = try Region.readHeader(&reader.interface);
         const encodings = try Region.loadEncodings(&reader.interface, fullheader, world.allocator);
-        
+
         for (0..Region.Size) |x| {
             for (0..Region.Size) |y| {
                 for (0..Region.Size) |z| {
-                    if (encodings[x][y][z])|encoding| {
+                    if (encodings[x][y][z]) |encoding| {
                         const chunk = try Chunk.from(encoding, world.allocator);
                         const worldPos = regionPos * @Vector(3, i32){ Region.Size, Region.Size, Region.Size } + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const existing = try world.Chunks.putNoOverrideaddRef(worldPos, chunk);
                         if (existing) |c| {
                             chunk.free(world.allocator);
                             world.allocator.destroy(chunk);
-                            c.release(); 
+                            c.release();
                         }
                     }
                 }
             }
         }
     }
-    
-    
+
     pub fn getOneChunk(self: *@This(), world: *World, regionPos: [3]i32, posInRegion: [3]i32) !?Chunk.BlockEncoding {
         const lr = ztracy.ZoneNC(@src(), "loadRegion", 687678678);
         defer lr.End();
@@ -118,13 +117,13 @@ pub const RegionStorage = struct {
         var reader = file.reader(&read_buf);
         const fullheader = try Region.readHeader(&reader.interface);
         const encodings = try Region.loadEncodings(&reader.interface, fullheader, world.allocator);
-        
+
         for (0..Region.Size) |x| {
             for (0..Region.Size) |y| {
                 for (0..Region.Size) |z| {
-                    if (x != posInRegion[0] or y != posInRegion[1] or z != posInRegion[2]){
-                        if(encodings[x][y][z])|encoding| {
-                            if(encoding == .blocks){
+                    if (x != posInRegion[0] or y != posInRegion[1] or z != posInRegion[2]) {
+                        if (encodings[x][y][z]) |encoding| {
+                            if (encoding == .blocks) {
                                 world.allocator.free(encoding.blocks);
                             }
                         }
@@ -133,7 +132,6 @@ pub const RegionStorage = struct {
             }
         }
         return encodings[@intCast(posInRegion[0])][@intCast(posInRegion[1])][@intCast(posInRegion[2])];
-        
     }
 
     const StorageParams = struct {

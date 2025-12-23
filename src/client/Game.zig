@@ -8,6 +8,7 @@ const EntityTypes = @import("EntityTypes");
 const utils = @import("utils.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const builtin = @import("builtin");
+const Chunk = @import("Chunk").Chunk;
 const Loader = @import("Loader.zig");
 const UserInput = @import("UserInput.zig");
 const glfw = @import("zglfw");
@@ -27,20 +28,41 @@ pub const Game = struct {
     loaderThread: ?std.Thread,
     unloaderThread: ?std.Thread,
 
-    // Distances
-    MeshDistance: [3]std.atomic.Value(u32),
-    GenerateDistance: [3]std.atomic.Value(u32),
-    LoadDistance: [3]std.atomic.Value(u32),
+    //The radius in which chunk generate chunks to generate horizontal, vertical
+    GenerateDistance: std.atomic.Value(packed struct { xz: u32, y: u32 }),
+
+    ///the smallest level for general world generation
+    SmallestLevel: i32 = 0,
+
+    levels: [2]i32,
+    
+    chunk_timeout: u64,
 
     running: std.atomic.Value(bool),
+    
+    
+    pub const GameConfig = struct {
+        
+        ///start, end
+        levels: [2]i32,
+        generation_distance: [2]u32,
+        ///after this of time in seconds a chunk will be unloadeed if it is not used
+        chunk_timeout: u64,
 
+    };
     pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window, game_path: std.fs.Dir) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
         defer worldConfigFile.close();
+        
         const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
         defer generatorConfigFile.close();
+        
+        const gameConfigFile = try std.fs.cwd().openFile("config/GameConfig.zon", .{ .mode = .read_only });
+        defer gameConfigFile.close();
+        
+        const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, game.game_arena.allocator());
 
         const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, game.game_arena.allocator());
         var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator, game.game_arena.allocator());
@@ -51,29 +73,25 @@ pub const Game = struct {
         GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
         GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
 
-        const GenDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 10, 10 } else [2]u32{ 20, 20 }; //x,y
-        const LoadDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-        const MeshDist: [2]u32 = if (builtin.mode == .Debug) [2]u32{ 12, 12 } else [2]u32{ 22, 22 }; //x,y
-
         game.allocator = allocator;
+        const terrain_height_cache_memory = 10_000_000; //10 mb
+        const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
         game.generator = World.DefaultGenerator{
-            .TerrainHeightCache = try .init(secondary_allocator, 4096),
+            .TerrainHeightCache = try .init(secondary_allocator, thc_size),
             .params = GeneratorConfig,
         };
-
+        game.levels = config.levels;
         game_path.makeDir("RegionStorage") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-
+        game.chunk_timeout = config.chunk_timeout;
         game.region_storage = .{
             .params = .{ .path = try game_path.openDir("RegionStorage", .{ .iterate = true }) },
         };
         errdefer game.generator.TerrainHeightCache.deinit();
         game.running = .init(true);
-        game.GenerateDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(GenDist[0]), std.atomic.Value(u32).init(GenDist[1]), std.atomic.Value(u32).init(GenDist[0]) };
-        game.LoadDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(LoadDist[0]), std.atomic.Value(u32).init(LoadDist[1]), std.atomic.Value(u32).init(LoadDist[0]) };
-        game.MeshDistance = [3]std.atomic.Value(u32){ std.atomic.Value(u32).init(MeshDist[0]), std.atomic.Value(u32).init(MeshDist[1]), std.atomic.Value(u32).init(MeshDist[0]) };
+        game.GenerateDistance = .init(.{ .xz = config.generation_distance[0], .y = config.generation_distance[1] });
         const cpu_count = try std.Thread.getCpuCount();
         try game.pool.init(.{ .n_jobs = cpu_count, .allocator = secondary_allocator });
         errdefer game.pool.deinit();
@@ -119,7 +137,7 @@ pub const Game = struct {
         game.chunkManager = .{
             .pool = &game.pool,
             .ChunkRenderList = .init(allocator),
-            .LoadingChunks = ConcurrentHashMap([3]i32, bool, std.hash_map.AutoContext([3]i32), 80, 32).init(allocator),
+            .LoadingChunks = .init(allocator),
             .MeshesToLoad = .init(allocator),
             .world = &game.world,
             .allocator = allocator,
@@ -127,6 +145,18 @@ pub const Game = struct {
         game.renderer = try .init(allocator, game.player);
         try UserInput.init(game);
         _ = window.setCursorPosCallback(UserInput.MouseCallback);
+    }
+
+    pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
+        const dist = self.GenerateDistance.load(.monotonic);
+        return .{ dist.xz, dist.y };
+    }
+
+
+    pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
+        if (level <= World.StandardLevel) return @splat(0);
+        const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.TreeDivisions, World.TreeDivisions };
+        return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
     }
 
     pub fn Frame(self: *@This(), viewport_pixels: @Vector(2, f32), viewport_millimeters: @Vector(2, f32), window: *glfw.Window) ![2]u64 {
@@ -173,8 +203,8 @@ pub const Game = struct {
     }
 
     pub fn startThreads(self: *@This()) !void {
-        self.loaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkLoaderThread, .{ self, 50 * std.time.ns_per_ms });
-        self.unloaderThread = try std.Thread.spawn(.{}, Loader.Loader.ChunkUnloaderThread, .{ self, 50 * std.time.ns_per_ms });
+        self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
+        self.unloaderThread = try std.Thread.spawn(.{}, World.ChunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, self.chunk_timeout * std.time.us_per_s });
         self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.UpdateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
         self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
     }

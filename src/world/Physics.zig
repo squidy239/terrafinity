@@ -74,15 +74,18 @@ pub const Mover = struct {
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = allocator;
-        const maxMove: @Vector(3, f64) = @splat(0.4);
-        var reader = World.WorldReader{ .world = world };
-        defer reader.Clear();
         var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
+        if (!self.collisions) {
+            _ = physics.fetchAddPos(posOffset);
+            return;
+        }
+        const maxMove: @Vector(3, f64) = @splat(0.4);
+        var reader = World.Reader{ .world = world };
+        defer reader.Clear();
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
             var newPos = physics.fetchAddPos(move);
-
             while (try self.collision(newPos, &reader)) |mtv| {
                 newPos = physics.fetchAddPos(-mtv);
                 physics.velocityLock.lock();
@@ -94,7 +97,7 @@ pub const Mover = struct {
         }
     }
 
-    pub fn collision(self: *const @This(), pos: @Vector(3, f64), reader: *World.WorldReader) !?@Vector(3, f64) {
+    pub fn collision(self: *const @This(), pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
         defer reader.Clear();
 
         const base = @floor(pos); // floor entity pos once
@@ -112,8 +115,8 @@ pub const Mover = struct {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.GetBlockCached(@intFromFloat(blockPos));
-                    if (!Block.Properties.solid.get(block)) continue;
+                    const block = try reader.GetBlockCached(@intFromFloat(blockPos), World.StandardLevel);
+                    if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });
 

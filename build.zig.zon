@@ -43,8 +43,8 @@
             .hash = "zigimg-0.1.0-8_eo2vUZFgAAtN1c6dAO5DdqL0d4cEWHtn6iR5ucZJti",
         },
         .ConcurrentQueue = .{
-            .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#6ea86b57368ff851ab83fe2d625ef458f5ec9748",
-            .hash = "ConcurrentQueue-0.0.0-ucuqzmhCAAA_6XdltRtFrG2vzkb00c7PG78qvfeasffP",
+            .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#5a0b47c99f3e3ff4ee179028b43f1a0ee4498ffa",
+            .hash = "ConcurrentQueue-0.0.0-ucuqzoBCAAD7OexFDSJ3nulxQ9AjBcA1xStwAZWSWAlE",
         },
         .zgui = .{
             .url = "git+https://codeberg.org/glowsquid/zgui.git#27a3b4f8ad0dec8ad5265ac5bb5574c24ea5faa7",

@@ -3,6 +3,7 @@ const std = @import("std");
 const Block = @import("Chunk").Block;
 const Chunk = @import("Chunk").Chunk;
 const ChunkSize = Chunk.ChunkSize;
+const ChunkPos = @import("root").World.ChunkPos;
 const Obj = @import("obj");
 const ztracy = @import("ztracy");
 
@@ -26,6 +27,7 @@ pub const Face = packed struct(u64) {
     BlockType: u20,
     _: u12,
 };
+//TODO remove threadlocal vars to prepare for async
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
@@ -36,16 +38,17 @@ threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Blo
 pub const Mesh = struct {
     faces: ?[]const Face,
     TransperentFaces: ?[]const Face,
-    Pos: [3]i32,
+    Pos: ChunkPos,
     scale: f32,
     animation: bool,
     ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-    pub fn MeshFromChunks(ChunkPos: [3]i32, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
+    pub fn MeshFromChunks(chunkPos: ChunkPos, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
         GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
-        comptime std.debug.assert(@bitSizeOf(Block) <= 20);
+        if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
+
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
         var Tpos: usize = 0;
@@ -55,7 +58,7 @@ pub const Mesh = struct {
             for (1..ChunkSize + 1) |y| {
                 for (1..ChunkSize + 1) |z| {
                     const block = extendedBlocks[x][y][z];
-                    if (!Block.Properties.visible.get(block)) continue;
+                    if (!block.isVisible()) continue;
                     const neighboring_blocks = [6]Block{
                         extendedBlocks[x + 1][y][z],
                         extendedBlocks[x - 1][y][z],
@@ -64,10 +67,10 @@ pub const Mesh = struct {
                         extendedBlocks[x][y][z + 1],
                         extendedBlocks[x][y][z - 1],
                     };
-                    const block_transparent = Block.Properties.transparent.get(block);
+                    const block_transparent = block.isTransparent();
                     inline for (0..6) |i| {
                         inner: {
-                            if (!Block.Properties.transparent.get(neighboring_blocks[i])) break :inner;
+                            if (!neighboring_blocks[i].isTransparent()) break :inner;
                             if (!block_transparent) {
                                 std.debug.assert(pos < faceBuffer.len);
                                 faceBuffer[pos] = Face{
@@ -110,7 +113,7 @@ pub const Mesh = struct {
             return @This(){
                 .faces = if (pos > 0) try allocator.dupe(Face, faceBuffer[0..pos]) else null,
                 .TransperentFaces = if (Tpos > 0) try allocator.dupe(Face, TransparentfaceBuffer[0..Tpos]) else null,
-                .Pos = ChunkPos,
+                .Pos = chunkPos,
                 .scale = scale,
                 .animation = animation,
             };

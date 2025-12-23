@@ -163,17 +163,17 @@ pub const Cube = struct {
         //self.velocity[world.random.intRangeAtMost(usize, 0, 2)] += 100 * (world.random.float(f64) - 0.5) * dt[0];
         self.pos += self.velocity * dt;
         self.lock.unlock();
-        var worldReader = World.WorldReader{ .world = world };
+        var worldReader = World.Reader{ .world = world };
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
-        if ((worldReader.GetBlockNoCache(@intFromFloat(self.pos)) catch unreachable) != .Air) {
+        if ((worldReader.GetBlockNoCache(@intFromFloat(self.pos), World.StandardLevel) catch unreachable) != .Air) {
             g.End();
-            var worldEditor = World.WorldEditor{
+            var worldEditor = World.Editor{
                 .world = world,
                 .tempallocator = allocator,
             };
-            const sphere = World.WorldEditor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
+            const sphere = World.Editor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
             //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
-            worldEditor.PlaceSamplerShape(.Air, sphere) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            worldEditor.placeSamplerShape(.Air, sphere, World.StandardLevel) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
             //_ = uuid;
             _ = entity.ref_count.fetchSub(1, .seq_cst);
