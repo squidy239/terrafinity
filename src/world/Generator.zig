@@ -290,7 +290,7 @@ pub const DefaultGenerator = struct {
             .fixed_buffer_allocator = undefined,
         };
         const tempAllocator = bfa.get();
-        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false}; //no need to propagate since structures are generated in all LODs
+        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false }; //no need to propagate since structures are generated in all LODs
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
@@ -350,9 +350,9 @@ pub const DefaultGenerator = struct {
 
     fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
         const radius: f32 = (height * scale);
-        
-        if(radius < 0.1)return;
-        
+
+        if (radius < 0.1) return;
+
         if (radius < 0.5) {
             try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;

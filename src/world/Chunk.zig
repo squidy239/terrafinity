@@ -86,7 +86,7 @@ pub const Chunk = struct {
                 _ = try self.ToBlocks(allocator, false);
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks.blocks);
                 const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
-                for(flatArray, flatMergeArray) |*item, mergeItem| {
+                for (flatArray, flatMergeArray) |*item, mergeItem| {
                     if (mergeItem != .null) item.* = mergeItem;
                 }
                 if (IsOneBlock(self.blocks.blocks)) |block| {
@@ -96,7 +96,7 @@ pub const Chunk = struct {
             },
         }
     }
-    
+
     pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
         self.addAndLockShared();
         defer {

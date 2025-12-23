@@ -6,7 +6,6 @@ const zigimg = @import("zigimg");
 
 threadlocal var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
-
 ///must be run in a valid opengl context
 pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
     const keyword = ".png";
@@ -66,7 +65,7 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
     gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(textureArray.len), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     for (0..textureArray.len) |itt| {
         const textureData = (textureArray[itt] orelse missing_texture).rawBytes();
-        gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, @intCast(itt), @intCast(resolution[0]), @intCast(resolution[1]), 1, if(textureArray[itt] != null) gl.RGBA else gl.RGB, gl.UNSIGNED_BYTE, @ptrCast(textureData));
+        gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, @intCast(itt), @intCast(resolution[0]), @intCast(resolution[1]), 1, if (textureArray[itt] != null) gl.RGBA else gl.RGB, gl.UNSIGNED_BYTE, @ptrCast(textureData));
     }
     gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, 0);

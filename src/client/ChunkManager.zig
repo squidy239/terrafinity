@@ -73,8 +73,8 @@ pub const ChunkManager = struct {
         game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 
-    pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) void {
+    pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
         const manager = @as(*ChunkManager, @ptrCast(@alignCast(args)));
-        manager.AddChunkToRender(chunkPos, false, false) catch |err| std.log.err("err: {any}", .{err});
+        manager.AddChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
     }
 };

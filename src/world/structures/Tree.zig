@@ -67,20 +67,7 @@ pub const Tree = struct {
         return branchesCount;
     }
 
-    pub const Step = struct {
-        lengthPercent: f32 = 0.7,
-        lengthPercentRandomness: f32 = 0.0,
-        baseRadiusPercent: f32 = 1.0,
-        radiusPercent: f32 = 0.65,
-        radiusPercentRandomness: f32 = 0.0,
-        branchCountMin: usize = 2.0,
-        branchCountMax: usize = 4.0,
-        minBranchWidth: ?f32 = null,
-        branchRandomness: f32 = 0.0,
-        branchRange: @Vector(3, f32) = @splat(0.2),
-        block: Block = Block.wood,
-        endBlock: Block = Block.leaves
-    };
+    pub const Step = struct { lengthPercent: f32 = 0.7, lengthPercentRandomness: f32 = 0.0, baseRadiusPercent: f32 = 1.0, radiusPercent: f32 = 0.65, radiusPercentRandomness: f32 = 0.0, branchCountMin: usize = 2.0, branchCountMax: usize = 4.0, minBranchWidth: ?f32 = null, branchRandomness: f32 = 0.0, branchRange: @Vector(3, f32) = @splat(0.2), block: Block = Block.wood, endBlock: Block = Block.leaves };
 
     fn rand3Vec(comptime T: type, rand: std.Random, rangeBase: T, rangeTop: T) @Vector(3, T) {
         const vec = @Vector(3, T){ rand.float(T), rand.float(T), rand.float(T) };

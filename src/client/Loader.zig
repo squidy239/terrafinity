@@ -56,8 +56,8 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
 }
 
 pub fn keepLoaded(playerPos: World.BlockPos, Pos: World.ChunkPos, innerChunkRange: @Vector(2, u32), outerChunkRange: @Vector(2, u32)) bool {
-    const playerChunkPos = @as(@Vector(3, f64), @floatFromInt(playerPos)) / @as( @Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level)));
-    const inner: @Vector(3, f64) = .{ @floatFromInt(innerChunkRange[0]), @floatFromInt(innerChunkRange[1]), @floatFromInt(innerChunkRange[0])};
+    const playerChunkPos = @as(@Vector(3, f64), @floatFromInt(playerPos)) / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level)));
+    const inner: @Vector(3, f64) = .{ @floatFromInt(innerChunkRange[0]), @floatFromInt(innerChunkRange[1]), @floatFromInt(innerChunkRange[0]) };
     const outer: @Vector(3, f64) = .{ @floatFromInt(outerChunkRange[0]), @floatFromInt(outerChunkRange[1]), @floatFromInt(outerChunkRange[0]) };
     const center: @Vector(3, f64) = @floatFromInt(Pos.position);
 
@@ -119,9 +119,9 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
             while (y < distance[1]) {
                 defer y += 1;
                 const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
-                
+
                 const in_range = keepLoaded(playerPos, ChunkPos, innerdistance, distance);
-               // const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, .{ innerdistance[0], innerdistance[1], innerdistance[0] });
+                // const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, .{ innerdistance[0], innerdistance[1], innerdistance[0] });
 
                 if (!in_range or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                     continue;

@@ -35,33 +35,30 @@ pub const Game = struct {
     SmallestLevel: i32 = 0,
 
     levels: [2]i32,
-    
+
     chunk_timeout: u64,
 
     running: std.atomic.Value(bool),
-    
-    
+
     pub const GameConfig = struct {
-        
         ///start, end
         levels: [2]i32,
         generation_distance: [2]u32,
         ///after this of time in seconds a chunk will be unloadeed if it is not used
         chunk_timeout: u64,
-
     };
     pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window, game_path: std.fs.Dir) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
         defer worldConfigFile.close();
-        
+
         const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
         defer generatorConfigFile.close();
-        
+
         const gameConfigFile = try std.fs.cwd().openFile("config/GameConfig.zon", .{ .mode = .read_only });
         defer gameConfigFile.close();
-        
+
         const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, game.game_arena.allocator());
 
         const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, game.game_arena.allocator());
@@ -151,7 +148,6 @@ pub const Game = struct {
         const dist = self.GenerateDistance.load(.monotonic);
         return .{ dist.xz, dist.y };
     }
-
 
     pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
         if (level <= World.standard_level) return @splat(0);
