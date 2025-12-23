@@ -183,7 +183,7 @@ test "write" {
     var writer = file.writer(&writeBuf);
     var reader = file.reader(&readBuf);
 
-    var blocks: [Chunk.ChunkSize][Chunk.ChunkSize][Chunk.ChunkSize]Block = @splat(@splat(@splat(Block.Dirt)));
+    var blocks: [Chunk.ChunkSize][Chunk.ChunkSize][Chunk.ChunkSize]Block = @splat(@splat(@splat(Block.dirt)));
 
     const tchunk = try Chunk.FromBlocks(&blocks, std.testing.allocator);
 

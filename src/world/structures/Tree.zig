@@ -51,7 +51,7 @@ pub const Tree = struct {
                     while (x <= halfLeaf) : (x += 1) {
                         var z = -halfLeaf;
                         while (z <= halfLeaf) : (z += 1) {
-                            const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .Air;
+                            const block: Block = if (self.rand.float(f32) < self.leafDensity) step.endBlock else .air;
                             try editor.placeBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
                         }
                     }
@@ -78,8 +78,8 @@ pub const Tree = struct {
         minBranchWidth: ?f32 = null,
         branchRandomness: f32 = 0.0,
         branchRange: @Vector(3, f32) = @splat(0.2),
-        block: Block = Block.Wood,
-        endBlock: Block = Block.Leaves,
+        block: Block = Block.wood,
+        endBlock: Block = Block.leaves
     };
 
     fn rand3Vec(comptime T: type, rand: std.Random, rangeBase: T, rangeTop: T) @Vector(3, T) {

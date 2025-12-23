@@ -66,16 +66,16 @@ pub const Chunk = struct {
         defer self.release();
         if (lock) self.lockExclusive();
         defer if (lock) self.unlockExclusive();
-        if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .Null)) return;
+        if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .null)) return;
         switch (mergeBlocks) {
             .oneBlock => {
                 switch (self.blocks) {
                     .oneBlock => {
-                        if (mergeBlocks.oneBlock != .Null)
+                        if (mergeBlocks.oneBlock != .null)
                             self.blocks = mergeBlocks;
                     },
                     .blocks => {
-                        if (mergeBlocks.oneBlock != .Null) {
+                        if (mergeBlocks.oneBlock != .null) {
                             allocator.free(self.blocks.blocks);
                             self.blocks = .{ .oneBlock = mergeBlocks.oneBlock };
                         }
@@ -86,7 +86,7 @@ pub const Chunk = struct {
                 _ = try self.ToBlocks(allocator, false);
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self.blocks.blocks);
                 const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(mergeBlocks.blocks);
-                fastMerge(@typeInfo(Block).@"enum".tag_type, @intFromEnum(Block.Null), flatArray, flatMergeArray);
+                fastMerge(@typeInfo(Block).@"enum".tag_type, @intFromEnum(Block.null), flatArray, flatMergeArray);
                 if (IsOneBlock(self.blocks.blocks)) |block| {
                     allocator.free(self.blocks.blocks);
                     self.blocks = .{ .oneBlock = block };

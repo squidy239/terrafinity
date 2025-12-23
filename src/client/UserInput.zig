@@ -184,7 +184,7 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
         .frequency = 0.1,
     };
     worldEditorLock.lock();
-    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .Air, World.StandardLevel) catch |err| std.debug.panic("err: {any}\n", .{err});
+    World.Editor.TexturedSphere.NoiseSphere(&worldEditor, pos, 128, 1.0, noise, .air, World.StandardLevel) catch |err| std.debug.panic("err: {any}\n", .{err});
     std.debug.print("placeing\n", .{});
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
@@ -200,18 +200,18 @@ fn genFractalTask() void {
                 .branchCountMax = 32,
                 .branchCountMin = 32,
                 .branchRange = @Vector(3, f32){ 2, 2, 2 },
-                .block = .Stone,
+                .block = .stone,
                 .branchRandomness = 0.0,
             },
             1...21 => World.Editor.Tree.Step{
                 .lengthPercent = 0.75,
                 .radiusPercent = 0.5,
                 .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },
-                .block = .Stone,
+                .block = .stone,
                 .branchCountMax = 3,
                 .branchCountMin = 3,
                 .branchRandomness = 0.0,
-                .endBlock = .Snow,
+                .endBlock = .snow,
             },
             else => unreachable,
         };

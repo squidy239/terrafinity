@@ -98,7 +98,7 @@ pub const DefaultGenerator = struct {
         GenerateTerrain(blocks, Pos, &heights, &self.params, &rand, @floatCast(chunkscale));
         genterra.End();
         var oneBlock = Chunk.IsOneBlock(blocks);
-        if (oneBlock == null or oneBlock.? == Block.Stone or oneBlock.? == Block.Water) {
+        if (oneBlock == null or oneBlock.? == Block.stone or oneBlock.? == Block.water) {
             GenerateCavesInterpolate(blocks, Pos, &heights, @floatCast(chunkscale), self.params);
             oneBlock = Chunk.IsOneBlock(blocks);
         }
@@ -167,7 +167,7 @@ pub const DefaultGenerator = struct {
                 inline for (0..ChunkSize) |z| {
                     const isCave = int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cavesess;
                     if (isCave) {
-                        chunkBlocks[x][y][z] = .Air;
+                        chunkBlocks[x][y][z] = .air;
                     }
                 }
             }
@@ -190,7 +190,7 @@ pub const DefaultGenerator = struct {
                     const m: f32 = 1 - (1 / -@min(-1, (realY / gen_params.CaveExpansionMax) - 1));
                     const cavesess: f32 = (gen_params.Cavesess + (m * 2));
                     if (noise < cavesess) {
-                        chunkBlocks[x][y][z] = .Air;
+                        chunkBlocks[x][y][z] = .air;
                     }
                 }
             }
@@ -199,21 +199,21 @@ pub const DefaultGenerator = struct {
 
     fn GetSurfaceBlock(block_height: i64, terrain_height: i64, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32, oneDterrainScale: f32) Block {
         if (block_height < terrain_height - 5) {
-            return Block.Stone;
+            return Block.stone;
         } else if (block_height < terrain_height) {
-            return Block.Dirt;
+            return Block.dirt;
         } else if (block_height == terrain_height) {
             return RandGround(rand, @as(f32, @floatFromInt(terrain_height)) * thamount[@intFromBool(terrain_height <= SeaLevel)], block_height, SeaLevel, blockRandomness, oneDterrainScale);
         } else if (block_height > terrain_height and block_height <= SeaLevel) {
-            return Block.Water;
+            return Block.water;
         } else {
-            return Block.Air;
+            return Block.air;
         }
     }
 
     fn RandGround(rand: *std.Random, heightPercent: f32, block_height: i64, seaLevel: i64, blockRandomness: f32, oneDterrainScale: f32) Block {
         const a = std.math.lerp(heightPercent * oneDterrainScale, rand.float(f32), blockRandomness);
-        return if (block_height < seaLevel) Block.Dirt else if (a < 0.25) Block.Grass else if (a < 0.4) Block.Dirt else if (a < 0.6) Block.Stone else Block.Snow;
+        return if (block_height < seaLevel) Block.dirt else if (a < 0.25) Block.grass else if (a < 0.4) Block.dirt else if (a < 0.6) Block.stone else Block.snow;
     }
 
     pub fn GetTerrainHeight(self: *DefaultGenerator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
@@ -351,11 +351,11 @@ pub const DefaultGenerator = struct {
     fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
         const radius: f32 = (height * scale);
         if (radius < 0.5) {
-            try editor.placeBlock(.Leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
+            try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
         }
         const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius), 0 }), radius);
-        _ = try editor.placeSamplerShape(.Leaves, sphere, level);
+        _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 
     fn isTree(noise: f32, scale: f32) bool {

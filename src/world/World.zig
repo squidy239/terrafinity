@@ -481,7 +481,7 @@ pub const World = struct {
                 return;
             }
             
-            var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.Null))))).value_ptr;
+            var chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.null))))).value_ptr;
             self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
             chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
         }
