@@ -290,7 +290,7 @@ pub const DefaultGenerator = struct {
             .fixed_buffer_allocator = undefined,
         };
         const tempAllocator = bfa.get();
-        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator};
+        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false}; //no need to propagate since structures are generated in all LODs
         defer _ = worldEditor.flush() catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
         defer chunk.releaseAndUnlockShared();
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;

@@ -431,9 +431,8 @@ pub const World = struct {
 
                 if (self.propagateChanges) {
                     var coords: ChunkPos = diffChunk.key_ptr.*;
-                    //TODO improve this one editor per layer instead of one editor per chunk and not fixed amount of layers to propagate
                     var i: usize = 0;
-                    while (i < 16) {
+                    while (i < 16) {//16 is the upper limit so it wont break
                         const changed = try propagationEditor.propagateToParentByCoords(coords);
                         if (!changed) break;
                         coords = coords.parent();
