@@ -56,20 +56,18 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
 }
 
 pub fn keepLoaded(playerPos: World.BlockPos, Pos: World.ChunkPos, innerChunkRange: @Vector(2, u32), outerChunkRange: @Vector(2, u32)) bool {
-    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(playerPos, Pos.level);
-    const inner: @Vector(3, i32) = .{ @intCast(innerChunkRange[0]), @intCast(innerChunkRange[1]), @intCast(innerChunkRange[0]) };
-    const outer: @Vector(3, i32) = .{ @intCast(outerChunkRange[0]), @intCast(outerChunkRange[1]), @intCast(outerChunkRange[0]) };
-
-    const player = playerChunkPos.position;
-    const center = Pos.position;
+    const playerChunkPos = @as(@Vector(3, f64), @floatFromInt(playerPos)) / @as( @Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level)));
+    const inner: @Vector(3, f64) = .{ @floatFromInt(innerChunkRange[0]), @floatFromInt(innerChunkRange[1]), @floatFromInt(innerChunkRange[0])};
+    const outer: @Vector(3, f64) = .{ @floatFromInt(outerChunkRange[0]), @floatFromInt(outerChunkRange[1]), @floatFromInt(outerChunkRange[0]) };
+    const center: @Vector(3, f64) = @floatFromInt(Pos.position);
 
     const insideInner =
-        @reduce(.And, player > center - inner) and
-        @reduce(.And, player < center + inner);
+        @reduce(.And, playerChunkPos > center - inner) and
+        @reduce(.And, playerChunkPos < center + inner);
 
     const outsideOuter =
-        @reduce(.Or, player < center - outer) or
-        @reduce(.Or, player > center + outer);
+        @reduce(.Or, playerChunkPos < center - outer) or
+        @reduce(.Or, playerChunkPos > center + outer);
 
     return !insideInner and !outsideOuter;
 }
@@ -121,9 +119,11 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
             while (y < distance[1]) {
                 defer y += 1;
                 const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
-                const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, .{ innerdistance[0], innerdistance[1], innerdistance[0] });
+                
+                const in_range = keepLoaded(playerPos, ChunkPos, innerdistance, distance);
+               // const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, .{ innerdistance[0], innerdistance[1], innerdistance[0] });
 
-                if (insideInner or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
+                if (!in_range or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                     continue;
                 }
 
@@ -132,8 +132,12 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
                     amount_loaded += 1;
                     try game.chunkManager.LoadingChunks.put(ChunkPos, true);
                     const priority: ThreadPool.Priority = switch (level) {
-                        0...1 => .High,
-                        else => .Medium,
+                        std.math.minInt(i32)...-1 => .High,
+                        0...2 => .High,
+                        3...5 => .Medium,
+                        6...10 => .Low,
+                        11...20 => .VeryLow,
+                        else => .VeryLow,
                     };
                     try game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true }, priority);
                 }

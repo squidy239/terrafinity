@@ -350,6 +350,9 @@ pub const DefaultGenerator = struct {
 
     fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
         const radius: f32 = (height * scale);
+        
+        if(radius < 0.1)return;
+        
         if (radius < 0.5) {
             try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
