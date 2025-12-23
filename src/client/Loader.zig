@@ -24,7 +24,7 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
     defer unload.End();
     var meshesToUnloadBuffer: [256]World.ChunkPos = undefined;
     var meshesToUnloadBufferPos: usize = 0;
-    const mesh_distance = gen_distance + @Vector(2, u32){ 2, 2 };
+    const mesh_distance = gen_distance;
     {
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
@@ -35,7 +35,7 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
             defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
             while (it.next()) |key| {
                 const Pos = key.*;
-                const innerRadius = game.getInnerRenderRadius(Pos.level);
+                const innerRadius = game.getInnerGenRadius(Pos.level);
                 if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
                 const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
                 if (keep) continue;

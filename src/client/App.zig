@@ -168,6 +168,7 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
         game = .{
             .allocator = undefined,
             .world = undefined,
+            .chunk_timeout = undefined,
             .player = undefined,
             .pool = undefined,
             .chunkManager = undefined,
