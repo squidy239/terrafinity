@@ -7,6 +7,7 @@ flat in uint blocktype;
 flat in uint side;
 flat in uint blockArrayLayer;
 //uniform vec4 skyColor;
+in float logz;
 uniform float fogDensity;
 uniform sampler2DArray TextureArray;
 out vec4 FragColor;
@@ -42,6 +43,7 @@ float bouncingMod(float x, float n) {
 
 void main()
 {
+gl_FragDepth = logz;
     vec2 texcoords = vec2(0, 0);
     vec3 Normal;
     if (side == 0) {

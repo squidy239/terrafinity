@@ -119,7 +119,7 @@ pub const Game = struct {
             .physics = .{
                 .elements = .{
                     .mover = .{
-                        .collisions = false,
+                        .collisions = true,
                         .boundingBox = .init(.{ -0.5, -2, -0.5 }, .{ 0.5, 2, 0.5 }),
                     },
                     .gravity = .{},
@@ -179,20 +179,11 @@ pub const Game = struct {
         std.log.info("closed threadpool", .{});
 
         var it = self.chunkManager.ChunkRenderList.iterator();
-        while (it.next()) |mapptr| {
-            const map = mapptr.value_ptr.*;
-            const bktamount2 = map.buckets.len;
-            for (0..bktamount2) |bb| {
-                map.buckets[bb].lock.lock();
-                var itt = map.buckets[bb].hash_map.valueIterator();
-                defer map.buckets[bb].lock.unlock();
-                while (itt.next()) |mesh| {
-                    mesh.free();
-                }
-            }
-            map.*.deinit();
-            self.chunkManager.allocator.destroy(map);
+        while (it.next()) |entry| {
+            const mesh = entry.value_ptr;
+            mesh.free();
         }
+
         it.deinit();
         self.chunkManager.ChunkRenderList.deinit();
         self.chunkManager.LoadingChunks.deinit();

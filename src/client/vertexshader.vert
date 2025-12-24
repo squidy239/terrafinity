@@ -12,6 +12,10 @@ out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
 const float ChunkSize = 32.0;
+const float Far = 10000000.0;  // Your far plane distance
+const float C = 1.0;  // Resolution constant (adjust as needed)
+
+out float logz;  // Pass to fragment shader
 layout(std140, binding = 0) uniform UBO {
     float scale;
     double creationTime;
@@ -138,6 +142,11 @@ void main() {
    // newscale *= 1 - (pow((animationMs - min(chunktime, animationMs))/animationMs, 2)); //replace with pos.y for other aniamtion
 
     gl_Position = vec4(dmat4(projview) * dvec4(dvec4(dvec3(coords * newscale) + dvec3(pos * scale) + (relativeChunkPos), 1)));
+    
+    logz = log(C * gl_Position.w + 1.0) / log(C * Far + 1.0);
+       
+    // Multiply by w to undo the perspective divide that happens later
+    gl_Position.z = logz * gl_Position.w;
 }
 
 

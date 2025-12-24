@@ -28,21 +28,16 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
     {
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
-        var it = game.chunkManager.ChunkRenderList.iterator();
-        defer it.deinit();
-        outer: while (it.next()) |list_entry| {
-            const list = list_entry.value_ptr.*;
-            var list_it = list.iterator();
-            defer list_it.deinit();
-            while (list_it.next()) |entry| {
-                const Pos: World.ChunkPos = .{ .position = entry.key_ptr.*, .level = list_entry.key_ptr.* };
-                const innerRadius = game.getInnerGenRadius(Pos.level);
-                if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
-                const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
-                if (keep) continue;
-                meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                meshesToUnloadBufferPos += 1;
-            }
+        var list_it = game.chunkManager.ChunkRenderList.iterator();
+        defer list_it.deinit();
+        while (list_it.next()) |entry| {
+            const Pos: World.ChunkPos = entry.key_ptr.*;
+            const innerRadius = game.getInnerGenRadius(Pos.level);
+            if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break;
+            const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
+            if (keep) continue;
+            meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+            meshesToUnloadBufferPos += 1;
         }
     }
 
@@ -50,7 +45,7 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
         const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
         defer free.End();
         for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-            const mesh = game.chunkManager.fetchremoveFromList(Pos);
+            const mesh = game.chunkManager.ChunkRenderList.fetchremove(Pos);
             if (mesh) |m| m.free();
         }
         meshesToUnloadBufferPos = 0;
@@ -127,10 +122,10 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
                     continue;
                 }
 
-                const loaded = game.chunkManager.chunkInRenderList(ChunkPos);
+                const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
                 if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
-                    try game.chunkManager.LoadingChunks.put(ChunkPos, true);
+                    try game.chunkManager.LoadingChunks.put(ChunkPos, undefined);
                     const priority: ThreadPool.Priority = switch (level) {
                         std.math.minInt(i32)...-1 => .High,
                         0...2 => .High,
@@ -162,10 +157,10 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
         const inside_range = keepLoaded(@intFromFloat(player_pos), mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
         if (isempty or !inside_range) {
-            _ = game.chunkManager.removeFromList(mesh.Pos);
+            _ = game.chunkManager.ChunkRenderList.remove(mesh.Pos);
             continue;
         }
-        const ex = game.chunkManager.getFromList(mesh.Pos);
+        const ex = game.chunkManager.ChunkRenderList.get(mesh.Pos);
         defer amount += 1;
         var oldtime: ?i64 = null;
         if (ex) |m| {
@@ -176,7 +171,7 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
         }
         const mesh_buffer_ids = LoadMesh(renderer, mesh, oldtime);
         {
-            const oldChunk = try game.chunkManager.fetchputToList(mesh.Pos, mesh_buffer_ids);
+            const oldChunk = try game.chunkManager.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
             if (oldChunk) |old_mesh| {
                 old_mesh.free();
             }

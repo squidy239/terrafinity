@@ -1,5 +1,5 @@
 .{ .terrainblockRandomness = 0.25, .TerrainNoise = .{
-    .frequency = 0.02,
+    .frequency = 0.002,
     .noise_type = .perlin,
     .rotation_type = .none,
     .fractal_type = .ridged,
@@ -21,7 +21,7 @@
     .cellular_return = .distance,
     .cellular_jitter_mod = 0.75,
 }, .terrainNoiseBalance = 0.9, .LargeTerrainNoise = .{
-    .frequency = 0.008,
+    .frequency = 0.0008,
     .noise_type = .perlin,
     .rotation_type = .none,
     .fractal_type = .none,
@@ -64,7 +64,7 @@
     .cellular_return = .distance,
     .domain_warp_type = .simplex,
     .domain_warp_amp = 1,
-}, .terrainmin = -256, .terrainmax = 1024, .SeaLevel = 0, .Cavesess = -0.7, .CaveExpansionMax = 8192, .CaveExpansionStart = 0, .seed = 0, .terrainScale = 1, .genStructures = true, .trees = .{
+}, .terrainmin = -1024, .terrainmax = 8196, .SeaLevel = 0, .Cavesess = -77882.7, .CaveExpansionMax = 8192, .CaveExpansionStart = 0, .seed = 0, .terrainScale = 1, .genStructures = true, .trees = .{
     .{
         .baseRadius = 15,
         .baseRadiusVariation = 0.5,

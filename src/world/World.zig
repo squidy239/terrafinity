@@ -65,6 +65,10 @@ pub const ChunkPos = struct {
         return std.math.pow(f32, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
     }
 
+    pub inline fn levelToBlockRatioF64(level: i32) f64 {
+        return std.math.pow(f64, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
+    }
+
     pub inline fn parent(self: ChunkPos) ChunkPos {
         return .{ .level = self.level + 1, .position = @divFloor(self.position, @as(@Vector(3, i32), @splat(scale_factor))) };
     }
