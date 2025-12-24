@@ -29,18 +29,28 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
         const bktamount = game.chunkManager.ChunkRenderList.buckets.len;
+
         outer: for (0..bktamount) |b| {
             game.chunkManager.ChunkRenderList.buckets[b].lock.lock();
-            var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.keyIterator();
+            var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.iterator();
             defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
-            while (it.next()) |key| {
-                const Pos = key.*;
-                const innerRadius = game.getInnerGenRadius(Pos.level);
-                if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
-                const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
-                if (keep) continue;
-                meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                meshesToUnloadBufferPos += 1;
+            while (it.next()) |list_entry| {
+                const list = list_entry.value_ptr.*;
+                const levelbktamount = list.buckets.len;
+                for (0..levelbktamount) |bu| {
+                    list.buckets[bu].lock.lock();
+                    var list_it = list.buckets[bu].hash_map.iterator();
+                    defer list.buckets[bu].lock.unlock();
+                    while (list_it.next()) |entry| {
+                        const Pos: World.ChunkPos = .{ .position = entry.key_ptr.*, .level = list_entry.key_ptr.* };
+                        const innerRadius = game.getInnerGenRadius(Pos.level);
+                        if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
+                        const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
+                        if (keep) continue;
+                        meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+                        meshesToUnloadBufferPos += 1;
+                    }
+                }
             }
         }
     }
@@ -48,7 +58,7 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
         const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
         defer free.End();
         for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-            const mesh = game.chunkManager.ChunkRenderList.fetchremove(Pos);
+            const mesh = game.chunkManager.fetchremoveFromList(Pos);
             if (mesh) |m| m.free();
         }
         meshesToUnloadBufferPos = 0;
@@ -121,13 +131,11 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
                 const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
                 const in_range = keepLoaded(playerPos, ChunkPos, innerdistance, distance);
-                // const insideInner = isInside(@Vector(3, i32){ xz[0], y, xz[1] }, .{ innerdistance[0], innerdistance[1], innerdistance[0] });
-
                 if (!in_range or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                     continue;
                 }
 
-                const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
+                const loaded = game.chunkManager.chunkInRenderList(ChunkPos);
                 if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
                     amount_loaded += 1;
                     try game.chunkManager.LoadingChunks.put(ChunkPos, true);
@@ -162,10 +170,10 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
         const inside_range = keepLoaded(@intFromFloat(player_pos), mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
         if (isempty or !inside_range) {
-            _ = game.chunkManager.ChunkRenderList.remove(mesh.Pos);
+            _ = game.chunkManager.removeFromList(mesh.Pos);
             continue;
         }
-        const ex = game.chunkManager.ChunkRenderList.get(mesh.Pos);
+        const ex = game.chunkManager.getFromList(mesh.Pos);
         defer amount += 1;
         var oldtime: ?i64 = null;
         if (ex) |m| {
@@ -176,7 +184,7 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
         }
         const mesh_buffer_ids = LoadMesh(renderer, mesh, oldtime);
         {
-            const oldChunk = try game.chunkManager.ChunkRenderList.fetchPut(mesh.Pos, mesh_buffer_ids);
+            const oldChunk = try game.chunkManager.fetchputToList(mesh.Pos, mesh_buffer_ids);
             if (oldChunk) |old_mesh| {
                 old_mesh.free();
             }

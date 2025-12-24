@@ -164,7 +164,7 @@ pub const Renderer = struct {
         clear.End();
 
         const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-        const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
+        const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels, game.levels);
         drawChunks.End();
         const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
         try self.DrawEntities(game, playerPos, viewport_pixels);
@@ -180,7 +180,7 @@ pub const Renderer = struct {
         }
         return drawn;
     }
-    fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
+    fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32), LODs: [2]i32) [2]u64 {
         gl.FrontFace(gl.CW);
         gl.UseProgram(self.shaderprogram);
         gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -201,20 +201,21 @@ pub const Renderer = struct {
         gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
         gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
         const frustrum = Frustum.extractFrustumPlanes(projview);
-        inline for (0..2) |i| {
-            if (i == 1) gl.Disable(gl.CULL_FACE);
-            defer gl.Enable(gl.CULL_FACE);
-            const bktamount = game.chunkManager.ChunkRenderList.buckets.len;
-            for (0..bktamount) |b| {
-                game.chunkManager.ChunkRenderList.buckets[b].lock.lockShared();
-                var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.iterator();
-                defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlockShared();
-                while (it.next()) |item| {
+        var d: i32 = LODs[0];
+        levels_loop: while (d < LODs[1]) : (d += 1) {
+            var lod_map = game.chunkManager.ChunkRenderList.get(d) orelse continue :levels_loop;
+            inline for (0..2) |i| {
+                if (i == 1) gl.Disable(gl.CULL_FACE);
+                defer gl.Enable(gl.CULL_FACE);
+                var list_it = lod_map.iterator();
+                defer list_it.deinit();
+                while (list_it.next()) |item| {
                     torenderchunks += 1;
                     const buffer_ids = item.value_ptr;
                     const Pos = item.key_ptr.*;
+
                     const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
-                    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
+                    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos)) * chunkSizeVec) - playerPos);
                     const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
                     if (!cull) continue;
                     drawnchunks += 1;

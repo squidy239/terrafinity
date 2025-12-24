@@ -184,7 +184,7 @@ pub const Mover = struct {
 
 pub const Gravity = struct {
     up: @Vector(3, f64) = .{ 0, 1, 0 },
-    ///the strength of the gravity in meters per second squared
+    ///the strength of the gravity in blocks per second squared
     strength: f64 = 9.8,
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
@@ -192,5 +192,20 @@ pub const Gravity = struct {
         _ = allocator;
         const velOffset = @as(@Vector(3, f64), @splat(self.strength)) * self.up * @as(@Vector(3, f64), @splat(deltaT));
         _ = physics.fetchAddVelocity(-velOffset);
+    }
+};
+
+pub const Resistance = struct {
+    ///after one second the velocity will be this fraction of the original velocity
+    fraction_per_second: f64 = 0.1,
+
+    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+        _ = world;
+        _ = allocator;
+        _ = deltaT;
+        _ = self;
+        physics.velocityLock.lock();
+        //physics.velocity *= @as(@Vector(3, f64), @splat( self.fraction_per_second));
+        physics.velocityLock.unlock();
     }
 };

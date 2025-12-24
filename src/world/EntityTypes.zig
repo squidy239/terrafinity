@@ -86,7 +86,11 @@ pub const Player = struct {
     gameMode: GameMode,
     headRotationAxis: @Vector(2, f32),
     headRotationAxisLock: std.Thread.RwLock = .{},
-    physics: Physics.getInterface(struct { gravity: Physics.Gravity, mover: Physics.Mover }),
+    physics: Physics.getInterface(struct {
+        gravity: Physics.Gravity,
+        resistance: Physics.Resistance,
+        mover: Physics.Mover,
+    }),
 
     pub const Name = struct {
         data: [64]u8,

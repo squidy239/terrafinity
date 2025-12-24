@@ -3,8 +3,10 @@ const Chunk = @import("Chunk").Chunk;
 
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
+        const Map = @This();
+        const Bkt = Bucket(K, V, Context, maxloadpercentage);
         ctx: Context,
-        buckets: [bucketamount]Bucket(K, V, Context, maxloadpercentage),
+        buckets: [bucketamount]Bkt,
         allocator: std.mem.Allocator,
 
         const Self = @This();
@@ -27,7 +29,13 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
         pub fn putNoOverrideaddRef(self: *Self, key: K, value: V) !?V {
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
-            return try self.buckets[bucket_index].putNoOverride(key, value);
+            return try self.buckets[bucket_index].putNoOverrideAddRef(key, value);
+        }
+
+        pub fn getOrPut(self: *Self, key: K, value: V) !Map.Bkt.Map.Entry {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return try self.buckets[bucket_index].getOrPut(key, value);
         }
 
         pub fn getandaddref(self: *Self, key: K) ?V {
@@ -131,13 +139,57 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                 b.deinit();
             }
         }
+
+        const Iterator = struct {
+            map: *Map,
+            bkt_index: usize = 0,
+            bkt_iter: ?Bkt.Map.Iterator = null,
+
+            pub fn next(it: *Iterator) ?Bkt.Map.Entry {
+                while (true) {
+                    // If we have an active bucket iterator, use it
+                    if (it.bkt_iter) |*iter| {
+                        if (iter.next()) |entry| {
+                            return entry;
+                        }
+
+                        // Bucket exhausted
+                        it.map.buckets[it.bkt_index].lock.unlock();
+                        it.bkt_iter = null;
+                        it.bkt_index += 1;
+                        continue;
+                    }
+
+                    // Move to next bucket
+                    if (it.bkt_index >= it.map.buckets.len)
+                        return null;
+
+                    const bucket = &it.map.buckets[it.bkt_index];
+                    bucket.lock.lock();
+                    it.bkt_iter = bucket.hash_map.iterator();
+                }
+            }
+            
+            ///unlocks the current bucket, this only needs to be called if the iterator doesnt finish
+            pub fn deinit(it: *Iterator) void {
+                if (it.bkt_iter != null) {
+                    it.map.buckets[it.bkt_index].lock.unlock();
+                    it.bkt_iter = null;
+                }
+            }
+        };
+
+        pub fn iterator(self: *@This()) Iterator {
+            return Iterator{ .map = self };
+        }
     };
 }
 
 fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64) type {
     return struct {
+        pub const Map = std.HashMap(K, V, Context, maxloadpercentage);
         lock: std.Thread.RwLock,
-        hash_map: std.HashMap(K, V, Context, maxloadpercentage),
+        hash_map: Map,
 
         const Self = @This();
 
@@ -175,7 +227,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             return res.value;
         }
 
-        pub fn putNoOverride(self: *Self, key: K, value: V) !?V {
+        pub fn putNoOverrideAddRef(self: *Self, key: K, value: V) !?V {
             //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
             self.lock.lock();
             //bktlock.End();
@@ -188,6 +240,14 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             }
             try self.hash_map.put(key, value);
             return null;
+        }
+
+        pub fn getOrPut(self: *Self, key: K, value: V) !Map.Entry {
+            //const bktlock = ztracy.ZoneNC(@src(), "bktlock", 0x2665f2d);
+            self.lock.lock();
+            //bktlock.End();
+            defer self.lock.unlock();
+            return try self.hash_map.getOrPutValue(key, value);
         }
 
         pub fn getandaddref(self: *Self, key: K) ?V {

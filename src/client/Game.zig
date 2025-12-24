@@ -119,10 +119,11 @@ pub const Game = struct {
             .physics = .{
                 .elements = .{
                     .mover = .{
-                        .collisions = true,
+                        .collisions = false,
                         .boundingBox = .init(.{ -0.5, -2, -0.5 }, .{ 0.5, 2, 0.5 }),
                     },
                     .gravity = .{},
+                    .resistance = .{ .fraction_per_second = 0.1 },
                 },
                 .pos = try game.world.getPlayerSpawnPos(),
                 .velocity = @splat(0),
@@ -150,7 +151,7 @@ pub const Game = struct {
     }
 
     pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
-        if (level <= World.standard_level) return @splat(0);
+        if (level <= self.levels[0]) return @splat(0);
         const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
         return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
     }
@@ -177,15 +178,22 @@ pub const Game = struct {
         self.chunkManager.pool.deinit();
         std.log.info("closed threadpool", .{});
 
-        const bktamount = self.chunkManager.ChunkRenderList.buckets.len;
-        for (0..bktamount) |b| {
-            self.chunkManager.ChunkRenderList.buckets[b].lock.lock();
-            var it = self.chunkManager.ChunkRenderList.buckets[b].hash_map.valueIterator();
-            defer self.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
-            while (it.next()) |mesh| {
-                mesh.free();
+        var it = self.chunkManager.ChunkRenderList.iterator();
+        while (it.next()) |mapptr| {
+            const map = mapptr.value_ptr.*;
+            const bktamount2 = map.buckets.len;
+            for (0..bktamount2) |bb| {
+                map.buckets[bb].lock.lock();
+                var itt = map.buckets[bb].hash_map.valueIterator();
+                defer map.buckets[bb].lock.unlock();
+                while (itt.next()) |mesh| {
+                    mesh.free();
+                }
             }
+            map.*.deinit();
+            self.chunkManager.allocator.destroy(map);
         }
+        it.deinit();
         self.chunkManager.ChunkRenderList.deinit();
         self.chunkManager.LoadingChunks.deinit();
         while (self.chunkManager.MeshesToLoad.popFirst()) |mesh| {
