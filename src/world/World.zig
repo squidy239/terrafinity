@@ -226,6 +226,13 @@ pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32
     return height;
 }
 
+///returns the genstate of a loaded chunk, null if the chunk is not loaded
+pub fn getGenState(self: *@This(), Pos: ChunkPos) ?Chunk.Genstate {
+    const chunk = self.Chunks.getandaddref(Pos) orelse return null;
+    defer chunk.release();
+    return chunk.genstate.load(.seq_cst);
+}
+
 //TODO replace this with tick certen amount of entitys or certen amount of time
 pub fn tickEntitiesBucketTask(self: *@This(), complete: *std.atomic.Value(u32), bucketindex: usize, allocator: std.mem.Allocator) void {
     defer _ = complete.fetchAdd(1, .seq_cst);

@@ -19,7 +19,7 @@ const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 pub const ChunkManager = struct {
     allocator: std.mem.Allocator,
     pool: *ThreadPool,
-    LoadingChunks: ConcurrentHashMap(World.ChunkPos, bool, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
+    LoadingChunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
     MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
     world: *World,
     ChunkRenderList: ConcurrentHashMap(World.ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
@@ -67,9 +67,12 @@ pub const ChunkManager = struct {
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool) void {
-        const inside_range = Loader.keepLoaded(@intFromFloat(game.player.getPos().?), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
+        const inside_range = Loader.keepLoaded((game.player.getPos().?), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
         const running = game.running.load(.monotonic);
-        if (!inside_range or !running) return;
+        if (!inside_range or !running) {
+            _ = game.chunkManager.LoadingChunks.remove(Pos);
+            return;
+        }
         game.chunkManager.AddChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
     }
 

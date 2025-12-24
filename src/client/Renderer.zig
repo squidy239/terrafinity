@@ -171,7 +171,7 @@ pub const Renderer = struct {
         drawEntities.End();
         const gen_distance = game.getGenDistance();
         const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-        Loader.UnloadMeshes(game, gen_distance, @intFromFloat(playerPos));
+        Loader.UnloadMeshes(game, gen_distance, playerPos);
         unloadMeshes.End();
         {
             const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;

@@ -19,7 +19,7 @@ const Game = @import("Game.zig");
 const Mesher = @import("Mesher.zig");
 const outOfSquareRange = @import("utils.zig").outOfSquareRange;
 
-pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, i64)) void {
+pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, f64)) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
     var meshesToUnloadBuffer: [256]World.ChunkPos = undefined;
@@ -52,21 +52,25 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
     }
 }
 
-pub fn keepLoaded(playerPos: World.BlockPos, Pos: World.ChunkPos, innerChunkRange: @Vector(2, u32), outerChunkRange: @Vector(2, u32)) bool {
-    const playerChunkPos = @as(@Vector(3, f64), @floatFromInt(playerPos)) / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level)));
-    const inner: @Vector(3, f64) = .{ @floatFromInt(innerChunkRange[0]), @floatFromInt(innerChunkRange[1]), @floatFromInt(innerChunkRange[0]) };
-    const outer: @Vector(3, f64) = .{ @floatFromInt(outerChunkRange[0]), @floatFromInt(outerChunkRange[1]), @floatFromInt(outerChunkRange[0]) };
+pub fn keepLoaded(playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+    const playerChunkPos = @floor(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level))));
     const center: @Vector(3, f64) = @floatFromInt(Pos.position);
+    if (innerChunkRange) |icr| {
+        const inner: @Vector(3, f64) = .{ @floatFromInt(icr[0]), @floatFromInt(icr[1]), @floatFromInt(icr[0]) };
+        const insideInner =
+            @reduce(.And, playerChunkPos > center - inner) and
+            @reduce(.And, playerChunkPos < center + inner);
+        if (insideInner) return false;
+    }
 
-    const insideInner =
-        @reduce(.And, playerChunkPos > center - inner) and
-        @reduce(.And, playerChunkPos < center + inner);
-
-    const outsideOuter =
-        @reduce(.Or, playerChunkPos < center - outer) or
-        @reduce(.Or, playerChunkPos > center + outer);
-
-    return !insideInner and !outsideOuter;
+    if (outerChunkRange) |ocr| {
+        const outer: @Vector(3, f64) = .{ @floatFromInt(ocr[0]), @floatFromInt(ocr[1]), @floatFromInt(ocr[0]) };
+        const outsideOuter =
+            @reduce(.Or, playerChunkPos < center - outer) or
+            @reduce(.Or, playerChunkPos > center + outer);
+        if (outsideOuter) return false;
+    }
+    return true;
 }
 
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
@@ -80,27 +84,23 @@ pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
         const genDistance = game.getGenDistance();
         var level = game.levels[0];
         while (level < game.levels[1]) : (level += 1) {
-            loadChunksSpiral(game, @intFromFloat(playerPos), genDistance, game.getInnerGenRadius(level), level) catch unreachable;
+            loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(level), level) catch unreachable;
         }
 
         addChunkstoLoad.End();
     }
 }
 
-fn isInside(pos: @Vector(3, i32), distance: @Vector(3, u32)) bool {
-    const abs_pos = @Vector(3, u32){ @intCast(@abs(pos[0])), @intCast(@abs(pos[1])), @intCast(@abs(pos[2])) };
-    return abs_pos[0] < distance[0] and abs_pos[1] < distance[1] and abs_pos[2] < distance[2];
-}
-
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !void {
-    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos((playerPos), level);
+fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !void {
+    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
     var xz: [2]i32 = .{ 0, 0 };
     var c: usize = 0;
 
+    const distance = dist;
     while (true) {
         if (amount_tested >= 4 * distance[0] * distance[0]) {
             break;
@@ -123,7 +123,8 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, i64), distance: @Vec
                 }
 
                 const loaded = game.chunkManager.ChunkRenderList.contains(ChunkPos);
-                if ((!loaded or ((game.chunkManager.world.Chunks.get(ChunkPos) orelse continue).genstate.load(.seq_cst) == .TerrainGenerated))) {
+
+                if ((!loaded or (game.chunkManager.world.getGenState(ChunkPos) orelse continue) == .TerrainGenerated)) {
                     amount_loaded += 1;
                     try game.chunkManager.LoadingChunks.put(ChunkPos, undefined);
                     const priority: ThreadPool.Priority = switch (level) {
@@ -155,7 +156,7 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
         defer mesh.free(game.allocator);
         defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos);
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
-        const inside_range = keepLoaded(@intFromFloat(player_pos), mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
+        const inside_range = keepLoaded(player_pos, mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
         if (isempty or !inside_range) {
             _ = game.chunkManager.ChunkRenderList.remove(mesh.Pos);
             continue;
