@@ -317,28 +317,23 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
 pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
-    const bktamount = self.Chunks.buckets.len;
     var chunks: u64 = 0;
     var unload_chunk_buffer: [128]ChunkPos = undefined;
-    for (0..bktamount) |b| {
-        var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
-        {
-            self.Chunks.buckets[b].lock.lockShared();
-            defer self.Chunks.buckets[b].lock.unlockShared();
-
-            var it = self.Chunks.buckets[b].hash_map.iterator();
-            const currenttime = std.time.microTimestamp();
-            while (it.next()) |c| {
-                chunks += 1;
-                const chunk = c.value_ptr.*;
-                const lastaccess = chunk.last_access.load(.monotonic);
-                if (currenttime - lastaccess < unload_timeout) continue;
-                tounload.appendBounded(c.key_ptr.*) catch break;
-            }
+    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
+    {
+        var it = self.Chunks.iterator();
+        defer it.deinit();
+        const currenttime = std.time.microTimestamp();
+        while (it.next()) |c| {
+            chunks += 1;
+            const chunk = c.value_ptr.*;
+            const lastaccess = chunk.last_access.load(.monotonic);
+            if (currenttime - lastaccess < unload_timeout) continue;
+            tounload.appendBounded(c.key_ptr.*) catch break;
         }
-        while (tounload.pop()) |Pos| {
-            try self.unloadChunk(Pos);
-        }
+    }
+    while (tounload.pop()) |Pos| {
+        try self.unloadChunk(Pos);
     }
 }
 
@@ -640,25 +635,17 @@ pub fn deinit(self: *@This()) void {
     const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
     defer deinitWorld.End();
     self.stop();
-    const bktamount = self.Chunks.buckets.len;
-    for (0..bktamount) |b| {
-        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-        self.Chunks.buckets[b].lock.lock();
-        lock.End();
-        var it = self.Chunks.buckets[b].hash_map.iterator();
-        defer self.Chunks.buckets[b].lock.unlock();
+    {
+        var it = self.Chunks.iterator();
+        defer it.deinit();
         while (it.next()) |c| {
             self.unloadChunkByPtr(c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
         }
     }
     std.log.info("chunks unloaded", .{});
-    const enbktamount = self.Entitys.buckets.len;
-    for (0..enbktamount) |b| {
-        const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-        self.Entitys.buckets[b].lock.lock();
-        lock.End();
-        var it = self.Entitys.buckets[b].hash_map.iterator();
-        defer self.Entitys.buckets[b].lock.unlock();
+    {
+        var it = self.Entitys.iterator();
+        defer it.deinit();
         while (it.next()) |c| {
             c.value_ptr.*.unload(self, c.key_ptr.*, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
         }

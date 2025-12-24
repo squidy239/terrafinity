@@ -28,32 +28,24 @@ pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: 
     {
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
-        const bktamount = game.chunkManager.ChunkRenderList.buckets.len;
-
-        outer: for (0..bktamount) |b| {
-            game.chunkManager.ChunkRenderList.buckets[b].lock.lock();
-            var it = game.chunkManager.ChunkRenderList.buckets[b].hash_map.iterator();
-            defer game.chunkManager.ChunkRenderList.buckets[b].lock.unlock();
-            while (it.next()) |list_entry| {
-                const list = list_entry.value_ptr.*;
-                const levelbktamount = list.buckets.len;
-                for (0..levelbktamount) |bu| {
-                    list.buckets[bu].lock.lock();
-                    var list_it = list.buckets[bu].hash_map.iterator();
-                    defer list.buckets[bu].lock.unlock();
-                    while (list_it.next()) |entry| {
-                        const Pos: World.ChunkPos = .{ .position = entry.key_ptr.*, .level = list_entry.key_ptr.* };
-                        const innerRadius = game.getInnerGenRadius(Pos.level);
-                        if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
-                        const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
-                        if (keep) continue;
-                        meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-                        meshesToUnloadBufferPos += 1;
-                    }
-                }
+        var it = game.chunkManager.ChunkRenderList.iterator();
+        defer it.deinit();
+        outer: while (it.next()) |list_entry| {
+            const list = list_entry.value_ptr.*;
+            var list_it = list.iterator();
+            defer list_it.deinit();
+            while (list_it.next()) |entry| {
+                const Pos: World.ChunkPos = .{ .position = entry.key_ptr.*, .level = list_entry.key_ptr.* };
+                const innerRadius = game.getInnerGenRadius(Pos.level);
+                if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break :outer;
+                const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
+                if (keep) continue;
+                meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+                meshesToUnloadBufferPos += 1;
             }
         }
     }
+
     if (meshesToUnloadBufferPos > 0) {
         const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
         defer free.End();

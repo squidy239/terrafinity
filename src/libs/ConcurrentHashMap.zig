@@ -154,7 +154,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                         }
 
                         // Bucket exhausted
-                        it.map.buckets[it.bkt_index].lock.unlock();
+                        it.map.buckets[it.bkt_index].lock.unlockShared();
                         it.bkt_iter = null;
                         it.bkt_index += 1;
                         continue;
@@ -165,15 +165,15 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                         return null;
 
                     const bucket = &it.map.buckets[it.bkt_index];
-                    bucket.lock.lock();
+                    bucket.lock.lockShared();
                     it.bkt_iter = bucket.hash_map.iterator();
                 }
             }
-            
+
             ///unlocks the current bucket, this only needs to be called if the iterator doesnt finish
             pub fn deinit(it: *Iterator) void {
                 if (it.bkt_iter != null) {
-                    it.map.buckets[it.bkt_index].lock.unlock();
+                    it.map.buckets[it.bkt_index].lock.unlockShared();
                     it.bkt_iter = null;
                 }
             }
