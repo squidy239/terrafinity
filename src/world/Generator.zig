@@ -221,7 +221,7 @@ pub const DefaultGenerator = struct {
         defer gth.End();
         if (self.TerrainHeightCache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
         const generatedHeights = GenTerrainHeight(self.params, level, Pos);
-        self.TerrainHeightCache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch |err| std.debug.panic("{any}\n", .{err});
+        self.TerrainHeightCache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch {};
         return generatedHeights;
     }
 

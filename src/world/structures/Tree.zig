@@ -105,7 +105,6 @@ pub const Tree = struct {
                 }
             }
         }
-        std.debug.print("bc: {d}\n", .{branchesCount});
         return branchesCount;
     }
 

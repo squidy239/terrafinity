@@ -213,7 +213,7 @@ pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
 
 pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
     const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
-    const height = try self.getTerrainHeightAtCoords(pos, World.standard_level);
+    const height = 1000;
     std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
     return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
 }
@@ -221,7 +221,7 @@ pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
 pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
     const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
     const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-    const genSource = self.ChunkSources[self.ChunkSources.len - 1] orelse undefined;
+    const genSource = self.ChunkSources[self.ChunkSources.len - 1].?;
     const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }, level))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
     return height;
 }
