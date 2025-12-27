@@ -16,7 +16,7 @@ pub const Tree = struct {
     leafSize: f32 = 2.0,
     leafDensity: f32 = 0.75,
     ///must be at least maxRecursionDepth
-    steps: []const Step,
+    steps: []const StepConfig,
     rand: std.Random,
     branchCounter: usize = 0,
     minRadius: f32 = 0.5,
@@ -24,50 +24,90 @@ pub const Tree = struct {
     scale: f32 = 1.0,
     squareEndScale: bool = true,
 
-    pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
-        std.debug.assert(self.steps.len > self.maxRecursionDepth);
-        var index: usize = 0;
-        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, &index, -0.05, 0.05);
-        return try self.placeStep(editor, @floatFromInt(self.pos), trunkVec, self.trunkHeight * self.scale, self.baseRadius * self.scale, 0, level, &index);
-    }
+    pub const StepConfig = struct {
+        lengthPercent: f32 = 0.7,
+        lengthPercentRandomness: f32 = 0.0,
+        baseRadiusPercent: f32 = 1.0,
+        radiusPercent: f32 = 0.65,
+        radiusPercentRandomness: f32 = 0.0,
+        branchCountMin: usize = 2.0,
+        branchCountMax: usize = 4.0,
+        minBranchWidth: ?f32 = null,
+        branchRandomness: f32 = 0.0,
+        branchRange: @Vector(3, f32) = @splat(0.2),
+        block: Block = Block.wood,
+        endBlock: Block = Block.leaves,
+    };
 
-    fn placeStep(self: *const @This(), editor: *WorldEditor, pos: @Vector(3, f64), direction: @Vector(3, f64), lastLength: f32, lastRadius: f32, recursionDepth: usize, level: i32, table_index: *usize) !u64 {
-        const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
-        defer pstep.End();
+    const StepGenData = struct {
+        pos: @Vector(3, f64),
+        direction: @Vector(3, f64),
+        lastLength: f32,
+        lastRadius: f32,
+        recursionDepth: usize,
+    };
+
+    pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
+        var step_buffer: [32]StepGenData = undefined;
+        std.debug.assert(step_buffer.len > self.steps.len);
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
-        const step = self.steps[recursionDepth];
-        const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
+        var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);
+        var index: usize = 0;
+        var branchesCount: u64 = 0;
+        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, &index, -0.05, 0.05);
+
+        try stack.appendBounded(.{
+            .pos = @floatFromInt(self.pos),
+            .direction = trunkVec,
+            .lastLength = self.trunkHeight * self.scale,
+            .lastRadius = self.baseRadius * self.scale,
+            .recursionDepth = 0,
+        });
+        
         const halfLeaf = self.leafSize * 0.5;
         const lenscale = if (self.squareEndScale) self.scale * self.scale else self.scale;
-        var branchesCount: u64 = 0;
-        for (0..firstBranches) |i| {
-            const branchVec = branchDirection(i, direction, step.branchRange, firstBranches) + rand3Vec(f32, table_index, -step.branchRandomness, step.branchRandomness);
-            const length = lastLength * step.lengthPercent + getRand(table_index) * step.lengthPercentRandomness;
-            const radius = lastRadius * step.radiusPercent + getRand(table_index) * step.radiusPercentRandomness;
-            if (length < self.minLength * lenscale or recursionDepth >= self.maxRecursionDepth) {
-                var y = -halfLeaf;
-                while (y < halfLeaf) : (y += 1) {
-                    var x = -halfLeaf;
-                    while (x <= halfLeaf) : (x += 1) {
-                        var z = -halfLeaf;
-                        while (z <= halfLeaf) : (z += 1) {
-                            const block: Block = if (getRand(table_index) < self.leafDensity) step.endBlock else .air;
-                            try editor.placeBlock(block, @intFromFloat(@round(pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
+        
+        while (stack.pop()) |data| {
+            const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
+            defer pstep.End();
+            std.debug.assert(self.steps.len > self.maxRecursionDepth);
+            const step = self.steps[data.recursionDepth];
+            const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
+           
+            for (0..firstBranches) |i| {
+                const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, &index, -step.branchRandomness, step.branchRandomness);
+                const length = data.lastLength * step.lengthPercent + getRand(&index) * step.lengthPercentRandomness;
+                const radius = data.lastRadius * step.radiusPercent + getRand(&index) * step.radiusPercentRandomness;
+                if (length < self.minLength * lenscale or data.recursionDepth >= self.maxRecursionDepth) {
+                    var y = -halfLeaf;
+                    while (y < halfLeaf) : (y += 1) {
+                        var x = -halfLeaf;
+                        while (x <= halfLeaf) : (x += 1) {
+                            var z = -halfLeaf;
+                            while (z <= halfLeaf) : (z += 1) {
+                                const block: Block = if (getRand(&index) < self.leafDensity) step.endBlock else .air;
+                                try editor.placeBlock(block, @intFromFloat(@round(data.pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
+                            }
                         }
                     }
+                } else {
+                    branchesCount += 1;
+                    const branch = WorldEditor.Geometry.Cone(f64).init(data.pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, data.lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
+                    try editor.placeSamplerShape(step.block, branch, level);
+                    const newPos = data.pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
+                    try stack.appendBounded(.{
+                        .pos = newPos,
+                        .direction = branchVec,
+                        .lastLength = length,
+                        .lastRadius = radius,
+                        .recursionDepth = data.recursionDepth + 1,
+                    });
                 }
-            } else {
-                branchesCount += 1;
-                const branch = WorldEditor.Geometry.Cone(f64).init(pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
-                try editor.placeSamplerShape(step.block, branch, level);
-                const newPos = pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
-                branchesCount += try self.placeStep(editor, newPos, branchVec, length, radius, recursionDepth + 1, level, table_index);
             }
         }
+        std.debug.print("bc: {d}\n", .{branchesCount});
         return branchesCount;
     }
-
-    pub const Step = struct { lengthPercent: f32 = 0.7, lengthPercentRandomness: f32 = 0.0, baseRadiusPercent: f32 = 1.0, radiusPercent: f32 = 0.65, radiusPercentRandomness: f32 = 0.0, branchCountMin: usize = 2.0, branchCountMax: usize = 4.0, minBranchWidth: ?f32 = null, branchRandomness: f32 = 0.0, branchRange: @Vector(3, f32) = @splat(0.2), block: Block = Block.wood, endBlock: Block = Block.leaves };
 
     fn rand3Vec(comptime T: type, index: *usize, rangeBase: T, rangeTop: T) @Vector(3, T) {
         const vec = @Vector(3, T){ getRand(index), getRand(index), getRand(index) };
@@ -110,8 +150,10 @@ pub const Tree = struct {
 };
 
 fn getRand(i: *usize) f32 {
-    defer i.* +%= 1;
-    return rand_table[i.*];
+    const v = rand_table[i.*];
+    i.* +%= 1;
+    if(i.* == rand_table.len) i.* = 0;
+    return v;
 }
 
 const rand_table = makeTable(10000);

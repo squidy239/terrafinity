@@ -191,10 +191,10 @@ fn placeSamplerSphereTask(pos: @Vector(3, f64)) void {
 }
 
 fn genFractalTask() void {
-    comptime var csteps: [20]World.Editor.Tree.Step = undefined;
+    comptime var csteps: [20]World.Editor.Tree.StepConfig = undefined;
     comptime for (&csteps, 0..) |*step, r| {
         step.* = switch (r) {
-            0 => World.Editor.Tree.Step{
+            0 => World.Editor.Tree.StepConfig{
                 .lengthPercent = 1.0,
                 .radiusPercent = 1.0,
                 .branchCountMax = 32,
@@ -203,7 +203,7 @@ fn genFractalTask() void {
                 .block = .stone,
                 .branchRandomness = 0.0,
             },
-            1...21 => World.Editor.Tree.Step{
+            1...21 => World.Editor.Tree.StepConfig{
                 .lengthPercent = 0.75,
                 .radiusPercent = 0.5,
                 .branchRange = @Vector(3, f32){ 0.3, 0.3, 0.3 },

@@ -407,7 +407,7 @@ pub const Editor = struct {
     world: *World,
     lastChunkCache: ?struct { Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
     propagateChanges: bool = true,
-    editBuffer: std.AutoHashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block) = .{},
+    editBuffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block,  std.hash_map.AutoContext(ChunkPos), 50) = .empty,
     tempallocator: std.mem.Allocator,
 
     ///applies the edits in the buffer to the world, frees any temporary allocations. cleans up even if an error occurs

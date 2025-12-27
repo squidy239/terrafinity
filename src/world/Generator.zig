@@ -76,7 +76,7 @@ pub const DefaultGenerator = struct {
 
     pub const TreeConfig = struct {
         enabled: bool = true,
-        steps: []World.Editor.Tree.Step,
+        steps: []World.Editor.Tree.StepConfig,
         baseRadius: f32,
         baseRadiusVariation: f32,
         trunkHeight: f32,
