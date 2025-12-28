@@ -9,13 +9,15 @@ const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("Entity").Entity;
 const EntityTypes = @import("EntityTypes");
 const ztracy = @import("ztracy");
-const World = @This();
+
+pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
 ///The main world object, this should not handle any rendering tasks
 ///chunks use LODs for better performance
 ///all LODs should be stored since with infinite level every level combined
 ///would only use 14.28571% more space then one LOD
 pub const WorldStorage = @import("WorldStorage.zig");
-pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
+
+const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 running: std.atomic.Value(bool),
@@ -415,6 +417,7 @@ pub const Editor = struct {
     pub fn flush(self: *@This()) !void {
         const flushh = ztracy.ZoneNC(@src(), "flush", 3563456);
         defer flushh.End();
+        self.lastChunkCache = null;
         self.editBuffer.lockPointers();
         defer self.editBuffer.clearAndFree(self.tempallocator);
         defer self.editBuffer.unlockPointers();
