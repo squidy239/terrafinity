@@ -1,5 +1,5 @@
 .{
-    .levels = .{ 0, 5 },
-    .generation_distance = .{ 6, 6 },
+    .levels = .{ 0, 14 },
+    .generation_distance = .{ 12, 12 },
     .chunk_timeout = 10,
 }

@@ -48,7 +48,7 @@ pub const Tree = struct {
     };
 
     pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
-        var step_buffer: [32]StepGenData = undefined;
+        var step_buffer: [64]StepGenData = undefined;
         std.debug.assert(step_buffer.len > self.steps.len);
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);

@@ -423,7 +423,6 @@ pub const Editor = struct {
         defer neghborsToRemesh.deinit();
         const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
         var propagationEditor: @This() = .{ .propagateChanges = false, .world = self.world, .tempallocator = self.tempallocator };
-        errdefer propagationEditor.editBuffer.deinit(self.tempallocator);
         while (it.next()) |diffChunk| {
             const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
             const chunk = try self.world.loadChunk(diffChunk.key_ptr.*, false);
@@ -442,6 +441,7 @@ pub const Editor = struct {
                 while (i < 16) { //16 is the upper limit so it wont break
                     const changed = try propagationEditor.propagateToParentByCoords(coords);
                     if (!changed) break;
+                    try propagationEditor.flush();//have to flush at each propagation so others dont get stale data
                     coords = coords.parent();
                     i += 1;
                 }
@@ -535,8 +535,8 @@ pub const Editor = struct {
                 isoneblock = true;
             },
         }
-        const pos_in_parent = Pos.posInParent();
-        const block_pos = parent_pos.toLocalBlockPos() + pos_in_parent * @as(@Vector(3, u8), @splat(simplified_size));
+        const pos_in_parent = Pos.posInParent() * @as(@Vector(3, u8), @splat(simplified_size));
+        const block_pos = parent_pos.toLocalBlockPos() + pos_in_parent;
         const parent = try self.world.loadChunk(parent_pos, false);
         defer parent.release();
         if (isoneblock) {
