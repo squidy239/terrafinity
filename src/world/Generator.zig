@@ -349,7 +349,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
-        const radius: f32 = (height * scale);
+        const radius: f32 = (height * scale) * 2;// * 2 makes it look closer to the real trees
 
         if (radius < 0.1) return;
 
@@ -357,7 +357,7 @@ pub const DefaultGenerator = struct {
             try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
         }
-        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius), 0 }), radius);
+        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius / 1.5), 0 }), radius);
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 

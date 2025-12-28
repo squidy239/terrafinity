@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 isinit: bool,
 config: Config,
 database: rocksdb.Database(.Multiple),
+options: *rocksdb.c.rocksdb_options_t,
 
 pub fn getSource(self: *@This()) World.ChunkSource {
     return .{
@@ -30,15 +31,14 @@ pub fn init(path: [:0]const u8, config: Config, allocator: std.mem.Allocator) !@
     storage.isinit = true;
     storage.config = config;
 
-    const options = rocksdb.c.rocksdb_options_create() orelse return error.OutOfMemory;
-    defer rocksdb.c.rocksdb_options_destroy(options);
+    storage.options = rocksdb.c.rocksdb_options_create() orelse return error.OutOfMemory;
 
-    rocksdb.c.rocksdb_options_set_create_if_missing(options, 1);
-    rocksdb.c.rocksdb_options_increase_parallelism(options, @intCast(cpu_count));
-    rocksdb.c.rocksdb_options_optimize_level_style_compaction(options, config.memory_budget);
-    rocksdb.c.rocksdb_options_set_compression(options, @intFromEnum(config.compression));
+    rocksdb.c.rocksdb_options_set_create_if_missing(storage.options, 1);
+    rocksdb.c.rocksdb_options_increase_parallelism(storage.options, @intCast(cpu_count));
+   // rocksdb.c.rocksdb_options_optimize_level_style_compaction(storage.options,);
+    rocksdb.c.rocksdb_options_set_compression(storage.options, @intFromEnum(config.compression));
 
-    storage.database = try .openRaw(allocator, path, options);
+    storage.database = try .openRaw(allocator, path, storage.options);
 
     return storage;
 }
@@ -92,6 +92,7 @@ pub fn getBlocks(source: World.ChunkSource, world: *World, blocks: *[ChunkSize][
         .blocks => buf_reader.readSliceEndian(Block, @as([]Block, @ptrCast(blocks)), .little) catch unreachable,
         .oneBlock => blocks.* = @splat(@splat(@splat(@enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable)))),
     }
+    rocksdb.free(value.?);
     return true;
 }
 
@@ -105,10 +106,10 @@ pub fn deinit(self: *@This()) void {
     std.debug.assert(self.isinit);
     self.isinit = false;
     self.database.deinit();
+    rocksdb.c.rocksdb_options_destroy(self.options);
 }
 
 pub const Config = struct {
-    memory_budget: u64 = 512 * 1024 * 1024, // 512MiB
     compression: enum(i32) {
         none = rocksdb.c.rocksdb_no_compression,
         snappy = rocksdb.c.rocksdb_snappy_compression,
@@ -118,5 +119,5 @@ pub const Config = struct {
         lz4hc = rocksdb.c.rocksdb_lz4hc_compression,
         xpress = rocksdb.c.rocksdb_xpress_compression,
         zstd = rocksdb.c.rocksdb_zstd_compression,
-    } = .lz4,
+    } = .none,
 };
