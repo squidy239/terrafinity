@@ -63,17 +63,17 @@ pub const Tree = struct {
             .lastRadius = self.baseRadius * self.scale,
             .recursionDepth = 0,
         });
-        
+
         const halfLeaf = self.leafSize * 0.5;
         const lenscale = if (self.squareEndScale) self.scale * self.scale else self.scale;
-        
+
         while (stack.pop()) |data| {
             const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
             defer pstep.End();
             std.debug.assert(self.steps.len > self.maxRecursionDepth);
             const step = self.steps[data.recursionDepth];
             const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
-           
+
             for (0..firstBranches) |i| {
                 const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, &index, -step.branchRandomness, step.branchRandomness);
                 const length = data.lastLength * step.lengthPercent + getRand(&index) * step.lengthPercentRandomness;
@@ -151,7 +151,7 @@ pub const Tree = struct {
 fn getRand(i: *usize) f32 {
     const v = rand_table[i.*];
     i.* +%= 1;
-    if(i.* == rand_table.len) i.* = 0;
+    if (i.* == rand_table.len) i.* = 0;
     return v;
 }
 

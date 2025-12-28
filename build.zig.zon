@@ -50,6 +50,10 @@
             .url = "git+https://codeberg.org/glowsquid/zgui.git#27a3b4f8ad0dec8ad5265ac5bb5574c24ea5faa7",
             .hash = "zgui-0.0.0-5-RVg2MX5AAT1ZhkbAy6gCCIwCjUx4EvmDAS5fBzVdxT",
         },
+        .rocksdb = .{
+            .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
+            .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.

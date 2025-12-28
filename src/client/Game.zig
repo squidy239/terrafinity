@@ -21,7 +21,7 @@ pub const Game = struct {
     chunkManager: ChunkManager,
     renderer: Renderer.Renderer,
     generator: World.DefaultGenerator,
-    region_storage: World.WorldStorage.RegionStorage,
+    region_storage: World.WorldStorage,
     game_arena: std.heap.ArenaAllocator,
 
     // Threads
@@ -78,14 +78,9 @@ pub const Game = struct {
             .params = GeneratorConfig,
         };
         game.levels = config.levels;
-        game_path.makeDir("RegionStorage") catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
         game.chunk_timeout = config.chunk_timeout;
-        game.region_storage = .{
-            .params = .{ .path = try game_path.openDir("RegionStorage", .{ .iterate = true }) },
-        };
+        _ = game_path;
+        game.region_storage = try .init("test_world/storage", .{}, allocator);
         errdefer game.generator.TerrainHeightCache.deinit();
         game.running = .init(true);
         game.GenerateDistance = .init(.{ .xz = config.generation_distance[0], .y = config.generation_distance[1] });

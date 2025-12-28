@@ -181,7 +181,7 @@
                 .branchCountMin = 5,
                 .lengthPercentRandomness = 0.4,
                 .baseRadiusPercent = 0.75,
-                .branchRange = .{1, 1, 1 },
+                .branchRange = .{ 1, 1, 1 },
             },
             .{
                 .lengthPercent = 0.6,

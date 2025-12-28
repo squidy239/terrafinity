@@ -137,6 +137,7 @@ pub const ChunkSource = struct {
 
     ///This function is called for every UnloadChunk call, it will be called many times for each chunk
     ///all chunk sources will be tried
+    ///this function does not have to be thread safe or lock the chunk sonce it is only called when the chunk has 1 ref
     onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{Unrecoverable}!void,
 
     ///should return the height of the terrain in blocks at the given chunk coordinates
@@ -407,7 +408,7 @@ pub const Editor = struct {
     world: *World,
     lastChunkCache: ?struct { Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
     propagateChanges: bool = true,
-    editBuffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block,  std.hash_map.AutoContext(ChunkPos), 50) = .empty,
+    editBuffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block, std.hash_map.AutoContext(ChunkPos), 50) = .empty,
     tempallocator: std.mem.Allocator,
 
     ///applies the edits in the buffer to the world, frees any temporary allocations. cleans up even if an error occurs
@@ -624,8 +625,8 @@ pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
 
 ///dosent remove chunk from hashmap, just frees it
 pub fn unloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
-    try onUnload(self, chunk, Pos);
     _ = chunk.WaitForRefAmount(1, null);
+    try onUnload(self, chunk, Pos);
     _ = chunk.free(self.allocator);
     self.allocator.destroy(chunk);
 }

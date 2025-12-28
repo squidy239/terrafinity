@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibrary(ztracy.artifact("tracy"));
 
+    const dep_rocksdb = b.dependency("rocksdb", .{});
+    exe.root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
+    exe.linkLibC();
+
     // linux dependancy: sudo apt install libx11-dev
     //  const cache = b.dependency("cache", .{
     //       .target = target,

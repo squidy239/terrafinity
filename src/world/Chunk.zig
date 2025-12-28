@@ -15,7 +15,7 @@ pub const Chunk = struct {
     ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
     modified: std.atomic.Value(bool) = .init(false),
 
-    pub const BlockEncoding = union(enum(u4)) {
+    pub const BlockEncoding = union(enum(u8)) {
         blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         oneBlock: Block,
         ///Returns a block encoding made from a given block array owned by the allocator.

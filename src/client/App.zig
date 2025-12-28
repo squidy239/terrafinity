@@ -7,6 +7,7 @@ const glfw = @import("zglfw");
 pub const Block = @import("Chunk").Block;
 pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("Chunk").Chunk;
+pub const rocksdb = @import("rocksdb");
 const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const ConcurrentQueue = @import("ConcurrentQueue");
@@ -182,11 +183,11 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
             .running = undefined,
             .region_storage = undefined,
         };
-        std.fs.cwd().makeDir("testWorld") catch |err| switch (err) {
+        std.fs.cwd().makeDir("test_world") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        try game.?.init(primary_allocator, secondary_allocator, window, try std.fs.cwd().openDir("testWorld", .{ .iterate = true }));
+        try game.?.init(primary_allocator, secondary_allocator, window, try std.fs.cwd().openDir("test_world", .{ .iterate = true }));
         try game.?.startThreads();
     }
     currentMenuPage = newMenu;
