@@ -9,7 +9,9 @@ There is also no world height limit, which lets extremely large terrain exist.
 # How To Build
 
 Terrafinity can be built using the zig build system.
-To compile and run in release mode use ```zig build run -Doptimize=ReleaseSafe``` with a zig 0.15.2 compiler installed
+To compile and run in release mode use ```zig build run -Doptimize=ReleaseSafe``` with a zig 0.15.2 compiler installed.
+
+I only tested it on x64 Linux so their may be issues on other platforms.
 
 ## Additional Dependencies:
 
