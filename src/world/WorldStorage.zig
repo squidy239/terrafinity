@@ -35,7 +35,6 @@ pub fn init(path: [:0]const u8, config: Config, allocator: std.mem.Allocator) !@
 
     rocksdb.c.rocksdb_options_set_create_if_missing(storage.options, 1);
     rocksdb.c.rocksdb_options_increase_parallelism(storage.options, @intCast(cpu_count));
-   // rocksdb.c.rocksdb_options_optimize_level_style_compaction(storage.options,);
     rocksdb.c.rocksdb_options_set_compression(storage.options, @intFromEnum(config.compression));
 
     storage.database = try .openRaw(allocator, path, storage.options);
@@ -119,5 +118,5 @@ pub const Config = struct {
         lz4hc = rocksdb.c.rocksdb_lz4hc_compression,
         xpress = rocksdb.c.rocksdb_xpress_compression,
         zstd = rocksdb.c.rocksdb_zstd_compression,
-    } = .none,
+    } = .lz4,
 };
