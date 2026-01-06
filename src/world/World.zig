@@ -347,8 +347,6 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
             try self.unloadChunk(Pos);
         }
     }
-    
-    std.debug.print("{d} chunks loaded, {d}\n", .{chunks, self.Chunks.count()});
 }
 
 pub fn chunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {

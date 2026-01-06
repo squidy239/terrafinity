@@ -38,7 +38,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.linkLibrary(ztracy.artifact("tracy"));
-    exe.linkLibC();
 
     if (target.result.os.tag != .emscripten) {
         const zglfw = b.dependency("zglfw", .{

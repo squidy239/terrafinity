@@ -87,7 +87,7 @@ fn InitWindowAndProcs(proc_table: *gl.ProcTable) !void {
 
 pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{ .backing_allocator_zeroes = false }).init;
-    primary_allocator = debug_allocator.allocator();
+    primary_allocator = if(builtin.mode == .Debug) debug_allocator else std.heap.smp_allocator;
     secondary_allocator = primary_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
     var proc: gl.ProcTable = undefined;
