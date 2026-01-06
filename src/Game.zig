@@ -50,6 +50,7 @@ pub const Game = struct {
     pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: *glfw.Window, game_path: std.fs.Dir) !void {
         game.game_arena = .init(secondary_allocator);
         errdefer game.game_arena.deinit();
+        const arena = game.game_arena.allocator();
         const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
         defer worldConfigFile.close();
 
@@ -59,10 +60,10 @@ pub const Game = struct {
         const gameConfigFile = try std.fs.cwd().openFile("config/GameConfig.zon", .{ .mode = .read_only });
         defer gameConfigFile.close();
 
-        const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, game.game_arena.allocator());
+        const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, arena);
 
-        const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, game.game_arena.allocator());
-        var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator, game.game_arena.allocator());
+        const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, arena);
+        var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator, arena);
 
         GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
         GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
