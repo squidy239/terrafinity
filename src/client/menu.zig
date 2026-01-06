@@ -1,4 +1,4 @@
-const switchMenu = @import("root").SwitchMenu;
+const switchMenu = @import("../App.zig").SwitchMenu;
 
 const glfw = @import("zglfw");
 const gui = @import("gui");

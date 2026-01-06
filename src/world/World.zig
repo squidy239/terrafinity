@@ -1,5 +1,5 @@
 const std = @import("std");
-const ThreadPool = @import("root").ThreadPool;
+const ThreadPool = @import("ThreadPool");
 
 pub const Block = @import("Block.zig").Block;
 const Cache = @import("Cache").Cache;
@@ -197,12 +197,6 @@ pub fn unloadEntity(self: *@This(), entityUUID: u128) void {
     en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
 }
 
-pub fn unloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
-    const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
-    _ = en.waitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
-    //TODO save entity to disk
-    en.fullfree(self.allocator);
-}
 
 pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
     const UUID = uuid orelse World.prng.random().int(u128);

@@ -1,7 +1,7 @@
 const std = @import("std");
-const Renderer = @import("root").Renderer;
-const World = @import("root").World;
-const ztracy = @import("root").ztracy;
+const Renderer = @import("../App.zig").Renderer;
+const World = @import("World.zig");
+const ztracy = @import("ztracy");
 
 const EntityTypes = @import("EntityTypes");
 
@@ -20,7 +20,7 @@ pub const interface = struct {
     ///the entity ptr is not valid after this
     unload: *const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
     getPos: ?*const fn (self: *anyopaque) @Vector(3, f64) = null,
-    draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) error{Unrecoverable}!void = null,
+    draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };
 
 ///this function removes a ref from entity when it returns
@@ -31,7 +31,7 @@ pub fn update(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allo
     } else _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
-pub fn draw(self: *@This(), playerPos: @Vector(3, f64), uuid: u128, world: *World, r: *Renderer.Renderer) !void {
+pub fn draw(self: *@This(), playerPos: @Vector(3, f64), uuid: u128, world: *World, r: *Renderer) !void {
     if (self.vtable.draw) |drawFn| {
         return try drawFn(self.ptr, world, uuid, world.allocator, playerPos, r);
     }

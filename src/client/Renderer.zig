@@ -1,15 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const ConcurrentQueue = @import("root").ConcurrentQueue.ConcurrentQueue;
-const root = @import("root");
-const ChunkManager = root.ChunkManager;
-const Loader = root.Loader;
+const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const ThreadPool = @import("root").ThreadPool;
 const Game = @import("../Game.zig").Game;
 const Block = @import("Block").Blocks;
+const Loader = @import("../Loader.zig");
 const ChunkSize = @import("../App.zig").ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Entity = @import("root").Entity;
+const Entity = @import("../App.zig").Entity;
 const EntityTypes = @import("EntityTypes");
 const gl = @import("gl");
 const glfw = @import("zglfw");
@@ -21,7 +19,6 @@ const ztracy = @import("ztracy");
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
 
-pub const Renderer = struct {
     pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
     allocator: std.mem.Allocator,
     facebuffer: c_uint,
@@ -183,7 +180,7 @@ pub const Renderer = struct {
         gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
         const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
         const projdist = 10000000;
-        const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, Renderer.cameraUp);
+        const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
         const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
         const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
         gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
@@ -224,7 +221,7 @@ pub const Renderer = struct {
     pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
         gl.FrontFace(gl.CCW);
         gl.UseProgram(self.entityshaderprogram);
-        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, Renderer.cameraUp)).data));
+        const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, @This().cameraUp)).data));
         gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
         var it = game.chunkManager.world.Entitys.iterator();
         defer it.deinit();
@@ -232,7 +229,6 @@ pub const Renderer = struct {
             try c.value_ptr.*.draw(playerPos, c.key_ptr.*, &game.world, self);
         }
     }
-};
 
 pub const MeshBufferIDs = struct {
     time: i64,

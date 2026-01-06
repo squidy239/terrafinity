@@ -190,3 +190,7 @@ pub fn SwitchMenu(newMenu: menuPage) !void {
     }
     currentMenuPage = newMenu;
 }
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
+}

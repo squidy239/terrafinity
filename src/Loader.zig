@@ -1,12 +1,13 @@
 const std = @import("std");
-const ConcurrentQueue = @import("root").ConcurrentQueue;
-const root = @import("root");
+const ConcurrentQueue = @import("ConcurrentQueue");
+
+const root = @import("App.zig");
 const ChunkManager = root.ChunkManager;
 const DrawElementsIndirectCommand = root.Renderer.DrawElementsIndirectCommand;
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;
 const Renderer = root.Renderer;
 const UBO = root.Renderer.UBO;
-const ThreadPool = @import("root").ThreadPool;
+const ThreadPool = @import("ThreadPool");
 
 const Chunk = @import("Chunk");
 const ChunkSize = Chunk.ChunkSize;
@@ -142,7 +143,7 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, f64), dist: @Vector(
     }
 }
 
-pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
+pub fn LoadMeshes(renderer: *Renderer, game: *Game.Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
     const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
     defer loadMeshes.End();
     const st = std.time.microTimestamp();
@@ -181,7 +182,7 @@ pub fn LoadMeshes(renderer: *Renderer.Renderer, game: *Game.Game, glSync: ?*gl.s
     return amount;
 }
 
-fn LoadMesh(renderer: *Renderer.Renderer, mesh: Mesher.Mesh, CreationTime: ?i64) MeshBufferIDs {
+fn LoadMesh(renderer: *Renderer, mesh: Mesher.Mesh, CreationTime: ?i64) MeshBufferIDs {
     var NewMeshIDs: MeshBufferIDs = .{
         .vao = [2]?c_uint{ null, null },
         .vbo = [2]?c_uint{ null, null },

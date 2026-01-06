@@ -3,7 +3,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
-const ztracy = @import("root").ztracy;
 const ConcurrentQueue = @import("ConcurrentQueue");
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
@@ -116,9 +115,7 @@ pub fn spawn(pool: *Pool, comptime func: anytype, args: anytype, priority: Prior
         fn runFn(runnable: *Runnable) void {
             const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
             @call(.auto, func, closure.arguments);
-            const d = ztracy.ZoneNC(@src(), "threadpooldestroy", 423342423);
             closure.pool.allocator.destroy(closure);
-            d.End();
         }
     };
 

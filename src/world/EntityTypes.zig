@@ -1,12 +1,12 @@
 const std = @import("std");
-const Renderer = @import("root").Renderer;
-const World = @import("root").World;
-const zm = @import("root").zm;
-const Block = @import("root").Block;
+const Renderer = @import("../App.zig").Renderer;
+const World = @import("World.zig");
+const zm = @import("zm");
+const Block = @import("Block.zig").Block;
 const Entity = @import("Entity.zig");
 const gl = @import("gl");
 const obj = @import("obj");
-const ztracy = @import("root").ztracy;
+const ztracy = @import("ztracy");
 const Physics = @import("Physics.zig");
 
 const pack = "default";
@@ -212,7 +212,7 @@ pub const Cube = struct {
         };
     }
 
-    pub fn draw(ptr: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer.Renderer) error{Unrecoverable}!void {
+    pub fn draw(ptr: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void {
         _ = world;
         _ = uuid;
         _ = allocator;

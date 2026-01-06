@@ -1,7 +1,7 @@
 const std = @import("std");
 const root = @import("root");
 const Game = @import("Game.zig").Game;
-const World = @import("root").World;
+const World = @import("world/World.zig");
 
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
 const EntityTypes = @import("world/EntityTypes.zig");
@@ -10,7 +10,7 @@ const glfw = @import("zglfw");
 const gui = @import("gui");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
-const Renderer = @import("client/Renderer.zig").Renderer;
+const Renderer = @import("client/Renderer.zig");
 var game: *Game = undefined;
 var worldEditor: World.Editor = undefined;
 var worldEditorLock: std.Thread.Mutex = .{};

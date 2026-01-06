@@ -2,7 +2,7 @@ const std = @import("std");
 const World = @import("world/World.zig");
 const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 const Renderer = @import("client/Renderer.zig");
-const ThreadPool = @import("root").ThreadPool;
+const ThreadPool = @import("ThreadPool");
 const Entity = @import("world/Entity.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
 const utils = @import("libs/utils.zig");
@@ -19,7 +19,7 @@ pub const Game = struct {
     player: *Entity,
     pool: ThreadPool,
     chunkManager: ChunkManager,
-    renderer: Renderer.Renderer,
+    renderer: Renderer,
     generator: World.DefaultGenerator,
     region_storage: World.WorldStorage,
     game_arena: std.heap.ArenaAllocator,

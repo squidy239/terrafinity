@@ -1,141 +1,188 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    // Build options
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    var exe = b.addExecutable(.{
-        .name = "terrafinity",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/App.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .use_llvm = true,
-    });
-    const options = .{
-        .enable_ztracy = b.option(
-            bool,
-            "enable_ztracy",
-            "Enable Tracy profile markers",
-        ) orelse false,
-        .enable_fibers = b.option(
-            bool,
-            "enable_fibers",
-            "Enable Tracy fiber support",
-        ) orelse false,
-        .on_demand = b.option(
-            bool,
-            "on_demand",
-            "Build tracy with TRACY_ON_DEMAND",
-        ) orelse false,
+    const check = b.option(bool, "check", "check if the game compiles") orelse false;
+
+    // Tracy profiling options
+    const tracy_options = .{
+        .enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false,
+        .enable_fibers = b.option(bool, "enable_fibers", "Enable Tracy fiber support") orelse false,
+        .on_demand = b.option(bool, "on_demand", "Build tracy with TRACY_ON_DEMAND") orelse false,
     };
 
-    const check = b.option(bool, "check", "check if the game compiles") orelse false;
-    const ztracy = b.dependency("ztracy", .{
-        .enable_ztracy = options.enable_ztracy,
-        .enable_fibers = options.enable_fibers,
-        .on_demand = options.on_demand,
+    // Create root module
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/App.zig"),
+        .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("ztracy", ztracy.module("root"));
 
+    // Set up dependencies and imports
+    setupDependencies(b, root_module, target, optimize, tracy_options);
+
+    // Create executable
+    var exe = b.addExecutable(.{
+        .name = "terrafinity",
+        .root_module = root_module,
+        .use_llvm = true,
+    });
+
+    // Link libraries
+    const ztracy = b.dependency("ztracy", .{
+        .enable_ztracy = tracy_options.enable_ztracy,
+        .enable_fibers = tracy_options.enable_fibers,
+        .on_demand = tracy_options.on_demand,
+        .optimize = optimize,
+    });
     exe.linkLibrary(ztracy.artifact("tracy"));
-
-    const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false }); //requires sudo apt-get install librocksdb-dev TODO make rocksdb compile with compression with the build system
-    exe.root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
     exe.linkLibC();
 
-    // linux dependancy: sudo apt install libx11-dev
-    //
-    const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
-
-    const ThreadPool = b.addModule("ThreadPool", .{ .root_source_file = b.path("src/libs/ThreadPool.zig"), .optimize = optimize, .imports = &.{
-        .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
-    } });
-    exe.root_module.addImport("ThreadPool", ThreadPool);
-
-    const obj_mod = b.dependency("obj", .{ .target = target, .optimize = optimize }).module("obj");
-    exe.root_module.addImport("obj", obj_mod);
-
-    const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
-        .api = .gl,
-        .version = .@"4.1",
-        .profile = .core,
-    });
-    exe.root_module.addImport("gl", gl_bindings);
-
-    const zigimg_dependency = b.dependency("zigimg", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
-
-    const zglfw = b.dependency("zglfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zglfw", zglfw.module("root"));
-
-    const gui = b.dependency("zgui", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const gui_mod = gui.module("zgui");
-
-    gui_mod.addImport("gl", gl_bindings);
-    gui_mod.addImport("glfw", zglfw.module("root"));
-
-    exe.root_module.addImport("gui", gui_mod);
-
-    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
-        .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
-        .optimize = optimize,
-        .imports = &.{.{ .name = "ztracy", .module = ztracy.module("root") }},
-    });
-    exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
-
-    const Cache = b.addModule(
-        "Cache",
-        .{
-            .root_source_file = b.path("src/libs/Cache.zig"),
-            .imports = &.{
-                .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
-            },
-            .optimize = optimize,
-        },
-    );
-    exe.root_module.addImport("Cache", Cache);
-
-    const zm = b.dependency("zm", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zm", zm.module("zm"));
-
     if (target.result.os.tag != .emscripten) {
+        const zglfw = b.dependency("zglfw", .{
+            .target = target,
+            .optimize = optimize,
+        });
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
 
-    if (check) { //TODO redo this
+    // Check step
+    if (check) {
         exe.use_llvm = false;
         const checkStep = b.step("check", "Check if the game compiles");
         checkStep.dependOn(&exe.step);
         return;
     }
+
+    // Install and run steps
     b.installArtifact(exe);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // Test step
+    const tests = b.addTest(.{
+        .root_module = root_module,
+    });
+    b.installArtifact(tests);
+
+    const run_test = b.addRunArtifact(tests);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_test.step);
+}
+
+
+
+
+fn setupDependencies(
+    b: *std.Build,
+    root_module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    tracy_options: anytype,
+) void {
+    // Tracy profiling
+    const ztracy = b.dependency("ztracy", .{
+        .enable_ztracy = tracy_options.enable_ztracy,
+        .enable_fibers = tracy_options.enable_fibers,
+        .on_demand = tracy_options.on_demand,
+        .optimize = optimize,
+    });
+    root_module.addImport("ztracy", ztracy.module("root"));
+
+    // RocksDB (requires: sudo apt-get install librocksdb-dev)
+    const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false });
+    root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
+
+    // ConcurrentQueue
+    const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
+
+    // ThreadPool
+    const ThreadPool = b.addModule("ThreadPool", .{
+        .root_source_file = b.path("src/libs/ThreadPool.zig"),
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
+        },
+    });
+    root_module.addImport("ThreadPool", ThreadPool);
+
+    // ConcurrentHashMap
+    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
+        .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ztracy", .module = ztracy.module("root") },
+        },
+    });
+    root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
+
+    // Cache
+    const Cache = b.addModule("Cache", .{
+        .root_source_file = b.path("src/libs/Cache.zig"),
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
+        },
+    });
+    root_module.addImport("Cache", Cache);
+
+    // OBJ parser
+    const obj_mod = b.dependency("obj", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("obj");
+    root_module.addImport("obj", obj_mod);
+
+    // OpenGL bindings
+    const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
+        .api = .gl,
+        .version = .@"4.1",
+        .profile = .core,
+    });
+    root_module.addImport("gl", gl_bindings);
+
+    // Image library
+    const zigimg_dependency = b.dependency("zigimg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
+
+    // GLFW (requires: sudo apt install libx11-dev on Linux)
+    const zglfw = b.dependency("zglfw", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("zglfw", zglfw.module("root"));
+
+    // GUI (zgui with OpenGL and GLFW)
+    const gui = b.dependency("zgui", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const gui_mod = gui.module("zgui");
+    gui_mod.addImport("gl", gl_bindings);
+    gui_mod.addImport("glfw", zglfw.module("root"));
+    root_module.addImport("gui", gui_mod);
+
+    // Math library
+    const zm = b.dependency("zm", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("zm", zm.module("zm"));
 }

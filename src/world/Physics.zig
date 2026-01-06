@@ -1,7 +1,7 @@
 const std = @import("std");
-const World = @import("root").World;
-const Block = @import("root").Block;
-const zm = @import("root").zm;
+const World = @import("World.zig");
+const Block = @import("Block.zig").Block;
+const zm = @import("zm");
 ///gets a Physics interface, all functions are thread-safe
 pub fn getInterface(physicsElements: anytype) type {
     return struct {
