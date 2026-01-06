@@ -1,13 +1,13 @@
 const std = @import("std");
 const ThreadPool = @import("root").ThreadPool;
 
-pub const Block = @import("Chunk").Block;
+pub const Block = @import("Block.zig").Block;
 const Cache = @import("Cache").Cache;
-const Chunk = @import("Chunk").Chunk;
+const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Entity = @import("Entity").Entity;
-const EntityTypes = @import("EntityTypes");
+const Entity = @import("Entity.zig");
+const EntityTypes = @import("EntityTypes.zig");
 const ztracy = @import("ztracy");
 
 pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
@@ -199,7 +199,7 @@ pub fn unloadEntity(self: *@This(), entityUUID: u128) void {
 
 pub fn unloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) void {
     const en = self.Entitys.fetchremoveandaddref(entityUUID) orelse return;
-    _ = en.WaitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
+    _ = en.waitForRefAmount(1 + ref_amount, null); //already done in fullfree but i am doing it here so there will be 1 ref when saving
     //TODO save entity to disk
     en.fullfree(self.allocator);
 }
@@ -207,7 +207,7 @@ pub fn unloadEntityNoLock(self: *@This(), entityUUID: u128, ref_amount: u32) voi
 pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
     const UUID = uuid orelse World.prng.random().int(u128);
     if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
-    const allocated_entity = try Entity.Make(entity, self.allocator);
+    const allocated_entity = try Entity.make(entity, self.allocator);
     errdefer allocated_entity.unload(self, UUID, self.allocator, false) catch unreachable;
     const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
     std.debug.assert(existing == null);
@@ -444,7 +444,7 @@ pub const Editor = struct {
                 while (i < 16) { //16 is the upper limit so it wont break
                     const changed = try propagationEditor.propagateToParentByCoords(coords);
                     if (!changed) break;
-                    try propagationEditor.flush();//have to flush at each propagation so others dont get stale data
+                    try propagationEditor.flush(); //have to flush at each propagation so others dont get stale data
                     coords = coords.parent();
                     i += 1;
                 }

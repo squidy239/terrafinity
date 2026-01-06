@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const Block = @import("Chunk").Block;
-const Chunk = @import("Chunk").Chunk;
+const Block = @import("world/Block.zig").Block;
+const Chunk = @import("world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const ChunkPos = @import("root").World.ChunkPos;
 const Obj = @import("obj");

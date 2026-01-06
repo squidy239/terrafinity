@@ -1,29 +1,27 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const EntityTypes = @import("EntityTypes");
+const EntityTypes = @import("world/EntityTypes.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
-pub const Block = @import("Chunk").Block;
+pub const Block = @import("world/Block.zig").Block;
 pub const Cache = @import("Cache").Cache;
-pub const Chunk = @import("Chunk").Chunk;
-pub const rocksdb = @import("rocksdb");
-const ChunkSize = Chunk.ChunkSize;
+pub const Chunk = @import("world/Chunk.zig");
+pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const ConcurrentQueue = @import("ConcurrentQueue");
-const Entity = @import("Entity").Entity;
+pub const Entity = @import("world/Entity.zig");
 pub const gui = @import("gui");
 pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
 pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 
-pub const World = @import("World");
-pub const Interpolation = @import("Interpolation");
+pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
 const Game = @import("Game.zig");
-pub const menu = @import("menu.zig");
-pub const Renderer = @import("Renderer.zig");
+pub const menu = @import("client/menu.zig");
+pub const Renderer = @import("client/Renderer.zig");
 const UserInput = @import("UserInput.zig");
 
 var lastx: f64 = undefined;

@@ -8,16 +8,16 @@ const Renderer = root.Renderer;
 const UBO = root.Renderer.UBO;
 const ThreadPool = @import("root").ThreadPool;
 
-const Chunk = @import("Chunk").Chunk;
+const Chunk = @import("Chunk");
 const ChunkSize = Chunk.ChunkSize;
 const Entity = @import("Entity").Entity;
 const gl = @import("gl");
-const World = @import("World");
+const World = @import("world/World.zig");
 const ztracy = @import("ztracy");
 
 const Game = @import("Game.zig");
 const Mesher = @import("Mesher.zig");
-const outOfSquareRange = @import("utils.zig").outOfSquareRange;
+const outOfSquareRange = @import("libs/utils.zig").outOfSquareRange;
 
 pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, f64)) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);

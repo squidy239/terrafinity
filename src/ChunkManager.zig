@@ -6,15 +6,15 @@ const Renderer = root.Renderer;
 const Game = @import("Game.zig").Game;
 const ThreadPool = @import("root").ThreadPool;
 const Loader = @import("Loader.zig");
-const Block = @import("Chunk").Block;
-const Chunk = @import("Chunk").Chunk;
+const Block = @import("world/Block.zig").Block;
+const Chunk = @import("world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const World = @import("World");
+const World = @import("world/World.zig");
 const ztracy = @import("ztracy");
 
 const Mesher = @import("Mesher.zig");
-const outOfSquareRange = @import("utils.zig").outOfSquareRange;
+const outOfSquareRange = @import("libs/utils.zig").outOfSquareRange;
 
 pub const ChunkManager = struct {
     allocator: std.mem.Allocator,

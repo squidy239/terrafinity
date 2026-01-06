@@ -3,8 +3,7 @@ const Renderer = @import("root").Renderer;
 const World = @import("root").World;
 const zm = @import("root").zm;
 const Block = @import("root").Block;
-const Entity = @import("Entity").Entity;
-const EntityType = @import("Entity").Entity.Type;
+const Entity = @import("Entity.zig");
 const gl = @import("gl");
 const obj = @import("obj");
 const ztracy = @import("root").ztracy;
@@ -17,8 +16,8 @@ const EntityMeshBufferIDs = struct {
     ebo: c_uint,
 };
 
-var EntityMeshes: [@typeInfo(EntityType).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
-var EntityMeshesLen: [@typeInfo(EntityType).@"enum".fields.len]c_int = undefined;
+var EntityMeshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
+var EntityMeshesLen: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
 
 pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
     var cwd = std.fs.cwd(); //cd into packs
@@ -29,7 +28,7 @@ pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
     var entities = try packdir.makeOpenPath("Entities", .{});
     defer entities.close();
     for (&EntityMeshes, 0..) |*mesh, i| {
-        const entity: EntityType = @enumFromInt(i);
+        const entity: Entity.Type = @enumFromInt(i);
         std.debug.print("reading: {s}\n", .{@tagName(entity)});
         const fileContents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
             std.log.err("failed to read: {s}\n", .{@tagName(entity)});
@@ -222,9 +221,9 @@ pub const Cube = struct {
         const relativePos: @Vector(3, f32) = @floatCast(self.pos - playerPos);
         self.lock.unlockShared();
         gl.Uniform3f(renderer.uniforms.relativeEntityposlocation, relativePos[0], relativePos[1], relativePos[2]);
-        gl.BindVertexArray(EntityMeshes[@intFromEnum(EntityType.Cube)].?.vao);
-        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, EntityMeshes[@intFromEnum(EntityType.Cube)].?.ebo);
-        gl.DrawElements(gl.TRIANGLES, EntityMeshesLen[@intFromEnum(EntityType.Cube)], gl.UNSIGNED_INT, 0);
+        gl.BindVertexArray(EntityMeshes[@intFromEnum(Entity.Type.Cube)].?.vao);
+        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, EntityMeshes[@intFromEnum(Entity.Type.Cube)].?.ebo);
+        gl.DrawElements(gl.TRIANGLES, EntityMeshesLen[@intFromEnum(Entity.Type.Cube)], gl.UNSIGNED_INT, 0);
     }
 };
 fn texture(u: f64, v: f64, args: anytype) f64 {

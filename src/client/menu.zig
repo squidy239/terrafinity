@@ -137,7 +137,7 @@ pub const optionsMenu = gui.Element.CreationOptions{ .elementBackground = .{ .so
     },
 } } };
 
-const ToggleSettings = @import("UserInput.zig").ToggleSettings;
+const ToggleSettings = @import("../UserInput.zig").ToggleSettings;
 
 pub const textEscMenu = gui.Element.CreationOptions{
     .elementBackground = .{ .solid = .{ 0.8, 0.8, 0.8, 0.95 } },

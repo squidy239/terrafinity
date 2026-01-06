@@ -1,10 +1,10 @@
 const std = @import("std");
-const Block = @import("Chunk").Block;
+const Block = @import("Block.zig").Block;
 const Cache = @import("Cache").Cache;
-const Chunk = @import("Chunk").Chunk;
+const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
-const rocksdb = @import("root").rocksdb;
+const rocksdb = @import("rocksdb");
 const ztracy = @import("ztracy");
 const builtin = @import("builtin");
 

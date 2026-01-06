@@ -1,14 +1,14 @@
 const std = @import("std");
-const World = @import("World");
+const World = @import("world/World.zig");
 const ChunkManager = @import("ChunkManager.zig").ChunkManager;
-const Renderer = @import("Renderer.zig");
+const Renderer = @import("client/Renderer.zig");
 const ThreadPool = @import("root").ThreadPool;
-const Entity = @import("Entity");
-const EntityTypes = @import("EntityTypes");
-const utils = @import("utils.zig");
+const Entity = @import("world/Entity.zig");
+const EntityTypes = @import("world/EntityTypes.zig");
+const utils = @import("libs/utils.zig");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const builtin = @import("builtin");
-const Chunk = @import("Chunk").Chunk;
+const Chunk = @import("world/Chunk.zig");
 const Loader = @import("Loader.zig");
 const UserInput = @import("UserInput.zig");
 const glfw = @import("zglfw");
@@ -16,7 +16,7 @@ const glfw = @import("zglfw");
 pub const Game = struct {
     allocator: std.mem.Allocator,
     world: World,
-    player: *Entity.Entity,
+    player: *Entity,
     pool: ThreadPool,
     chunkManager: ChunkManager,
     renderer: Renderer.Renderer,

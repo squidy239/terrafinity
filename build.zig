@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/client/App.zig"),
+            .root_source_file = b.path("src/App.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -44,23 +44,9 @@ pub fn build(b: *std.Build) void {
     const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false }); //requires sudo apt-get install librocksdb-dev TODO make rocksdb compile with compression with the build system
     exe.root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
     exe.linkLibC();
-    
-    
-    
+
     // linux dependancy: sudo apt install libx11-dev
-    //  const cache = b.dependency("cache", .{
-    //       .target = target,
-    //       .optimize = optimize,
-    // });
     //
-
-    //    exe.root_module.addImport("cache", cache.module("cache"));
-    var Entitys = b.addModule("Entity", .{
-        .root_source_file = b.path("src/world/Entity.zig"),
-        .optimize = optimize,
-    });
-
-    exe.root_module.addImport("Entity", Entitys);
     const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
         .target = target,
         .optimize = optimize,
@@ -107,28 +93,12 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("gui", gui_mod);
 
-    const EntityTypes = b.addModule("EntityTypes", .{
-        .root_source_file = b.path("src/world/EntityTypes.zig"),
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "Entity", .module = Entitys },
-            .{ .name = "obj", .module = obj_mod },
-            .{ .name = "gl", .module = gl_bindings },
-        },
-    });
-
-    Entitys.addImport("EntityTypes", EntityTypes);
-    exe.root_module.addImport("EntityTypes", EntityTypes);
-
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
         .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
         .optimize = optimize,
         .imports = &.{.{ .name = "ztracy", .module = ztracy.module("root") }},
     });
     exe.root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
-
-    const Interpolation = b.addModule("Interpolation", .{ .root_source_file = b.path("src/libs/Interpolation.zig") });
-    exe.root_module.addImport("Interpolation", Interpolation);
 
     const Cache = b.addModule(
         "Cache",
@@ -142,28 +112,6 @@ pub fn build(b: *std.Build) void {
     );
     exe.root_module.addImport("Cache", Cache);
 
-    const Chunk = b.addModule("Chunk", .{
-        .root_source_file = b.path("src/world/Chunk.zig"),
-        .imports = &.{
-            .{ .name = "Cache", .module = Cache }, .{ .name = "Interpolation", .module = Interpolation }, .{
-                .name = "ztracy",
-                .module = ztracy.module("root"),
-            },
-        },
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("Chunk", Chunk);
-
-    const world_module = b.addModule("World", .{
-        .root_source_file = b.path("src/world/World.zig"),
-        .imports = &.{ .{ .name = "Chunk", .module = Chunk }, .{ .name = "Entity", .module = Entitys }, .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap }, .{ .name = "Cache", .module = Cache }, .{
-            .name = "ztracy",
-            .module = ztracy.module("root"),
-        } },
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("World", world_module);
-
     const zm = b.dependency("zm", .{
         .target = target,
         .optimize = optimize,
@@ -174,7 +122,7 @@ pub fn build(b: *std.Build) void {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
 
-    if (check) { //TODO redo this whole file
+    if (check) { //TODO redo this
         exe.use_llvm = false;
         const checkStep = b.step("check", "Check if the game compiles");
         checkStep.dependOn(&exe.step);

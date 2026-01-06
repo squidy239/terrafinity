@@ -2,7 +2,7 @@ const std = @import("std");
 const zm = @import("root").zm;
 const ztracy = @import("root").ztracy;
 
-const Block = @import("../World.zig").Block;
+const Block = @import("../Block.zig").Block;
 const WorldEditor = @import("../World.zig").Editor;
 
 const utils = @import("utils.zig");
