@@ -169,7 +169,18 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                     it.bkt_iter = bucket.hash_map.iterator();
                 }
             }
-
+            
+            ///pauses the iterator, iteration may not be complete or ordered if the map is modified while it is paused, must be followed by unpause
+            pub fn pause(it: *Iterator) void {
+                if (it.bkt_index >= it.map.buckets.len)return;
+                it.map.buckets[it.bkt_index].lock.unlockShared();
+            }
+            
+            pub fn unpause(it: *Iterator) void {
+                if (it.bkt_index >= it.map.buckets.len)return;
+                it.map.buckets[it.bkt_index].lock.lockShared();
+            }
+            
             ///unlocks the current bucket, this only needs to be called if the iterator doesnt finish
             pub fn deinit(it: *Iterator) void {
                 if (it.bkt_iter != null) {

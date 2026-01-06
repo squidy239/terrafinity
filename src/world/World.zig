@@ -325,23 +325,30 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
     var chunks: u64 = 0;
-    var unload_chunk_buffer: [128]ChunkPos = undefined;
-    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
-    {
-        var it = self.Chunks.iterator();
-        defer it.deinit();
-        const currenttime = std.time.microTimestamp();
-        while (it.next()) |c| {
-            chunks += 1;
-            const chunk = c.value_ptr.*;
-            const lastaccess = chunk.last_access.load(.monotonic);
-            if (currenttime - lastaccess < unload_timeout) continue;
-            tounload.appendBounded(c.key_ptr.*) catch break;
+    var unload_chunk_buffer: [32784]ChunkPos = undefined;
+    var it = self.Chunks.iterator();
+    defer it.deinit();
+    while (true) {
+        var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
+        {
+            const currenttime = std.time.microTimestamp();
+            while (it.next()) |c| {
+                chunks += 1;
+                const chunk = c.value_ptr.*;
+                const lastaccess = chunk.last_access.load(.monotonic);
+                if (currenttime - lastaccess < unload_timeout) continue;
+                tounload.appendBounded(c.key_ptr.*) catch break;
+            }
+        }
+        if (tounload.items.len == 0) break;
+        it.pause();
+        defer it.unpause();
+        while (tounload.pop()) |Pos| {
+            try self.unloadChunk(Pos);
         }
     }
-    while (tounload.pop()) |Pos| {
-        try self.unloadChunk(Pos);
-    }
+    
+    std.debug.print("{d} chunks loaded, {d}\n", .{chunks, self.Chunks.count()});
 }
 
 pub fn chunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
