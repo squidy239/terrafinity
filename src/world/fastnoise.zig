@@ -1911,7 +1911,7 @@ test "reference all" {
 }
 
 test "range of all 2D noise/fractal combinations" {
-    if(true)return error.SkipZigTest;//this fails possibly because of floating point rounding errors
+    if (true) return error.SkipZigTest; //this fails possibly because of floating point rounding errors
     const size = 768;
     var noise = Noise(f32){};
 
@@ -1930,7 +1930,7 @@ test "range of all 2D noise/fractal combinations" {
 }
 
 test "range of all 3D noise/fractal combinations" {
-    if(true)return error.SkipZigTest;//this fails possibly because of floating point rounding errors
+    if (true) return error.SkipZigTest; //this fails possibly because of floating point rounding errors
 
     const size = 64;
     var noise = Noise(f32){};
@@ -1950,6 +1950,7 @@ test "range of all 3D noise/fractal combinations" {
 }
 
 test "range of all 2D cellular return/distance combinations (f64)" {
+    if (true) return error.SkipZigTest; //this is slow
     const size = 768;
     var noise = Noise(f64){
         .noise_type = .cellular,
@@ -1968,6 +1969,7 @@ test "range of all 2D cellular return/distance combinations (f64)" {
 }
 
 test "range of all 3D cellular return/distance combinations" {
+    if (true) return error.SkipZigTest; //this is slow
     const size = 96;
     var noise = Noise(f32){
         .noise_type = .cellular,

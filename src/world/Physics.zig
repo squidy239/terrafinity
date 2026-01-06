@@ -1,7 +1,10 @@
 const std = @import("std");
-const World = @import("World.zig");
-const Block = @import("Block.zig").Block;
+
 const zm = @import("zm");
+
+const Block = @import("Block.zig").Block;
+const World = @import("World.zig");
+
 ///gets a Physics interface, all functions are thread-safe
 pub fn getInterface(physicsElements: anytype) type {
     return struct {
@@ -176,8 +179,8 @@ pub const Mover = struct {
 
         if (ax == 0.0 and ay == 0.0 and az == 0.0) return @splat(0.0);
 
-        if (ax <= ay and ax <= az) return @Vector(3, f64){ i[0], 0.0, 0.0 };
-        if (ay <= ax and ay <= az) return @Vector(3, f64){ 0.0, i[1], 0.0 };
+        if (ax < ay and ax < az) return @Vector(3, f64){ i[0], 0.0, 0.0 };
+        if (ay < ax and ay < az) return @Vector(3, f64){ 0.0, i[1], 0.0 };
         return @Vector(3, f64){ 0.0, 0.0, i[2] };
     }
 };
@@ -209,3 +212,57 @@ pub const Resistance = struct {
         physics.velocityLock.unlock();
     }
 };
+
+test "AABB intersection" {
+    const testing = std.testing;
+
+    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB.init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
+    const aabb3 = zm.AABB.init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
+
+    const intersect12 = Mover.getAABBintersect(aabb1, aabb2);
+    try testing.expect(intersect12[0] != 0 and intersect12[1] != 0 and intersect12[2] != 0);
+
+    const intersect13 = Mover.getAABBintersect(aabb1, aabb3);
+    try testing.expect(std.meta.eql(intersect13, .{ 0, 0, 0 }));
+}
+
+test "AABB penetration" {
+    const testing = std.testing;
+
+    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB.init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
+
+    const penetration = Mover.getAABBpenetration(aabb1, aabb2);
+    try testing.expect(penetration[0] == 0 and penetration[1] != 0 and penetration[2] == 0);
+}
+
+test "Gravity" {
+    const testing = std.testing;
+    const physics_interface = getInterface(struct { gravity: Gravity });
+    var physics_object = physics_interface{
+        .elements = .{ .gravity = .{} },
+        .updateTimer = try std.time.Timer.start(),
+        .pos = .{ 0, 0, 0 },
+        .velocity = .{ 0, 0, 0 },
+    };
+    _ = physics_object.lapUpdateTimer();
+    std.Thread.sleep(std.time.ns_per_ms * 10);
+    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.getVelocity()[1] < 0);
+}
+
+test "simpleMover" {
+    const testing = std.testing;
+    const physics_interface = getInterface(struct { mover: simpleMover });
+    var physics_object = physics_interface{
+        .elements = .{ .mover = .{} },
+        .updateTimer = try std.time.Timer.start(),
+        .pos = .{ 0, 0, 0 },
+        .velocity = .{ 1, 0, 0 },
+    };
+    _ = physics_object.lapUpdateTimer();
+    std.Thread.sleep(std.time.ns_per_ms * 10);
+    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.getPos()[0] > 0);
+}

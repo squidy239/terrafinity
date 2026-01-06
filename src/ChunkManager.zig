@@ -51,7 +51,7 @@ pub const ChunkManager = struct {
         }
         exbl.End();
         const scale: f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
-        const mesh = Mesher.Mesh.MeshFromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
+        const mesh = Mesher.Mesh.meshFromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
             _ = try self.MeshesToLoad.append(m);

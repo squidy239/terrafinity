@@ -221,3 +221,64 @@ pub fn releaseAndUnlockShared(self: *@This()) void {
     self.unlockShared();
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
+
+test "IsOneBlock" {
+    const testing = std.testing;
+    var one_block_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    one_block_chunk[0][0][0] = .stone;
+    try testing.expect(IsOneBlock(&one_block_chunk) == null);
+
+    var all_stone_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
+    try testing.expect(IsOneBlock(&all_stone_chunk) != null);
+    try testing.expect(IsOneBlock(&all_stone_chunk).? == .stone);
+}
+
+test "ToBlocks" {
+    const testing = std.testing;
+    const allocator = std.testing.allocator;
+    var chunk = try from(.{ .oneBlock = .stone }, allocator);
+    defer allocator.destroy(chunk);
+    defer chunk.free(allocator);
+
+    const converted = try chunk.ToBlocks(allocator, true);
+    try testing.expect(converted);
+
+    switch (chunk.blocks) {
+        .oneBlock => unreachable,
+        .blocks => |blocks| {
+            try testing.expect(blocks[0][0][0] == .stone);
+            try testing.expect(blocks[10][20][30] == .stone);
+        },
+    }
+}
+
+test "Merge" {
+    const testing = std.testing;
+    const allocator = std.testing.allocator;
+
+    var blocks1: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    blocks1[0][0][0] = .dirt;
+
+    var blocks2: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
+    blocks2[0][0][1] = .grass;
+
+    const chunk1_encoding = try BlockEncoding.fromBlocks(&blocks1, allocator);
+    var chunk1 = try from(chunk1_encoding, allocator);
+    defer allocator.destroy(chunk1);
+    defer chunk1.free(allocator);
+
+    const chunk2_encoding = try BlockEncoding.fromBlocks(&blocks2, allocator);
+
+    try chunk1.Merge(chunk2_encoding, allocator, true);
+
+    allocator.destroy(chunk2_encoding.blocks);
+
+    switch (chunk1.blocks) {
+        .oneBlock => return error.TestFailed,
+        .blocks => |blocks| {
+            try testing.expect(blocks[0][0][0] == .dirt);
+            try testing.expect(blocks[0][0][1] == .grass);
+            try testing.expect(blocks[1][1][1] == .air);
+        },
+    }
+}

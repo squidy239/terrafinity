@@ -73,7 +73,7 @@ pub const NaturalCubicInterpolator3D = struct {
         coeffs_z = computeNaturalCubicCoeffs(f32, values);
         self.coeffs_z_vectorized = coeffs_z;
     }
-    
+
     pub fn sample(interp: *const Self, x: f32, y: f32, z: f32) f32 {
         // Step 1: X interpolation
         var xresult: [4][4]f32 = @bitCast(splineEvalSimd(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));

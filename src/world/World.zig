@@ -1,16 +1,16 @@
 const std = @import("std");
-const ThreadPool = @import("ThreadPool");
 
-pub const Block = @import("Block.zig").Block;
 const Cache = @import("Cache").Cache;
-const Chunk = @import("Chunk.zig");
-const ChunkSize = Chunk.ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Entity = @import("Entity.zig");
-const EntityTypes = @import("EntityTypes.zig");
+const ThreadPool = @import("ThreadPool");
 const ztracy = @import("ztracy");
 
+pub const Block = @import("Block.zig").Block;
+const Chunk = @import("Chunk.zig");
+const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
+const Entity = @import("Entity.zig");
+const EntityTypes = @import("EntityTypes.zig");
 ///The main world object, this should not handle any rendering tasks
 ///chunks use LODs for better performance
 ///all LODs should be stored since with infinite level every level combined
@@ -196,7 +196,6 @@ pub fn unloadEntity(self: *@This(), entityUUID: u128) void {
     const en = self.Entitys.fetchremove(entityUUID) orelse return;
     en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
 }
-
 
 pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
     const UUID = uuid orelse World.prng.random().int(u128);
@@ -671,4 +670,45 @@ pub fn deinit(self: *@This()) void {
 
 fn normilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
     return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
+}
+
+test "ChunkPos" {
+    const testing = std.testing;
+
+    const pos1 = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };
+    try testing.expect(std.meta.eql(pos1.parent(), ChunkPos{ .level = 1, .position = .{ 0, 1, 1 } }));
+
+    try testing.expectEqual(32, ChunkPos.levelToBlockRatio(0));
+    try testing.expectEqual(64, ChunkPos.levelToBlockRatio(1));
+
+    const pos2 = ChunkPos{ .level = 5, .position = .{ 32, 32, 32 } };
+
+    try std.testing.expectEqual(BlockPos{ 32768, 32768, 32768 }, pos2.toGlobalBlockPos());
+
+    const pos3 = ChunkPos.fromGlobalBlockPos(.{ 32, 64, 32 }, -5);
+    try testing.expect(std.meta.eql(pos3, ChunkPos{ .level = -5, .position = .{ 32, 64, 32 } }));
+
+    const pos4 = ChunkPos{ .level = 0, .position = .{ 1, 1, 1 } };
+    const pos5 = pos4.toLevel(-5);
+    try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));
+}
+
+test "world" {
+    var threadPool: ThreadPool = undefined;
+    try threadPool.init(.{ .allocator = std.testing.allocator, .n_jobs = 16 });
+    defer threadPool.deinit();
+
+    var world: World = .{
+        .threadPool = &threadPool,
+        .allocator = std.testing.allocator,
+        .onEdit = null,
+        .ChunkSources = @splat(null),
+        .running = .init(true),
+        .Chunks = .init(std.testing.allocator),
+        .Entitys = .init(std.testing.allocator),
+        .entityUpdaterThread = null,
+        .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
+    };
+    defer world.deinit();
+    try std.testing.expectEqual(error.AllSourcesFailed, world.loadChunk(ChunkPos{ .level = standard_level, .position = .{ 0, 0, 0 } }, true));
 }

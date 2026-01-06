@@ -1,13 +1,13 @@
 const std = @import("std");
-const Interpolation = @import("Interpolation.zig");
 
-const Block = @import("Block.zig").Block;
 const Cache = @import("Cache").Cache;
-const Chunk = @import("Chunk.zig");
-const ChunkSize = Chunk.ChunkSize;
 const ztracy = @import("ztracy");
 
+const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
+const Chunk = @import("Chunk.zig");
+const ChunkSize = Chunk.ChunkSize;
+const Interpolation = @import("Interpolation.zig");
 const World = @import("World.zig");
 const ChunkPos = World.ChunkPos;
 
@@ -211,7 +211,7 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    fn randGround(rand: *std.Random, heightPercent: f32, block_height: i64, seaLevel: i64, blockRandomness: f32, oneDterrainScale: f32) Block {
+    fn randGround(rand: *const std.Random, heightPercent: f32, block_height: i64, seaLevel: i64, blockRandomness: f32, oneDterrainScale: f32) Block {
         const a = std.math.lerp(heightPercent * oneDterrainScale, rand.float(f32), blockRandomness);
         return if (block_height < seaLevel) Block.dirt else if (a < 0.25) Block.grass else if (a < 0.4) Block.dirt else if (a < 0.6) Block.stone else Block.snow;
     }

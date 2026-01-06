@@ -30,7 +30,7 @@ pub const Face = packed struct(u64) {
 //TODO remove threadlocal vars to prepare for async
 threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
 threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
-threadlocal var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
+threadlocal var ExtendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
 
 //TODO make better mesher, greedy meshing?
 //maybie for each face move in and mesh the 2d face
@@ -41,18 +41,22 @@ pub const Mesh = struct {
     Pos: ChunkPos,
     scale: f32,
     animation: bool,
+
     ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-    pub fn MeshFromChunks(chunkPos: ChunkPos, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
+    pub fn meshFromChunks(chunkPos: ChunkPos, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
         const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
         defer mdc.End();
         const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
-        GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
+        GenerateExtendedChunk(&ExtendedBlocks, mainblocks, neighbor_faces);
+        ecp.End();
         if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
+        return try meshSimple(chunkPos, &ExtendedBlocks, scale, animation, allocator);
+    }
 
+    pub fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
         //buffers are threadlocal so they only get init once, HUGE speedup
         var pos: usize = 0;
         var Tpos: usize = 0;
-        ecp.End();
         const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
         for (1..ChunkSize + 1) |x| {
             for (1..ChunkSize + 1) |y| {
