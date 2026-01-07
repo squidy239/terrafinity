@@ -1,5 +1,5 @@
 const std = @import("std");
-const Renderer = @import("../App.zig").Renderer;
+const Renderer = @import("../main.zig").Renderer;
 const World = @import("World.zig");
 const ztracy = @import("ztracy");
 

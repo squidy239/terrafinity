@@ -1,7 +1,7 @@
 const std = @import("std");
 const ConcurrentQueue = @import("ConcurrentQueue");
 
-const root = @import("App.zig");
+const root = @import("main.zig");
 const ChunkManager = root.ChunkManager;
 const DrawElementsIndirectCommand = root.Renderer.DrawElementsIndirectCommand;
 const MeshBufferIDs = root.Renderer.MeshBufferIDs;

@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
 
     // Create root module
     const root_module = b.createModule(.{
-        .root_source_file = b.path("src/App.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = true,
+        // .use_llvm = true,
     });
 
     // Link libraries
@@ -38,14 +38,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.linkLibrary(ztracy.artifact("tracy"));
-
-    if (target.result.os.tag != .emscripten) {
-        const zglfw = b.dependency("zglfw", .{
-            .target = target,
-            .optimize = optimize,
-        });
-        exe.linkLibrary(zglfw.artifact("glfw"));
-    }
 
     // Check step
     if (check) {
@@ -143,6 +135,22 @@ fn setupDependencies(
     }).module("obj");
     root_module.addImport("obj", obj_mod);
 
+    // SDL3
+    const sdl3 = b.dependency("sdl3", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("sdl3", sdl3.module("sdl3"));
+
+    const dvui_dep = b.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .sdl3gpu,
+        .freetype = false,
+    });
+    root_module.addImport("dvui", dvui_dep.module("dvui_sdl3gpu"));
+    root_module.addImport("sdl3gpu-backend", dvui_dep.module("sdl3"));
+
     // OpenGL bindings
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
@@ -157,23 +165,6 @@ fn setupDependencies(
         .optimize = optimize,
     });
     root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
-
-    // GLFW (requires: sudo apt install libx11-dev on Linux)
-    const zglfw = b.dependency("zglfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    root_module.addImport("zglfw", zglfw.module("root"));
-
-    // GUI (zgui with OpenGL and GLFW)
-    const gui = b.dependency("zgui", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const gui_mod = gui.module("zgui");
-    gui_mod.addImport("gl", gl_bindings);
-    gui_mod.addImport("glfw", zglfw.module("root"));
-    root_module.addImport("gui", gui_mod);
 
     // Math library
     const zm = b.dependency("zm", .{
