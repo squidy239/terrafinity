@@ -68,26 +68,34 @@ pub const NaturalCubicInterpolator3D = struct {
         self.coeffs_y_vectorized = transpose(f32, 4, 4, coeffs_y);
 
         // Precompute Z-direction coefficients
-        var coeffs_z: [4]f32 = undefined;
         const values = [4]f32{ grid[0][0][0], grid[0][0][1], grid[0][0][2], grid[0][0][3] };
-        coeffs_z = computeNaturalCubicCoeffs(f32, values);
+        const coeffs_z = computeNaturalCubicCoeffs(f32, values);
         self.coeffs_z_vectorized = coeffs_z;
     }
 
     pub fn sample(interp: *const Self, x: f32, y: f32, z: f32) f32 {
         // Step 1: X interpolation
-        var xresult: [4][4]f32 = @bitCast(splineEvalSimd(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
+        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimd(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
         // Step 2: Y interpolation
-        const yresult = splineEvalSimd(f32, 4, &xresult, &interp.coeffs_y_vectorized, y);
+        const yresult = splineEvalSimd(f32, 4, xresult, &interp.coeffs_y_vectorized, y);
         // Step 3: Z interpolation
         return splineEval(f32, yresult, interp.coeffs_z_vectorized, z);
     }
 
     pub fn sampleComptimeXZ(interp: *const Self, comptime x: f32, y: f32, comptime z: f32) f32 {
         // Step 1: X interpolation
-        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x));
+        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x)); //this bitcast might be unsafe
         // Step 2: Y interpolation
         const yresult = splineEvalSimd(f32, 4, xresult, interp.coeffs_y_vectorized, y);
+        // Step 3: Z interpolation
+        return splineEvalComptimeT(f32, yresult, interp.coeffs_z_vectorized, z);
+    }
+
+    pub fn sampleComptime(interp: *const Self, comptime x: f32, comptime y: f32, comptime z: f32) f32 {
+        // Step 1: X interpolation
+        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x)); //this bitcast might be unsafe
+        // Step 2: Y interpolation
+        const yresult = splineEvalSimdComptimeT(f32, 4, xresult, interp.coeffs_y_vectorized, y);
         // Step 3: Z interpolation
         return splineEvalComptimeT(f32, yresult, interp.coeffs_z_vectorized, z);
     }

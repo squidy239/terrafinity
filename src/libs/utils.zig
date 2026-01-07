@@ -9,17 +9,16 @@ pub fn loadZON(comptime T: type, file: std.fs.File, temp_allocator: std.mem.Allo
     const stat = try file.stat();
     _ = allocator;
     var reader = file.reader(&buf);
-    const slice = try temp_allocator.alloc(u8, stat.size+1);
+    const slice = try temp_allocator.alloc(u8, stat.size + 1);
     defer temp_allocator.free(slice);
     try reader.interface.readSliceAll(slice[0..stat.size]);
     slice[stat.size] = 0;
     @setEvalBranchQuota(100000000);
-    var diag:std.zon.parse.Diagnostics = .{};
+    var diag: std.zon.parse.Diagnostics = .{};
     defer diag.deinit(temp_allocator);
-    const result = try std.zon.parse.fromSlice(T,temp_allocator, slice[0..stat.size:0], &diag, .{});
+    const result = try std.zon.parse.fromSlice(T, temp_allocator, slice[0..stat.size :0], &diag, .{});
     var stderr = std.fs.File.stderr().writer(&buf);
     try diag.format(&stderr.interface);
     try stderr.interface.flush();
     return result;
-    
 }
