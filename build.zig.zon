@@ -36,10 +36,6 @@
             .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#5a0b47c99f3e3ff4ee179028b43f1a0ee4498ffa",
             .hash = "ConcurrentQueue-0.0.0-ucuqzoBCAAD7OexFDSJ3nulxQ9AjBcA1xStwAZWSWAlE",
         },
-        .zgui = .{
-            .url = "git+https://codeberg.org/glowsquid/zgui.git#27a3b4f8ad0dec8ad5265ac5bb5574c24ea5faa7",
-            .hash = "zgui-0.0.0-5-RVg2MX5AAT1ZhkbAy6gCCIwCjUx4EvmDAS5fBzVdxT",
-        },
         .rocksdb = .{
             .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
             .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",

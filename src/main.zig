@@ -35,9 +35,10 @@ var primary_allocator: std.mem.Allocator = undefined;
 
 var game: ?Game.Game = null;
 var proc_table: gl.ProcTable = undefined;
-var running: std.atomic.Value(bool) = .init(true);
 
 pub fn main() !void {
+    var running: std.atomic.Value(bool) = .init(true);
+
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
@@ -89,80 +90,62 @@ pub fn main() !void {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    const running_watch = try sdl.events.addWatch(std.atomic.Value(bool), running_watcher, &running);
+    const running_watch = try sdl.events.addWatch(std.atomic.Value(bool), runningWatcher, &running);
     defer sdl.events.removeWatch(running_watch, &running);
     while (running.load(.unordered)) {
         sdl.events.pump(); //TODO make this happen more then every frame, maybie have renderers be on seprate threads.
-        const cmd = try ui_gpu.acquireCommandBuffer();
-
-        const swapchain_texture = try cmd.waitAndAcquireSwapchainTexture(window);
-        const texture = swapchain_texture.@"0" orelse return error.NoSwapchainTexture;
-        
-        // acquire the command buffer and loan it to the backend
-        // if cmd is set before calling begin() we are responsible for submitting it
-        backend.cmd = @ptrCast(cmd.value);
-        backend.swapchain_texture = @ptrCast(texture.value);
-
-        // marks the beginning of a frame for dvui, can call dvui functions after this
-        try ui_window.begin(std.time.nanoTimestamp());
-
-        const c = sdl.c;
-        // clear the window
-        var color_target = sdl.gpu.ColorTargetInfo{.texture = texture};
-        color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
-        color_target.load = .clear;
-        color_target.store = .store;
-
-        const clearPass = cmd.beginRenderPass(@ptrCast(&color_target), null);
-        clearPass.end();
-
-        // draw hello-triangle with sdl-gpu
-
-        dvui_floating_stuff();
-
-        // marks end of dvui frame, don't call dvui functions after this
-        // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
-        _ = try ui_window.end(.{});
-
-        // cursor management
-        if (ui_window.cursorRequestedFloating()) |cursor| {
-            // cursor is over floating window, dvui sets it
-            try backend.setCursor(cursor);
-        } else {
-            // cursor should be handled by application
-            try backend.setCursor(.bad);
-        }
-        try backend.textInputRect(ui_window.textInputRequested());
-
-        // render frame to OS
-        try backend.renderPresent();
-
-        // its still on us to issue the submit and present
-        const submitted = c.SDL_SubmitGPUCommandBuffer(@ptrCast(cmd.value));
-        if (!submitted) {
-            return error.CommandBufferSubmissionFailed;
-        }
+        try drawUi(null, dvui_floating_stuff, &backend, window, &ui_window, &ui_gpu, {});
     }
 }
 
-fn running_watcher(user_data: ?*std.atomic.Value(bool), event: *sdl.events.Event) bool {
+fn drawUi(UserData: ?type, func: if (UserData != null) *const fn (UserData) void else *const fn () void, backend: *SDLBackend, window: sdl.video.Window, ui_window: *dvui.Window, ui_gpu: *const sdl.gpu.Device, context: if (UserData != null) ?UserData.* else void) !void {
+    const cmd = try ui_gpu.acquireCommandBuffer();
+
+    const swapchain_texture = try cmd.waitAndAcquireSwapchainTexture(window);
+    const texture = swapchain_texture.@"0" orelse return error.NoSwapchainTexture;
+
+    backend.cmd = @ptrCast(cmd.value);
+    backend.swapchain_texture = @ptrCast(texture.value);
+
+    try ui_window.begin(std.time.nanoTimestamp());
+
+    _ = try backend.addAllEvents(ui_window);
+
+    var color_target = sdl.gpu.ColorTargetInfo{ .texture = texture };
+    color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
+    color_target.load = .clear;
+    color_target.store = .store;
+
+    const clearPass = cmd.beginRenderPass(@ptrCast(&color_target), null);
+    clearPass.end();
+
+    if (UserData != null) {
+        func(context.?);
+    } else {
+        func();
+    }
+
+    _ = try ui_window.end(.{});
+
+    if (ui_window.cursorRequestedFloating()) |cursor| {
+        try backend.setCursor(cursor);
+    } else {
+        try backend.setCursor(.bad);
+    }
+    try backend.textInputRect(ui_window.textInputRequested());
+    try backend.renderPresent();
+    try cmd.submit();
+}
+
+fn runningWatcher(running: ?*std.atomic.Value(bool), event: *sdl.events.Event) bool {
     switch (event.*) {
-        .quit,
-        .terminating,
-        .window_close_requested,
-        => {
-            user_data.?.store(false, .unordered);
+        .quit, .terminating, .window_close_requested => {
+            running.?.store(false, .unordered);
             return true;
         },
         else => return false,
     }
 }
-
-const menuPage = enum {
-    mainMenu,
-    optionsMenu,
-    worldRender,
-};
 
 test {
     std.testing.refAllDeclsRecursive(@This());
