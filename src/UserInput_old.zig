@@ -1,13 +1,11 @@
 const std = @import("std");
 const root = @import("root");
-const Game = @import("Game.zig").Game;
+const Game = @import("Game.zig");
 const World = @import("world/World.zig");
 
 const ChunkSize = @import("Chunk").Chunk.ChunkSize;
 const EntityTypes = @import("world/EntityTypes.zig");
 const gl = @import("gl");
-const glfw = @import("zglfw");
-const gui = @import("gui");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 const Renderer = @import("client/Renderer.zig");
@@ -17,7 +15,6 @@ var worldEditorLock: std.Thread.Mutex = .{};
 var last_mouse_pos: [2]f64 = [2]f64{ 0, 0 };
 var isinit = false;
 const Menu = @import("client/menu.zig");
-var menu: gui.Element = undefined;
 var lastmicrotime: i64 = 0;
 var lastfullscreentoggle: i64 = 0;
 var lastbreak: i64 = 0;
@@ -31,15 +28,6 @@ pub fn init(g: *Game) !void { //TODO move menu out of this and redo user input h
     };
     lastmicrotime = std.time.microTimestamp();
 
-    //menu is temporay test code
-    menu = try gui.Element.create(std.heap.c_allocator, Menu.textEscMenu);
-    menu.children.?[0].onHoverArgs = &ts;
-    menu.children.?[1].onHoverArgs = &ts;
-    std.debug.print("mo: {any}\n", .{menu.onHoverArgs});
-    const viewport_pixels: @Vector(2, f32) = @splat(0);
-    const viewport_millimeters: @Vector(2, f32) = @splat(0);
-    menu.init(viewport_pixels, viewport_millimeters);
-    @as(*gui.Widgets.SlideData, @ptrCast(@alignCast(menu.children.?[2].customData.?))).onSlide = OnSlide;
     isinit = true;
 }
 
@@ -48,17 +36,9 @@ pub fn deinit() void {
     _ = worldEditor.flush() catch |err| std.debug.panic("failed to deinit WorldEditor: {any}\n", .{err});
     worldEditorLock.unlock();
 
-    menu.deinit();
     isinit = false;
 }
 
-fn OnSlide(slider: *gui.Element, slideData: *const gui.Widgets.SlideData, window: *glfw.Window) void {
-    _ = slider;
-    _ = window;
-    var genDistf: @Vector(2, f32) = @Vector(2, f32){ 100, 100 };
-    genDistf *= @splat(slideData.sliderPos);
-    unreachable; //not working
-}
 
 pub const ToggleSettings = struct {
     Fullscreen: bool,

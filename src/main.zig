@@ -20,7 +20,7 @@ pub const ztracy = @import("ztracy");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
 pub const Renderer = @import("client/Renderer.zig");
-const SDLBackend = @import("sdl3gpu-backend");
+const SDLBackend = @import("sdl3-backend");
 
 var lastx: f64 = undefined;
 var lasty: f64 = undefined;
@@ -33,7 +33,6 @@ pub var width: u32 = 600;
 
 var primary_allocator: std.mem.Allocator = undefined;
 
-var game: ?Game.Game = null;
 var proc_table: gl.ProcTable = undefined;
 
 pub fn main() !void {
@@ -42,7 +41,7 @@ pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
-
+    
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -92,9 +91,23 @@ pub fn main() !void {
 
     const running_watch = try sdl.events.addWatch(std.atomic.Value(bool), runningWatcher, &running);
     defer sdl.events.removeWatch(running_watch, &running);
+
+    var path = try std.fs.cwd().openDir("test_world", .{});
+    defer path.close();
+    
+    var game: Game = undefined;
+    try game.init(allocator, allocator, window, path);
+    defer game.deinit(window);
+    
+    try game.startThreads();
+    
     while (running.load(.unordered)) {
-        sdl.events.pump(); //TODO make this happen more then every frame, maybie have renderers be on seprate threads.
+        sdl.events.pump(); //TODO make this happen more then every frame, maybe have renderers be on seprate threads.
+        const size = try window.getSize();
+        const viewport_pixels = @Vector(2, f32){@floatFromInt(size[0]), @floatFromInt(size[1]) };
+        _ = try game.renderer.Draw(&game, viewport_pixels);
         try drawUi(null, dvui_floating_stuff, &backend, window, &ui_window, &ui_gpu, {});
+        try sdl.video.gl.swapWindow(window);
     }
 }
 
@@ -112,7 +125,7 @@ fn drawUi(UserData: ?type, func: if (UserData != null) *const fn (UserData) void
     _ = try backend.addAllEvents(ui_window);
 
     var color_target = sdl.gpu.ColorTargetInfo{ .texture = texture };
-    color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
+    color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 };
     color_target.load = .clear;
     color_target.store = .store;
 
@@ -133,7 +146,6 @@ fn drawUi(UserData: ?type, func: if (UserData != null) *const fn (UserData) void
         try backend.setCursor(.bad);
     }
     try backend.textInputRect(ui_window.textInputRequested());
-    try backend.renderPresent();
     try cmd.submit();
 }
 

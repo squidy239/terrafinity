@@ -145,11 +145,11 @@ fn setupDependencies(
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
-        .backend = .sdl3gpu,
+        .backend = .sdl3,
         .freetype = false,
     });
-    root_module.addImport("dvui", dvui_dep.module("dvui_sdl3gpu"));
-    root_module.addImport("sdl3gpu-backend", dvui_dep.module("sdl3"));
+    root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
+    root_module.addImport("sdl3-backend", dvui_dep.module("sdl3"));
 
     // OpenGL bindings
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{

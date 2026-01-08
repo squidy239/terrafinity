@@ -20,7 +20,7 @@ const Game = @import("Game.zig");
 const Mesher = @import("Mesher.zig");
 const outOfSquareRange = @import("libs/utils.zig").outOfSquareRange;
 
-pub fn UnloadMeshes(game: *Game.Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, f64)) void {
+pub fn UnloadMeshes(game: *Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, f64)) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
     var meshesToUnloadBuffer: [256]World.ChunkPos = undefined;
@@ -75,7 +75,7 @@ pub fn keepLoaded(playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRan
 }
 
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
-pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
+pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
     std.debug.assert(game.player.type == .Player);
     while (game.running.load(.monotonic)) {
         const playerPos = game.player.getPos().?;
@@ -93,7 +93,7 @@ pub fn ChunkLoaderThread(game: *Game.Game, intervel_ns: u64) void {
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !void {
+fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !void {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
@@ -143,7 +143,7 @@ fn loadChunksSpiral(game: *Game.Game, playerPos: @Vector(3, f64), dist: @Vector(
     }
 }
 
-pub fn LoadMeshes(renderer: *Renderer, game: *Game.Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
+pub fn LoadMeshes(renderer: *Renderer, game: *Game, glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
     const loadMeshes = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
     defer loadMeshes.End();
     const st = std.time.microTimestamp();
