@@ -39,7 +39,6 @@ pub fn deinit() void {
     isinit = false;
 }
 
-
 pub const ToggleSettings = struct {
     Fullscreen: bool,
     Sprinting: bool,

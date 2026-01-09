@@ -35,13 +35,16 @@ var primary_allocator: std.mem.Allocator = undefined;
 
 var proc_table: gl.ProcTable = undefined;
 
+// SDL Renderer for UI overlay
+var sdl_renderer: ?sdl.render.Renderer = null;
+
 pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
-    
+
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -49,32 +52,37 @@ pub fn main() !void {
     defer sdl.shutdown();
     try sdl.init(init_flags);
     defer sdl.quit(init_flags);
+
+    // Set OpenGL attributes
     try sdl.video.gl.setAttribute(.context_major_version, 4);
     try sdl.video.gl.setAttribute(.context_minor_version, 1);
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
-    try sdl.video.gl.setAttribute(.context_flags, @intFromEnum(sdl.video.gl.ContextFlag.forward_compatible));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
-    try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-
-    const window = try sdl.video.Window.init("terrafinity", width, height, .{ .open_gl = true });
+    //try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
+    const window = try sdl.video.Window.init("terrafinity", width, height, .{
+        .open_gl = true,
+    });
     defer window.deinit();
 
-    const ui_gpu = try sdl.gpu.Device.init(.{ .spirv = true }, builtin.mode == .Debug, null);
-    defer ui_gpu.deinit();
+    // Create SDL renderer for UI (uses OpenGL backend internally)
+    SDLBackend.enableSDLLogging();
 
-    try ui_gpu.claimWindow(window);
-    try ui_gpu.setSwapchainParameters(window, .sdr, .immediate);
+    const game_render_context = try sdl.video.gl.Context.init(window);
+    defer game_render_context.deinit() catch unreachable;
 
-    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(ui_gpu.value), allocator);
-    defer backend.deinit();
+    const ui_context = try sdl.video.gl.Context.init(window);
+    defer ui_context.deinit() catch unreachable;
 
-    var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
-    defer ui_window.deinit();
+    errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
+    const renderer = try sdl.render.Renderer.init(window, "opengl");
+    defer renderer.deinit();
 
-    const context = try sdl.video.gl.Context.init(window);
-    defer context.deinit() catch unreachable; //why can deinit fail?
-    try context.makeCurrent(window);
+    try renderer.setDrawBlendMode(.blend);
+    // Create OpenGL context
 
+    try game_render_context.makeCurrent(window);
+
+    // Initialize OpenGL
     if (!proc_table.init(sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&proc_table);
 
@@ -89,48 +97,52 @@ pub fn main() !void {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
+    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(renderer.value));
+    defer backend.deinit();
+
+    var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
+    defer ui_window.deinit();
+
     const running_watch = try sdl.events.addWatch(std.atomic.Value(bool), runningWatcher, &running);
     defer sdl.events.removeWatch(running_watch, &running);
 
     var path = try std.fs.cwd().openDir("test_world", .{});
     defer path.close();
-    
+
     var game: Game = undefined;
     try game.init(allocator, allocator, window, path);
     defer game.deinit(window);
-    
+
     try game.startThreads();
-    
     while (running.load(.unordered)) {
-        sdl.events.pump(); //TODO make this happen more then every frame, maybe have renderers be on seprate threads.
+        sdl.events.pump();
+
         const size = try window.getSize();
-        const viewport_pixels = @Vector(2, f32){@floatFromInt(size[0]), @floatFromInt(size[1]) };
+        const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
+
+        try game_render_context.makeCurrent(window);
+
+        // Render game with OpenGL
         _ = try game.renderer.Draw(&game, viewport_pixels);
-        try drawUi(null, dvui_floating_stuff, &backend, window, &ui_window, &ui_gpu, {});
+        try ui_context.makeCurrent(window);
+
+        try drawUi(null, dvui_floating_stuff, &backend, renderer, &ui_window, {});
+
         try sdl.video.gl.swapWindow(window);
     }
 }
 
-fn drawUi(UserData: ?type, func: if (UserData != null) *const fn (UserData) void else *const fn () void, backend: *SDLBackend, window: sdl.video.Window, ui_window: *dvui.Window, ui_gpu: *const sdl.gpu.Device, context: if (UserData != null) ?UserData.* else void) !void {
-    const cmd = try ui_gpu.acquireCommandBuffer();
-
-    const swapchain_texture = try cmd.waitAndAcquireSwapchainTexture(window);
-    const texture = swapchain_texture.@"0" orelse return error.NoSwapchainTexture;
-
-    backend.cmd = @ptrCast(cmd.value);
-    backend.swapchain_texture = @ptrCast(texture.value);
-
+fn drawUi(
+    UserData: ?type,
+    func: if (UserData != null) *const fn (UserData) void else *const fn () void,
+    backend: *SDLBackend,
+    renderer: sdl.render.Renderer,
+    ui_window: *dvui.Window,
+    context: if (UserData != null) ?UserData.* else void,
+) !void {
     try ui_window.begin(std.time.nanoTimestamp());
 
     _ = try backend.addAllEvents(ui_window);
-
-    var color_target = sdl.gpu.ColorTargetInfo{ .texture = texture };
-    color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 };
-    color_target.load = .clear;
-    color_target.store = .store;
-
-    const clearPass = cmd.beginRenderPass(@ptrCast(&color_target), null);
-    clearPass.end();
 
     if (UserData != null) {
         func(context.?);
@@ -145,8 +157,8 @@ fn drawUi(UserData: ?type, func: if (UserData != null) *const fn (UserData) void
     } else {
         try backend.setCursor(.bad);
     }
-    try backend.textInputRect(ui_window.textInputRequested());
-    try cmd.submit();
+
+    try renderer.flush();
 }
 
 fn runningWatcher(running: ?*std.atomic.Value(bool), event: *sdl.events.Event) bool {
@@ -164,14 +176,6 @@ test {
 }
 
 fn dvui_floating_stuff() void {
-    var float = dvui.floatingWindow(@src(), .{}, .{ .max_size_content = .{ .w = 400, .h = 400 } });
-    defer float.deinit();
-
-    float.dragAreaSet(dvui.windowHeader("Floating Window", "", null));
-
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
-    defer scroll.deinit();
-
     var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .font = .theme(.title) });
     const lorem = "This example shows how to use dvui for floating windows on top of an existing application.";
     tl.addText(lorem, .{});
@@ -200,7 +204,6 @@ fn dvui_floating_stuff() void {
         dvui.toggleDebugWindow();
     }
 
-    // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo();
 }
 
@@ -211,32 +214,13 @@ fn sdlLog(
     message: [:0]const u8,
 ) void {
     _ = user_data;
-    const category_str: ?[]const u8 = if (category) |val| switch (val) {
-        .application => "Application",
-        .errors => "Errors",
-        .assert => "Assert",
-        .system => "System",
-        .audio => "Audio",
-        .video => "Video",
-        .render => "Render",
-        .input => "Input",
-        .testing => "Testing",
-        .gpu => "Gpu",
-        else => null,
-    } else null;
-    const priority_str: [:0]const u8 = if (priority) |val| switch (val) {
-        .trace => "Trace",
-        .verbose => "Verbose",
-        .debug => "Debug",
-        .info => "Info",
-        .warn => "Warn",
-        .err => "Error",
-        .critical => "Critical",
-    } else "Unknown";
-    if (category_str) |val| {
-        std.log.info("[{s}:{s}] {s}\n", .{ val, priority_str, message });
-    } else {
-        std.log.info("[Custom_{?}:{s}] {s}\n", .{ category, priority_str, message });
+    _ = category;
+    switch (priority orelse .info) {
+        .warn => std.log.warn("{s}", .{message}),
+        .debug => std.log.debug("{s}", .{message}),
+        .info => std.log.info("{s}", .{message}),
+        .err => std.log.err("{s}", .{message}),
+        else => std.log.debug("{s}", .{message}),
     }
 }
 

@@ -145,6 +145,8 @@ fn LoadFacebuffer(self: *@This()) void {
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
 }
+var last_viewport: [2]f32 = undefined;
+
 pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
     const playerPos = self.player.getPos().?;
     //draw chunks
@@ -156,7 +158,8 @@ pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u
     gl.Clear(gl.COLOR_BUFFER_BIT);
     gl.Clear(gl.DEPTH_BUFFER_BIT);
     clear.End();
-
+    if (!std.meta.eql(last_viewport, viewport_pixels)) gl.Viewport(0, 0, @intFromFloat(viewport_pixels[0]), @intFromFloat(viewport_pixels[1]));
+    last_viewport = viewport_pixels;
     const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
     const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
     drawChunks.End();

@@ -57,10 +57,10 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
 
     const gameConfigFile = try std.fs.cwd().openFile("config/GameConfig.zon", .{ .mode = .read_only });
     defer gameConfigFile.close();
-    
+
     game.loaderThread = null;
     game.unloaderThread = null;
-    
+
     const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, arena);
 
     const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, arena);
