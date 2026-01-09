@@ -11,10 +11,11 @@ const builtin = @import("builtin");
 const Chunk = @import("world/Chunk.zig");
 const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
+const Key = @import("Key.zig");
 
 allocator: std.mem.Allocator,
 world: World,
-player: *Entity,
+player: *EntityTypes.Player,
 pool: ThreadPool,
 chunkManager: ChunkManager,
 renderer: Renderer,
@@ -111,7 +112,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
         });
     }
 
-    game.player = try game.world.spawnEntity(null, EntityTypes.Player{
+    const playerentity = try game.world.spawnEntity(null, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
             .elements = .{
@@ -127,8 +128,9 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
             .updateTimer = try .start(),
         },
         .gameMode = .Spectator,
-        .headRotationAxis = @Vector(2, f16){ 0, 0 },
+        .viewDirection = @Vector(3, f32){ 0, 0, 0},
     });
+    game.player = @ptrCast(@alignCast(playerentity.ptr));
     game.chunkManager = .{
         .pool = &game.pool,
         .ChunkRenderList = .init(allocator),
@@ -150,6 +152,19 @@ pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
     if (level <= self.levels[0]) return @splat(0);
     const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
+}
+
+pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, dt: i64) !void {
+    _ = dt;
+    _ = self;
+    _ = actions;
+    @panic("TODO");
+}
+
+fn moveForward(self: *@This(), dt: i64) !void {
+    _ = dt;
+    _ = self;
+    @panic("TODO");
 }
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {

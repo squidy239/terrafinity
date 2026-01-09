@@ -68,9 +68,11 @@ pub fn main() !void {
     defer ui_context.deinit() catch unreachable;
 
     errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
-    const renderer = try sdl.render.Renderer.init(window, "opengl");
-    defer renderer.deinit();
-    try renderer.setDrawBlendMode(.blend);
+    const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
+    defer sdl_renderer.deinit();
+
+    try sdl_renderer.setDrawBlendMode(.blend);
+
     try game_render_context.makeCurrent(window);
 
     // Initialize OpenGL
@@ -88,7 +90,7 @@ pub fn main() !void {
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(renderer.value));
+    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
@@ -113,29 +115,25 @@ pub fn main() !void {
 
     while (running.load(.unordered)) {
         var action_set = Key.ActionSet.initFill(false);
-        handleEvents(&keymap, &action_set, &running);
-
-        const size = try window.getSize();
-        const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
-        
-        try game_render_context.makeCurrent(window);
+        try handleEvents(&keymap, &action_set, &running, &backend, &ui_window);
 
         if (menu_state.ingame) {
-            const drawn = try game.renderer.Draw(&game, viewport_pixels);
-            std.log.debug("{any}", .{drawn});
-            if(action_set.get(.escape_menu)) {
-                menu_state.esc = true;
-                std.debug.print("esc\n", .{});
+            const size = try window.getSize();
+            const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
+
+            try game_render_context.makeCurrent(window);
+            _ = try game.renderer.Draw(&game, viewport_pixels);
+            if (action_set.get(.escape_menu)) {
+                menu_state.esc = !menu_state.esc;
             }
         }
 
         try ui_context.makeCurrent(window);
         try ui_window.begin(std.time.nanoTimestamp());
-        _ = try backend.addAllEvents(&ui_window);
 
-        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state);
-        if(menu_state.esc) try escMenu(&game, window, &menu_state);
-        
+        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state, game_render_context, ui_context);
+        if (menu_state.esc) try escMenu(&game, window, &menu_state);
+
         _ = try ui_window.end(.{});
         if (ui_window.cursorRequestedFloating()) |cursor| {
             try backend.setCursor(cursor);
@@ -143,21 +141,24 @@ pub fn main() !void {
             try backend.setCursor(.arrow);
         }
 
-        try renderer.flush();
+        try sdl_renderer.flush();
         try sdl.video.gl.swapWindow(window);
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_context: sdl.video.gl.Context, ui_context: sdl.video.gl.Context) !void {
+    try game_context.makeCurrent(window);
     std.debug.assert(!menu_state.ingame);
     try gameptr.init(allocator, allocator, window, path);
     menu_state.ingame = true;
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});
+    try ui_context.makeCurrent(window);
 }
 
-fn handleEvents(key_map: *Key.Map, action_set: *Key.ActionSet, running: *std.atomic.Value(bool)) void {
+fn handleEvents(key_map: *Key.Map, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
     while (sdl.events.poll()) |event| {
+        _ = try ui_backend.addEvent(window, @bitCast(event.toSdl()));
         switch (event) {
             .key_down => |key| {
                 const action = key_map.getAction(Key.Key{ .key = key.key orelse continue, .modifier = key.mod }) orelse continue;
@@ -176,12 +177,11 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-
-fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState) !void {
+fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_render_context: sdl.video.gl.Context, ui_context: sdl.video.gl.Context) !void {
     const size = try window.getSizeInPixels();
     const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     if (dvui.button(@src(), "Play", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        try openGame(gameptr, allocator, window, path, menu_state);
+        try openGame(gameptr, allocator, window, path, menu_state, game_render_context, ui_context);
         menu_state.main = false;
     }
     menu.deinit();

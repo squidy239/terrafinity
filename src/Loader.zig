@@ -76,9 +76,8 @@ pub fn keepLoaded(playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRan
 
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
 pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
-    std.debug.assert(game.player.type == .Player);
     while (game.running.load(.monotonic)) {
-        const playerPos = game.player.getPos().?;
+        const playerPos = game.player.physics.getPos();
         const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
@@ -148,7 +147,7 @@ pub fn LoadMeshes(renderer: *Renderer, game: *Game, glSync: ?*gl.sync, min_us: u
     defer loadMeshes.End();
     const st = std.time.microTimestamp();
     var amount: u64 = 0;
-    const player_pos = game.player.getPos().?;
+    const player_pos = game.player.physics.getPos();
     while (true) {
         var syncStatus: c_int = undefined;
         if (glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;

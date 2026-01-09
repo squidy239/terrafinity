@@ -8,7 +8,7 @@ const Loader = @import("../Loader.zig");
 const ChunkSize = @import("../main.zig").ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("../main.zig").Entity;
-const EntityTypes = @import("EntityTypes");
+const EntityTypes = @import("../world/EntityTypes.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const Player = @import("EntityTypes").Player;
@@ -23,7 +23,7 @@ pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
-player: *Entity,
+player: *EntityTypes.Player,
 cameraFront: @Vector(3, f64),
 mouseSensitivity: f64,
 indecies: c_uint,
@@ -32,8 +32,7 @@ shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
 uniforms: UniformLocations,
 
-pub fn init(allocator: std.mem.Allocator, player: *Entity) !@This() {
-    _ = player.ref_count.fetchAdd(1, .seq_cst);
+pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() {
     var renderer = @This(){
         .allocator = allocator,
         .mouseSensitivity = 0.2,
@@ -55,7 +54,6 @@ pub fn init(allocator: std.mem.Allocator, player: *Entity) !@This() {
 }
 
 pub fn deinit(self: *@This()) void {
-    _ = self.player.ref_count.fetchSub(1, .seq_cst);
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
@@ -148,7 +146,7 @@ fn LoadFacebuffer(self: *@This()) void {
 var last_viewport: [2]f32 = undefined;
 
 pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
-    const playerPos = self.player.getPos().?;
+    const playerPos = self.player.physics.getPos();
     //draw chunks
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };

@@ -83,8 +83,8 @@ pub fn FreeMeshes() void {
 pub const Player = struct {
     player_name: Name,
     gameMode: GameMode,
-    headRotationAxis: @Vector(2, f32),
-    headRotationAxisLock: std.Thread.RwLock = .{},
+    viewDirection: @Vector(3, f32),
+    viewDirectionLock: std.Thread.RwLock = .{},
     physics: Physics.getInterface(struct {
         gravity: Physics.Gravity,
         resistance: Physics.Resistance,
@@ -129,6 +129,14 @@ pub const Player = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         return self.physics.getPos();
     }
+    
+    
+    pub fn getViewDirection(self:  *@This()) @Vector(3, f32) {
+        self.viewDirectionLock.lockShared();
+        defer self.viewDirectionLock.unlockShared();
+        return self.viewDirection;
+    }
+    
 
     pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {
         _ = uuid;
