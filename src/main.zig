@@ -21,22 +21,16 @@ const Game = @import("Game.zig");
 const dvui = @import("dvui");
 pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
-
-var lastx: f64 = undefined;
-var lasty: f64 = undefined;
-var cameraFront = @Vector(3, f64){ 0, 1, 0 };
-var cameraUp = @Vector(3, f64){ 0, 1, 0 };
-var pitch: f64 = 1;
-var yaw: f64 = 1;
-pub var height: u32 = 800;
-pub var width: u32 = 600;
-
-var primary_allocator: std.mem.Allocator = undefined;
+const Key = @import("Key.zig");
 
 var proc_table: gl.ProcTable = undefined;
 
-// SDL Renderer for UI overlay
-var sdl_renderer: ?sdl.render.Renderer = null;
+const MenuState = struct {
+    ingame: bool = false,
+    options: bool = false,
+    main: bool = false,
+    esc: bool = false,
+};
 
 pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
@@ -59,7 +53,7 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     //try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-    const window = try sdl.video.Window.init("terrafinity", width, height, .{
+    const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
     });
     defer window.deinit();
@@ -76,17 +70,14 @@ pub fn main() !void {
     errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
     const renderer = try sdl.render.Renderer.init(window, "opengl");
     defer renderer.deinit();
-
     try renderer.setDrawBlendMode(.blend);
-    // Create OpenGL context
-
     try game_render_context.makeCurrent(window);
 
     // Initialize OpenGL
     if (!proc_table.init(sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&proc_table);
 
-    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(width))), @intFromFloat(@as(f32, @floatFromInt(height))));
+    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
 
     gl.Enable(gl.MULTISAMPLE);
     gl.Enable(gl.DEPTH_TEST);
@@ -103,71 +94,81 @@ pub fn main() !void {
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
 
-    const running_watch = try sdl.events.addWatch(std.atomic.Value(bool), runningWatcher, &running);
-    defer sdl.events.removeWatch(running_watch, &running);
-
     var path = try std.fs.cwd().openDir("test_world", .{});
     defer path.close();
 
-    var game: Game = undefined;
-    try game.init(allocator, allocator, window, path);
-    defer game.deinit(window);
+    var menu_state: MenuState = .{ .main = true };
+    var keymap = Key.Map.init(allocator);
+    defer keymap.map.deinit();
+    //TODO load keymap from file
+    try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
+    try keymap.setActionKey(.{ .key = .w }, .forward);
+    try keymap.setActionKey(.{ .key = .s }, .backward);
+    try keymap.setActionKey(.{ .key = .a }, .left);
+    try keymap.setActionKey(.{ .key = .d }, .right);
+    try keymap.setActionKey(.{ .key = .space }, .jump);
 
-    try game.startThreads();
+    var game: Game = undefined;
+    defer if (menu_state.ingame) game.deinit(window);
+
     while (running.load(.unordered)) {
-        sdl.events.pump();
+        var action_set = Key.ActionSet.initFill(false);
+        handleEvents(&keymap, &action_set, &running);
 
         const size = try window.getSize();
         const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
-
+        
         try game_render_context.makeCurrent(window);
 
-        // Render game with OpenGL
-        _ = try game.renderer.Draw(&game, viewport_pixels);
+        if (menu_state.ingame) {
+            const drawn = try game.renderer.Draw(&game, viewport_pixels);
+            std.log.debug("{any}", .{drawn});
+            if(action_set.get(.escape_menu)) {
+                menu_state.esc = true;
+                std.debug.print("esc\n", .{});
+            }
+        }
+
         try ui_context.makeCurrent(window);
+        try ui_window.begin(std.time.nanoTimestamp());
+        _ = try backend.addAllEvents(&ui_window);
 
-        try drawUi(null, dvui_floating_stuff, &backend, renderer, &ui_window, {});
+        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state);
+        if(menu_state.esc) try escMenu(&game, window, &menu_state);
+        
+        _ = try ui_window.end(.{});
+        if (ui_window.cursorRequestedFloating()) |cursor| {
+            try backend.setCursor(cursor);
+        } else {
+            try backend.setCursor(.arrow);
+        }
 
+        try renderer.flush();
         try sdl.video.gl.swapWindow(window);
     }
 }
 
-fn drawUi(
-    UserData: ?type,
-    func: if (UserData != null) *const fn (UserData) void else *const fn () void,
-    backend: *SDLBackend,
-    renderer: sdl.render.Renderer,
-    ui_window: *dvui.Window,
-    context: if (UserData != null) ?UserData.* else void,
-) !void {
-    try ui_window.begin(std.time.nanoTimestamp());
-
-    _ = try backend.addAllEvents(ui_window);
-
-    if (UserData != null) {
-        func(context.?);
-    } else {
-        func();
-    }
-
-    _ = try ui_window.end(.{});
-
-    if (ui_window.cursorRequestedFloating()) |cursor| {
-        try backend.setCursor(cursor);
-    } else {
-        try backend.setCursor(.bad);
-    }
-
-    try renderer.flush();
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState) !void {
+    std.debug.assert(!menu_state.ingame);
+    try gameptr.init(allocator, allocator, window, path);
+    menu_state.ingame = true;
+    try gameptr.startThreads();
+    std.log.info("opening game\n", .{});
 }
 
-fn runningWatcher(running: ?*std.atomic.Value(bool), event: *sdl.events.Event) bool {
-    switch (event.*) {
-        .quit, .terminating, .window_close_requested => {
-            running.?.store(false, .unordered);
-            return true;
-        },
-        else => return false,
+fn handleEvents(key_map: *Key.Map, action_set: *Key.ActionSet, running: *std.atomic.Value(bool)) void {
+    while (sdl.events.poll()) |event| {
+        switch (event) {
+            .key_down => |key| {
+                const action = key_map.getAction(Key.Key{ .key = key.key orelse continue, .modifier = key.mod }) orelse continue;
+                action_set.set(action, true);
+            },
+            .quit, .terminating, .window_close_requested => {
+                running.store(false, .unordered);
+                return; //stop handling if closing
+            },
+            else => {},
+        }
     }
 }
 
@@ -175,36 +176,33 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn dvui_floating_stuff() void {
-    var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .font = .theme(.title) });
-    const lorem = "This example shows how to use dvui for floating windows on top of an existing application.";
-    tl.addText(lorem, .{});
-    tl.deinit();
 
-    var tl2 = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal });
-    tl2.addText("The dvui is painting only floating windows and dialogs.", .{});
-    tl2.addText("\n\n", .{});
-    tl2.addText("Framerate is managed by the application", .{});
-    tl2.addText("\n\n", .{});
-    tl2.addText("Cursor is only being set by dvui for floating windows.", .{});
-    tl2.addText("\n\n", .{});
-    if (dvui.useFreeType) {
-        tl2.addText("Fonts are being rendered by FreeType 2.", .{});
-    } else {
-        tl2.addText("Fonts are being rendered by stb_truetype.", .{});
+fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState) !void {
+    const size = try window.getSizeInPixels();
+    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
+    if (dvui.button(@src(), "Play", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
+        try openGame(gameptr, allocator, window, path, menu_state);
+        menu_state.main = false;
     }
-    tl2.deinit();
+    menu.deinit();
+}
 
-    const label = if (dvui.Examples.show_demo_window) "Hide Demo Window" else "Show Demo Window";
-    if (dvui.button(@src(), label, .{}, .{})) {
-        dvui.Examples.show_demo_window = !dvui.Examples.show_demo_window;
+fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !void {
+    std.debug.assert(menu_state.ingame);
+    const size = try window.getSizeInPixels();
+    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
+    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
+        menu_state.esc = false;
     }
 
-    if (dvui.button(@src(), "Debug Window", .{}, .{})) {
-        dvui.toggleDebugWindow();
+    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
+        menu_state.main = true;
+        menu_state.esc = false;
+        menu_state.ingame = false;
+        gameptr.deinit(window);
+        gameptr.* = undefined;
     }
-
-    dvui.Examples.demo();
+    menu.deinit();
 }
 
 fn sdlLog(
