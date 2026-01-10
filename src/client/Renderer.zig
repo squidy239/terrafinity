@@ -24,8 +24,6 @@ pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
 player: *EntityTypes.Player,
-cameraFront: @Vector(3, f64),
-mouseSensitivity: f64,
 indecies: c_uint,
 entityshaderprogram: c_uint,
 shaderprogram: c_uint,
@@ -35,8 +33,6 @@ uniforms: UniformLocations,
 pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() {
     var renderer = @This(){
         .allocator = allocator,
-        .mouseSensitivity = 0.2,
-        .cameraFront = @Vector(3, f64){ 0.0001, -0.4, 0.001 },
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
@@ -182,14 +178,14 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
     const projdist = 10000000;
-    const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
+
+    const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, game.player.getViewDirection(), @This().cameraUp);
     const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
     const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-
     var drawnchunks: u64 = 0;
     var torenderchunks: u64 = 0;
     const millitimestamp = std.time.milliTimestamp();
@@ -223,7 +219,7 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
 pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
     gl.FrontFace(gl.CCW);
     gl.UseProgram(self.entityshaderprogram);
-    const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, @This().cameraUp)).data));
+    const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + game.player.getViewDirection(), @This().cameraUp)).data));
     gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
     var it = game.chunkManager.world.Entitys.iterator();
     defer it.deinit();

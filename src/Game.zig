@@ -114,6 +114,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
 
     const playerentity = try game.world.spawnEntity(null, EntityTypes.Player{
         .player_name = .fromString("squid"),
+        .fly_speed = .init(100),
         .physics = .{
             .elements = .{
                 .mover = .{
@@ -127,8 +128,8 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
             .velocity = @splat(0),
             .updateTimer = try .start(),
         },
-        .gameMode = .Spectator,
-        .viewDirection = @Vector(3, f32){ 0, 0, 0},
+        .gameMode = .init(.Creative),
+        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
     game.chunkManager = .{
@@ -154,17 +155,24 @@ pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 
-pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, dt: i64) !void {
-    _ = dt;
-    _ = self;
-    _ = actions;
-    @panic("TODO");
+pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
+    const delta_time_seconds = @as(f32, @floatFromInt(delta_time_ns)) / std.time.ns_per_s;
+
+    switch (self.player.gameMode.load(.unordered)) {
+        .Creative => try self.flyMove(actions, delta_time_seconds),
+        else => @panic("TODO"),
+    }
 }
 
-fn moveForward(self: *@This(), dt: i64) !void {
-    _ = dt;
-    _ = self;
-    @panic("TODO");
+fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !void {
+    const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
+    if (actions.contains(.forward)) {
+        std.debug.print("forward\n", .{});
+        _ = self.player.physics.fetchAddVelocity(veldiff * self.player.viewDirection);
+    }
+    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.player.viewDirection);
+
+    //TODO remaining actions
 }
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {

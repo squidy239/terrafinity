@@ -10,7 +10,8 @@ pub const Action = enum {
     escape_menu,
 };
 
-pub const ActionSet = std.enums.EnumArray(Action, bool);
+pub const ActionSet = std.enums.EnumSet(Action);
+pub const Singlepress = std.enums.EnumSet(Action);
 
 const Keys = sdl.keycode.Keycode;
 const Modifier = sdl.keycode.KeyModifier;

@@ -67,7 +67,7 @@ pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
     mem.* = tempentity;
 
     const en = Entity{
-        .type = .Player,
+        .type = @TypeOf(tempentity).Type,
         .ptr = mem,
         .ref_count = .init(1),
         .vtable = tempentity.getInterface(),
