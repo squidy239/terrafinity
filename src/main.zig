@@ -30,9 +30,9 @@ const MenuState = struct {
     options: bool = false,
     main: bool = false,
     esc: bool = false,
-    
+
     pub fn playingGame(self: MenuState) bool {
-        return std.meta.eql(self, MenuState{.ingame = true});
+        return std.meta.eql(self, MenuState{ .ingame = true });
     }
 };
 
@@ -110,13 +110,16 @@ pub fn main() !void {
     var singlepress = Key.Singlepress.initEmpty();
     //TODO load keymap from file
     try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
+    try keymap.setActionKey(.{ .key = .left_gui }, .escape_menu);
+
     singlepress.insert(.escape_menu);
 
     try keymap.setActionKey(.{ .key = .w }, .forward);
     try keymap.setActionKey(.{ .key = .s }, .backward);
     try keymap.setActionKey(.{ .key = .a }, .left);
     try keymap.setActionKey(.{ .key = .d }, .right);
-    try keymap.setActionKey(.{ .key = .space }, .jump);
+    try keymap.setActionKey(.{ .key = .space }, .up);
+    try keymap.setActionKey(.{ .key = .left_shift }, .down);
 
     var game: Game = undefined;
     defer if (menu_state.ingame) game.deinit(window);

@@ -6,7 +6,8 @@ pub const Action = enum {
     backward,
     left,
     right,
-    jump,
+    up,
+    down,
     escape_menu,
 };
 

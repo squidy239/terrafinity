@@ -182,13 +182,15 @@ pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_
 
 fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !void {
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    if (actions.contains(.forward)) {
-        std.debug.print("forward\n", .{});
-        _ = self.player.physics.fetchAddVelocity(veldiff * self.renderer.cameraDirection);
-    }
-    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.renderer.cameraDirection);
+    const c = zm.vec.cross(self.renderer.cameraFront, Renderer.cameraUp);
+    const cross: ?@Vector(3, f64) = if (std.meta.eql(c, @Vector(3, f64){ 0, 0, 0 })) null else zm.vec.normalize(c); //prevent divide by zero
 
-    //TODO remaining actions
+    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.renderer.cameraFront);
+    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.renderer.cameraFront);
+    if (actions.contains(.up)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, veldiff[1], 0 });
+    if (actions.contains(.down)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, -veldiff[1], 0 });
+    if (actions.contains(.right) and cross != null) _ = self.player.physics.fetchAddVelocity(veldiff * cross.?);
+    if (actions.contains(.left) and cross != null) _ = self.player.physics.fetchAddVelocity(-veldiff * cross.?);
 }
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {
