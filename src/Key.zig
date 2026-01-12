@@ -18,7 +18,7 @@ const Modifier = sdl.keycode.KeyModifier;
 
 pub const Key = struct {
     key: Keys,
-    modifier: Modifier = .{},
+    modifier: ?Modifier = null,
 };
 
 pub const Map = struct {

@@ -12,6 +12,7 @@ const Chunk = @import("world/Chunk.zig");
 const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 const Key = @import("Key.zig");
+const zm = @import("zm");
 
 allocator: std.mem.Allocator,
 world: World,
@@ -155,6 +156,21 @@ pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 
+pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32) void {
+    const sensitivity: f32 = 0.5;
+    var viewDirDiff: @Vector(2, f32) = @splat(0);
+    viewDirDiff += @Vector(2, f32){ mouse_motion[1], mouse_motion[0] };
+    viewDirDiff *= @splat(sensitivity);
+
+    const smallf32 = 0.00001;
+
+    self.player.viewDirectionLock.lock();
+    self.player.viewDirection -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
+    self.player.viewDirection[0] = std.math.clamp(self.player.viewDirection[0], -90 + smallf32, 90 - smallf32);
+    self.player.viewDirectionLock.unlock();
+    self.renderer.updateCameraDirection();
+}
+
 pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time_ns)) / std.time.ns_per_s;
 
@@ -168,9 +184,9 @@ fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !voi
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
     if (actions.contains(.forward)) {
         std.debug.print("forward\n", .{});
-        _ = self.player.physics.fetchAddVelocity(veldiff * self.player.viewDirection);
+        _ = self.player.physics.fetchAddVelocity(veldiff * self.renderer.cameraDirection);
     }
-    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.player.viewDirection);
+    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.renderer.cameraDirection);
 
     //TODO remaining actions
 }

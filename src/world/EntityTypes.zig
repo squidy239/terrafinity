@@ -85,6 +85,7 @@ pub const Player = struct {
     player_name: Name,
     gameMode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32),
+    ///pitch, yaw, roll, in degrees
     viewDirection: @Vector(3, f32),
     viewDirectionLock: std.Thread.RwLock = .{},
     physics: Physics.getInterface(struct {

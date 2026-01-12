@@ -29,6 +29,7 @@ entityshaderprogram: c_uint,
 shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
 uniforms: UniformLocations,
+cameraDirection: @Vector(3, f32),
 
 pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() {
     var renderer = @This(){
@@ -37,11 +38,12 @@ pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() 
         .indecies = undefined,
         .shaderprogram = undefined,
         .entityshaderprogram = undefined,
+        .cameraDirection = undefined,
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .player = player,
     };
-
+    renderer.updateCameraDirection();
     try renderer.CompileShaders();
     renderer.LoadFacebuffer();
     renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
@@ -56,6 +58,16 @@ pub fn deinit(self: *@This()) void {
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
     std.log.info("renderer deinit", .{});
+}
+
+pub fn updateCameraDirection(self: *@This()) void {
+    self.player.viewDirectionLock.lockShared();
+    const viewDir = self.player.viewDirection;
+    self.player.viewDirectionLock.unlockShared();
+    self.cameraDirection[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.cameraDirection[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    self.cameraDirection[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    _ = zm.vec.normalize(self.cameraDirection);
 }
 
 fn CompileShaders(self: *@This()) !void {
@@ -179,7 +191,7 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
     const projdist = 10000000;
 
-    const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, game.player.getViewDirection(), @This().cameraUp);
+    const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraDirection, @This().cameraUp);
     const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
     const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
@@ -219,7 +231,7 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
 pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
     gl.FrontFace(gl.CCW);
     gl.UseProgram(self.entityshaderprogram);
-    const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + game.player.getViewDirection(), @This().cameraUp)).data));
+    const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraDirection, @This().cameraUp)).data));
     gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
     var it = game.chunkManager.world.Entitys.iterator();
     defer it.deinit();

@@ -30,6 +30,10 @@ const MenuState = struct {
     options: bool = false,
     main: bool = false,
     esc: bool = false,
+    
+    pub fn playingGame(self: MenuState) bool {
+        return std.meta.eql(self, MenuState{.ingame = true});
+    }
 };
 
 pub fn main() !void {
@@ -102,12 +106,12 @@ pub fn main() !void {
     var menu_state: MenuState = .{ .main = true };
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
-    
+
     var singlepress = Key.Singlepress.initEmpty();
     //TODO load keymap from file
     try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
     singlepress.insert(.escape_menu);
-    
+
     try keymap.setActionKey(.{ .key = .w }, .forward);
     try keymap.setActionKey(.{ .key = .s }, .backward);
     try keymap.setActionKey(.{ .key = .a }, .left);
@@ -119,20 +123,21 @@ pub fn main() !void {
     var frame_time: std.time.Timer = try .start();
     var action_set = Key.ActionSet.initEmpty();
     while (running.load(.unordered)) {
-        _ = try handleEvents(&keymap,&singlepress, &action_set, &running, &backend, &ui_window);
+        try sdl.mouse.setWindowRelativeMode(window, menu_state.playingGame());
+        try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
         const dt = frame_time.lap();
+        const ms = sdl.mouse.getRelativeState();
         if (menu_state.ingame) {
+            const mouse_moved = (ms[1] != 0 or ms[2] != 0);
+            if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] });
             try game.handleKeyboardActions(action_set, dt);
+            if (action_set.contains(.escape_menu)) menu_state.esc = !menu_state.esc;
+
             const size = try window.getSize();
             const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
-
             try game_render_context.makeCurrent(window);
             _ = try game.renderer.Draw(&game, viewport_pixels);
-            if (action_set.contains(.escape_menu)) {
-                menu_state.esc = !menu_state.esc;
-            }
         }
-
         try ui_context.makeCurrent(window);
         try ui_window.begin(std.time.nanoTimestamp());
 
@@ -161,23 +166,23 @@ fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Wind
     try ui_context.makeCurrent(window);
 }
 
-fn handleEvents(key_map: *Key.Map,singlepress: *Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
+fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
-    while(it.next())|action| {
-        if(singlepress.contains(action)) action_set.remove(action);
+    while (it.next()) |action| {
+        if (singlepress.contains(action)) action_set.remove(action);
     }
-    
     while (sdl.events.poll()) |event| {
         _ = try ui_backend.addEvent(window, @bitCast(event.toSdl()));
         switch (event) {
-            .key_down => |key| {
-                const action = key_map.getAction(Key.Key{ .key = key.key orelse continue, .modifier = key.mod }) orelse continue;
-                action_set.insert(action);
-            },
             .key_up => |key| {
-                const action = key_map.getAction(Key.Key{ .key = key.key orelse continue, .modifier = key.mod }) orelse continue;
+                //TODO modifiers
+                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.remove(action);
+            },
+            .key_down => |key| {
+                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
+                action_set.insert(action);
             },
             .quit, .terminating, .window_close_requested => {
                 running.store(false, .unordered);
