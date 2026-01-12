@@ -56,24 +56,23 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_minor_version, 1);
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
-    //try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
+    try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
+    
     const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
     });
     defer window.deinit();
+    errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
 
     // Create SDL renderer for UI (uses OpenGL backend internally)
     SDLBackend.enableSDLLogging();
 
+    const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
+    defer sdl_renderer.deinit();
+    
     const game_render_context = try sdl.video.gl.Context.init(window);
     defer game_render_context.deinit() catch unreachable;
 
-    const ui_context = try sdl.video.gl.Context.init(window);
-    defer ui_context.deinit() catch unreachable;
-
-    errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
-    const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
-    defer sdl_renderer.deinit();
 
     try sdl_renderer.setDrawBlendMode(.blend);
 
@@ -141,10 +140,9 @@ pub fn main() !void {
             try game_render_context.makeCurrent(window);
             _ = try game.renderer.Draw(&game, viewport_pixels);
         }
-        try ui_context.makeCurrent(window);
         try ui_window.begin(std.time.nanoTimestamp());
 
-        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state, game_render_context, ui_context);
+        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state, game_render_context);
         if (menu_state.esc) try escMenu(&game, window, &menu_state);
 
         _ = try ui_window.end(.{});
@@ -159,14 +157,13 @@ pub fn main() !void {
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_context: sdl.video.gl.Context, ui_context: sdl.video.gl.Context) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_context: sdl.video.gl.Context) !void {
     try game_context.makeCurrent(window);
     std.debug.assert(!menu_state.ingame);
     try gameptr.init(allocator, allocator, window, path);
     menu_state.ingame = true;
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});
-    try ui_context.makeCurrent(window);
 }
 
 fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
@@ -199,11 +196,11 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_render_context: sdl.video.gl.Context, ui_context: sdl.video.gl.Context) !void {
+fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
     const size = try window.getSizeInPixels();
     const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     if (dvui.button(@src(), "Play", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        try openGame(gameptr, allocator, window, path, menu_state, game_render_context, ui_context);
+        try openGame(gameptr, allocator, window, path, menu_state, game_render_context);
         menu_state.main = false;
     }
     menu.deinit();
