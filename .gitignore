@@ -1,5 +1,4 @@
 .zig-cache
 zig-out
 .zed
-test_world
-test.tfr
+test_world/storage

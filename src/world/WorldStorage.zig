@@ -38,7 +38,6 @@ pub fn init(path: [:0]const u8, config: Config, allocator: std.mem.Allocator) !@
     rocksdb.c.rocksdb_options_set_compression(storage.options, @intFromEnum(config.compression));
 
     storage.database = try .openRaw(allocator, path, storage.options);
-
     return storage;
 }
 

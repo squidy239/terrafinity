@@ -22,6 +22,7 @@ const dvui = @import("dvui");
 pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
+const utils = @import("libs/utils.zig");
 
 var proc_table: gl.ProcTable = undefined;
 
@@ -43,6 +44,11 @@ pub fn main() !void {
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
 
+    const configFile = try std.fs.cwd().openFile("Config.zon", .{ .mode = .read_only });
+    const config = try utils.loadZON(Config, configFile, allocator, allocator);
+    defer std.zon.parse.free(allocator, config);
+    configFile.close();
+
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -57,7 +63,7 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-    
+
     const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
     });
@@ -69,10 +75,9 @@ pub fn main() !void {
 
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
-    
+
     const game_render_context = try sdl.video.gl.Context.init(window);
     defer game_render_context.deinit() catch unreachable;
-
 
     try sdl_renderer.setDrawBlendMode(.blend);
 
@@ -98,9 +103,6 @@ pub fn main() !void {
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
-
-    var path = try std.fs.cwd().openDir("test_world", .{});
-    defer path.close();
 
     var menu_state: MenuState = .{ .main = true };
     var keymap = Key.Map.init(allocator);
@@ -142,7 +144,7 @@ pub fn main() !void {
         }
         try ui_window.begin(std.time.nanoTimestamp());
 
-        if (menu_state.main) try mainMenu(&game, allocator, window, path, &menu_state, game_render_context);
+        if (menu_state.main) try mainMenu(&game, allocator, window, config.game_config, &menu_state, game_render_context);
         if (menu_state.esc) try escMenu(&game, window, &menu_state);
 
         _ = try ui_window.end(.{});
@@ -157,10 +159,10 @@ pub fn main() !void {
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_context: sdl.video.gl.Context) !void {
-    try game_context.makeCurrent(window);
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: Game.GameConfig, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
     std.debug.assert(!menu_state.ingame);
-    try gameptr.init(allocator, allocator, window, path);
+    try render_context.makeCurrent(window);
+    try gameptr.init(allocator, game_config, window, join);
     menu_state.ingame = true;
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});
@@ -196,13 +198,16 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, path: std.fs.Dir, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: Game.GameConfig, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
     const size = try window.getSizeInPixels();
     const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     if (dvui.button(@src(), "Play", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        try openGame(gameptr, allocator, window, path, menu_state, game_render_context);
+        const join: Game.Join = .{ .world_folder = "test_world" };
+        try openGame(gameptr, allocator, window, game_config, join, menu_state, game_render_context);
         menu_state.main = false;
     }
+    // const continue_games = dvui.scrollArea(@src(), .{}, .{});
+
     menu.deinit();
 }
 
@@ -223,6 +228,10 @@ fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !vo
     }
     menu.deinit();
 }
+
+const Config = struct {
+    game_config: Game.GameConfig,
+};
 
 fn sdlLog(
     user_data: ?*anyopaque,

@@ -47,26 +47,32 @@ pub const GameConfig = struct {
     ///after this of time in seconds a chunk will be unloadeed if it is not used
     chunk_timeout: u64,
 };
-pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: std.mem.Allocator, window: sdl.video.Window, game_path: std.fs.Dir) !void {
-    game.game_arena = .init(secondary_allocator);
+
+///This holds data used to join a game type, multiplayer protocols will be added later
+pub const Join = union(enum) {
+    world_folder: []const u8,
+};
+
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfig, window: sdl.video.Window, join_data: Join) !void {
+    std.debug.assert(join_data == .world_folder);
+    game.game_arena = .init(allocator);
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
-    const worldConfigFile = try std.fs.cwd().openFile("config/WorldConfig.zon", .{ .mode = .read_only });
+
+    var world_folder = try std.fs.cwd().openDir(join_data.world_folder, .{});
+    defer world_folder.close();
+
+    const worldConfigFile = try world_folder.openFile("config/WorldConfig.zon", .{ .mode = .read_only });
     defer worldConfigFile.close();
 
-    const generatorConfigFile = try std.fs.cwd().openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
+    const generatorConfigFile = try world_folder.openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
     defer generatorConfigFile.close();
-
-    const gameConfigFile = try std.fs.cwd().openFile("config/GameConfig.zon", .{ .mode = .read_only });
-    defer gameConfigFile.close();
 
     game.loaderThread = null;
     game.unloaderThread = null;
 
-    const config = try utils.loadZON(GameConfig, gameConfigFile, secondary_allocator, arena);
-
-    const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, secondary_allocator, arena);
-    var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, secondary_allocator, arena);
+    const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, arena);
+    var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, allocator, arena);
 
     GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
     GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
@@ -78,26 +84,30 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, secondary_allocator: s
     const terrain_height_cache_memory = 10_000_000; //10 mb
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
-        .TerrainHeightCache = try .init(secondary_allocator, thc_size),
+        .TerrainHeightCache = try .init(allocator, thc_size),
         .params = GeneratorConfig,
     };
-    game.levels = config.levels;
-    game.chunk_timeout = config.chunk_timeout;
-    _ = game_path;
-    game.region_storage = try .init("test_world/storage", .{}, allocator);
+    game.levels = game_config.levels;
+    game.chunk_timeout = game_config.chunk_timeout;
+
+    const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ join_data.world_folder, "storage" });
+    {
+        defer allocator.free(storage_path);
+        game.region_storage = try .init(storage_path, .{}, allocator);
+    }
     errdefer game.generator.TerrainHeightCache.deinit();
     game.running = .init(true);
-    game.GenerateDistance = .init(.{ .xz = config.generation_distance[0], .y = config.generation_distance[1] });
+    game.GenerateDistance = .init(.{ .xz = game_config.generation_distance[0], .y = game_config.generation_distance[1] });
     const cpu_count = try std.Thread.getCpuCount();
-    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = secondary_allocator });
+    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
     errdefer game.pool.deinit();
     game.world = .{
         .running = .init(true),
         .entityUpdaterThread = null,
         .allocator = allocator,
         .threadPool = &game.pool,
-        .Entitys = .init(secondary_allocator),
-        .Chunks = .init(secondary_allocator),
+        .Entitys = .init(allocator),
+        .Chunks = .init(allocator),
         .Config = MainWorldConfig,
         .ChunkSources = .{ null, null, game.region_storage.getSource(), game.generator.getSource() },
         .onEdit = null,
