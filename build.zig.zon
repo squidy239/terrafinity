@@ -12,10 +12,6 @@
     .minimum_zig_version = "0.15.1",
 
     .dependencies = .{
-        .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#d9c06187e8b23e91b2ba6865d265e4213e5e7d09",
-            .hash = "zglfw-0.10.0-dev-zgVDNC64IQCeL-_eVOA27Wa50WVitrJswOZVvgcXmIsy",
-        },
         .zm = .{
             .url = "git+https://github.com/griush/zm#b5d70485dfc78baa9251a06a844d860fd00e9bcf",
             .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
@@ -40,13 +36,17 @@
             .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#5a0b47c99f3e3ff4ee179028b43f1a0ee4498ffa",
             .hash = "ConcurrentQueue-0.0.0-ucuqzoBCAAD7OexFDSJ3nulxQ9AjBcA1xStwAZWSWAlE",
         },
-        .zgui = .{
-            .url = "git+https://codeberg.org/glowsquid/zgui.git#27a3b4f8ad0dec8ad5265ac5bb5574c24ea5faa7",
-            .hash = "zgui-0.0.0-5-RVg2MX5AAT1ZhkbAy6gCCIwCjUx4EvmDAS5fBzVdxT",
-        },
         .rocksdb = .{
             .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
             .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
+        },
+        .sdl3 = .{
+            .url = "git+https://github.com/Gota7/zig-sdl3?ref=master#79b0d1f1ef10a424037025f6af44fe06bf7e062c",
+            .hash = "sdl3-0.1.5-NmT1Q3ARJgDmFWtbbK3KBb7vufbQD0EjD4Me4Fbdq0p3",
+        },
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#1bc9c4e29c12779d067566f00e63817277a1dd1d",
+            .hash = "dvui-0.4.0-dev-AQFJmeVS2gBr_UZImna5jjqJewaW2LBD6fve0Lt9Lc70",
         },
     },
 

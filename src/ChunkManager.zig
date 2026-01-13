@@ -2,7 +2,7 @@ const std = @import("std");
 const ConcurrentQueue = @import("ConcurrentQueue");
 const Renderer = @import("client/Renderer.zig");
 const MeshBufferIDs = Renderer.MeshBufferIDs;
-const Game = @import("Game.zig").Game;
+const Game = @import("Game.zig");
 const ThreadPool = @import("ThreadPool");
 const Loader = @import("Loader.zig");
 const Block = @import("world/Block.zig").Block;
@@ -66,7 +66,7 @@ pub const ChunkManager = struct {
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool) void {
-        const inside_range = Loader.keepLoaded((game.player.getPos().?), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
+        const inside_range = Loader.keepLoaded((game.player.physics.getPos()), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
         const running = game.running.load(.monotonic);
         if (!inside_range or !running) {
             _ = game.chunkManager.LoadingChunks.remove(Pos);

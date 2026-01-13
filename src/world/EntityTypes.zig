@@ -1,5 +1,5 @@
 const std = @import("std");
-const Renderer = @import("../App.zig").Renderer;
+const Renderer = @import("../main.zig").Renderer;
 const World = @import("World.zig");
 const zm = @import("zm");
 const Block = @import("Block.zig").Block;
@@ -81,10 +81,13 @@ pub fn FreeMeshes() void {
 }
 
 pub const Player = struct {
+    pub const Type = Entity.Type.Player;
     player_name: Name,
-    gameMode: GameMode,
-    headRotationAxis: @Vector(2, f32),
-    headRotationAxisLock: std.Thread.RwLock = .{},
+    gameMode: std.atomic.Value(GameMode),
+    fly_speed: std.atomic.Value(f32),
+    ///pitch, yaw, roll, in degrees
+    viewDirection: @Vector(3, f32),
+    viewDirectionLock: std.Thread.RwLock = .{},
     physics: Physics.getInterface(struct {
         gravity: Physics.Gravity,
         resistance: Physics.Resistance,
@@ -128,6 +131,12 @@ pub const Player = struct {
     pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         return self.physics.getPos();
+    }
+
+    pub fn getViewDirection(self: *@This()) @Vector(3, f32) {
+        self.viewDirectionLock.lockShared();
+        defer self.viewDirectionLock.unlockShared();
+        return self.viewDirection;
     }
 
     pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {

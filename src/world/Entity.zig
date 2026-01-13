@@ -1,5 +1,5 @@
 const std = @import("std");
-const Renderer = @import("../App.zig").Renderer;
+const Renderer = @import("../main.zig").Renderer;
 const World = @import("World.zig");
 const ztracy = @import("ztracy");
 
@@ -67,7 +67,7 @@ pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
     mem.* = tempentity;
 
     const en = Entity{
-        .type = .Player,
+        .type = @TypeOf(tempentity).Type,
         .ptr = mem,
         .ref_count = .init(1),
         .vtable = tempentity.getInterface(),

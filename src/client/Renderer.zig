@@ -2,13 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const ThreadPool = @import("root").ThreadPool;
-const Game = @import("../Game.zig").Game;
+const Game = @import("../Game.zig");
 const Block = @import("Block").Blocks;
 const Loader = @import("../Loader.zig");
-const ChunkSize = @import("../App.zig").ChunkSize;
+const ChunkSize = @import("../main.zig").ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Entity = @import("../App.zig").Entity;
-const EntityTypes = @import("EntityTypes");
+const Entity = @import("../main.zig").Entity;
+const EntityTypes = @import("../world/EntityTypes.zig");
 const gl = @import("gl");
 const glfw = @import("zglfw");
 const Player = @import("EntityTypes").Player;
@@ -23,30 +23,27 @@ pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
-player: *Entity,
-cameraFront: @Vector(3, f64),
-mouseSensitivity: f64,
+player: *EntityTypes.Player,
 indecies: c_uint,
 entityshaderprogram: c_uint,
 shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
 uniforms: UniformLocations,
+cameraFront: @Vector(3, f32),
 
-pub fn init(allocator: std.mem.Allocator, player: *Entity) !@This() {
-    _ = player.ref_count.fetchAdd(1, .seq_cst);
+pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() {
     var renderer = @This(){
         .allocator = allocator,
-        .mouseSensitivity = 0.2,
-        .cameraFront = @Vector(3, f64){ 0.0001, -0.4, 0.001 },
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
         .entityshaderprogram = undefined,
+        .cameraFront = undefined,
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .player = player,
     };
-
+    renderer.updateCameraDirection();
     try renderer.CompileShaders();
     renderer.LoadFacebuffer();
     renderer.uniforms = UniformLocations.GetLocations(renderer.shaderprogram, renderer.entityshaderprogram);
@@ -55,13 +52,22 @@ pub fn init(allocator: std.mem.Allocator, player: *Entity) !@This() {
 }
 
 pub fn deinit(self: *@This()) void {
-    _ = self.player.ref_count.fetchSub(1, .seq_cst);
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
     std.log.info("renderer deinit", .{});
+}
+
+pub fn updateCameraDirection(self: *@This()) void {
+    self.player.viewDirectionLock.lockShared();
+    const viewDir = self.player.viewDirection;
+    self.player.viewDirectionLock.unlockShared();
+    self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    _ = zm.vec.normalize(self.cameraFront);
 }
 
 fn CompileShaders(self: *@This()) !void {
@@ -145,8 +151,10 @@ fn LoadFacebuffer(self: *@This()) void {
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
 }
+var last_viewport: [2]f32 = undefined;
+
 pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
-    const playerPos = self.player.getPos().?;
+    const playerPos = self.player.physics.getPos();
     //draw chunks
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
@@ -156,7 +164,8 @@ pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u
     gl.Clear(gl.COLOR_BUFFER_BIT);
     gl.Clear(gl.DEPTH_BUFFER_BIT);
     clear.End();
-
+    if (!std.meta.eql(last_viewport, viewport_pixels)) gl.Viewport(0, 0, @intFromFloat(viewport_pixels[0]), @intFromFloat(viewport_pixels[1]));
+    last_viewport = viewport_pixels;
     const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
     const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
     drawChunks.End();
@@ -181,6 +190,7 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
     const projdist = 10000000;
+
     const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
     const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(projdist));
     const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
@@ -188,7 +198,6 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-
     var drawnchunks: u64 = 0;
     var torenderchunks: u64 = 0;
     const millitimestamp = std.time.milliTimestamp();
