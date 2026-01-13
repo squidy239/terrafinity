@@ -28,7 +28,7 @@ var proc_table: gl.ProcTable = undefined;
 
 const MenuState = struct {
     ingame: bool = false,
-    options: bool = false,
+    settings: bool = false,
     main: bool = false,
     esc: bool = false,
 
@@ -49,7 +49,7 @@ pub fn main() !void {
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
 
     const configFile = try std.fs.cwd().openFile("Config.zon", .{ .mode = .read_only });
-    const config = try utils.loadZON(Config, configFile, allocator, allocator);
+    var config = try utils.loadZON(Config, configFile, allocator, allocator);
     defer std.zon.parse.free(allocator, config);
     configFile.close();
 
@@ -58,6 +58,16 @@ pub fn main() !void {
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
     const init_flags: sdl.InitFlags = .{ .video = true, .events = true };
     defer sdl.shutdown();
+
+    //try wayland since its not default
+    var d: usize = 0;
+    while (sdl.video.getDriverName(d)) |name| : (d += 1) {
+        if (std.mem.eql(u8, name, "wayland")) {
+            sdl.hints.set(.video_driver, "wayland") catch {};
+            break;
+        }
+    }
+
     try sdl.init(init_flags);
     defer sdl.quit(init_flags);
 
@@ -67,7 +77,6 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-
     const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
         .resizable = true,
@@ -152,7 +161,7 @@ pub fn main() !void {
         }
         try ui_window.begin(std.time.nanoTimestamp());
 
-        if (menu_state.main) try mainMenu(&game, allocator, window, config, &menu_state, game_render_context);
+        if (menu_state.main) try mainPage(&game, allocator, window, &config, &menu_state, game_render_context);
         if (menu_state.esc) try escMenu(&game, window, &menu_state);
 
         _ = try ui_window.end(.{});
@@ -202,10 +211,16 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
-    const m = dvui.overlay(@src(), .{});
-    defer m.deinit();
-    _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = menu_background } } }, .{});
+fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+    const menuarea = dvui.overlay(@src(), .{ .expand = .both });
+    defer menuarea.deinit();
+    //background
+    _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = menu_background } }, .shrink = .vertical }, .{ .expand = .both });
+
+    const mainpage = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer mainpage.deinit();
+
+    try sidebar(allocator, config, menu_state);
 
     const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .r = 24, .g = 24, .b = 24, .a = 255 }, .expand = .both });
     defer menu.deinit();
@@ -219,13 +234,27 @@ fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Wind
     try continueMenu(gameptr, allocator, window, config, menu_state, game_render_context);
 }
 
-fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+fn sidebar(allocator: std.mem.Allocator, config: *Config, menu_state: *MenuState) !void {
+    const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 48, .a = 225 }, .expand = .vertical, .min_size_content = .width(128) });
+    defer bar.deinit();
+
+    if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } }))
+        menu_state.* = .{ .main = true };
+    if (dvui.button(@src(), "Settings", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } }))
+        menu_state.* = .{ .settings = true };
+
+    _ = allocator;
+    _ = config;
+}
+
+fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *const Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
         .horizontal = .auto,
     }, .{
         .expand = .horizontal,
+        .margin = .{ .w = 16, .x = 16 },
         .color_fill = .transparent,
         .min_size_content = .height(384),
     });
@@ -234,10 +263,11 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     const container = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical });
     defer container.deinit();
 
-    const new_game = menuCard(@src(), .{}, .{});
-    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{.size = 96 } })) {
+    const new_game = menuCard(@src(), .{}, .{ .expand = .vertical });
+    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = getFontNameByName("Vera Sans") } })) {
         //TODO open new game menu
     }
+
     new_game.deinit();
 
     var worlds_path: std.fs.Dir = try std.fs.cwd().openDir(config.worlds_path, .{ .iterate = true });
@@ -246,7 +276,7 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     var i: usize = 0;
     while (try it.next()) |item| : (i += 1) {
         if (item.kind != .directory) continue;
-        const game = menuCard(@src(), .{}, .{ .id_extra = i });
+        const game = menuCard(@src(), .{}, .{ .id_extra = i, .expand = .vertical });
         defer game.deinit();
 
         const text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
@@ -273,17 +303,50 @@ fn getFontNameByName(comptime name: []const u8) [50:0]u8 {
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
     var options: dvui.Options = .{
         .min_size_content = .all(256),
-        .expand = .vertical,
         .color_fill = .{ .r = 48, .g = 48, .b = 48, .a = 255 },
         .background = true,
         .corner_radius = .all(0),
         .border = .all(8),
-        .margin = .{ .w = 16 },
+        .margin = .all(16),
+        .gravity_y = 0.5,
         .color_border = .{ .r = 48, .g = 77, .b = 48, .a = 255 },
-        .style = .content,
-        .color_fill_hover = .blue,
     };
-    return dvui.box(src, init_opts, options.override(opts));
+    var card = dvui.widgetAlloc(dvui.BoxWidget);
+    card.init(src, init_opts, options.override(opts));
+    card.data().was_allocated_on_widget_stack = true;
+
+    var hover: bool = false;
+    _ = dvui.clicked(card.data(), .{ .hovered = &hover });
+    if (hover) {
+        card.data().options.margin = .all(0);
+        //do the same stuff as init without clearing it to update it so it has no margin on hover
+        card.data().register();
+        card.child_rect = card.data().contentRect().justSize();
+        if (card.data_prev) |dp| {
+            if (card.init_opts.equal_space) {
+                if (dp.packed_children > 0) {
+                    switch (card.init_opts.dir) {
+                        .horizontal => card.pixels_per_w = card.child_rect.w / dp.packed_children,
+                        .vertical => card.pixels_per_w = card.child_rect.h / dp.packed_children,
+                    }
+                }
+            } else {
+                var packed_weight = dp.total_weight;
+                if (card.init_opts.num_packed_expanded) |num| {
+                    packed_weight = @floatFromInt(num);
+                }
+
+                if (packed_weight > 0) {
+                    switch (card.init_opts.dir) {
+                        .horizontal => card.pixels_per_w = @max(0, card.child_rect.w - dp.min_space_taken) / packed_weight,
+                        .vertical => card.pixels_per_w = @max(0, card.child_rect.h - dp.min_space_taken) / packed_weight,
+                    }
+                }
+            }
+        }
+    }
+    card.drawBackground();
+    return card;
 }
 
 fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !void {
