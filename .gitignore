@@ -1,4 +1,4 @@
 .zig-cache
 zig-out
 .zed
-test_world/storage
+worlds/test_world/storage
