@@ -37,6 +37,10 @@ const MenuState = struct {
     }
 };
 
+const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
+const menu_background: []const u8 = @embedFile("assets/terrain.png");
+const pixel_font = getFontNameByName("Press Start 2P");
+
 pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
 
@@ -67,6 +71,7 @@ pub fn main() !void {
     const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
         .resizable = true,
+        .high_pixel_density = true,
     });
 
     defer window.deinit();
@@ -104,6 +109,8 @@ pub fn main() !void {
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
+
+    try ui_window.addFont("Press Start 2P", press_start_2p, null);
 
     var menu_state: MenuState = .{ .main = true };
     var keymap = Key.Map.init(allocator);
@@ -196,9 +203,19 @@ test {
 }
 
 fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
-    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
+    const m = dvui.overlay(@src(), .{});
+    defer m.deinit();
+    _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = menu_background } } }, .{});
+
+    const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .r = 24, .g = 24, .b = 24, .a = 255 }, .expand = .both });
     defer menu.deinit();
 
+    const top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    const terrafinity = dvui.textLayout(@src(), .{ .break_lines = false }, .{ .gravity_x = 0.5, .color_fill = .transparent });
+
+    terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
+    terrafinity.deinit();
+    top.deinit();
     try continueMenu(gameptr, allocator, window, config, menu_state, game_render_context);
 }
 
@@ -218,7 +235,7 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     defer container.deinit();
 
     const new_game = menuCard(@src(), .{}, .{});
-    if (dvui.button(@src(), "New Game", .{}, .{ .expand = .both, .color_fill = .blue })) {
+    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{.size = 96 } })) {
         //TODO open new game menu
     }
     new_game.deinit();
@@ -233,9 +250,11 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
         defer game.deinit();
 
         const text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
-        text.addText(item.name, .{});
+        text.addText(item.name, .{
+            .font = .{ .family = pixel_font },
+        });
         text.deinit();
-        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .color_fill = .blue })) {
+        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ config.worlds_path, item.name });
             defer allocator.free(jpath);
             const join: Game.Join = .{ .world_folder = jpath };
@@ -243,6 +262,12 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
             menu_state.main = false;
         }
     }
+}
+
+fn getFontNameByName(comptime name: []const u8) [50:0]u8 {
+    comptime var f: [50:0]u8 = @splat(0);
+    comptime @memcpy(f[0..name.len], name);
+    return f;
 }
 
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
