@@ -30,23 +30,20 @@ loaderThread: ?std.Thread,
 unloaderThread: ?std.Thread,
 
 options: *Options,
-
+options_lock: *std.Thread.RwLock,
 running: std.atomic.Value(bool),
 
 pub const Options = struct {
-    lock: std.Thread.RwLock = .{},
-
     unloader_frequency_ms: u64 = 1000,
     ///start, end
     levels: [2]i32,
     ///x, y
-    generation_distance: @Vector(2, u32),
+    generation_distance: [2]u32,
 
     ///after this of time in microseconds a chunk will be unloaded if it is not used
     chunk_timeout_ms: u64,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
-        .lock = .{ .standard = .{ .display = .none } },
         .chunk_timeout_ms = .{ .number = .{ .display = .read_write } },
     }, null);
 };
@@ -157,14 +154,14 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
-    self.options.lock.lockShared();
-    defer self.options.lock.unlockShared();
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
     return self.options.generation_distance;
 }
 
 pub fn getLevels(self: *@This()) [2]i32 {
-    self.options.lock.lockShared();
-    defer self.options.lock.unlockShared();
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
     return self.options.levels;
 }
 
@@ -246,7 +243,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options });
+    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
     self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
 }

@@ -36,7 +36,7 @@ const MenuState = struct {
         return std.meta.eql(self, MenuState{ .ingame = true });
     }
 };
-
+const config_path = "Config.zon";
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = getFontNameByName("Press Start 2P");
@@ -47,14 +47,15 @@ pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
-    
+
     _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
-    const configFile = try std.fs.cwd().openFile("Config.zon", .{ .mode = .read_only });
+    var config_lock: std.Thread.RwLock = .{};
+    const configFile = try std.fs.cwd().openFile(config_path, .{ .mode = .read_only });
     var config = try utils.loadZON(Config, configFile, allocator, allocator);
     defer std.zon.parse.free(allocator, config);
     configFile.close();
-    
+
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -168,7 +169,7 @@ pub fn main() !void {
 
         if (menu_state.esc and !menuchanged) try escMenu(&game, window, &menu_state);
         if (menu_state.main and !menuchanged) menuchanged = try mainPage(&game, allocator, window, &config, &menu_state, game_render_context);
-        if (menu_state.settings and !menuchanged) menuchanged = try settingsMenu(&config, &menu_state);
+        if (menu_state.settings and !menuchanged) menuchanged = try settingsMenu(&config, &config_lock, &menu_state);
 
         _ = try ui_window.end(.{});
         try backend.setCursor(ui_window.cursorRequested());
@@ -217,7 +218,7 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn settingsMenu(config: *Config, menu_state: *MenuState) !bool {
+fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
@@ -226,18 +227,21 @@ fn settingsMenu(config: *Config, menu_state: *MenuState) !bool {
     const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer settings.deinit();
 
-    config.lock.lock();
-    config.game_config.lock.lock();
+    config_lock.lock();
     const firstconfig = config.*;
 
     dvui.structUI(@src(), "Settings", config, 32, .{ Config.structui_options, Game.Options.structui_options });
 
     const config_changed = !std.meta.eql(firstconfig, config.*);
-    config.game_config.lock.unlock();
-    config.lock.unlock();
+    config_lock.unlock();
 
     if (config_changed) {
-        std.debug.print("item changed\n", .{});
+        const configFile = try std.fs.cwd().openFile(config_path, .{ .mode = .write_only });
+        defer configFile.close();
+        var buffer: [512]u8 = undefined;
+        var filewriter = configFile.writer(&buffer);
+        try std.zon.stringify.serialize(config, .{}, &filewriter.interface);
+        try filewriter.end();
     }
     return menuchanged;
 }
@@ -377,11 +381,10 @@ fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !vo
     menu.deinit();
 }
 
+///must be locked by the caller
 const Config = struct {
     game_config: Game.Options,
     worlds_path: []const u8,
-    ///only protects outer fields, not game_config
-    lock: std.Thread.RwLock = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .game_config = .{
@@ -389,7 +392,6 @@ const Config = struct {
                 .display = .read_write,
             },
         },
-        .lock = .{ .standard = .{ .display = .none } },
     }, null);
 };
 
