@@ -285,6 +285,7 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
         });
         text.deinit();
         if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
+            std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ config.worlds_path, item.name });
             defer allocator.free(jpath);
             const join: Game.Join = .{ .world_folder = jpath };
@@ -315,35 +316,10 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
     card.init(src, init_opts, options.override(opts));
     card.data().was_allocated_on_widget_stack = true;
 
-    var hover: bool = false;
-    _ = dvui.clicked(card.data(), .{ .hovered = &hover });
+    const hover: bool = hovered(card.data(), .{});
     if (hover) {
         card.data().options.margin = .all(0);
-        //do the same stuff as init without clearing it to update it so it has no margin on hover
-        card.data().register();
-        card.child_rect = card.data().contentRect().justSize();
-        if (card.data_prev) |dp| {
-            if (card.init_opts.equal_space) {
-                if (dp.packed_children > 0) {
-                    switch (card.init_opts.dir) {
-                        .horizontal => card.pixels_per_w = card.child_rect.w / dp.packed_children,
-                        .vertical => card.pixels_per_w = card.child_rect.h / dp.packed_children,
-                    }
-                }
-            } else {
-                var packed_weight = dp.total_weight;
-                if (card.init_opts.num_packed_expanded) |num| {
-                    packed_weight = @floatFromInt(num);
-                }
-
-                if (packed_weight > 0) {
-                    switch (card.init_opts.dir) {
-                        .horizontal => card.pixels_per_w = @max(0, card.child_rect.w - dp.min_space_taken) / packed_weight,
-                        .vertical => card.pixels_per_w = @max(0, card.child_rect.h - dp.min_space_taken) / packed_weight,
-                    }
-                }
-            }
-        }
+        calculateWidget(card);
     }
     card.drawBackground();
     return card;
@@ -396,5 +372,60 @@ fn sdlErr(
         std.log.err("******* [Error! {s}] *******\n", .{val});
     } else {
         std.log.err("******* [Unknown Error!] *******\n", .{});
+    }
+}
+
+fn hovered(wd: *const dvui.WidgetData, opts: HoverOptions) bool {
+    const click_rect = opts.rect orelse wd.borderRectScale().r;
+    for (dvui.events()) |*e| {
+        if (!dvui.eventMatch(e, .{ .id = wd.id, .r = click_rect }))
+            continue;
+        if (e.evt == .mouse) {
+            if (e.evt.mouse.action == .position) {
+                // Usually you don't want to mark .position events as
+                // handled, so that multiple widgets can all do hover
+                // highlighting.
+
+                // a single .position mouse event is at the end of each
+                // frame, so this means the mouse ended above us
+                if (opts.hover_cursor) |cursor| {
+                    dvui.cursorSet(cursor);
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+const HoverOptions = struct {
+    hover_cursor: ?dvui.enums.Cursor = .hand,
+    rect: ?dvui.Rect.Physical = null,
+};
+
+fn calculateWidget(widget: *dvui.BoxWidget) void {
+    widget.data().register();
+    widget.child_rect = widget.data().contentRect().justSize();
+    if (widget.data_prev) |dp| {
+        if (widget.init_opts.equal_space) {
+            if (dp.packed_children > 0) {
+                switch (widget.init_opts.dir) {
+                    .horizontal => widget.pixels_per_w = widget.child_rect.w / dp.packed_children,
+                    .vertical => widget.pixels_per_w = widget.child_rect.h / dp.packed_children,
+                }
+            }
+        } else {
+            var packed_weight = dp.total_weight;
+            if (widget.init_opts.num_packed_expanded) |num| {
+                packed_weight = @floatFromInt(num);
+            }
+
+            if (packed_weight > 0) {
+                switch (widget.init_opts.dir) {
+                    .horizontal => widget.pixels_per_w = @max(0, widget.child_rect.w - dp.min_space_taken) / packed_weight,
+                    .vertical => widget.pixels_per_w = @max(0, widget.child_rect.h - dp.min_space_taken) / packed_weight,
+                }
+            }
+        }
     }
 }
