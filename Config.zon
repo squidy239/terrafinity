@@ -1,6 +1,8 @@
 .{ .game_config = .{
     .unloader_frequency_ms = 1000,
-    .levels = .{ 1, 14 },
-    .generation_distance = .{ 6, 6 },
+    .lowest_lever = 0,
+    .highest_level = 10,
+    .generation_distance_x = 8,
+    .generation_distance_y = 6,
     .chunk_timeout_ms = 10000,
 }, .worlds_path = "worlds" }

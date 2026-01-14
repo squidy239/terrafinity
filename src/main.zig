@@ -35,6 +35,11 @@ const MenuState = struct {
     pub fn playingGame(self: MenuState) bool {
         return std.meta.eql(self, MenuState{ .ingame = true });
     }
+
+    pub fn handleEsc(self: *MenuState) void {
+        if (self.ingame) self.*.esc = !self.*.esc;
+        self.settings = false;
+    }
 };
 const config_path = "Config.zon";
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
@@ -151,13 +156,13 @@ pub fn main() !void {
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, menu_state.playingGame());
         try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
+        if (action_set.contains(.escape_menu)) menu_state.handleEsc();
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (menu_state.ingame) {
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] });
             try game.handleKeyboardActions(action_set, dt);
-            if (action_set.contains(.escape_menu)) menu_state.esc = !menu_state.esc;
 
             const size = try window.getSize();
             const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
@@ -167,8 +172,8 @@ pub fn main() !void {
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
 
-        if (menu_state.esc and !menuchanged) try escMenu(&game, window, &menu_state);
-        if (menu_state.main and !menuchanged) menuchanged = try mainPage(&game, allocator, window, &config, &menu_state, game_render_context);
+        if (menu_state.esc and !menuchanged) menuchanged = try escMenu(&game, window, &menu_state);
+        if (menu_state.main and !menuchanged) menuchanged = try mainPage(&game, allocator, window, &config, &config_lock, &menu_state, game_render_context);
         if (menu_state.settings and !menuchanged) menuchanged = try settingsMenu(&config, &config_lock, &menu_state);
 
         _ = try ui_window.end(.{});
@@ -179,10 +184,10 @@ pub fn main() !void {
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
     std.debug.assert(!menu_state.ingame);
     try render_context.makeCurrent(window);
-    try gameptr.init(allocator, game_config, window, join);
+    try gameptr.init(allocator, game_config, options_lock, join);
     menu_state.ingame = true;
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});
@@ -222,14 +227,13 @@ fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, menu_state: *M
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menuchanged: bool = sidebar(menu_state);
+    const menuchanged: bool = if (!menu_state.ingame) sidebar(menu_state) else false;
 
     const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer settings.deinit();
 
     config_lock.lock();
     const firstconfig = config.*;
-
     dvui.structUI(@src(), "Settings", config, 32, .{ Config.structui_options, Game.Options.structui_options });
 
     const config_changed = !std.meta.eql(firstconfig, config.*);
@@ -240,13 +244,17 @@ fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, menu_state: *M
         defer configFile.close();
         var buffer: [512]u8 = undefined;
         var filewriter = configFile.writer(&buffer);
-        try std.zon.stringify.serialize(config, .{}, &filewriter.interface);
+        {
+            config_lock.lockShared();
+            defer config_lock.unlockShared();
+            try std.zon.stringify.serialize(config, .{}, &filewriter.interface);
+        }
         try filewriter.end();
     }
     return menuchanged;
 }
 
-fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !bool {
+fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
     //background
@@ -266,7 +274,7 @@ fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Wind
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    try continueMenu(gameptr, allocator, window, config, menu_state, game_render_context);
+    try continueMenu(gameptr, allocator, window, config, config_lock, menu_state, game_render_context);
     return changed;
 }
 
@@ -285,7 +293,7 @@ fn sidebar(menu_state: *MenuState) bool {
     return false;
 }
 
-fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
@@ -327,7 +335,7 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ config.worlds_path, item.name });
             defer allocator.free(jpath);
             const join: Game.Join = .{ .world_folder = jpath };
-            try openGame(gameptr, allocator, window, &config.game_config, join, menu_state, game_render_context); //TODO popup when game cant be opened
+            try openGame(gameptr, allocator, window, &config.game_config, config_lock, join, menu_state, game_render_context); //TODO popup when game cant be opened
             menu_state.main = false;
         }
     }
@@ -363,22 +371,32 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
     return card;
 }
 
-fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !void {
+fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !bool {
     std.debug.assert(menu_state.ingame);
     const size = try window.getSizeInPixels();
-    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
-    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
+    const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
+    defer menu.deinit();
+    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
         menu_state.esc = false;
+        return true;
     }
 
-    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
+    if (dvui.button(@src(), "Settings", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
+        menu_state.settings = true;
+        menu_state.esc = false;
+        return true;
+    }
+
+    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
         menu_state.main = true;
         menu_state.esc = false;
         menu_state.ingame = false;
         gameptr.deinit(window);
         gameptr.* = undefined;
+        return true;
     }
-    menu.deinit();
+
+    return false;
 }
 
 ///must be locked by the caller
@@ -386,13 +404,7 @@ const Config = struct {
     game_config: Game.Options,
     worlds_path: []const u8,
 
-    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
-        .game_config = .{
-            .standard = .{
-                .display = .read_write,
-            },
-        },
-    }, null);
+    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
 fn sdlLog(
