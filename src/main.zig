@@ -47,12 +47,14 @@ pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
+    
+    _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
     const configFile = try std.fs.cwd().openFile("Config.zon", .{ .mode = .read_only });
     var config = try utils.loadZON(Config, configFile, allocator, allocator);
     defer std.zon.parse.free(allocator, config);
     configFile.close();
-
+    
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -70,7 +72,6 @@ pub fn main() !void {
 
     try sdl.init(init_flags);
     defer sdl.quit(init_flags);
-
     // Set OpenGL attributes
     try sdl.video.gl.setAttribute(.context_major_version, 4);
     try sdl.video.gl.setAttribute(.context_minor_version, 1);
