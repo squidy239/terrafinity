@@ -86,9 +86,12 @@ pub fn main() !void {
     defer window.deinit();
     errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
 
-    // Create SDL renderer for UI (uses OpenGL backend internally)
     SDLBackend.enableSDLLogging();
 
+    try sdl.keyboard.startTextInput(window);
+    defer sdl.keyboard.stopTextInput(window) catch unreachable;
+
+    // Create SDL renderer for UI (uses OpenGL backend internally)
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
 
@@ -160,9 +163,11 @@ pub fn main() !void {
             _ = try game.renderer.Draw(&game, viewport_pixels);
         }
         try ui_window.begin(std.time.nanoTimestamp());
+        var menuchanged: bool = false;
 
-        if (menu_state.main) try mainPage(&game, allocator, window, &config, &menu_state, game_render_context);
-        if (menu_state.esc) try escMenu(&game, window, &menu_state);
+        if (menu_state.esc and !menuchanged) try escMenu(&game, window, &menu_state);
+        if (menu_state.main and !menuchanged) menuchanged = try mainPage(&game, allocator, window, &config, &menu_state, game_render_context);
+        if (menu_state.settings and !menuchanged) menuchanged = try settingsMenu(&config, &menu_state);
 
         _ = try ui_window.end(.{});
         try backend.setCursor(ui_window.cursorRequested());
@@ -172,7 +177,7 @@ pub fn main() !void {
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: Game.GameConfig, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
     std.debug.assert(!menu_state.ingame);
     try render_context.makeCurrent(window);
     try gameptr.init(allocator, game_config, window, join);
@@ -211,16 +216,41 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+fn settingsMenu(config: *Config, menu_state: *MenuState) !bool {
+    const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer page.deinit();
+
+    const menuchanged: bool = sidebar(menu_state);
+
+    const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
+    defer settings.deinit();
+
+    config.lock.lock();
+    config.game_config.lock.lock();
+    const firstconfig = config.*;
+
+    dvui.structUI(@src(), "Settings", config, 32, .{ Config.structui_options, Game.Options.structui_options });
+
+    const config_changed = !std.meta.eql(firstconfig, config.*);
+    config.game_config.lock.unlock();
+    config.lock.unlock();
+
+    if (config_changed) {
+        std.debug.print("item changed\n", .{});
+    }
+    return menuchanged;
+}
+
+fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
     //background
     _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = menu_background } }, .shrink = .vertical }, .{ .expand = .both });
 
-    const mainpage = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
-    defer mainpage.deinit();
+    const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer page.deinit();
 
-    try sidebar(allocator, config, menu_state);
+    const changed: bool = sidebar(menu_state);
 
     const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .r = 24, .g = 24, .b = 24, .a = 255 }, .expand = .both });
     defer menu.deinit();
@@ -232,22 +262,25 @@ fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Wind
     terrafinity.deinit();
     top.deinit();
     try continueMenu(gameptr, allocator, window, config, menu_state, game_render_context);
+    return changed;
 }
 
-fn sidebar(allocator: std.mem.Allocator, config: *Config, menu_state: *MenuState) !void {
+fn sidebar(menu_state: *MenuState) bool {
     const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 48, .a = 225 }, .expand = .vertical, .min_size_content = .width(128) });
     defer bar.deinit();
 
-    if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } }))
+    if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
         menu_state.* = .{ .main = true };
-    if (dvui.button(@src(), "Settings", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } }))
+        return true;
+    }
+    if (dvui.button(@src(), "Settings", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
         menu_state.* = .{ .settings = true };
-
-    _ = allocator;
-    _ = config;
+        return true;
+    }
+    return false;
 }
 
-fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *const Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
@@ -289,7 +322,7 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ config.worlds_path, item.name });
             defer allocator.free(jpath);
             const join: Game.Join = .{ .world_folder = jpath };
-            try openGame(gameptr, allocator, window, config.game_config, join, menu_state, game_render_context); //TODO popup when game cant be opened
+            try openGame(gameptr, allocator, window, &config.game_config, join, menu_state, game_render_context); //TODO popup when game cant be opened
             menu_state.main = false;
         }
     }
@@ -310,7 +343,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
         .border = .all(8),
         .margin = .all(16),
         .gravity_y = 0.5,
-        .color_border = .{ .r = 48, .g = 77, .b = 48, .a = 255 },
+        .color_border = .{ .r = 48, .g = 77, .b = 48, .a = 225 },
     };
     var card = dvui.widgetAlloc(dvui.BoxWidget);
     card.init(src, init_opts, options.override(opts));
@@ -344,8 +377,19 @@ fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !vo
 }
 
 const Config = struct {
-    game_config: Game.GameConfig,
+    game_config: Game.Options,
     worlds_path: []const u8,
+    ///only protects outer fields, not game_config
+    lock: std.Thread.RwLock = .{},
+
+    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
+        .game_config = .{
+            .standard = .{
+                .display = .read_write,
+            },
+        },
+        .lock = .{ .standard = .{ .display = .none } },
+    }, null);
 };
 
 fn sdlLog(

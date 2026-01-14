@@ -82,8 +82,9 @@ pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const genDistance = game.getGenDistance();
-        var level = game.levels[0];
-        while (level < game.levels[1]) : (level += 1) {
+        const levels = game.getLevels();
+        var level = levels[0];
+        while (level < levels[1]) : (level += 1) {
             loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(level), level) catch unreachable;
         }
 

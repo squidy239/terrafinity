@@ -349,11 +349,16 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
     }
 }
 
-pub fn chunkUnloaderThread(self: *@This(), intervel_ns: u64, unload_timeout: u64) void {
+//TODO when 0.16 is out get rid of this and make it happen after the time on asynchronously from the main loop
+pub fn chunkUnloaderThread(self: *@This(), options: *@import("../Game.zig").Options) void {
     while (self.running.load(.monotonic)) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         defer unloadChunks.End();
         const st = std.time.nanoTimestamp();
+        options.lock.lockShared();
+        const unload_timeout = options.chunk_timeout_ms;
+        const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
+        options.lock.unlockShared();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         self.unloadUnusedChunks(unload_timeout) catch |err| std.debug.panic("err:{any}\n", .{err});
     }

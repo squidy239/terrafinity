@@ -13,6 +13,7 @@ const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 const Key = @import("Key.zig");
 const zm = @import("zm");
+const dvui = @import("dvui");
 
 allocator: std.mem.Allocator,
 world: World,
@@ -28,24 +29,26 @@ game_arena: std.heap.ArenaAllocator,
 loaderThread: ?std.Thread,
 unloaderThread: ?std.Thread,
 
-//The radius in which chunk generate chunks to generate horizontal, vertical
-GenerateDistance: std.atomic.Value(packed struct { xz: u32, y: u32 }),
-
-///the smallest level for general world generation
-SmallestLevel: i32 = 0,
-
-levels: [2]i32,
-
-chunk_timeout: u64,
+options: *Options,
 
 running: std.atomic.Value(bool),
 
-pub const GameConfig = struct {
+pub const Options = struct {
+    lock: std.Thread.RwLock = .{},
+
+    unloader_frequency_ms: u64 = 1000,
     ///start, end
     levels: [2]i32,
-    generation_distance: [2]u32,
-    ///after this of time in seconds a chunk will be unloadeed if it is not used
-    chunk_timeout: u64,
+    ///x, y
+    generation_distance: @Vector(2, u32),
+
+    ///after this of time in microseconds a chunk will be unloaded if it is not used
+    chunk_timeout_ms: u64,
+
+    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
+        .lock = .{ .standard = .{ .display = .none } },
+        .chunk_timeout_ms = .{ .number = .{ .display = .read_write } },
+    }, null);
 };
 
 ///This holds data used to join a game type, multiplayer protocols will be added later
@@ -53,7 +56,7 @@ pub const Join = union(enum) {
     world_folder: []const u8,
 };
 
-pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfig, window: sdl.video.Window, join_data: Join) !void {
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, window: sdl.video.Window, join_data: Join) !void {
     std.debug.assert(join_data == .world_folder);
     game.game_arena = .init(allocator);
     errdefer game.game_arena.deinit();
@@ -87,9 +90,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfi
         .TerrainHeightCache = try .init(allocator, thc_size),
         .params = GeneratorConfig,
     };
-    game.levels = game_config.levels;
-    game.chunk_timeout = game_config.chunk_timeout;
-
+    game.options = game_options;
     const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ join_data.world_folder, "storage" });
     {
         defer allocator.free(storage_path);
@@ -97,7 +98,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfi
     }
     errdefer game.generator.TerrainHeightCache.deinit();
     game.running = .init(true);
-    game.GenerateDistance = .init(.{ .xz = game_config.generation_distance[0], .y = game_config.generation_distance[1] });
+
     const cpu_count = try std.Thread.getCpuCount();
     try game.pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
     errdefer game.pool.deinit();
@@ -156,12 +157,19 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfi
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
-    const dist = self.GenerateDistance.load(.monotonic);
-    return .{ dist.xz, dist.y };
+    self.options.lock.lockShared();
+    defer self.options.lock.unlockShared();
+    return self.options.generation_distance;
+}
+
+pub fn getLevels(self: *@This()) [2]i32 {
+    self.options.lock.lockShared();
+    defer self.options.lock.unlockShared();
+    return self.options.levels;
 }
 
 pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
-    if (level <= self.levels[0]) return @splat(0);
+    if (level <= self.getLevels()[0]) return @splat(0);
     const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
@@ -238,7 +246,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, self.chunk_timeout * std.time.us_per_s });
+    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
     self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
 }
