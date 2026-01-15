@@ -44,7 +44,7 @@ const MenuState = struct {
 const config_path = "Config.zon";
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background: []const u8 = @embedFile("assets/terrain.png");
-const pixel_font = getFontNameByName("Press Start 2P");
+const pixel_font = sliceToBounded("Press Start 2P", 50);
 
 pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
@@ -58,7 +58,9 @@ pub fn main() !void {
     var config_lock: std.Thread.RwLock = .{};
 
     var config: Config = try .load(allocator, config_path);
-    defer config.deinit(allocator);
+    defer config.deinit(allocator); //TODO fix invalid free that happends sometimes
+
+    try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
 
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -162,7 +164,7 @@ pub fn main() !void {
             if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleKeyboardActions(action_set, dt);
 
-            const size = try window.getSize();
+            const size = try window.getSizeInPixels();
             const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
             try game_render_context.makeCurrent(window);
             _ = try game.renderer.Draw(&game, viewport_pixels);
@@ -297,15 +299,17 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     defer container.deinit();
 
     const new_game = menuCard(@src(), .{}, .{ .expand = .vertical });
-    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = getFontNameByName("Vera Sans") } })) {
+    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = comptime sliceToBounded("Vera Sans", 50) } })) {
         //TODO open new game menu
     }
 
     new_game.deinit();
-
-    var worlds_path: std.fs.Dir = try std.fs.cwd().openDir(config.worlds_path, .{ .iterate = true });
-    defer worlds_path.close();
-    var it = worlds_path.iterate();
+    config_lock.lockShared();
+    const worlds_path = config.worlds_path;
+    config_lock.unlockShared();
+    var worlds_folder: std.fs.Dir = try std.fs.cwd().openDir(worlds_path, .{ .iterate = true });
+    defer worlds_folder.close();
+    var it = worlds_folder.iterate();
     var i: usize = 0;
     while (try it.next()) |item| : (i += 1) {
         if (item.kind != .directory) continue;
@@ -328,9 +332,10 @@ fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     }
 }
 
-fn getFontNameByName(comptime name: []const u8) [50:0]u8 {
-    comptime var f: [50:0]u8 = @splat(0);
-    comptime @memcpy(f[0..name.len], name);
+fn sliceToBounded(comptime slice: []const u8, comptime max: usize) [max:0]u8 {
+    var f: [max:0]u8 = undefined;
+    @memcpy(f[0..slice.len], slice);
+    f[slice.len] = 0;
     return f;
 }
 
@@ -392,22 +397,23 @@ const Config = struct {
     worlds_path: []const u8 = "worlds",
 
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| sw: switch (err) {
+        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
             error.FileNotFound => {
-                std.log.warn("Config file not found, creating default config file", .{});
+                std.log.info("Config file not found, creating default config file", .{});
                 break :sw null;
             },
             else => return err,
         };
-
-        var config: Config = undefined;
         defer if (configFile) |file| file.close();
+        var config: Config = undefined;
         config = if (configFile) |file| try utils.loadZON(Config, file, allocator, allocator) else .{};
+
+        if (configFile == null) config.worlds_path = try allocator.dupe(u8, config.worlds_path); //world path must be owned by the allocator so it dosent free invalid memory
         return config;
     }
 
     pub fn save(self: *const Config, path: []const u8, config_lock: ?*std.Thread.RwLock) !void {
-        const configFile = try std.fs.cwd().createFile(path, .{});
+        const configFile = try std.fs.cwd().createFile(path, .{ .lock = .exclusive });
         defer configFile.close();
         var buffer: [512]u8 = undefined;
         var filewriter = configFile.writer(&buffer);

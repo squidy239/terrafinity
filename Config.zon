@@ -1,5 +1,5 @@
 .{ .game_config = .{
-    .mouse_sensitivity = 0.16965775,
+    .mouse_sensitivity = 0.5,
     .lowest_level = 0,
     .highest_level = 10,
     .generation_distance_x = 8,
