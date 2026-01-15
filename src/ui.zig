@@ -3,6 +3,8 @@ const std = @import("std");
 const Game = @import("Game.zig");
 const sdl = @import("sdl3");
 const Config = @import("main.zig").Config;
+const World = @import("world/World.zig");
+const utils = @import("libs/utils.zig");
 
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background: []const u8 = @embedFile("assets/terrain.png");
@@ -13,6 +15,7 @@ pub const MenuState = struct {
     settings: bool = false,
     main: bool = false,
     esc: bool = false,
+    newgame: bool = false,
 
     pub fn playingGame(self: MenuState) bool {
         return std.meta.eql(self, MenuState{ .ingame = true });
@@ -103,6 +106,21 @@ pub fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, config_pat
     return menuchanged;
 }
 
+pub fn newGameMenu(config: *Config, worlds_path: []const u8, menu_state: *MenuState) !bool {
+    const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer page.deinit();
+
+    const menuchanged: bool = if (!menu_state.ingame) sidebar(menu_state) else false;
+
+    const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
+    defer settings.deinit();
+
+    dvui.structUI(@src(), "Settings", config, 32, .{ Config.structui_options, Game.Options.structui_options });
+
+    _ = worlds_path;
+    return menuchanged;
+}
+
 pub fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
@@ -185,17 +203,17 @@ pub fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.vi
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ config.worlds_path, item.name });
             defer allocator.free(jpath);
-            const join: Game.Join = .{ .world_folder = jpath };
-            try openGame(gameptr, allocator, window, &config.game_config, config_lock, join, menu_state, game_render_context); //TODO popup when game cant be opened
+            try openGame(gameptr, allocator, window, &config.game_config, config_lock, jpath, menu_state, game_render_context); //TODO popup when game cant be opened
             menu_state.main = false;
         }
     }
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
     std.debug.assert(!menu_state.ingame);
     try render_context.makeCurrent(window);
-    try gameptr.init(allocator, game_config, options_lock, join);
+    try gameptr.init(allocator, game_config, options_lock, folder);
+    errdefer gameptr.deinit(window);
     menu_state.ingame = true;
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});

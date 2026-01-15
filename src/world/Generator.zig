@@ -10,11 +10,13 @@ const ChunkSize = Chunk.ChunkSize;
 const Interpolation = @import("Interpolation.zig");
 const World = @import("World.zig");
 const ChunkPos = World.ChunkPos;
+const utils = @import("../libs/utils.zig");
+const defaults = @import("defaults.zig");
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
-    params: GenParams,
-    TerrainHeightCache: Cache(struct { pos: [2]i32, level: i32 }, [ChunkSize][ChunkSize]i32),
+    params: Params,
+    terrain_height_cache: Cache(struct { pos: [2]i32, level: i32 }, [ChunkSize][ChunkSize]i32),
 
     pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
@@ -51,10 +53,11 @@ pub const DefaultGenerator = struct {
     fn deinit(self: World.ChunkSource, world: *World) void {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        generator.TerrainHeightCache.deinit();
+        generator.terrain_height_cache.deinit();
     }
 
-    pub const GenParams = struct {
+    pub const Params = struct {
+        pub const default = defaults.default_generator;
         terrainblockRandomness: f32, //must be from 0 to 1
         TerrainNoise: Noise.Noise(f32),
         TreeNoise: Noise.Noise(f32),
@@ -68,15 +71,25 @@ pub const DefaultGenerator = struct {
         Cavesess: f32,
         CaveExpansionMax: f32,
         CaveExpansionStart: f32,
-        seed: u64,
+        ///if null, a random seed will be generated. this will be set to the random seed and will not be null after setSeeds is called
+        seed: ?u64,
         terrainScale: f32,
         genStructures: bool,
-        trees: []TreeConfig,
+        trees: []const TreeConfig,
+
+        pub fn setSeeds(self: *Params) void {
+            if (self.seed == null) self.seed = std.crypto.random.int(u64);
+            self.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 1));
+            self.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 2));
+            self.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
+            self.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
+            self.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
+        }
     };
 
     pub const TreeConfig = struct {
         enabled: bool = true,
-        steps: []World.Editor.Tree.StepConfig,
+        steps: []const World.Editor.Tree.StepConfig,
         baseRadius: f32,
         baseRadiusVariation: f32,
         trunkHeight: f32,
@@ -91,7 +104,7 @@ pub const DefaultGenerator = struct {
         const heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
         //  std.debug.print("hit/miss percent: {d}%, theoretical percent: {d}%                 \r", .{ @as(f32, @floatFromInt(cacheHits.load(.seq_cst))) / @as(f32, @floatFromInt(cacheMisses.load(.seq_cst) + cacheHits.load(.seq_cst))), 20.0 / 21.0 });
         gc.End();
-        var rng = std.Random.DefaultPrng.init(self.params.seed +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
+        var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
         var rand = rng.random();
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
@@ -105,7 +118,7 @@ pub const DefaultGenerator = struct {
         gen.End();
     }
 
-    fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const GenParams, rand: *std.Random, chunkScale: f32) void {
+    fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
         const terrainScaleUp: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const terrainScaleDown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
         const terrainScales: [2]f32 = .{ terrainScaleUp, terrainScaleDown };
@@ -122,7 +135,7 @@ pub const DefaultGenerator = struct {
             }
         }
     }
-    fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: GenParams) void {
+    fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
         const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
         defer caves.End();
         var grid: [4][4][4]f32 = undefined;
@@ -174,7 +187,7 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    fn generateCavesFull(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: GenParams) void {
+    fn generateCavesFull(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
         const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
         defer caves.End();
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(Pos.position[0]), @floatFromInt(Pos.position[1]), @floatFromInt(Pos.position[2]) };
@@ -219,13 +232,13 @@ pub const DefaultGenerator = struct {
     pub fn getTerrainHeight(self: *DefaultGenerator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
-        if (self.TerrainHeightCache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
+        if (self.terrain_height_cache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
         const generatedHeights = genTerrainHeight(self.params, level, Pos);
-        self.TerrainHeightCache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch {};
+        self.terrain_height_cache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch {};
         return generatedHeights;
     }
 
-    fn genTerrainHeight(params: GenParams, level: i32, Pos: [2]i32) [ChunkSize][ChunkSize]i32 {
+    fn genTerrainHeight(params: Params, level: i32, Pos: [2]i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
         defer gth.End();
         const chunkSizeGenScale = 1.0 / @as(f32, @floatCast(World.ChunkPos.toScale(level)));
@@ -319,7 +332,7 @@ pub const DefaultGenerator = struct {
                         } else {
                             const realY: f32 = @as(f32, @floatFromInt((Pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
                             const realPos = @Vector(3, f32){ realX, realY, realZ };
-                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed, Pos.level);
+                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed.?, Pos.level);
                         }
                     }
                 }

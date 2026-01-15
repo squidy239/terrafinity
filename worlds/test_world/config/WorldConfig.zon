@@ -1,8 +1,0 @@
-.{
-    .SpawnCenterPos = .{
-        0,
-        0,
-        0,
-    },
-    .SpawnRange = 0,
-}

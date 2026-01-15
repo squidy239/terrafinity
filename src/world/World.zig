@@ -117,8 +117,8 @@ pub const ChunkPos = struct {
 };
 
 pub const WorldConfig = struct {
-    SpawnCenterPos: @Vector(3, f64),
-    SpawnRange: u32,
+    SpawnCenterPos: @Vector(3, f64) = .{ 0, 0, 0 },
+    SpawnRange: u32 = 0,
 };
 
 ///sources must be thread safe

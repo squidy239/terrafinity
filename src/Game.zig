@@ -75,18 +75,70 @@ pub const Options = struct {
     }, null);
 };
 
-///This holds data used to join a game type, multiplayer protocols will be added later
-pub const Join = union(enum) {
-    world_folder: []const u8,
+pub const WorldOptions = struct {
+    const default: @This() = .{ .generator_config = .default, .world_config = .{} };
+    generator_config: World.DefaultGenerator.Params,
+    world_config: World.WorldConfig,
+
+    pub fn fromWorldFolder(folder: []const u8, allocator: std.mem.Allocator) !WorldOptions {
+        var world_folder = try std.fs.cwd().openDir(folder, .{});
+        defer world_folder.close();
+
+        const worldConfigFile = try world_folder.openFile("config/World.zon", .{ .lock = .shared });
+        defer worldConfigFile.close();
+
+        const generatorConfigFile = try world_folder.openFile("config/DefaultGenerator.zon", .{ .lock = .shared });
+        defer generatorConfigFile.close();
+
+        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, generatorConfigFile, allocator, allocator);
+        generator_config.setSeeds();
+        return .{
+            .generator_config = generator_config,
+            .world_config = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, allocator),
+        };
+    }
+
+    ///saves the world options to the config directory in the given folder, creating the files if they do not exist
+    pub fn save(self: WorldOptions, folder: []const u8) !void {
+        var wbuffer: [1024]u8 = undefined;
+        var gbuffer: [1024]u8 = undefined;
+
+        var world_folder = try std.fs.cwd().openDir(folder, .{});
+        defer world_folder.close();
+
+        world_folder.makeDir("config") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const worldConfigFile = try world_folder.createFile("config/World.zon", .{ .lock = .exclusive });
+        defer worldConfigFile.close();
+
+        var worldconfwriter = worldConfigFile.writer(&wbuffer);
+
+        const generatorConfigFile = try world_folder.createFile("config/DefaultGenerator.zon", .{ .lock = .exclusive });
+        defer generatorConfigFile.close();
+
+        var generatorconfwriter = generatorConfigFile.writer(&gbuffer);
+
+        try std.zon.stringify.serialize(self.world_config, .{}, &worldconfwriter.interface);
+        try std.zon.stringify.serialize(self.generator_config, .{}, &generatorconfwriter.interface);
+
+        try worldconfwriter.end();
+        try generatorconfwriter.end();
+    }
+
+    pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
+        std.zon.parse.free(allocator, self.world_config);
+        std.zon.parse.free(allocator, self.generator_config);
+    }
 };
 
-pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, options_lock: *std.Thread.RwLock, join_data: Join) !void {
-    std.debug.assert(join_data == .world_folder);
-
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8) !void {
     game.* = .{
         .game_arena = .init(allocator),
         .options = game_options,
-        .options_lock = options_lock,
+        .options_lock = game_options_lock,
         .running = .init(true),
         .allocator = allocator,
         .pool = undefined,
@@ -102,36 +154,26 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
 
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
-    var world_folder = try std.fs.cwd().openDir(join_data.world_folder, .{});
-    defer world_folder.close();
 
-    const worldConfigFile = try world_folder.openFile("config/WorldConfig.zon", .{ .mode = .read_only });
-    defer worldConfigFile.close();
-
-    const generatorConfigFile = try world_folder.openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
-    defer generatorConfigFile.close();
-
-    const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, arena);
-    var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, allocator, arena);
-
-    GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
-    GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
-    GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
-    GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-    GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
+    var world_options = WorldOptions.fromWorldFolder(folder, arena) catch |err| switch (err) {
+        error.FileNotFound => WorldOptions.default,
+        else => return err,
+    };
+    world_options.generator_config.setSeeds();
+    try world_options.save(folder);
 
     const terrain_height_cache_memory = 10_000_000; //10 mb
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
-        .TerrainHeightCache = try .init(allocator, thc_size),
-        .params = GeneratorConfig,
+        .terrain_height_cache = try .init(allocator, thc_size),
+        .params = world_options.generator_config,
     };
-    const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ join_data.world_folder, "storage" });
+    errdefer game.generator.terrain_height_cache.deinit();
+    const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ folder, "storage" });
     {
         defer allocator.free(storage_path);
         game.world_storage = try .init(storage_path, .{}, allocator);
     }
-    errdefer game.generator.TerrainHeightCache.deinit();
 
     const cpu_count = try std.Thread.getCpuCount();
     try game.pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
@@ -143,7 +185,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .threadPool = &game.pool,
         .Entitys = .init(allocator),
         .Chunks = .init(allocator),
-        .Config = MainWorldConfig,
+        .Config = world_options.world_config,
         .ChunkSources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = null,
     };
