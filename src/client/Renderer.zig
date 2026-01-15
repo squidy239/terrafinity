@@ -172,9 +172,8 @@ pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u
     const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
     try self.DrawEntities(game, playerPos, viewport_pixels);
     drawEntities.End();
-    const gen_distance = game.getGenDistance();
     const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-    Loader.UnloadMeshes(game, gen_distance, playerPos);
+    Loader.UnloadMeshes(game, playerPos);
     unloadMeshes.End();
     {
         const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;

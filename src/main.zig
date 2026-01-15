@@ -56,13 +56,11 @@ pub fn main() !void {
     _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
     var config_lock: std.Thread.RwLock = .{};
-    const configFile = try std.fs.cwd().openFile(config_path, .{ .mode = .read_only });
-    var config = try utils.loadZON(Config, configFile, allocator, allocator);
-    defer std.zon.parse.free(allocator, config);
-    configFile.close();
+
+    var config: Config = try .load(allocator, config_path);
+    defer config.deinit(allocator);
 
     sdl.errors.error_callback = &sdlErr;
-    sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
     const init_flags: sdl.InitFlags = .{ .video = true, .events = true };
     defer sdl.shutdown();
@@ -161,7 +159,7 @@ pub fn main() !void {
         const ms = sdl.mouse.getRelativeState();
         if (menu_state.ingame) {
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] });
+            if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleKeyboardActions(action_set, dt);
 
             const size = try window.getSize();
@@ -239,18 +237,7 @@ fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, menu_state: *M
     const config_changed = !std.meta.eql(firstconfig, config.*);
     config_lock.unlock();
 
-    if (config_changed) {
-        const configFile = try std.fs.cwd().openFile(config_path, .{ .mode = .write_only });
-        defer configFile.close();
-        var buffer: [512]u8 = undefined;
-        var filewriter = configFile.writer(&buffer);
-        {
-            config_lock.lockShared();
-            defer config_lock.unlockShared();
-            try std.zon.stringify.serialize(config, .{}, &filewriter.interface);
-        }
-        try filewriter.end();
-    }
+    if (config_changed) try config.save(config_path, config_lock);
     return menuchanged;
 }
 
@@ -401,8 +388,40 @@ fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !bo
 
 ///must be locked by the caller
 const Config = struct {
-    game_config: Game.Options,
-    worlds_path: []const u8,
+    game_config: Game.Options = .{},
+    worlds_path: []const u8 = "worlds",
+
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
+        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| sw: switch (err) {
+            error.FileNotFound => {
+                std.log.warn("Config file not found, creating default config file", .{});
+                break :sw null;
+            },
+            else => return err,
+        };
+
+        var config: Config = undefined;
+        defer if (configFile) |file| file.close();
+        config = if (configFile) |file| try utils.loadZON(Config, file, allocator, allocator) else .{};
+        return config;
+    }
+
+    pub fn save(self: *const Config, path: []const u8, config_lock: ?*std.Thread.RwLock) !void {
+        const configFile = try std.fs.cwd().createFile(path, .{});
+        defer configFile.close();
+        var buffer: [512]u8 = undefined;
+        var filewriter = configFile.writer(&buffer);
+        {
+            if (config_lock) |lock| lock.lockShared();
+            defer if (config_lock) |lock| lock.unlockShared();
+            try std.zon.stringify.serialize(self, .{}, &filewriter.interface);
+        }
+        try filewriter.end();
+    }
+
+    pub fn deinit(self: *const Config, allocator: std.mem.Allocator) void {
+        std.zon.parse.free(allocator, self.*);
+    }
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };

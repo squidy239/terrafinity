@@ -349,8 +349,9 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
     }
 }
 
+const Options = @import("../Game.zig").Options;
 //TODO when 0.16 is out get rid of this and make it happen after the time on asynchronously from the main loop
-pub fn chunkUnloaderThread(self: *@This(), options: *@import("../Game.zig").Options, options_lock: *std.Thread.RwLock) void {
+pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std.Thread.RwLock) void {
     while (self.running.load(.monotonic)) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         defer unloadChunks.End();

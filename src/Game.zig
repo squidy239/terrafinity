@@ -34,15 +34,18 @@ options_lock: *std.Thread.RwLock,
 running: std.atomic.Value(bool),
 
 pub const Options = struct {
-    unloader_frequency_ms: u64 = 1000,
-    lowest_lever: i32,
-    highest_level: i32,
+    mouse_sensitivity: f32 = 0.5,
 
-    generation_distance_x: u32,
-    generation_distance_y: u32,
+    lowest_level: i32 = 0,
+    highest_level: i32 = 10,
+
+    generation_distance_x: u32 = 8,
+    generation_distance_y: u32 = 6,
 
     ///after this of time in microseconds a chunk will be unloaded if it is not used
-    chunk_timeout_ms: u64,
+    chunk_timeout_ms: u64 = 10000,
+    ///how often the unloader thread will try to unload chunks
+    unloader_frequency_ms: u64 = 1000,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -51,12 +54,17 @@ pub const Options = struct {
             .max = 24,
             .widget_type = .slider,
         } },
-        .lowest_lever = .{ .number = .{
+        .lowest_level = .{ .number = .{
             .display = .none,
         } },
         .generation_distance_x = .{ .number = .{
             .min = 6,
             .max = 32,
+            .widget_type = .slider,
+        } },
+        .mouse_sensitivity = .{ .number = .{
+            .min = 0,
+            .max = 5,
             .widget_type = .slider,
         } },
         .generation_distance_y = .{ .number = .{
@@ -190,7 +198,7 @@ pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
 pub fn getLevels(self: *@This()) [2]i32 {
     self.options_lock.lockShared();
     defer self.options_lock.unlockShared();
-    return .{ self.options.lowest_lever, self.options.highest_level };
+    return .{ self.options.lowest_level, self.options.highest_level };
 }
 
 pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
@@ -199,8 +207,7 @@ pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 
-pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32) void {
-    const sensitivity: f32 = 0.5;
+pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32) void {
     var viewDirDiff: @Vector(2, f32) = @splat(0);
     viewDirDiff += @Vector(2, f32){ mouse_motion[1], mouse_motion[0] };
     viewDirDiff *= @splat(sensitivity);
@@ -212,6 +219,12 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32) void {
     self.player.viewDirection[0] = std.math.clamp(self.player.viewDirection[0], -90 + smallf32, 90 - smallf32);
     self.player.viewDirectionLock.unlock();
     self.renderer.updateCameraDirection();
+}
+
+pub fn getMouseSensitivity(self: *@This()) f32 {
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
+    return self.options.mouse_sensitivity;
 }
 
 pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
