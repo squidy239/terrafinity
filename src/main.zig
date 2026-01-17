@@ -52,15 +52,6 @@ pub fn main() !void {
     const init_flags: sdl.InitFlags = .{ .video = true, .events = true };
     defer sdl.shutdown();
 
-    //try wayland since its not default
-    var d: usize = 0;
-    while (sdl.video.getDriverName(d)) |name| : (d += 1) {
-        if (std.mem.eql(u8, name, "wayland")) {
-            sdl.hints.set(.video_driver, "wayland") catch {};
-            break;
-        }
-    }
-
     try sdl.init(init_flags);
     defer sdl.quit(init_flags);
     // Set OpenGL attributes
@@ -165,7 +156,6 @@ pub fn main() !void {
         try backend.setCursor(ui_window.cursorRequested());
 
         try sdl_renderer.flush();
-        try game_render_context.makeCurrent(window);
         try sdl.video.gl.swapWindow(window);
         std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }

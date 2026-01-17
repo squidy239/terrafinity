@@ -4,10 +4,10 @@ const Block = @import("../main.zig").Block;
 const gl = @import("gl");
 const zigimg = @import("zigimg");
 
-threadlocal var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
 ///must be run in a valid opengl context
 pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
+    var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
     const keyword = ".png";
     const resolution = try allSquares(textures_path, keyword);
     const missing_texture_pixels = try allocator.alloc(u8, resolution[0] * resolution[1] * 3);
@@ -101,7 +101,8 @@ fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
 }
 
 fn getResolution(texture: std.fs.File) ![2]usize {
-    var fbuf: [1000000]u8 = undefined;
+    var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
+    var fbuf: [100000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fbuf);
     const alloc = fba.allocator();
     var img = try zigimg.Image.fromFile(alloc, texture, &read_buffer);
