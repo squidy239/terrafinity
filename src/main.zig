@@ -165,6 +165,7 @@ pub fn main() !void {
         try backend.setCursor(ui_window.cursorRequested());
 
         try sdl_renderer.flush();
+        try game_render_context.makeCurrent(window);
         try sdl.video.gl.swapWindow(window);
         std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
