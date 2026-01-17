@@ -321,10 +321,10 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
     }
 }
 
-pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
+pub fn unloadTimeout(self: *@This(), max_ms: u64, current_memory: *std.atomic.Value(usize), memory_target: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
-    var chunks: u64 = 0;
+    var chunks: [self.Chunks.buckets.len]u64 = @splat(0);
     var unload_chunk_buffer: [32784]ChunkPos = undefined;
     var it = self.Chunks.iterator();
     defer it.deinit();
@@ -333,10 +333,11 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
         {
             const currenttime = std.time.microTimestamp();
             while (it.next()) |c| {
-                chunks += 1;
+                chunks[it.bkt_index] += 1;
                 const chunk = c.value_ptr.*;
-                const lastaccess = chunk.last_access.load(.monotonic);
-                if (currenttime - lastaccess < unload_timeout) continue;
+                const lastaccess = chunk.last_access.load(.unordered); //this might have to happen only once bc it may unbalence map, TODO check
+                const timeout = memCurve(max_ms, current_memory.load(.unordered), memory_target);
+                if (currenttime - lastaccess < timeout) continue;
                 tounload.appendBounded(c.key_ptr.*) catch break;
             }
         }
@@ -347,21 +348,30 @@ pub fn unloadUnusedChunks(self: *@This(), unload_timeout: u64) !void {
             try self.unloadChunk(Pos);
         }
     }
+    std.debug.print("percent: {d}, timeout: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)), memCurve(max_ms, current_memory.load(.unordered), memory_target) });
+}
+
+///returns chunk timeout seconds
+fn memCurve(max_ms: u64, current_memory: usize, memory_target: usize) u64 {
+    const fraction: f32 = @min(1, @as(f32, @floatFromInt(current_memory)) / @as(f32, @floatFromInt(memory_target)));
+    const time: u64 = @intFromFloat(@as(f32, @floatFromInt(max_ms)) * (1 - fraction));
+    return time;
 }
 
 const Options = @import("../Game.zig").Options;
 //TODO when 0.16 is out get rid of this and make it happen after the time on asynchronously from the main loop
-pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std.Thread.RwLock) void {
+pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std.Thread.RwLock, current_memory: *std.atomic.Value(usize)) void {
     while (self.running.load(.monotonic)) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         defer unloadChunks.End();
         const st = std.time.nanoTimestamp();
         options_lock.lockShared();
-        const unload_timeout = options.chunk_timeout_ms;
+        const unload_timeout = options.max_chunk_timeout_ms;
+        const memory_target = options.memory_target;
         const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
         options_lock.unlockShared();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-        self.unloadUnusedChunks(unload_timeout) catch |err| std.debug.panic("err:{any}\n", .{err});
+        self.unloadTimeout(unload_timeout, current_memory, memory_target) catch |err| std.debug.panic("err:{any}\n", .{err});
     }
 }
 

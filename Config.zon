@@ -1,9 +1,0 @@
-.{ .game_config = .{
-    .mouse_sensitivity = 0.27341753,
-    .lowest_level = 0,
-    .highest_level = 13,
-    .generation_distance_x = 32,
-    .generation_distance_y = 12,
-    .chunk_timeout_ms = 20000,
-    .unloader_frequency_ms = 1000,
-}, .worlds_path = "worlds" }

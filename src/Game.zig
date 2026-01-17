@@ -14,6 +14,7 @@ const sdl = @import("sdl3");
 const Key = @import("Key.zig");
 const zm = @import("zm");
 const dvui = @import("dvui");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 allocator: std.mem.Allocator,
 world: World,
@@ -24,6 +25,7 @@ renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
+tracking_allocator: TrackingAllocator,
 
 // Threads
 loaderThread: ?std.Thread,
@@ -42,8 +44,8 @@ pub const Options = struct {
     generation_distance_x: u32 = 8,
     generation_distance_y: u32 = 6,
 
-    ///after this of time in microseconds a chunk will be unloaded if it is not used
-    chunk_timeout_ms: u64 = 10000,
+    max_chunk_timeout_ms: u64 = 10000,
+    memory_target: u64 = 2 * 1024 * 1024 * 1024, //1 GiB
     ///how often the unloader thread will try to unload chunks
     unloader_frequency_ms: u64 = 1000,
 
@@ -140,18 +142,19 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .options = game_options,
         .options_lock = game_options_lock,
         .running = .init(true),
-        .allocator = allocator,
+        .allocator = undefined,
         .pool = undefined,
         .chunkManager = undefined,
         .renderer = undefined,
         .generator = undefined,
+        .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
         .loaderThread = null,
         .unloaderThread = null,
     };
-
+    game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
 
@@ -165,26 +168,26 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     const terrain_height_cache_memory = 10_000_000; //10 mb
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
-        .terrain_height_cache = try .init(allocator, thc_size),
+        .terrain_height_cache = try .init(game.allocator, thc_size),
         .params = world_options.generator_config,
     };
     errdefer game.generator.terrain_height_cache.deinit();
-    const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ folder, "storage" });
+    const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
-        defer allocator.free(storage_path);
-        game.world_storage = try .init(storage_path, .{}, allocator);
+        defer game.allocator.free(storage_path);
+        game.world_storage = try .init(storage_path, .{}, game.allocator);
     }
 
     const cpu_count = try std.Thread.getCpuCount();
-    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
+    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = game.allocator });
     errdefer game.pool.deinit();
     game.world = .{
         .running = .init(true),
         .entityUpdaterThread = null,
-        .allocator = allocator,
+        .allocator = game.allocator,
         .threadPool = &game.pool,
-        .Entitys = .init(allocator),
-        .Chunks = .init(allocator),
+        .Entitys = .init(game.allocator),
+        .Chunks = .init(game.allocator),
         .Config = world_options.world_config,
         .ChunkSources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = null,
@@ -222,13 +225,13 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     game.player = @ptrCast(@alignCast(playerentity.ptr));
     game.chunkManager = .{
         .pool = &game.pool,
-        .ChunkRenderList = .init(allocator),
-        .LoadingChunks = .init(allocator),
-        .MeshesToLoad = .init(allocator),
+        .ChunkRenderList = .init(game.allocator),
+        .LoadingChunks = .init(game.allocator),
+        .MeshesToLoad = .init(game.allocator),
         .world = &game.world,
-        .allocator = allocator,
+        .allocator = game.allocator,
     };
-    game.renderer = try .init(allocator, game.player);
+    game.renderer = try .init(game.allocator, game.player);
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
@@ -326,7 +329,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock });
+    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
     self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
 }

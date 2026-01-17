@@ -24,6 +24,7 @@ pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 var proc_table: gl.ProcTable = undefined;
 
@@ -33,9 +34,10 @@ pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
+    const backing_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
+    var tracking_allocator = TrackingAllocator.init(backing_allocator, std.math.maxInt(usize));
+    const allocator = tracking_allocator.get_allocator();
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
-
     _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
     var config_lock: std.Thread.RwLock = .{};
@@ -164,6 +166,7 @@ pub fn main() !void {
 
         try sdl_renderer.flush();
         try sdl.video.gl.swapWindow(window);
+        std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }
 
