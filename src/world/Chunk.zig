@@ -25,7 +25,7 @@ pub const BlockEncoding = union(enum(u8)) {
             blockEncoding = BlockEncoding{ .oneBlock = block };
         } else {
             const mem = try allocator.create([ChunkSize][ChunkSize][ChunkSize]Block);
-            mem.* = blocks.*;
+            @memcpy(mem, blocks);
             blockEncoding = BlockEncoding{ .blocks = mem };
         }
         return blockEncoding;

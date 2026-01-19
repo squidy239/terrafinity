@@ -102,20 +102,24 @@ pub const DefaultGenerator = struct {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
         const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
         const heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
-        //  std.debug.print("hit/miss percent: {d}%, theoretical percent: {d}%                 \r", .{ @as(f32, @floatFromInt(cacheHits.load(.seq_cst))) / @as(f32, @floatFromInt(cacheMisses.load(.seq_cst) + cacheHits.load(.seq_cst))), 20.0 / 21.0 });
         gc.End();
         var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
         var rand = rng.random();
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
-        const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
-        generateTerrain(blocks, Pos, &heights, &self.params, &rand, @floatCast(chunkscale));
-        genterra.End();
-        var oneBlock = Chunk.IsOneBlock(blocks);
-        if (oneBlock == null or oneBlock.? == Block.stone or oneBlock.? == Block.water) {
-            generateCavesInterpolate(blocks, Pos, &heights, @floatCast(chunkscale), self.params);
-            oneBlock = Chunk.IsOneBlock(blocks);
+        defer gen.End();
+        if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
+            blocks.* = @splat(@splat(@splat(.air)));
+            return;
+        } else if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
+            blocks.* = @splat(@splat(@splat(.stone)));
+        } else {
+            const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
+            generateTerrain(blocks, Pos, &heights, &self.params, &rand, @floatCast(chunkscale));
+            genterra.End();
+            const oneBlock = Chunk.IsOneBlock(blocks);
+            if(oneBlock != null and oneBlock.? == .air) return;
         }
-        gen.End();
+        generateCavesInterpolate(blocks, Pos, &heights, @floatCast(chunkscale), self.params);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
