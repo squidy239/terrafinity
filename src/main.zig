@@ -151,6 +151,7 @@ pub fn main() !void {
         if (menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(&game, window, &menu_state);
         if (menu_state.main and !menuchanged) menuchanged = try ui.mainPage(&game, allocator, window, &config, &config_lock, &menu_state, game_render_context);
         if (menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(&config, &config_lock, config_path, &menu_state);
+        if (menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(config.worlds_path, &menu_state);
 
         _ = try ui_window.end(.{});
         try backend.setCursor(ui_window.cursorRequested());

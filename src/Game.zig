@@ -78,7 +78,7 @@ pub const Options = struct {
 };
 
 pub const WorldOptions = struct {
-    const default: @This() = .{ .generator_config = .default, .world_config = .{} };
+    pub const default: @This() = .{ .generator_config = .default, .world_config = .{} };
     generator_config: World.DefaultGenerator.Params,
     world_config: World.WorldConfig,
 

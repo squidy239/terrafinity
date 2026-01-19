@@ -4,7 +4,6 @@ const Block = @import("../main.zig").Block;
 const gl = @import("gl");
 const zigimg = @import("zigimg");
 
-
 ///must be run in a valid opengl context
 pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;

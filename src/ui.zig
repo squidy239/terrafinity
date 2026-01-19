@@ -27,6 +27,13 @@ pub const MenuState = struct {
     }
 };
 
+pub const UiData = struct { //TODO
+    menu_state: MenuState,
+    window: sdl.video.Window,
+    config: *Config,
+    config_lock: *std.Thread.RwLock,
+};
+
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
     var options: dvui.Options = .{
         .min_size_content = .all(256),
@@ -106,18 +113,36 @@ pub fn settingsMenu(config: *Config, config_lock: *std.Thread.RwLock, config_pat
     return menuchanged;
 }
 
-pub fn newGameMenu(config: *Config, worlds_path: []const u8, menu_state: *MenuState) !bool {
+var new_world_options: Game.WorldOptions = .default;
+pub fn newGameMenu(worlds_path: []const u8, menu_state: *MenuState) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
     const menuchanged: bool = if (!menu_state.ingame) sidebar(menu_state) else false;
 
-    const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
-    defer settings.deinit();
+    const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
+    defer options.deinit();
+    const create = dvui.button(@src(), "Create World", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } });
 
-    dvui.structUI(@src(), "Settings", config, 32, .{ Config.structui_options, Game.Options.structui_options });
+    {
+        const world_name_widget = dvui.textEntry(@src(), .{ .placeholder = "World Name" }, .{ .gravity_x = 0.5 });
+        defer world_name_widget.deinit();
+        if (create) {
+            const world_name = world_name_widget.textGet();
+            std.log.info("creating world: {any}\n", .{world_name});
+            std.fs.cwd().makeDir(worlds_path) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+            var path = try std.fs.cwd().openDir(worlds_path, .{});
+            defer path.close();
+            try path.makeDir(world_name);
+            var worldfolder = try path.openDir(world_name, .{});
+            defer worldfolder.close();
+        }
+    }
+    dvui.structUI(@src(), "World Options", &new_world_options, 32, .{});
 
-    _ = worlds_path;
     return menuchanged;
 }
 
@@ -130,7 +155,7 @@ pub fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const changed: bool = sidebar(menu_state);
+    var changed: bool = sidebar(menu_state);
 
     const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .r = 24, .g = 24, .b = 24, .a = 255 }, .expand = .both });
     defer menu.deinit();
@@ -141,7 +166,7 @@ pub fn mainPage(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    try continueMenu(gameptr, allocator, window, config, config_lock, menu_state, game_render_context);
+    changed |= try continueMenu(gameptr, allocator, window, config, config_lock, menu_state, game_render_context);
     return changed;
 }
 
@@ -160,7 +185,7 @@ pub fn sidebar(menu_state: *MenuState) bool {
     return false;
 }
 
-pub fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
+pub fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, config: *Config, config_lock: *std.Thread.RwLock, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !bool {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
@@ -176,12 +201,15 @@ pub fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.vi
     const container = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical });
     defer container.deinit();
 
-    const new_game = menuCard(@src(), .{}, .{ .expand = .vertical });
-    if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = comptime sliceToBounded("Vera Sans", 50) } })) {
-        //TODO open new game menu
+    {
+        const new_game = menuCard(@src(), .{}, .{ .expand = .vertical });
+        defer new_game.deinit();
+        if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = comptime sliceToBounded("Vera Sans", 50) } })) {
+            menu_state.* = .{ .newgame = true };
+            new_world_options = Game.WorldOptions.default;
+            return true;
+        }
     }
-
-    new_game.deinit();
     config_lock.lockShared();
     const worlds_path = config.worlds_path;
     config_lock.unlockShared();
@@ -205,8 +233,10 @@ pub fn continueMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.vi
             defer allocator.free(jpath);
             try openGame(gameptr, allocator, window, &config.game_config, config_lock, jpath, menu_state, game_render_context); //TODO popup when game cant be opened
             menu_state.main = false;
+            return true;
         }
     }
+    return false;
 }
 
 fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
