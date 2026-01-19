@@ -20,12 +20,12 @@ const Game = @import("Game.zig");
 const Mesher = @import("Mesher.zig");
 const outOfSquareRange = @import("libs/utils.zig").outOfSquareRange;
 
-pub fn UnloadMeshes(game: *Game, gen_distance: @Vector(2, u32), playerPos: @Vector(3, f64)) void {
+pub fn UnloadMeshes(game: *Game, playerPos: @Vector(3, f64)) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
     var meshesToUnloadBuffer: [256]World.ChunkPos = undefined;
     var meshesToUnloadBufferPos: usize = 0;
-    const mesh_distance = gen_distance;
+    const mesh_distance = game.getGenDistance();
     {
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
@@ -35,7 +35,11 @@ pub fn UnloadMeshes(game: *Game, gen_distance: @Vector(2, u32), playerPos: @Vect
             const Pos: World.ChunkPos = entry.key_ptr.*;
             const innerRadius = game.getInnerGenRadius(Pos.level);
             if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break;
-            const keep = keepLoaded(playerPos, Pos, innerRadius, mesh_distance);
+            game.options_lock.lockShared();
+            const min_level = game.options.lowest_level;
+            const max_level = game.options.highest_level;
+            game.options_lock.unlockShared();
+            const keep = keepLoaded(min_level, max_level, playerPos, Pos, innerRadius, mesh_distance);
             if (keep) continue;
             meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
             meshesToUnloadBufferPos += 1;
@@ -53,9 +57,17 @@ pub fn UnloadMeshes(game: *Game, gen_distance: @Vector(2, u32), playerPos: @Vect
     }
 }
 
-pub fn keepLoaded(playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+    if (lowest_level) |l| {
+        if (Pos.level < l) return false;
+    }
+    if (highest_level) |h| {
+        if (Pos.level > h) return false;
+    }
+
     const playerChunkPos = @floor(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level))));
     const center: @Vector(3, f64) = @floatFromInt(Pos.position);
+
     if (innerChunkRange) |icr| {
         const inner: @Vector(3, f64) = .{ @floatFromInt(icr[0]), @floatFromInt(icr[1]), @floatFromInt(icr[0]) };
         const insideInner =
@@ -82,8 +94,9 @@ pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
         const st = std.time.nanoTimestamp();
         defer std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
         const genDistance = game.getGenDistance();
-        var level = game.levels[0];
-        while (level < game.levels[1]) : (level += 1) {
+        const levels = game.getLevels();
+        var level = levels[0];
+        while (level < levels[1]) : (level += 1) {
             loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(level), level) catch unreachable;
         }
 
@@ -117,7 +130,7 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                 defer y += 1;
                 const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
-                const in_range = keepLoaded(playerPos, ChunkPos, innerdistance, distance);
+                const in_range = keepLoaded(null, null, playerPos, ChunkPos, innerdistance, distance);
                 if (!in_range or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
                     continue;
                 }
@@ -156,7 +169,7 @@ pub fn LoadMeshes(renderer: *Renderer, game: *Game, glSync: ?*gl.sync, min_us: u
         defer mesh.free(game.allocator);
         defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos);
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
-        const inside_range = keepLoaded(player_pos, mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
+        const inside_range = keepLoaded(null, null, player_pos, mesh.Pos, game.getInnerGenRadius(mesh.Pos.level), game.getGenDistance());
         if (isempty or !inside_range) {
             _ = game.chunkManager.ChunkRenderList.remove(mesh.Pos);
             continue;

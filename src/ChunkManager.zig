@@ -66,7 +66,12 @@ pub const ChunkManager = struct {
 
     ///Adds a chunk to the render list, generates it or its neighbors if it dosent exist
     pub fn AddChunkToRenderTask(game: *Game, Pos: World.ChunkPos, genStructures: bool) void {
-        const inside_range = Loader.keepLoaded((game.player.physics.getPos()), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
+        game.options_lock.lockShared();
+        const lowest_level = game.options.lowest_level;
+        const highest_level = game.options.highest_level;
+        game.options_lock.unlockShared();
+
+        const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
         const running = game.running.load(.monotonic);
         if (!inside_range or !running) {
             _ = game.chunkManager.LoadingChunks.remove(Pos);

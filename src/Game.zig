@@ -13,6 +13,8 @@ const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 const Key = @import("Key.zig");
 const zm = @import("zm");
+const dvui = @import("dvui");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 allocator: std.mem.Allocator,
 world: World,
@@ -21,95 +23,173 @@ pool: ThreadPool,
 chunkManager: ChunkManager,
 renderer: Renderer,
 generator: World.DefaultGenerator,
-region_storage: World.WorldStorage,
+world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
+tracking_allocator: TrackingAllocator,
 
 // Threads
 loaderThread: ?std.Thread,
 unloaderThread: ?std.Thread,
 
-//The radius in which chunk generate chunks to generate horizontal, vertical
-GenerateDistance: std.atomic.Value(packed struct { xz: u32, y: u32 }),
-
-///the smallest level for general world generation
-SmallestLevel: i32 = 0,
-
-levels: [2]i32,
-
-chunk_timeout: u64,
-
+options: *Options,
+options_lock: *std.Thread.RwLock,
 running: std.atomic.Value(bool),
 
-pub const GameConfig = struct {
-    ///start, end
-    levels: [2]i32,
-    generation_distance: [2]u32,
-    ///after this of time in seconds a chunk will be unloadeed if it is not used
-    chunk_timeout: u64,
+pub const Options = struct {
+    mouse_sensitivity: f32 = 0.5,
+
+    lowest_level: i32 = 0,
+    highest_level: i32 = 10,
+
+    generation_distance_x: u32 = 8,
+    generation_distance_y: u32 = 6,
+
+    max_chunk_timeout_ms: u64 = 10000,
+    memory_target: u64 = 2 * 1024 * 1024 * 1024, //1 GiB
+    ///how often the unloader thread will try to unload chunks
+    unloader_frequency_ms: u64 = 1000,
+
+    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
+        .highest_level = .{ .number = .{
+            .display = .read_write,
+            .min = 1,
+            .max = 24,
+            .widget_type = .slider,
+        } },
+        .lowest_level = .{ .number = .{
+            .display = .none,
+        } },
+        .generation_distance_x = .{ .number = .{
+            .min = 6,
+            .max = 32,
+            .widget_type = .slider,
+        } },
+        .mouse_sensitivity = .{ .number = .{
+            .min = 0,
+            .max = 5,
+            .widget_type = .slider,
+        } },
+        .generation_distance_y = .{ .number = .{
+            .min = 6,
+            .max = 32,
+            .widget_type = .slider,
+        } },
+    }, null);
 };
 
-///This holds data used to join a game type, multiplayer protocols will be added later
-pub const Join = union(enum) {
-    world_folder: []const u8,
+pub const WorldOptions = struct {
+    pub const default: @This() = .{ .generator_config = .default, .world_config = .{} };
+    generator_config: World.DefaultGenerator.Params,
+    world_config: World.WorldConfig,
+
+    pub fn fromWorldFolder(folder: []const u8, allocator: std.mem.Allocator) !WorldOptions {
+        var world_folder = try std.fs.cwd().openDir(folder, .{});
+        defer world_folder.close();
+
+        const worldConfigFile = try world_folder.openFile("config/World.zon", .{ .lock = .shared });
+        defer worldConfigFile.close();
+
+        const generatorConfigFile = try world_folder.openFile("config/DefaultGenerator.zon", .{ .lock = .shared });
+        defer generatorConfigFile.close();
+
+        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, generatorConfigFile, allocator, allocator);
+        generator_config.setSeeds();
+        return .{
+            .generator_config = generator_config,
+            .world_config = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, allocator),
+        };
+    }
+
+    ///saves the world options to the config directory in the given folder, creating the files if they do not exist
+    pub fn save(self: WorldOptions, folder: []const u8) !void {
+        var wbuffer: [1024]u8 = undefined;
+        var gbuffer: [1024]u8 = undefined;
+
+        var world_folder = try std.fs.cwd().openDir(folder, .{});
+        defer world_folder.close();
+
+        world_folder.makeDir("config") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const worldConfigFile = try world_folder.createFile("config/World.zon", .{ .lock = .exclusive });
+        defer worldConfigFile.close();
+
+        var worldconfwriter = worldConfigFile.writer(&wbuffer);
+
+        const generatorConfigFile = try world_folder.createFile("config/DefaultGenerator.zon", .{ .lock = .exclusive });
+        defer generatorConfigFile.close();
+
+        var generatorconfwriter = generatorConfigFile.writer(&gbuffer);
+
+        try std.zon.stringify.serialize(self.world_config, .{}, &worldconfwriter.interface);
+        try std.zon.stringify.serialize(self.generator_config, .{}, &generatorconfwriter.interface);
+
+        try worldconfwriter.end();
+        try generatorconfwriter.end();
+    }
+
+    pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
+        std.zon.parse.free(allocator, self.world_config);
+        std.zon.parse.free(allocator, self.generator_config);
+    }
 };
 
-pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfig, window: sdl.video.Window, join_data: Join) !void {
-    std.debug.assert(join_data == .world_folder);
-    game.game_arena = .init(allocator);
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8) !void {
+    game.* = .{
+        .game_arena = .init(allocator),
+        .options = game_options,
+        .options_lock = game_options_lock,
+        .running = .init(true),
+        .allocator = undefined,
+        .pool = undefined,
+        .chunkManager = undefined,
+        .renderer = undefined,
+        .generator = undefined,
+        .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
+        .world_storage = undefined,
+        .world = undefined,
+        .player = undefined,
+        .loaderThread = null,
+        .unloaderThread = null,
+    };
+    game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
 
-    var world_folder = try std.fs.cwd().openDir(join_data.world_folder, .{});
-    defer world_folder.close();
+    var world_options = WorldOptions.fromWorldFolder(folder, arena) catch |err| switch (err) {
+        error.FileNotFound => WorldOptions.default,
+        else => return err,
+    };
+    world_options.generator_config.setSeeds();
+    try world_options.save(folder);
 
-    const worldConfigFile = try world_folder.openFile("config/WorldConfig.zon", .{ .mode = .read_only });
-    defer worldConfigFile.close();
-
-    const generatorConfigFile = try world_folder.openFile("config/GeneratorConfig.zon", .{ .mode = .read_only });
-    defer generatorConfigFile.close();
-
-    game.loaderThread = null;
-    game.unloaderThread = null;
-
-    const MainWorldConfig = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, arena);
-    var GeneratorConfig = try utils.loadZON(World.DefaultGenerator.GenParams, generatorConfigFile, allocator, arena);
-
-    GeneratorConfig.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 1));
-    GeneratorConfig.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 2));
-    GeneratorConfig.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 3));
-    GeneratorConfig.LargeTerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-    GeneratorConfig.LargeTerrainNoiseWarp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(GeneratorConfig.seed +% 4));
-
-    game.allocator = allocator;
     const terrain_height_cache_memory = 10_000_000; //10 mb
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
-        .TerrainHeightCache = try .init(allocator, thc_size),
-        .params = GeneratorConfig,
+        .terrain_height_cache = try .init(game.allocator, thc_size),
+        .params = world_options.generator_config,
     };
-    game.levels = game_config.levels;
-    game.chunk_timeout = game_config.chunk_timeout;
-
-    const storage_path = try std.fs.path.joinZ(allocator, &[_][]const u8{ join_data.world_folder, "storage" });
+    errdefer game.generator.terrain_height_cache.deinit();
+    const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
-        defer allocator.free(storage_path);
-        game.region_storage = try .init(storage_path, .{}, allocator);
+        defer game.allocator.free(storage_path);
+        game.world_storage = try .init(storage_path, .{}, game.allocator);
     }
-    errdefer game.generator.TerrainHeightCache.deinit();
-    game.running = .init(true);
-    game.GenerateDistance = .init(.{ .xz = game_config.generation_distance[0], .y = game_config.generation_distance[1] });
+
     const cpu_count = try std.Thread.getCpuCount();
-    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = allocator });
+    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = game.allocator });
     errdefer game.pool.deinit();
     game.world = .{
         .running = .init(true),
         .entityUpdaterThread = null,
-        .allocator = allocator,
+        .allocator = game.allocator,
         .threadPool = &game.pool,
-        .Entitys = .init(allocator),
-        .Chunks = .init(allocator),
-        .Config = MainWorldConfig,
-        .ChunkSources = .{ null, null, game.region_storage.getSource(), game.generator.getSource() },
+        .Entitys = .init(game.allocator),
+        .Chunks = .init(game.allocator),
+        .Config = world_options.world_config,
+        .ChunkSources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = null,
     };
     errdefer game.world.deinit();
@@ -145,29 +225,34 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_config: GameConfi
     game.player = @ptrCast(@alignCast(playerentity.ptr));
     game.chunkManager = .{
         .pool = &game.pool,
-        .ChunkRenderList = .init(allocator),
-        .LoadingChunks = .init(allocator),
-        .MeshesToLoad = .init(allocator),
+        .ChunkRenderList = .init(game.allocator),
+        .LoadingChunks = .init(game.allocator),
+        .MeshesToLoad = .init(game.allocator),
         .world = &game.world,
-        .allocator = allocator,
+        .allocator = game.allocator,
     };
-    game.renderer = try .init(allocator, game.player);
-    _ = window;
+    game.renderer = try .init(game.allocator, game.player);
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
-    const dist = self.GenerateDistance.load(.monotonic);
-    return .{ dist.xz, dist.y };
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
+    return .{ self.options.generation_distance_x, self.options.generation_distance_y };
+}
+
+pub fn getLevels(self: *@This()) [2]i32 {
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
+    return .{ self.options.lowest_level, self.options.highest_level };
 }
 
 pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
-    if (level <= self.levels[0]) return @splat(0);
+    if (level <= self.getLevels()[0]) return @splat(0);
     const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 
-pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32) void {
-    const sensitivity: f32 = 0.5;
+pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32) void {
     var viewDirDiff: @Vector(2, f32) = @splat(0);
     viewDirDiff += @Vector(2, f32){ mouse_motion[1], mouse_motion[0] };
     viewDirDiff *= @splat(sensitivity);
@@ -179,6 +264,12 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32) void {
     self.player.viewDirection[0] = std.math.clamp(self.player.viewDirection[0], -90 + smallf32, 90 - smallf32);
     self.player.viewDirectionLock.unlock();
     self.renderer.updateCameraDirection();
+}
+
+pub fn getMouseSensitivity(self: *@This()) f32 {
+    self.options_lock.lockShared();
+    defer self.options_lock.unlockShared();
+    return self.options.mouse_sensitivity;
 }
 
 pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
@@ -238,7 +329,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, 1000 * std.time.ns_per_ms, self.chunk_timeout * std.time.us_per_s });
+    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
     self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
 }

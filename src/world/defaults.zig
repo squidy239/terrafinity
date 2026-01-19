@@ -1,4 +1,7 @@
-.{
+const Params = @import("Generator.zig").DefaultGenerator.Params;
+
+///setseeds must be called on this before using it
+pub const default_generator = Params{
     .terrainblockRandomness = 0.25,
     .TerrainNoise = .{
         .frequency = 0.002,
@@ -78,10 +81,10 @@
     .Cavesess = -77882.7,
     .CaveExpansionMax = 8192,
     .CaveExpansionStart = 0,
-    .seed = 0,
+    .seed = null,
     .terrainScale = 1,
     .genStructures = true,
-    .trees = .{
+    .trees = &.{
         .{
             .baseRadius = 15,
             .baseRadiusVariation = 0.5,
@@ -90,7 +93,7 @@
             .leafDensity = 0.5,
             .enabled = false,
             .leafSize = 6,
-            .steps = .{
+            .steps = &.{
                 .{
                     .lengthPercent = 1.0,
                     .radiusPercent = 1.0,
@@ -181,7 +184,7 @@
             .leafDensity = 0.5,
             .leafSize = 4,
             .enabled = true,
-            .steps = .{
+            .steps = &.{
                 .{
                     .lengthPercent = 1.0,
                     .radiusPercent = 1.0,
@@ -249,4 +252,4 @@
             },
         },
     },
-}
+};

@@ -1,7 +1,0 @@
-.{
-    .game_config = .{
-        .levels = .{ 0, 14 },
-        .generation_distance = .{ 6, 6 },
-        .chunk_timeout = 10,
-    },
-}

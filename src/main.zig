@@ -17,62 +17,64 @@ const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
+const Ui = @import("Ui.zig");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
 pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 var proc_table: gl.ProcTable = undefined;
 
-const MenuState = struct {
-    ingame: bool = false,
-    options: bool = false,
-    main: bool = false,
-    esc: bool = false,
-
-    pub fn playingGame(self: MenuState) bool {
-        return std.meta.eql(self, MenuState{ .ingame = true });
-    }
-};
+const config_path = "Config.zon";
 
 pub fn main() !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
+    const backing_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
+    var tracking_allocator = TrackingAllocator.init(backing_allocator, std.math.maxInt(usize));
+    const allocator = tracking_allocator.get_allocator();
     defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
+    _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
-    const configFile = try std.fs.cwd().openFile("Config.zon", .{ .mode = .read_only });
-    const config = try utils.loadZON(Config, configFile, allocator, allocator);
-    defer std.zon.parse.free(allocator, config);
-    configFile.close();
+    var config_lock: std.Thread.RwLock = .{};
+
+    var config: Config = try .load(allocator, config_path);
+    defer config.deinit(allocator); //TODO fix invalid free that happends sometimes
+
+    try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
 
     sdl.errors.error_callback = &sdlErr;
-    sdl.log.setAllPriorities(.info);
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
     const init_flags: sdl.InitFlags = .{ .video = true, .events = true };
     defer sdl.shutdown();
+
     try sdl.init(init_flags);
     defer sdl.quit(init_flags);
-
     // Set OpenGL attributes
     try sdl.video.gl.setAttribute(.context_major_version, 4);
     try sdl.video.gl.setAttribute(.context_minor_version, 1);
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-
     const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
+        .resizable = true,
+        .high_pixel_density = true,
     });
+
     defer window.deinit();
     errdefer if (sdl.errors.get()) |err| std.log.err("SDL error: {s}", .{err});
 
-    // Create SDL renderer for UI (uses OpenGL backend internally)
     SDLBackend.enableSDLLogging();
 
+    try sdl.keyboard.startTextInput(window);
+    defer sdl.keyboard.stopTextInput(window) catch unreachable;
+
+    // Create SDL renderer for UI (uses OpenGL backend internally)
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
 
@@ -80,7 +82,6 @@ pub fn main() !void {
     defer game_render_context.deinit() catch unreachable;
 
     try sdl_renderer.setDrawBlendMode(.blend);
-
     try game_render_context.makeCurrent(window);
 
     // Initialize OpenGL
@@ -104,7 +105,6 @@ pub fn main() !void {
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
 
-    var menu_state: MenuState = .{ .main = true };
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
 
@@ -123,49 +123,53 @@ pub fn main() !void {
     try keymap.setActionKey(.{ .key = .left_shift }, .down);
 
     var game: Game = undefined;
-    defer if (menu_state.ingame) game.deinit(window);
+
+    var ui: Ui = .{
+        .window = window,
+        .config = &config,
+        .config_lock = &config_lock,
+        .game = &game,
+        .menu_state = .{ .main = true },
+        .config_path = config_path,
+        .worlds_path = config.worlds_path,
+    };
+    try Ui.loadFonts(&ui_window);
+
+    defer if (ui.menu_state.ingame) game.deinit(window);
     var frame_time: std.time.Timer = try .start();
     var action_set = Key.ActionSet.initEmpty();
+
     while (running.load(.unordered)) {
-        try sdl.mouse.setWindowRelativeMode(window, menu_state.playingGame());
+        try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
+        if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
-        if (menu_state.ingame) {
+        if (ui.menu_state.ingame) {
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] });
+            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleKeyboardActions(action_set, dt);
-            if (action_set.contains(.escape_menu)) menu_state.esc = !menu_state.esc;
 
-            const size = try window.getSize();
+            const size = try window.getSizeInPixels();
             const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
             try game_render_context.makeCurrent(window);
             _ = try game.renderer.Draw(&game, viewport_pixels);
         }
         try ui_window.begin(std.time.nanoTimestamp());
+        var menuchanged: bool = false;
 
-        if (menu_state.main) try mainMenu(&game, allocator, window, config.game_config, &menu_state, game_render_context);
-        if (menu_state.esc) try escMenu(&game, window, &menu_state);
+        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator, game_render_context);
+        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator, game_render_context);
 
         _ = try ui_window.end(.{});
-        if (ui_window.cursorRequestedFloating()) |cursor| {
-            try backend.setCursor(cursor);
-        } else {
-            try backend.setCursor(.arrow);
-        }
+        try backend.setCursor(ui_window.cursorRequested());
 
         try sdl_renderer.flush();
         try sdl.video.gl.swapWindow(window);
+        std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
-}
-
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: Game.GameConfig, join: Game.Join, menu_state: *MenuState, render_context: sdl.video.gl.Context) !void {
-    std.debug.assert(!menu_state.ingame);
-    try render_context.makeCurrent(window);
-    try gameptr.init(allocator, game_config, window, join);
-    menu_state.ingame = true;
-    try gameptr.startThreads();
-    std.log.info("opening game\n", .{});
 }
 
 fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
@@ -198,39 +202,45 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-fn mainMenu(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: Game.GameConfig, menu_state: *MenuState, game_render_context: sdl.video.gl.Context) !void {
-    const size = try window.getSizeInPixels();
-    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
-    if (dvui.button(@src(), "Play", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        const join: Game.Join = .{ .world_folder = "test_world" };
-        try openGame(gameptr, allocator, window, game_config, join, menu_state, game_render_context);
-        menu_state.main = false;
+///must be locked by the caller
+pub const Config = struct {
+    game_config: Game.Options = .{},
+    worlds_path: []const u8 = "worlds",
+
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
+        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
+            error.FileNotFound => {
+                std.log.info("Config file not found, creating default config file", .{});
+                break :sw null;
+            },
+            else => return err,
+        };
+        defer if (configFile) |file| file.close();
+        var config: Config = undefined;
+        config = if (configFile) |file| try utils.loadZON(Config, file, allocator, allocator) else .{};
+
+        if (configFile == null) config.worlds_path = try allocator.dupe(u8, config.worlds_path); //world path must be owned by the allocator so it dosent free invalid memory
+        return config;
     }
-    // const continue_games = dvui.scrollArea(@src(), .{}, .{});
 
-    menu.deinit();
-}
-
-fn escMenu(gameptr: *Game, window: sdl.video.Window, menu_state: *MenuState) !void {
-    std.debug.assert(menu_state.ingame);
-    const size = try window.getSizeInPixels();
-    const menu = dvui.menu(@src(), .vertical, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
-    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        menu_state.esc = false;
+    pub fn save(self: *const Config, path: []const u8, config_lock: ?*std.Thread.RwLock) !void {
+        const configFile = try std.fs.cwd().createFile(path, .{ .lock = .exclusive });
+        defer configFile.close();
+        var buffer: [512]u8 = undefined;
+        var filewriter = configFile.writer(&buffer);
+        {
+            if (config_lock) |lock| lock.lockShared();
+            defer if (config_lock) |lock| lock.unlockShared();
+            try std.zon.stringify.serialize(self, .{}, &filewriter.interface);
+        }
+        try filewriter.end();
     }
 
-    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5, .style = .app3 })) {
-        menu_state.main = true;
-        menu_state.esc = false;
-        menu_state.ingame = false;
-        gameptr.deinit(window);
-        gameptr.* = undefined;
+    pub fn deinit(self: *const Config, allocator: std.mem.Allocator) void {
+        std.zon.parse.free(allocator, self.*);
     }
-    menu.deinit();
-}
 
-const Config = struct {
-    game_config: Game.GameConfig,
+    pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
 fn sdlLog(
