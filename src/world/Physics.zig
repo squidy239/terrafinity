@@ -41,6 +41,12 @@ pub fn getInterface(physicsElements: anytype) type {
             return self.velocity;
         }
 
+        pub fn setVelocity(self: *@This(), velocity: @Vector(3, f64)) void {
+            self.velocityLock.lock();
+            defer self.velocityLock.unlock();
+            self.velocity = velocity;
+        }
+
         pub fn fetchAddVelocity(self: *@This(), offset: @Vector(3, f64)) @Vector(3, f64) {
             self.velocityLock.lock();
             defer self.velocityLock.unlock();
@@ -71,11 +77,14 @@ pub const simpleMover = struct {
 };
 
 pub const Mover = struct {
-    comptime moveDistance: f64 = 0.5,
     collisions: bool,
+    zeroVelocity: bool,
     boundingBox: zm.AABB,
+    enabled: bool,
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+        if (!self.enabled) return;
+        defer if (self.zeroVelocity) physics.setVelocity(.{ 0, 0, 0 });
         _ = allocator;
         var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
         if (!self.collisions) {
@@ -186,11 +195,13 @@ pub const Mover = struct {
 };
 
 pub const Gravity = struct {
+    enabled: bool = true,
     up: @Vector(3, f64) = .{ 0, 1, 0 },
     ///the strength of the gravity in blocks per second squared
     strength: f64 = 9.8,
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+        if (!self.enabled) return;
         _ = world;
         _ = allocator;
         const velOffset = @as(@Vector(3, f64), @splat(self.strength)) * self.up * @as(@Vector(3, f64), @splat(deltaT));
@@ -199,14 +210,15 @@ pub const Gravity = struct {
 };
 
 pub const Resistance = struct {
+    enabled: bool = true,
     ///after one second the velocity will be this fraction of the original velocity
     fraction_per_second: f64 = 0.1,
 
     pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+        if (!self.enabled) return;
         _ = world;
         _ = allocator;
         _ = deltaT;
-        _ = self;
         physics.velocityLock.lock();
         //physics.velocity *= @as(@Vector(3, f64), @splat( self.fraction_per_second));
         physics.velocityLock.unlock();

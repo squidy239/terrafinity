@@ -37,6 +37,7 @@ running: std.atomic.Value(bool),
 
 pub const Options = struct {
     mouse_sensitivity: f32 = 0.5,
+    scroll_sensitivity: f32 = 0.1,
 
     lowest_level: i32 = 0,
     highest_level: i32 = 10,
@@ -206,20 +207,25 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     const playerentity = try game.world.spawnEntity(null, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .fly_speed = .init(100),
+        .fly_speed_linear = .init(10),
         .physics = .{
             .elements = .{
                 .mover = .{
-                    .collisions = true,
+                    .collisions = false,
                     .boundingBox = .init(.{ -0.5, -2, -0.5 }, .{ 0.5, 2, 0.5 }),
+                    .enabled = true,
+                    .zeroVelocity = true,
                 },
-                .gravity = .{},
-                .resistance = .{ .fraction_per_second = 0.1 },
+                .gravity = .{
+                    .enabled = false,
+                },
+                .resistance = .{ .fraction_per_second = 0.1, .enabled = false },
             },
             .pos = try game.world.getPlayerSpawnPos(),
             .velocity = @splat(0),
             .updateTimer = try .start(),
         },
-        .gameMode = .init(.Creative),
+        .gameMode = .init(.Spectator),
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
@@ -266,17 +272,30 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32)
     self.renderer.updateCameraDirection();
 }
 
+pub fn handleScroll(self: *@This(), scroll: f32) void {
+    self.options_lock.lockShared();
+    const scroll_sensitivity = self.options.scroll_sensitivity;
+    self.options_lock.unlockShared();
+    switch (self.player.gameMode.load(.seq_cst)) {
+        .Creative, .Spectator => {
+            const fsl = self.player.fly_speed_linear.fetchAdd(scroll * scroll_sensitivity, .seq_cst);
+            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fsl)), .seq_cst);
+        },
+        .Survival => {},
+    }
+}
+
 pub fn getMouseSensitivity(self: *@This()) f32 {
     self.options_lock.lockShared();
     defer self.options_lock.unlockShared();
     return self.options.mouse_sensitivity;
 }
 
-pub fn handleKeyboardActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
+pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time_ns)) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
-        .Creative => try self.flyMove(actions, delta_time_seconds),
+        .Creative, .Spectator => try self.flyMove(actions, delta_time_seconds),
         else => @panic("TODO"),
     }
 }

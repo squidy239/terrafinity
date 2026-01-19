@@ -85,6 +85,8 @@ pub const Player = struct {
     player_name: Name,
     gameMode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32),
+    fly_speed_linear: std.atomic.Value(f32),
+
     ///pitch, yaw, roll, in degrees
     viewDirection: @Vector(3, f32),
     viewDirectionLock: std.Thread.RwLock = .{},
@@ -131,6 +133,33 @@ pub const Player = struct {
     pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         return self.physics.getPos();
+    }
+
+    pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
+        self.gameMode.store(gameMode, .seq_cst);
+        switch (gameMode) {
+            .Spectator => {
+                self.physics.elements.mover.enabled = true;
+                self.physics.elements.mover.zeroVelocity = true;
+                self.physics.elements.mover.collisions = false;
+                self.physics.elements.gravity.enabled = false;
+                self.physics.elements.resistance.enabled = false;
+            },
+            .Survival => {
+                self.physics.elements.mover.enabled = true;
+                self.physics.elements.mover.zeroVelocity = false;
+                self.physics.elements.mover.collisions = true;
+                self.physics.elements.gravity.enabled = true;
+                self.physics.elements.resistance.enabled = true;
+            },
+            .Creative => {
+                self.physics.elements.mover.enabled = true;
+                self.physics.elements.mover.zeroVelocity = false;
+                self.physics.elements.mover.collisions = true;
+                self.physics.elements.gravity.enabled = false;
+                self.physics.elements.resistance.enabled = true;
+            },
+        }
     }
 
     pub fn getViewDirection(self: *@This()) @Vector(3, f32) {

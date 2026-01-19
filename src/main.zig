@@ -141,14 +141,15 @@ pub fn main() !void {
 
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
-        try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
+        const scroll = try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
-            try game.handleKeyboardActions(action_set, dt);
+            try game.handleButtonActions(action_set, dt);
+            game.handleScroll(scroll);
 
             const size = try window.getSizeInPixels();
             const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
@@ -172,12 +173,13 @@ pub fn main() !void {
     }
 }
 
-fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !void {
+fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !f32 {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
         if (singlepress.contains(action)) action_set.remove(action);
     }
+    var scroll: f32 = 0;
     while (sdl.events.poll()) |event| {
         _ = try ui_backend.addEvent(window, @bitCast(event.toSdl()));
         switch (event) {
@@ -193,9 +195,13 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
             .quit, .terminating, .window_close_requested => {
                 running.store(false, .unordered);
             },
+            .mouse_wheel => |wheel| {
+                scroll += wheel.scroll_y;
+            },
             else => {},
         }
     }
+    return scroll;
 }
 
 test {
