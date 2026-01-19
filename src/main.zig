@@ -104,7 +104,7 @@ pub fn main() !void {
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
-    
+
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
 
@@ -123,8 +123,8 @@ pub fn main() !void {
     try keymap.setActionKey(.{ .key = .left_shift }, .down);
 
     var game: Game = undefined;
-    
-    var ui:Ui = .{
+
+    var ui: Ui = .{
         .window = window,
         .config = &config,
         .config_lock = &config_lock,
@@ -134,12 +134,11 @@ pub fn main() !void {
         .worlds_path = config.worlds_path,
     };
     try Ui.loadFonts(&ui_window);
-    
+
     defer if (ui.menu_state.ingame) game.deinit(window);
     var frame_time: std.time.Timer = try .start();
     var action_set = Key.ActionSet.initEmpty();
-    
-    
+
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
@@ -162,7 +161,7 @@ pub fn main() !void {
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
         if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator, game_render_context);
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu();
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator, game_render_context);
 
         _ = try ui_window.end(.{});
         try backend.setCursor(ui_window.cursorRequested());

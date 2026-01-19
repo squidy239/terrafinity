@@ -36,7 +36,6 @@ menu_state: struct {
     }
 },
 
-
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
     var options: dvui.Options = .{
         .min_size_content = .all(256),
@@ -117,7 +116,7 @@ pub fn settingsMenu(self: *@This()) !bool {
 }
 
 var new_world_options: Game.WorldOptions = .default;
-pub fn newGameMenu(self: *@This()) !bool {
+pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator, game_render_context: sdl.video.gl.Context) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
@@ -142,6 +141,13 @@ pub fn newGameMenu(self: *@This()) !bool {
             try path.makeDir(world_name);
             var worldfolder = try path.openDir(world_name, .{});
             defer worldfolder.close();
+            const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
+            defer allocator.free(game_path);
+            try new_world_options.save(game_path);
+            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, game_path, game_render_context);
+            self.menu_state.ingame = true;
+            self.menu_state.newgame = false;
+            return true;
         }
     }
     dvui.structUI(@src(), "World Options", &new_world_options, 32, .{});
@@ -169,7 +175,7 @@ pub fn mainPage(self: *@This(), allocator: std.mem.Allocator, game_render_contex
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    changed |= try self.continueMenu( allocator,game_render_context);
+    changed |= try self.continueMenu(allocator, game_render_context);
     return changed;
 }
 
