@@ -17,7 +17,7 @@ const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
-const ui = @import("ui.zig");
+const Ui = @import("Ui.zig");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
 pub const Renderer = @import("client/Renderer.zig");
@@ -104,10 +104,7 @@ pub fn main() !void {
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
     defer ui_window.deinit();
-
-    try ui.loadFonts(&ui_window);
-
-    var menu_state: ui.MenuState = .{ .main = true };
+    
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
 
@@ -126,18 +123,32 @@ pub fn main() !void {
     try keymap.setActionKey(.{ .key = .left_shift }, .down);
 
     var game: Game = undefined;
-    defer if (menu_state.ingame) game.deinit(window);
+    
+    var ui:Ui = .{
+        .window = window,
+        .config = &config,
+        .config_lock = &config_lock,
+        .game = &game,
+        .menu_state = .{ .main = true },
+        .config_path = config_path,
+        .worlds_path = config.worlds_path,
+    };
+    try Ui.loadFonts(&ui_window);
+    
+    defer if (ui.menu_state.ingame) game.deinit(window);
     var frame_time: std.time.Timer = try .start();
     var action_set = Key.ActionSet.initEmpty();
+    
+    
     while (running.load(.unordered)) {
-        try sdl.mouse.setWindowRelativeMode(window, menu_state.playingGame());
+        try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
-        if (action_set.contains(.escape_menu)) menu_state.handleEsc();
+        if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
-        if (menu_state.ingame) {
+        if (ui.menu_state.ingame) {
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
+            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleKeyboardActions(action_set, dt);
 
             const size = try window.getSizeInPixels();
@@ -148,10 +159,10 @@ pub fn main() !void {
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
 
-        if (menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(&game, window, &menu_state);
-        if (menu_state.main and !menuchanged) menuchanged = try ui.mainPage(&game, allocator, window, &config, &config_lock, &menu_state, game_render_context);
-        if (menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(&config, &config_lock, config_path, &menu_state);
-        if (menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(config.worlds_path, &menu_state);
+        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator, game_render_context);
+        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu();
 
         _ = try ui_window.end(.{});
         try backend.setCursor(ui_window.cursorRequested());
