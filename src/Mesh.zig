@@ -39,7 +39,7 @@ scale: f32,
 animation: bool,
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn fromChunks(chunkPos: ChunkPos, mainblocks: *[ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
+pub fn fromChunks(chunkPos: ChunkPos, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
     const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
@@ -125,17 +125,29 @@ pub fn free(self: *const @This(), allocator: std.mem.Allocator) void {
     if (self.TransperentFaces) |f| allocator.free(f);
 }
 ///x+,x-,y+,y-,z+,z-
-fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: *const [ChunkSize][ChunkSize][ChunkSize]Block, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block) void {
+fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block) void {
     const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
     defer gec.End();
 
-    // Copy main blocks
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |y| {
-            for (0..ChunkSize) |z| {
-                blocksToPut[x + 1][y + 1][z + 1] = mainblocks[x][y][z];
+    switch (mainblocks) {
+        .blocks => |blocks| {
+            for (0..ChunkSize) |x| {
+                for (0..ChunkSize) |y| {
+                    for (0..ChunkSize) |z| {
+                        blocksToPut[x + 1][y + 1][z + 1] = blocks[x][y][z];
+                    }
+                }
             }
-        }
+        },
+        .oneBlock => |block| {
+            for (0..ChunkSize) |x| {
+                for (0..ChunkSize) |y| {
+                    for (0..ChunkSize) |z| {
+                        blocksToPut[x + 1][y + 1][z + 1] = block;
+                    }
+                }
+            }
+        },
     }
 
     // Copy neighbor faces

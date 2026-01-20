@@ -2,7 +2,6 @@ const std = @import("std");
 const ConcurrentQueue = @import("ConcurrentQueue");
 
 const root = @import("main.zig");
-const ChunkManager = root.ChunkManager;
 const UBO = root.Renderer.UBO;
 const ThreadPool = @import("ThreadPool");
 
@@ -88,15 +87,15 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                 const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
                 const in_range = keepLoaded(null, null, playerPos, ChunkPos, innerdistance, distance);
-                if (!in_range or game.chunkManager.LoadingChunks.contains(ChunkPos)) {
+                if (!in_range or game.LoadingChunks.contains(ChunkPos)) {
                     continue;
                 }
 
                 const loaded = game.renderer.containsChunk(ChunkPos);
 
-                if ((!loaded or (game.chunkManager.world.getGenState(ChunkPos) orelse continue) == .TerrainGenerated)) {
+                if ((!loaded or (game.world.getGenState(ChunkPos) orelse continue) == .TerrainGenerated)) {
                     amount_loaded += 1;
-                    try game.chunkManager.LoadingChunks.put(ChunkPos, undefined);
+                    try game.LoadingChunks.put(ChunkPos, undefined);
                     const priority: ThreadPool.Priority = switch (level) {
                         std.math.minInt(i32)...-1 => .High,
                         0...2 => .High,
@@ -105,7 +104,7 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                         11...20 => .VeryLow,
                         else => .VeryLow,
                     };
-                    try game.chunkManager.pool.spawn(ChunkManager.AddChunkToRenderTask, .{ game, ChunkPos, true }, priority);
+                    try game.pool.spawn(Game.AddChunkToRenderTask, .{ game, ChunkPos, true }, priority);
                 }
             }
         }

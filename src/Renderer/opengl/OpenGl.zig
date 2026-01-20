@@ -131,7 +131,7 @@ fn loadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 
         if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
         const mesh = self.load_queue.popFirst() orelse break;
         defer mesh.free(self.allocator);
-        //defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos); i will probubly froget to readd this
+        //defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos); i will probubly forget to readd this
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
         if (isempty) {
             self.remove(mesh.Pos);
@@ -432,7 +432,7 @@ fn DrawEntities(self: *@This(), game: *@import("../../Game.zig"), playerPos: @Ve
     gl.UseProgram(self.entityshaderprogram);
     const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, @This().cameraUp)).data));
     gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    var it = game.chunkManager.world.Entitys.iterator();
+    var it = game.world.Entitys.iterator();
     defer it.deinit();
     while (it.next()) |c| {
         try c.value_ptr.*.draw(playerPos, c.key_ptr.*, &game.world, self);

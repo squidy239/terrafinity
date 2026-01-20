@@ -1,6 +1,7 @@
 const std = @import("std");
 const World = @import("world/World.zig");
-const ChunkManager = @import("ChunkManager.zig").ChunkManager;
+const ChunkSize = World.ChunkSize;
+const Block = World.Block;
 pub const Renderer = @import("Renderer.zig");
 const ThreadPool = @import("ThreadPool");
 const Entity = @import("world/Entity.zig");
@@ -15,18 +16,21 @@ const Key = @import("Key.zig");
 const zm = @import("zm");
 const dvui = @import("dvui");
 const TrackingAllocator = @import("libs/TrackingAllocator.zig");
+const ztracy = @import("ztracy");
+const Mesh = @import("Mesh.zig");
 
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
 pool: ThreadPool,
-chunkManager: ChunkManager,
 opengl_renderer: Renderer.OpenGl,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 tracking_allocator: TrackingAllocator,
+
+LoadingChunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32), //TODO remove this and replace it
 
 // Threads
 loaderThread: ?std.Thread,
@@ -146,10 +150,10 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .running = .init(true),
         .allocator = undefined,
         .pool = undefined,
-        .chunkManager = undefined,
         .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
+        .LoadingChunks = .init(allocator),
         .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
@@ -234,13 +238,6 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
     game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
-    game.chunkManager = .{
-        .pool = &game.pool,
-        .LoadingChunks = .init(game.allocator),
-        .world = &game.world,
-        .renderer = &game.renderer,
-        .allocator = game.allocator,
-    };
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
@@ -316,6 +313,55 @@ fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !voi
     if (actions.contains(.left) and cross != null) _ = self.player.physics.fetchAddVelocity(-veldiff * cross.?);
 }
 
+///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
+pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool, playAnimation: bool) !void {
+    const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
+    defer GenMeshAndAdd.End();
+    const chunk = try self.world.loadChunk(Pos, genStructures);
+    const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
+        (try self.world.loadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, -1, 0 }), false)).extractFace(.yPlus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 0, 1 }), false)).extractFace(.zMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 0, -1 }), false)).extractFace(.zPlus, true),
+    };
+    const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
+    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
+    chunk.lockShared();
+    lock.End();
+    exbl.End();
+    const scale: f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
+    const mesh = Mesh.fromChunks(Pos, chunk.blocks, &neighbor_faces, scale, playAnimation, self.allocator);
+    chunk.releaseAndUnlockShared();
+    if (try mesh) |m| {
+        try self.renderer.addChunk(m);
+    } else {
+        self.renderer.removeChunk(Pos);
+    }
+}
+
+//TODO replace with async when its out
+pub fn AddChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool) void {
+    self.options_lock.lockShared();
+    const lowest_level = self.options.lowest_level;
+    const highest_level = self.options.highest_level;
+    self.options_lock.unlockShared();
+
+    const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
+    const running = self.running.load(.monotonic);
+    if (!inside_range or !running) {
+        _ = self.LoadingChunks.remove(Pos);
+        return;
+    }
+    self.addChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+}
+
+pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
+    const game: *@This() = @ptrCast(@alignCast(args));
+    game.addChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
+}
+
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
     self.world.stop();
@@ -326,10 +372,10 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
     self.opengl_renderer.deinit();
 
-    self.chunkManager.pool.deinit();
+    self.pool.deinit();
     std.log.info("closed threadpool", .{});
 
-    self.chunkManager.LoadingChunks.deinit();
+    self.LoadingChunks.deinit();
 
     self.world.deinit();
 
@@ -341,5 +387,5 @@ pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
     self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
-    self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
+    self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }

@@ -12,7 +12,6 @@ pub const ConcurrentQueue = @import("ConcurrentQueue");
 pub const Entity = @import("world/Entity.zig");
 pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
-pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
@@ -42,7 +41,7 @@ pub fn main() !void {
     var config_lock: std.Thread.RwLock = .{};
 
     var config: Config = try .load(allocator, config_path);
-    defer config.deinit(allocator); //TODO fix invalid free that happends sometimes
+    defer config.deinit(allocator);
 
     try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
 
