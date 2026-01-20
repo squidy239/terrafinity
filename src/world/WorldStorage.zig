@@ -75,8 +75,7 @@ pub fn saveChunk(self: *@This(), chunk: *Chunk, chunk_pos: World.ChunkPos) !void
     try self.database.put(keybytes, buf_writer.buffered(), .{});
 }
 
-pub fn getBlocks(source: World.ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
-    _ = world;
+pub fn getBlocks(source: World.ChunkSource, world: *World, blocks: *Chunk.BlockEncoding, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
     const self: *@This() = @ptrCast(@alignCast(source.data));
     var key = ChunkKey{ .x = Pos.position[0], .y = Pos.position[1], .z = Pos.position[2], .level = Pos.level };
     if (builtin.target.cpu.arch.endian() == .big) std.mem.byteSwapAllFields(ChunkKey, &key);
@@ -87,8 +86,11 @@ pub fn getBlocks(source: World.ChunkSource, world: *World, blocks: *[ChunkSize][
     var buf_reader = std.Io.Reader.fixed(value.?);
     const encoding: std.meta.Tag(Chunk.BlockEncoding) = @enumFromInt(buf_reader.takeInt(EncodingTagType, .little) catch unreachable);
     switch (encoding) {
-        .blocks => buf_reader.readSliceEndian(Block, @as([]Block, @ptrCast(blocks)), .little) catch unreachable,
-        .oneBlock => blocks.* = @splat(@splat(@splat(@enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable)))),
+        .blocks => {
+            try blocks.toBlocks(world.allocator);
+            buf_reader.readSliceEndian(Block, @as([]Block, @ptrCast(blocks.blocks)), .little) catch unreachable;
+        },
+        .oneBlock => try blocks.merge(.{ .oneBlock = @enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable) }, world.allocator),
     }
     rocksdb.free(value.?);
     return true;

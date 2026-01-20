@@ -128,7 +128,7 @@ pub const ChunkSource = struct {
 
     ///must generate the chunk blocks into the blocks array, this may be called multiple times on the same chunk position
     ///returns true if the chunk was generated, false if it was unsuccessful, in which case the next chunk source will be tried
-    getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool,
+    getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool,
 
     ///This function is called for every LoadChunk call, it will be called many times for each chunk
     ///it is intended for structures or similar things
@@ -150,11 +150,12 @@ pub const ChunkSource = struct {
 };
 
 ///gets the chunks blocks from the sources in order, returns the first source that succeeds
-fn getBlocks(self: *@This(), Pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!void {
+fn getBlocks(self: *@This(), Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!Chunk.BlockEncoding {
+    var encoding: Chunk.BlockEncoding = .{ .oneBlock = .null };
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, self, blocks, Pos)) return;
+                if (try getBlocksFn(s, self, &encoding, Pos)) return encoding;
             }
         }
     }
@@ -290,9 +291,8 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
     defer lc.End();
     const chunk = self.Chunks.getandaddref(Pos);
     if (chunk == null) {
-        var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        try self.getBlocks(Pos, &blocks);
-        const chunkptr: *Chunk = try .from(try .fromBlocks(&blocks, self.allocator), self.allocator);
+        const chunkencoding = try self.getBlocks(Pos);
+        const chunkptr: *Chunk = try .from(chunkencoding, self.allocator);
         _ = chunkptr.add_ref();
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
