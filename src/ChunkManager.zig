@@ -1,6 +1,6 @@
 const std = @import("std");
 const ConcurrentQueue = @import("ConcurrentQueue");
-const Renderer = @import("client/Renderer.zig");
+const Renderer = @import("Renderer.zig");
 const MeshBufferIDs = Renderer.MeshBufferIDs;
 const Game = @import("Game.zig");
 const ThreadPool = @import("ThreadPool");
@@ -53,12 +53,9 @@ pub const ChunkManager = struct {
         const mesh = Mesh.fromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
-            _ = try self.renderer.addMesh(m);
+            _ = try self.renderer.addChunk(m);
         } else {
-            const removeChunk = self.renderer.renderlist.contains(Pos);
-            if (removeChunk) {
-                _ = try self.renderer.removeMesh(Pos);
-            }
+            self.renderer.removeChunk(Pos);
         }
     }
 

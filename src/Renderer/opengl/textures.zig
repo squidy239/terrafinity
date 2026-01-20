@@ -1,5 +1,5 @@
 const std = @import("std");
-const Block = @import("../main.zig").Block;
+const Block = @import("../../main.zig").Block;
 
 const gl = @import("gl");
 const zigimg = @import("zigimg");

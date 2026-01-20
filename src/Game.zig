@@ -1,7 +1,7 @@
 const std = @import("std");
 const World = @import("world/World.zig");
 const ChunkManager = @import("ChunkManager.zig").ChunkManager;
-const Renderer = @import("client/Renderer.zig");
+pub const Renderer = @import("Renderer.zig");
 const ThreadPool = @import("ThreadPool");
 const Entity = @import("world/Entity.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
@@ -21,6 +21,7 @@ world: World,
 player: *EntityTypes.Player,
 pool: ThreadPool,
 chunkManager: ChunkManager,
+opengl_renderer: Renderer.OpenGl,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
@@ -146,6 +147,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .allocator = undefined,
         .pool = undefined,
         .chunkManager = undefined,
+        .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
         .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
@@ -155,6 +157,8 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .loaderThread = null,
         .unloaderThread = null,
     };
+    try game.opengl_renderer.init(allocator);
+    game.renderer = game.opengl_renderer.interface;
     game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
@@ -229,7 +233,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
-    game.renderer = try .init(game.allocator, game.player);
+    game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
     game.chunkManager = .{
         .pool = &game.pool,
         .LoadingChunks = .init(game.allocator),
@@ -267,8 +271,8 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32)
     self.player.viewDirectionLock.lock();
     self.player.viewDirection -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
     self.player.viewDirection[0] = std.math.clamp(self.player.viewDirection[0], -90 + smallf32, 90 - smallf32);
+    self.opengl_renderer.updateCameraDirection(self.player.viewDirection);
     self.player.viewDirectionLock.unlock();
-    self.renderer.updateCameraDirection();
 }
 
 pub fn handleScroll(self: *@This(), scroll: f32) void {
@@ -301,11 +305,11 @@ pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time_ns
 
 fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !void {
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.vec.cross(self.renderer.cameraFront, Renderer.cameraUp);
+    const c = zm.vec.cross(self.opengl_renderer.cameraFront, Renderer.OpenGl.cameraUp);
     const cross: ?@Vector(3, f64) = if (std.meta.eql(c, @Vector(3, f64){ 0, 0, 0 })) null else zm.vec.normalize(c); //prevent divide by zero
 
-    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.renderer.cameraFront);
-    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.renderer.cameraFront);
+    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.opengl_renderer.cameraFront);
+    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.opengl_renderer.cameraFront);
     if (actions.contains(.up)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, veldiff[1], 0 });
     if (actions.contains(.down)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, -veldiff[1], 0 });
     if (actions.contains(.right) and cross != null) _ = self.player.physics.fetchAddVelocity(veldiff * cross.?);
@@ -320,12 +324,11 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
     std.log.info("stopped threads", .{});
 
-    self.renderer.deinit();
+    self.opengl_renderer.deinit();
 
     self.chunkManager.pool.deinit();
     std.log.info("closed threadpool", .{});
 
-    
     self.chunkManager.LoadingChunks.deinit();
 
     self.world.deinit();

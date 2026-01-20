@@ -20,7 +20,6 @@ pub const ztracy = @import("ztracy");
 const Ui = @import("Ui.zig");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
-pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
@@ -152,9 +151,10 @@ pub fn main() !void {
             game.handleScroll(scroll);
 
             const size = try window.getSizeInPixels();
-            const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
             try game_render_context.makeCurrent(window);
-            _ = try game.renderer.Draw(&game, viewport_pixels);
+            game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
+            try game.renderer.clear(game.player.physics.getPos());
+            try game.renderer.drawChunks(game.player.physics.getPos());
         }
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;

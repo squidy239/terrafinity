@@ -7,7 +7,7 @@ const ztracy = @import("ztracy");
 
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
-const ChunkSize = Chunk.ChunkSize;
+pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
 const Entity = @import("Entity.zig");
 const EntityTypes = @import("EntityTypes.zig");

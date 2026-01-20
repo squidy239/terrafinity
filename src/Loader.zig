@@ -92,7 +92,7 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                     continue;
                 }
 
-                const loaded = game.renderer.renderlist.contains(ChunkPos);
+                const loaded = game.renderer.containsChunk(ChunkPos);
 
                 if ((!loaded or (game.chunkManager.world.getGenState(ChunkPos) orelse continue) == .TerrainGenerated)) {
                     amount_loaded += 1;
