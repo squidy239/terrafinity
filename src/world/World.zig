@@ -733,3 +733,51 @@ test "world" {
     defer world.deinit();
     try std.testing.expectEqual(error.AllSourcesFailed, world.loadChunk(ChunkPos{ .level = standard_level, .position = .{ 0, 0, 0 } }, true));
 }
+
+test "cube benchmark" {
+    if (@import("builtin").mode == .Debug) return error.SkipZigTest;
+    const allocator = std.heap.smp_allocator;
+    const cpu_count = try std.Thread.getCpuCount();
+    var threadPool: ThreadPool = undefined;
+    try threadPool.init(.{ .allocator = allocator, .n_jobs = cpu_count });
+
+    var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = try .init(allocator, 1024) };
+    generator.params.setSeeds();
+    var world: World = .{
+        .threadPool = &threadPool,
+        .allocator = allocator,
+        .onEdit = null,
+        .ChunkSources = .{ generator.getSource(), null, null, null },
+        .running = .init(true),
+        .Chunks = .init(allocator),
+        .Entitys = .init(allocator),
+        .entityUpdaterThread = null,
+        .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
+    };
+    defer world.deinit();
+    defer threadPool.deinit();
+
+    var counter: std.atomic.Value(usize) = .init(0);
+    var timer: std.time.Timer = try .start();
+    const levels: [2]i32 = .{ 0, 16 };
+    const square = 32;
+    var lvl: i32 = levels[0];
+    while (lvl < levels[1]) : (lvl += 1) {
+        for (0..square) |x| {
+            for (0..square) |y| {
+                for (0..square) |z| {
+                    try threadPool.spawn(loadchunktest, .{ &world, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter }, .Medium);
+                }
+            }
+        }
+    }
+    while (counter.load(.seq_cst) != (levels[1] - levels[0]) * square * square * square) {}
+    std.testing.log_level = .debug;
+    std.log.info("loaded at {d} chunks per second\n", .{@as(f32, @floatFromInt(counter.load(.seq_cst))) / (@as(f32, @floatFromInt(timer.read())) / std.time.ns_per_s)});
+}
+
+fn loadchunktest(self: *World, Pos: ChunkPos, structures: bool, counter: *std.atomic.Value(usize)) void {
+    const ch = self.loadChunk(Pos, structures) catch |err| std.debug.panic("err: {any}\n", .{err});
+    ch.release();
+    _ = counter.fetchAdd(1, .seq_cst);
+}
