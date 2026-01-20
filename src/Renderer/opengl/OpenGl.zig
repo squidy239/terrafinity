@@ -396,7 +396,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
             gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
         }
     }
-    std.log.debug("{d}/{d} chunks drawn", .{ drawnchunks, torenderchunks });
 }
 
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -404,8 +403,7 @@ fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed
     (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
     const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
     defer if (glSync) |sync| gl.DeleteSync(sync);
-    const l = loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms) catch return error.DrawFailed;
-    std.log.debug("loaded {d} meshes", .{l});
+    _ = loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms) catch return error.DrawFailed;
 }
 
 fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {

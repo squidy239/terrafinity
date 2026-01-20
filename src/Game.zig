@@ -30,7 +30,7 @@ world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 tracking_allocator: TrackingAllocator,
 
-LoadingChunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32), //TODO remove this and replace it
+rendered_chunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32), //TODO remove this and replace it
 
 // Threads
 loaderThread: ?std.Thread,
@@ -153,7 +153,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
-        .LoadingChunks = .init(allocator),
+        .rendered_chunks = .init(allocator),
         .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
@@ -341,8 +341,13 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     }
 }
 
-//TODO replace with async when its out
-pub fn AddChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool) void {
+pub fn addChunkToRenderAsync(self: *@This(), Pos: World.ChunkPos, genStructures: bool) !void {
+    try self.rendered_chunks.put(Pos, {});
+    errdefer _ = self.rendered_chunks.remove(Pos);
+    try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, .Medium);
+}
+
+fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool) void {
     self.options_lock.lockShared();
     const lowest_level = self.options.lowest_level;
     const highest_level = self.options.highest_level;
@@ -351,12 +356,11 @@ pub fn AddChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: 
     const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
     const running = self.running.load(.monotonic);
     if (!inside_range or !running) {
-        _ = self.LoadingChunks.remove(Pos);
+        _ = self.rendered_chunks.remove(Pos);
         return;
     }
     self.addChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
 }
-
 pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
     game.addChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
@@ -375,7 +379,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     self.pool.deinit();
     std.log.info("closed threadpool", .{});
 
-    self.LoadingChunks.deinit();
+    self.rendered_chunks.deinit();
 
     self.world.deinit();
 

@@ -84,27 +84,18 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
             var y: i32 = -@as(i32, @intCast(distance[1]));
             while (y < distance[1]) {
                 defer y += 1;
-                const ChunkPos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
+                const Pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
-                const in_range = keepLoaded(null, null, playerPos, ChunkPos, innerdistance, distance);
-                if (!in_range or game.LoadingChunks.contains(ChunkPos)) {
+                const in_range = keepLoaded(null, null, playerPos, Pos, innerdistance, distance);
+                if (!in_range or game.rendered_chunks.contains(Pos)) {
                     continue;
                 }
 
-                const loaded = game.renderer.containsChunk(ChunkPos);
+                const loaded = game.renderer.containsChunk(Pos);
 
-                if ((!loaded or (game.world.getGenState(ChunkPos) orelse continue) == .TerrainGenerated)) {
+                if ((!loaded or (game.world.getGenState(Pos) orelse continue) == .TerrainGenerated)) {
                     amount_loaded += 1;
-                    try game.LoadingChunks.put(ChunkPos, undefined);
-                    const priority: ThreadPool.Priority = switch (level) {
-                        std.math.minInt(i32)...-1 => .High,
-                        0...2 => .High,
-                        3...5 => .Medium,
-                        6...10 => .Low,
-                        11...20 => .VeryLow,
-                        else => .VeryLow,
-                    };
-                    try game.pool.spawn(Game.AddChunkToRenderTask, .{ game, ChunkPos, true }, priority);
+                    try game.addChunkToRenderAsync(Pos, true);
                 }
             }
         }
