@@ -15,6 +15,7 @@ pub const VTable = struct {
     containsChunk: *const fn (*anyopaque, ChunkPos) bool,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
     setViewport: *const fn (*anyopaque, @Vector(2, u32)) void,
+    unloadChunks: *const fn (*anyopaque, @Vector(3, f64), @Vector(2, u32), i32, i32, @Vector(2, u32)) void,
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
@@ -45,7 +46,12 @@ pub fn clear(self: *@This(), viewpos: @Vector(3, f64)) error{DrawFailed}!void {
 
 ///sets the viewport dimensions in pixels, this function should only be called on the main thread
 pub fn setViewport(self: *@This(), viewport_pixels: @Vector(2, u32)) void {
-    if(self.last_viewport) |lvp| if (std.meta.eql(lvp, viewport_pixels)) return;
+    if (self.last_viewport) |lvp| if (std.meta.eql(lvp, viewport_pixels)) return;
     self.vtable.setViewport(self.userdata, viewport_pixels);
     self.last_viewport = viewport_pixels;
+}
+
+///unloads chunks that do not meet the conditions from the renderer, this function should only be called on the main thread
+pub fn unloadChunks(self: *@This(), playerPos: @Vector(3, f64), mesh_distance: @Vector(2, u32), min_level: i32, max_level: i32, inner_radius: @Vector(2, u32)) void {
+    return self.vtable.unloadChunks(self.userdata, playerPos, mesh_distance, min_level, max_level, inner_radius);
 }

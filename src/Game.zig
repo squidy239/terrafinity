@@ -255,9 +255,9 @@ pub fn getLevels(self: *@This()) [2]i32 {
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
+pub fn getInnerGenRadius(self: *@This(), gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
     if (level <= self.getLevels()[0]) return @splat(0);
-    const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+    const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 

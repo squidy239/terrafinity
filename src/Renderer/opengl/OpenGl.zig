@@ -52,6 +52,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
                 .containsChunk = containsChunk,
                 .clear = clear,
                 .setViewport = setViewport,
+                .unloadChunks = unloadChunks,
             },
         },
     };
@@ -114,7 +115,6 @@ pub fn Draw(self: *@This(), game: *@import("../../Game.zig"), viewport_pixels: @
     return drawn;
 }
 
-
 pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     _ = try self.load_queue.append(mesh);
@@ -172,12 +172,12 @@ fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
     return self.renderlist.contains(Pos);
 }
 
-fn unloadMeshes(self: *@This(), playerPos: @Vector(3, f64), game: *@import("../../Game.zig")) void {
+fn unloadChunks(userdata: *anyopaque, playerPos: @Vector(3, f64), mesh_distance: @Vector(2, u32), min_level: i32, max_level: i32, inner_radius: @Vector(2, u32)) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
-    var meshesToUnloadBuffer: [256]ChunkPos = undefined;
-    var meshesToUnloadBufferPos: usize = 0;
-    const mesh_distance = game.getGenDistance();
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    var buffer: [256]ChunkPos = undefined;
+    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&buffer);
     {
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
@@ -185,26 +185,17 @@ fn unloadMeshes(self: *@This(), playerPos: @Vector(3, f64), game: *@import("../.
         defer list_it.deinit();
         while (list_it.next()) |entry| {
             const Pos: ChunkPos = entry.key_ptr.*;
-            const innerRadius = game.getInnerGenRadius(Pos.level);
-            if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break;
-            game.options_lock.lockShared();
-            const min_level = game.options.lowest_level;
-            const max_level = game.options.highest_level;
-            game.options_lock.unlockShared();
+            const innerRadius: @Vector(2, u32) = if (Pos.level > min_level) inner_radius else @splat(0);
             const keep = keepLoaded(min_level, max_level, playerPos, Pos, innerRadius, mesh_distance);
             if (keep) continue;
-            meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
-            meshesToUnloadBufferPos += 1;
+            tounload.appendBounded(Pos) catch break;
         }
     }
 
-    if (meshesToUnloadBufferPos > 0) {
-        const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
-        defer free.End();
-        for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
-            self.remove(Pos);
-        }
-        meshesToUnloadBufferPos = 0;
+    const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
+    defer free.End();
+    for (tounload.items) |Pos| {
+        self.remove(Pos);
     }
 }
 
@@ -410,7 +401,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
 
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
-    (self.drawChunks(viewpos, .{32, 32, 32, 255}, self.viewport_pixels)) catch return error.DrawFailed;
+    (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
     const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
     defer if (glSync) |sync| gl.DeleteSync(sync);
     const l = loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms) catch return error.DrawFailed;

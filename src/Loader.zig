@@ -54,7 +54,7 @@ pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
         const levels = game.getLevels();
         var level = levels[0];
         while (level < levels[1]) : (level += 1) {
-            loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(level), level) catch unreachable;
+            loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
         }
 
         addChunkstoLoad.End();

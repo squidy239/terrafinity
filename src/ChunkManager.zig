@@ -66,7 +66,7 @@ pub const ChunkManager = struct {
         const highest_level = game.options.highest_level;
         game.options_lock.unlockShared();
 
-        const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), Pos, game.getInnerGenRadius(Pos.level), game.getGenDistance());
+        const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), Pos, game.getInnerGenRadius(game.getGenDistance(), Pos.level), game.getGenDistance());
         const running = game.running.load(.monotonic);
         if (!inside_range or !running) {
             _ = game.chunkManager.LoadingChunks.remove(Pos);
