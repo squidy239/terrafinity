@@ -1,20 +1,15 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
-const ThreadPool = @import("root").ThreadPool;
-const Game = @import("../Game.zig");
-const Block = @import("Block").Blocks;
-const Loader = @import("../Loader.zig");
 const ChunkSize = @import("../main.zig").ChunkSize;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const Entity = @import("../main.zig").Entity;
+const Mesh = @import("../Mesh.zig");
+const ChunkPos = @import("../world/World.zig").ChunkPos;
 const EntityTypes = @import("../world/EntityTypes.zig");
 const gl = @import("gl");
-const glfw = @import("zglfw");
-const Player = @import("EntityTypes").Player;
-const UpdateEntitiesThread = @import("Entity").TickEntitiesThread;
 const zm = @import("zm");
 const ztracy = @import("ztracy");
+const keepLoaded = @import("../Loader.zig").keepLoaded;
 
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
@@ -30,6 +25,8 @@ shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
 uniforms: UniformLocations,
 cameraFront: @Vector(3, f32),
+MeshesToLoad: ConcurrentQueue(Mesh, 32, true),
+renderlist: ConcurrentHashMap(ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(ChunkPos), 80, 32),
 
 pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() {
     var renderer = @This(){
@@ -37,8 +34,10 @@ pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() 
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
+        .MeshesToLoad = .init(allocator),
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
+        .renderlist = .init(allocator),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .player = player,
@@ -52,12 +51,208 @@ pub fn init(allocator: std.mem.Allocator, player: *EntityTypes.Player) !@This() 
 }
 
 pub fn deinit(self: *@This()) void {
+    while (self.MeshesToLoad.popFirst()) |mesh| {
+        mesh.free(self.allocator);
+    }
+    self.MeshesToLoad.deinit(true);
+    
+    var it = self.renderlist.iterator();
+    while (it.next()) |entry| {
+        const mesh = entry.value_ptr;
+        mesh.free();
+    }
+
+    it.deinit();
+    self.renderlist.deinit();
+    
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
     std.log.info("renderer deinit", .{});
+}
+
+pub fn Draw(self: *@This(),game: *@import("../Game.zig"), viewport_pixels: @Vector(2, f32)) ![2]u64 {
+    const playerPos = self.player.physics.getPos();
+    //draw chunks
+    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
+    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
+    const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
+    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+    gl.Clear(gl.DEPTH_BUFFER_BIT);
+    clear.End();
+    if (!std.meta.eql(last_viewport, viewport_pixels)) gl.Viewport(0, 0, @intFromFloat(viewport_pixels[0]), @intFromFloat(viewport_pixels[1]));
+    last_viewport = viewport_pixels;
+    const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
+    const drawn = self.DrawChunks(playerPos, skyColor, viewport_pixels);
+    drawChunks.End();
+    const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
+    try self.DrawEntities(game, playerPos, viewport_pixels);
+    drawEntities.End();
+    const um = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
+    self.unloadMeshes(playerPos, game);
+    um.End();
+    {
+        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
+        defer if (glSync) |sync| gl.DeleteSync(sync);
+        _ = try loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
+    }
+    return drawn;
+}
+
+pub fn addMesh(self: *@This(), mesh: Mesh) !void {
+    _ = try self.MeshesToLoad.append(mesh);
+}
+
+fn loadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
+    const lm = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
+    defer lm.End();
+    const st = std.time.microTimestamp();
+    var amount: u64 = 0;
+    while (true) {
+        var syncStatus: c_int = undefined;
+        if (glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
+        if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
+        const mesh = self.MeshesToLoad.popFirst() orelse break;
+        defer mesh.free(self.allocator);
+        //defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos); i will probubly froget to readd this
+        const isempty = mesh.faces == null and mesh.TransperentFaces == null;
+        if (isempty) {
+            self.remove(mesh.Pos);
+            continue;
+        }
+        const ex = self.renderlist.get(mesh.Pos);
+        defer amount += 1;
+        var oldtime: ?i64 = null;
+        if (ex) |m| {
+            oldtime = m.time;
+        }
+        if (!mesh.animation) {
+            oldtime = 0;
+        }
+        const mesh_buffer_ids = LoadMesh(self, mesh, oldtime);
+        {
+            const oldChunk = try self.renderlist.fetchPut(mesh.Pos, mesh_buffer_ids);
+            if (oldChunk) |old_mesh| {
+                old_mesh.free();
+            }
+        }
+    }
+    return amount;
+}
+
+fn remove(self: *@This(), Pos: ChunkPos) void {
+    const ids = self.renderlist.fetchremove(Pos) orelse return;
+    ids.free();
+}
+
+pub fn removeMesh(self: *@This(), Pos: ChunkPos) !void {
+    const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
+    try self.addMesh(emptyMesh);
+}
+
+fn unloadMeshes(self: *@This(), playerPos: @Vector(3, f64), game: *@import("../Game.zig")) void {
+    const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
+    defer unload.End();
+    var meshesToUnloadBuffer: [256]ChunkPos = undefined;
+    var meshesToUnloadBufferPos: usize = 0;
+    const mesh_distance = game.getGenDistance();
+    {
+        const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
+        defer loop.End();
+        var list_it = self.renderlist.iterator();
+        defer list_it.deinit();
+        while (list_it.next()) |entry| {
+            const Pos: ChunkPos = entry.key_ptr.*;
+            const innerRadius = game.getInnerGenRadius(Pos.level);
+            if (meshesToUnloadBufferPos >= meshesToUnloadBuffer.len) break;
+            game.options_lock.lockShared();
+            const min_level = game.options.lowest_level;
+            const max_level = game.options.highest_level;
+            game.options_lock.unlockShared();
+            const keep = keepLoaded(min_level, max_level, playerPos, Pos, innerRadius, mesh_distance);
+            if (keep) continue;
+            meshesToUnloadBuffer[meshesToUnloadBufferPos] = Pos;
+            meshesToUnloadBufferPos += 1;
+        }
+    }
+
+    if (meshesToUnloadBufferPos > 0) {
+        const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
+        defer free.End();
+        for (meshesToUnloadBuffer[0..meshesToUnloadBufferPos]) |Pos| {
+            self.remove(Pos);
+        }
+        meshesToUnloadBufferPos = 0;
+    }
+}
+
+fn LoadMesh(renderer: *@This(), mesh: Mesh, CreationTime: ?i64) MeshBufferIDs {
+    var NewMeshIDs: MeshBufferIDs = .{
+        .vao = [2]?c_uint{ null, null },
+        .vbo = [2]?c_uint{ null, null },
+        .count = [2]u32{ 0, 0 },
+        .drawCommand = [2]?c_uint{ null, null },
+        .UBO = undefined,
+        .pos = mesh.Pos.position,
+        .time = 0,
+        .scale = @floatCast(ChunkPos.toScale(mesh.Pos.level)),
+    };
+
+    gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
+    gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
+    const UniformBuffer = UBO{
+        .chunkPos = mesh.Pos.position,
+        .scale = @floatCast(ChunkPos.toScale(mesh.Pos.level)),
+        .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
+        ._0 = undefined,
+    };
+    gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
+
+    inline for (0..2) |i| {
+        const faces = if (i == 0) mesh.faces else mesh.TransperentFaces;
+        if (faces) |f| {
+            var a: c_uint = undefined;
+            var b: c_uint = undefined;
+            gl.GenVertexArrays(1, @ptrCast(&a));
+            gl.BindVertexArray(a);
+            gl.GenBuffers(1, @ptrCast(&b));
+            gl.BindBuffer(gl.ARRAY_BUFFER, b);
+            NewMeshIDs.vao[i] = a;
+            NewMeshIDs.vbo[i] = b;
+            const bytes = std.mem.sliceAsBytes(f);
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(Mesh.Face) * f.len), bytes.ptr, gl.STATIC_DRAW);
+            NewMeshIDs.count[i] = @intCast(f.len);
+            gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.indecies);
+            gl.BindBuffer(gl.ARRAY_BUFFER, renderer.facebuffer);
+            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
+            gl.EnableVertexAttribArray(0);
+            gl.BindBuffer(gl.ARRAY_BUFFER, b);
+            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+            gl.EnableVertexAttribArray(1);
+            gl.VertexAttribDivisor(1, 1);
+            var indirectBuff: c_uint = undefined;
+            gl.GenBuffers(1, @ptrCast(&indirectBuff));
+            gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, indirectBuff);
+            const IndirectCommand: DrawElementsIndirectCommand = .{
+                .count = 6,
+                .baseInstance = 0,
+                .baseVertex = 0,
+                .firstIndex = 0,
+                .instanceCount = @intCast(NewMeshIDs.count[i]),
+            };
+            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
+            NewMeshIDs.drawCommand[i] = indirectBuff;
+        }
+    }
+    NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
+
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+    gl.BindVertexArray(0);
+    return NewMeshIDs;
 }
 
 pub fn updateCameraDirection(self: *@This()) void {
@@ -153,36 +348,7 @@ fn LoadFacebuffer(self: *@This()) void {
 }
 var last_viewport: [2]f32 = undefined;
 
-pub fn Draw(self: *@This(), game: *Game, viewport_pixels: @Vector(2, f32)) ![2]u64 {
-    const playerPos = self.player.physics.getPos();
-    //draw chunks
-    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
-    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
-    const clear = ztracy.ZoneNC(@src(), "Clear", 32213);
-    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
-    gl.Clear(gl.DEPTH_BUFFER_BIT);
-    clear.End();
-    if (!std.meta.eql(last_viewport, viewport_pixels)) gl.Viewport(0, 0, @intFromFloat(viewport_pixels[0]), @intFromFloat(viewport_pixels[1]));
-    last_viewport = viewport_pixels;
-    const drawChunks = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-    const drawn = self.DrawChunks(game, playerPos, skyColor, viewport_pixels);
-    drawChunks.End();
-    const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-    try self.DrawEntities(game, playerPos, viewport_pixels);
-    drawEntities.End();
-    const unloadMeshes = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-    Loader.UnloadMeshes(game, playerPos);
-    unloadMeshes.End();
-    {
-        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
-        defer if (glSync) |sync| gl.DeleteSync(sync);
-        _ = try Loader.LoadMeshes(self, game, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
-    }
-    return drawn;
-}
-fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
+fn DrawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, f32)) [2]u64 {
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -206,7 +372,7 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     inline for (0..2) |i| {
         if (i == 1) gl.Disable(gl.CULL_FACE);
         defer gl.Enable(gl.CULL_FACE);
-        var list_it = game.chunkManager.ChunkRenderList.iterator();
+        var list_it = self.renderlist.iterator();
         defer list_it.deinit();
         while (list_it.next()) |item| {
             torenderchunks += 1;
@@ -227,7 +393,8 @@ fn DrawChunks(self: *@This(), game: *Game, playerPos: @Vector(3, f64), skyColor:
     return [2]u64{ drawnchunks, torenderchunks };
 }
 
-pub fn DrawEntities(self: *@This(), game: *Game, playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
+//TODO update entity rendering
+fn DrawEntities(self: *@This(), game: *@import("../Game.zig"), playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
     gl.FrontFace(gl.CCW);
     gl.UseProgram(self.entityshaderprogram);
     const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, @This().cameraUp)).data));

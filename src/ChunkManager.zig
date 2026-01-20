@@ -12,16 +12,15 @@ const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const World = @import("world/World.zig");
 const ztracy = @import("ztracy");
 
-const Mesher = @import("Mesher.zig");
+const Mesh = @import("Mesh.zig");
 const outOfSquareRange = @import("libs/utils.zig").outOfSquareRange;
 
 pub const ChunkManager = struct {
     allocator: std.mem.Allocator,
     pool: *ThreadPool,
     LoadingChunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
-    MeshesToLoad: ConcurrentQueue.ConcurrentQueue(Mesher.Mesh, 32, true),
     world: *World,
-    ChunkRenderList: ConcurrentHashMap(World.ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(World.ChunkPos), 80, 32),
+    renderer: *Renderer,
 
     ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
     threadlocal var blocks: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
@@ -51,15 +50,14 @@ pub const ChunkManager = struct {
         }
         exbl.End();
         const scale: f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
-        const mesh = Mesher.Mesh.meshFromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
+        const mesh = Mesh.fromChunks(Pos, blocks, &neighbor_faces, scale, playAnimation, self.allocator);
         chunk.releaseAndUnlockShared();
         if (try mesh) |m| {
-            _ = try self.MeshesToLoad.append(m);
+            _ = try self.renderer.addMesh(m);
         } else {
-            const removeChunk = self.ChunkRenderList.contains(Pos);
+            const removeChunk = self.renderer.renderlist.contains(Pos);
             if (removeChunk) {
-                const emptyMesh: Mesher.Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = scale, .animation = playAnimation };
-                _ = try self.MeshesToLoad.append(emptyMesh);
+                _ = try self.renderer.removeMesh(Pos);
             }
         }
     }

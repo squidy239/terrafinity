@@ -229,15 +229,14 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
+    game.renderer = try .init(game.allocator, game.player);
     game.chunkManager = .{
         .pool = &game.pool,
-        .ChunkRenderList = .init(game.allocator),
         .LoadingChunks = .init(game.allocator),
-        .MeshesToLoad = .init(game.allocator),
         .world = &game.world,
+        .renderer = &game.renderer,
         .allocator = game.allocator,
     };
-    game.renderer = try .init(game.allocator, game.player);
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
@@ -326,19 +325,8 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     self.chunkManager.pool.deinit();
     std.log.info("closed threadpool", .{});
 
-    var it = self.chunkManager.ChunkRenderList.iterator();
-    while (it.next()) |entry| {
-        const mesh = entry.value_ptr;
-        mesh.free();
-    }
-
-    it.deinit();
-    self.chunkManager.ChunkRenderList.deinit();
+    
     self.chunkManager.LoadingChunks.deinit();
-    while (self.chunkManager.MeshesToLoad.popFirst()) |mesh| {
-        mesh.free(self.allocator);
-    }
-    self.chunkManager.MeshesToLoad.deinit(true);
 
     self.world.deinit();
 
