@@ -139,6 +139,7 @@ pub const WorldOptions = struct {
     }
 
     pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
+        @import("main.zig").context_index.store(0, .seq_cst);
         std.zon.parse.free(allocator, self.world_config);
         std.zon.parse.free(allocator, self.generator_config);
     }
@@ -378,6 +379,7 @@ pub fn unloadChunkMeshes(self: *@This()) void {
         list_it.pause();
         defer list_it.unpause();
         while (tounload.pop()) |Pos| {
+            std.debug.print("U", .{});
             self.opengl_renderer.remove(Pos);
             _ = self.loaded_or_meshed.remove(Pos);
         }
@@ -405,6 +407,7 @@ fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
     const running = self.running.load(.monotonic);
     if (!inside_range or !running) {
+        std.debug.print("L", .{});
         _ = self.loaded_or_meshed.remove(Pos);
         return;
     }

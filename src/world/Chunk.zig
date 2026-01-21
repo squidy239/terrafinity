@@ -169,7 +169,7 @@ pub fn WaitForRefAmount(self: *const @This(), amount: u32, maxMicroTime: ?u64) b
 }
 
 pub fn touch(self: *@This()) void {
-    self.last_access.store(std.time.microTimestamp(), .monotonic);
+    self.last_access.store(std.time.microTimestamp(), .unordered);
 }
 
 pub fn touchModify(self: *@This()) void {

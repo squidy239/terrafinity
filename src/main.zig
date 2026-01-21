@@ -27,7 +27,7 @@ const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 pub var proc_table: gl.ProcTable = undefined;
 pub var window: sdl.video.Window = undefined;
 pub var game_render_context: sdl.video.gl.Context = undefined;
-pub var contexts: []sdl.video.gl.Context = undefined;
+pub var contexts: []?sdl.video.gl.Context = undefined;
 pub var context_index: std.atomic.Value(usize) = .init(0);
 const config_path = "Config.zon";
 
@@ -86,7 +86,10 @@ pub fn main() !void {
 
     try sdl_renderer.setDrawBlendMode(.blend);
     const cpu_count = try std.Thread.getCpuCount();
-    contexts = try allocator.alloc(sdl.video.gl.Context, cpu_count);
+    contexts = try allocator.alloc(?sdl.video.gl.Context, cpu_count);
+    for (contexts) |*ctx| ctx.* = null;
+    defer for (contexts) |ctx| if (ctx != null) ctx.?.deinit() catch unreachable;
+
     for (contexts) |*ctx| {
         ctx.* = try sdl.video.gl.Context.init(window);
     }

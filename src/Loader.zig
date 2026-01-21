@@ -52,16 +52,17 @@ pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
         const genDistance = game.getGenDistance();
         const levels = game.getLevels();
         var level = levels[0];
+        var amount_loaded: u64 = 0;
         while (level < levels[1]) : (level += 1) {
-            loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
+            amount_loaded += loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
         }
-
+        std.debug.print("loaded {d} chunks, count: {d}\n", .{ amount_loaded, game.loaded_or_meshed.count() });
         addChunkstoLoad.End();
     }
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !void {
+fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !u64 {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
@@ -90,15 +91,16 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                 if (!in_range)
                     continue;
 
-                const loaded = game.renderer.containsChunk(Pos) or game.loaded_or_meshed.contains(Pos);
+                const loaded = game.loaded_or_meshed.contains(Pos);
 
-                if ((!loaded or (game.world.getGenState(Pos) orelse continue) == .TerrainGenerated)) {
+                if (!loaded) {
                     amount_loaded += 1;
                     try game.addChunkToRenderAsync(Pos, true);
                 }
             }
         }
     }
+    return amount_loaded;
 }
 
 fn Move(xzin: [2]i32, c: *usize) [2]i32 {
