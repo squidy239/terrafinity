@@ -27,7 +27,8 @@ const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 pub var proc_table: gl.ProcTable = undefined;
 pub var window: sdl.video.Window = undefined;
 pub var game_render_context: sdl.video.gl.Context = undefined;
-pub var contexts: [512]sdl.video.gl.Context = undefined;
+pub var contexts: []sdl.video.gl.Context = undefined;
+pub var context_index: std.atomic.Value(usize) = .init(0);
 const config_path = "Config.zon";
 
 pub fn main() !void {
@@ -84,8 +85,9 @@ pub fn main() !void {
     defer game_render_context.deinit() catch unreachable;
 
     try sdl_renderer.setDrawBlendMode(.blend);
-
-    for (&contexts) |*ctx| {
+    const cpu_count = try std.Thread.getCpuCount();
+    contexts = try allocator.alloc(sdl.video.gl.Context, cpu_count);
+    for (contexts) |*ctx| {
         ctx.* = try sdl.video.gl.Context.init(window);
     }
     try game_render_context.makeCurrent(window);
@@ -161,8 +163,8 @@ pub fn main() !void {
             try game_render_context.makeCurrent(window);
             game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
             try game.renderer.clear(game.player.physics.getPos());
-            game.unloadChunkMeshes();
             try game.renderer.drawChunks(game.player.physics.getPos());
+            game.unloadChunkMeshes();
         }
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
@@ -177,6 +179,7 @@ pub fn main() !void {
 
         try sdl_renderer.flush();
         try sdl.video.gl.swapWindow(window);
+        ztracy.FrameMark();
         std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }

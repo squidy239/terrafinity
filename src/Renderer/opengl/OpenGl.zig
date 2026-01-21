@@ -155,10 +155,9 @@ pub const MeshWriter = struct {
         _ = data;
         const buffered = io_w.buffered();
         if (buffered.len == 0) return 0;
-        gl.makeProcTableCurrent(&main.proc_table);
         if (context == null) {
-            context = main.contexts[std.crypto.random.intRangeAtMost(usize, 0, 511)]; //terrable solution
-            context.?.makeCurrent(main.window) catch return error.WriteFailed;
+            context = main.contexts[main.context_index.fetchAdd(1, .seq_cst)];
+            gl.makeProcTableCurrent(&main.proc_table);
         }
         context.?.makeCurrent(main.window) catch return error.WriteFailed;
         const mesh_writer: *MeshWriter = @alignCast(@fieldParentPtr("interface", io_w));
@@ -171,7 +170,7 @@ pub const MeshWriter = struct {
         }
         gl.BindBuffer(gl.ARRAY_BUFFER, new_vbo);
         gl.BufferStorage(gl.ARRAY_BUFFER, @intCast(buffered.len), buffered.ptr, 0x0);
-        gl.Finish();
+        gl.Flush();
         glError() catch {
             gl.DeleteBuffers(1, @ptrCast(&new_vbo));
             mesh_writer.vbo = null;
@@ -433,8 +432,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
-    //const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
-    //defer if (glSync) |sync| gl.DeleteSync(sync);
     self.frameLoadBuffers() catch return error.DrawFailed;
 }
 
