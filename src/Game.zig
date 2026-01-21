@@ -320,6 +320,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
     defer GenMeshAndAdd.End();
     const chunk = try self.world.loadChunk(Pos, genStructures);
+    defer chunk.release();
     const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
         (try self.world.loadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
         (try self.world.loadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
@@ -331,9 +332,10 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
     const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
     chunk.lockShared();
+    defer chunk.unlockShared();
     lock.End();
     exbl.End();
-    var buffer: [100000]u8 = undefined;
+    var buffer: [1000000]u8 = undefined;
     var mesh_writer: Renderer.OpenGl.MeshWriter = .init(&buffer);
     try Mesh.fromChunks(
         chunk.blocks,
@@ -343,8 +345,6 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     try mesh_writer.interface.flush();
     _ = playAnimation;
     _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = mesh_writer.pos, .vbo = mesh_writer.vbo orelse return });
-
-    chunk.releaseAndUnlockShared();
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {

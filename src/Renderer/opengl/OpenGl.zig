@@ -1,20 +1,23 @@
 const std = @import("std");
-const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
-const World = @import("../../world/World.zig");
-const ChunkSize = World.ChunkSize;
+
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const Entity = World.Entity;
-const Mesh = @import("../../Mesh.zig");
-const ChunkPos = World.ChunkPos;
-const EntityTypes = World.EntityTypes;
+const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
+const sdl = @import("sdl3");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
+
 const keepLoaded = @import("../../Loader.zig").keepLoaded;
-const sdl = @import("sdl3");
+const Mesh = @import("../../Mesh.zig");
+const Renderer = @import("../../Renderer.zig");
+const World = @import("../../world/World.zig");
+const ChunkSize = World.ChunkSize;
+const Entity = World.Entity;
+const ChunkPos = World.ChunkPos;
+const EntityTypes = World.EntityTypes;
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
-const Renderer = @import("../../Renderer.zig");
+
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 const OpenGlRenderer = @This();
 allocator: std.mem.Allocator,
@@ -144,9 +147,10 @@ pub const MeshWriter = struct {
         };
     }
     const main = @import("../../main.zig");
-    
-    
+
     pub fn drain(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) error{WriteFailed}!usize {
+        const d = ztracy.ZoneNC(@src(), "drain", 32213);
+        defer d.End();
         _ = splat;
         _ = data;
         const buffered = io_w.buffered();
@@ -166,7 +170,7 @@ pub const MeshWriter = struct {
             @panic("TODO copy data");
         }
         gl.BindBuffer(gl.ARRAY_BUFFER, new_vbo);
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(buffered.len), buffered.ptr, gl.STATIC_DRAW);
+        gl.BufferStorage(gl.ARRAY_BUFFER, @intCast(buffered.len), buffered.ptr, 0x0);
         gl.Finish();
         glError() catch {
             gl.DeleteBuffers(1, @ptrCast(&new_vbo));
@@ -194,14 +198,16 @@ fn glError() !void {
     }
 }
 
-fn frameLoadBuffers(self: *@This())!void{
+fn frameLoadBuffers(self: *@This()) !void {
+    const flb = ztracy.ZoneNC(@src(), "frameLoadBuffers", 32213);
+    defer flb.End();
     while (self.load_queue.popFirst()) |vbo| {
         try self.loadBuffer(vbo.Pos, vbo.vbo, vbo.face_count, false);
     }
 }
 
 pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
-    if(true)unreachable;
+    if (true) unreachable;
     const self: *@This() = @ptrCast(@alignCast(userdata));
     _ = try self.load_queue.append(mesh);
 }
@@ -225,18 +231,19 @@ fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
 }
 
 pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, CreationTime: ?i64) MeshBufferIDs {
+    var tempb: [2]c_uint = undefined;
+    gl.GenBuffers(2, @ptrCast(&tempb));
     var NewMeshIDs: MeshBufferIDs = .{
-        .vao = [2]?c_uint{ null, null },
-        .vbo = [2]?c_uint{ null, null },
-        .count = [2]u32{ 0, 0 },
-        .drawCommand = [2]?c_uint{ null, null },
-        .UBO = undefined,
+        .vao = null,
+        .vbo = vbo,
+        .count = @intCast(face_count),
+        .drawCommand = tempb[1],
+        .UBO = tempb[0],
         .pos = Pos.position,
         .time = 0,
         .scale = @floatCast(ChunkPos.toScale(Pos.level)),
     };
 
-    gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
     gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
     const UniformBuffer = UBO{
         .chunkPos = Pos.position,
@@ -244,44 +251,31 @@ pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize
         .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
         ._0 = undefined,
     };
-    gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
+    gl.BufferStorage(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), 0x0);
 
-    inline for (0..2) |i| {
-        const faces = if (i == 0) true else false;
-        if (faces) {
-            var a: c_uint = undefined;
-            gl.GenVertexArrays(1, @ptrCast(&a));
-            gl.BindVertexArray(a);
-            gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-            NewMeshIDs.vao[i] = a;
-            NewMeshIDs.vbo[i] = vbo;
-            NewMeshIDs.count[i] = @intCast(face_count);
-            gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.indecies);
-            gl.BindBuffer(gl.ARRAY_BUFFER, renderer.facebuffer);
-            gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-            gl.EnableVertexAttribArray(0);
-            gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-            gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-            gl.EnableVertexAttribArray(1);
-            gl.VertexAttribDivisor(1, 1);
-            var indirectBuff: c_uint = undefined;
-            gl.GenBuffers(1, @ptrCast(&indirectBuff));
-            gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, indirectBuff);
-            const IndirectCommand: DrawElementsIndirectCommand = .{
-                .count = 6,
-                .baseInstance = 0,
-                .baseVertex = 0,
-                .firstIndex = 0,
-                .instanceCount = @intCast(NewMeshIDs.count[i]),
-            };
-            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, gl.STATIC_DRAW);
-            NewMeshIDs.drawCommand[i] = indirectBuff;
-        }
-    }
+    var a: c_uint = undefined;
+    gl.GenVertexArrays(1, @ptrCast(&a));
+    gl.BindVertexArray(a);
+    NewMeshIDs.vao = a;
+    NewMeshIDs.count = @intCast(face_count);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.indecies);
+    gl.BindBuffer(gl.ARRAY_BUFFER, renderer.facebuffer);
+    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
+    gl.EnableVertexAttribArray(0);
+    gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+    gl.EnableVertexAttribArray(1);
+    gl.VertexAttribDivisor(1, 1);
+    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, NewMeshIDs.drawCommand.?);
+    const IndirectCommand: DrawElementsIndirectCommand = .{
+        .count = 6,
+        .baseInstance = 0,
+        .baseVertex = 0,
+        .firstIndex = 0,
+        .instanceCount = @intCast(NewMeshIDs.count),
+    };
+    gl.BufferStorage(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, 0x0);
     NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
-
-    gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-    gl.BindVertexArray(0);
     return NewMeshIDs;
 }
 
@@ -296,7 +290,6 @@ pub fn loadBuffer(self: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize,
     }
     const mesh_buffer_ids = LoadVbo(self, Pos, vbo, face_count, oldtime);
     {
-        std.debug.print("putting\n", .{});
         const oldChunk = try self.renderlist.fetchPut(Pos, mesh_buffer_ids);
         if (oldChunk) |old_mesh| {
             old_mesh.free();
@@ -415,27 +408,25 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
-    inline for (0..2) |i| {
-        if (i == 1) gl.Disable(gl.CULL_FACE);
-        defer gl.Enable(gl.CULL_FACE);
-        var list_it = self.renderlist.iterator();
-        defer list_it.deinit();
-        while (list_it.next()) |item| {
-            torenderchunks += 1;
-            const buffer_ids = item.value_ptr;
-            const Pos = item.key_ptr.*;
-            //std.debug.print("rendering: {any}\n", .{buffer_ids});
-            const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
-            const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
-            const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-            if (!cull) continue;
-            drawnchunks += 1;
-            gl.BindVertexArray(buffer_ids.vao[i] orelse continue);
-            gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
-            gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
-            gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
-            try glError();
-        }
+    //if (i == 1) gl.Disable(gl.CULL_FACE);
+    //defer gl.Enable(gl.CULL_FACE);
+    var list_it = self.renderlist.iterator();
+    defer list_it.deinit();
+    while (list_it.next()) |item| {
+        torenderchunks += 1;
+        const buffer_ids = item.value_ptr;
+        const Pos = item.key_ptr.*;
+        //std.debug.print("rendering: {any}\n", .{buffer_ids});
+        const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
+        const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
+        const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+        if (!cull) continue;
+        drawnchunks += 1;
+        gl.BindVertexArray(buffer_ids.vao orelse continue);
+        gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
+        gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand.?);
+        gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
+        try glError();
     }
 }
 
@@ -480,20 +471,18 @@ fn DrawEntities(self: *@This(), game: *@import("../../Game.zig"), playerPos: @Ve
 
 const MeshBufferIDs = struct {
     time: i64,
-    vbo: [2]?c_uint,
-    vao: [2]?c_uint,
-    drawCommand: [2]?c_uint,
+    vbo: ?c_uint,
+    vao: ?c_uint,
+    drawCommand: ?c_uint,
     UBO: c_uint,
     pos: [3]i32,
-    count: [2]u32,
+    count: u32,
     scale: f32,
 
     pub fn free(self: *const @This()) void {
-        inline for (0..2) |i| {
-            if (self.vbo[i]) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
-            if (self.vao[i]) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
-            if (self.drawCommand[i]) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
-        }
+        if (self.vbo) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
+        if (self.vao) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
+        if (self.drawCommand) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
         gl.DeleteBuffers(1, @ptrCast(&self.UBO));
     }
 };
