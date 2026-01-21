@@ -41,8 +41,8 @@
             .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
         },
         .sdl3 = .{
-            .url = "git+https://github.com/Gota7/zig-sdl3?ref=master#79b0d1f1ef10a424037025f6af44fe06bf7e062c",
-            .hash = "sdl3-0.1.5-NmT1Q3ARJgDmFWtbbK3KBb7vufbQD0EjD4Me4Fbdq0p3",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=master#eefd1b86205ed4fbc5f5274b5ba34aa97798d693",
+            .hash = "sdl3-0.1.6-NmT1Q8kQJgCrbdH9Z3ZmLo5uJ1et3oxhfYazrNTtfsgv",
         },
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui?ref=main#1bc9c4e29c12779d067566f00e63817277a1dd1d",

@@ -192,9 +192,10 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
                 const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.insert(action);
             },
-            .quit, .terminating, .window_close_requested => {
+            .quit, .window_close_requested => {
                 running.store(false, .unordered);
             },
+            .terminating => {},
             .mouse_wheel => |wheel| {
                 scroll += wheel.scroll_y;
             },

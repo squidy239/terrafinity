@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
         .enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false,
         .enable_fibers = b.option(bool, "enable_fibers", "Enable Tracy fiber support") orelse false,
         .on_demand = b.option(bool, "on_demand", "Build tracy with TRACY_ON_DEMAND") orelse false,
+        
     };
 
     // Create root module

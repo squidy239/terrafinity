@@ -1,23 +1,25 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const dvui = @import("dvui");
+const sdl = @import("sdl3");
+const ThreadPool = @import("ThreadPool");
+const zm = @import("zm");
+const ztracy = @import("ztracy");
+
+const Key = @import("Key.zig");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
+const utils = @import("libs/utils.zig");
+const Loader = @import("Loader.zig");
+const Mesh = @import("Mesh.zig");
+pub const Renderer = @import("Renderer.zig");
+const Chunk = @import("world/Chunk.zig");
+const Entity = @import("world/Entity.zig");
+const EntityTypes = @import("world/EntityTypes.zig");
 const World = @import("world/World.zig");
 const ChunkSize = World.ChunkSize;
 const Block = World.Block;
-pub const Renderer = @import("Renderer.zig");
-const ThreadPool = @import("ThreadPool");
-const Entity = @import("world/Entity.zig");
-const EntityTypes = @import("world/EntityTypes.zig");
-const utils = @import("libs/utils.zig");
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const builtin = @import("builtin");
-const Chunk = @import("world/Chunk.zig");
-const Loader = @import("Loader.zig");
-const sdl = @import("sdl3");
-const Key = @import("Key.zig");
-const zm = @import("zm");
-const dvui = @import("dvui");
-const TrackingAllocator = @import("libs/TrackingAllocator.zig");
-const ztracy = @import("ztracy");
-const Mesh = @import("Mesh.zig");
 
 allocator: std.mem.Allocator,
 world: World,
@@ -174,7 +176,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     world_options.generator_config.setSeeds();
     try world_options.save(folder);
 
-    const terrain_height_cache_memory = 10_000_000; //10 mb
+    const terrain_height_cache_memory = 100_000_000; //100 mb
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
         .terrain_height_cache = try .init(game.allocator, thc_size),
@@ -348,12 +350,13 @@ pub fn unloadChunkMeshes(self: *@This()) void {
     const playerpos = self.player.physics.getPos();
     const renderdistance = self.getGenDistance();
     const levels = self.getLevels();
-    var buffer: [256]World.ChunkPos = undefined;
+    var buffer: [1024]World.ChunkPos = undefined;
     var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
 
     var list_it = self.opengl_renderer.renderlist.iterator();
     defer list_it.deinit();
     while (true) {
+        tounload.clearRetainingCapacity();
         {
             const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
             defer loop.End();

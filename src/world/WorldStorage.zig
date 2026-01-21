@@ -36,7 +36,7 @@ pub fn init(path: [:0]const u8, config: Config, allocator: std.mem.Allocator) !@
     rocksdb.c.rocksdb_options_set_create_if_missing(storage.options, 1);
     rocksdb.c.rocksdb_options_increase_parallelism(storage.options, @intCast(cpu_count));
     rocksdb.c.rocksdb_options_set_compression(storage.options, @intFromEnum(config.compression));
-
+    
     storage.database = try .openRaw(allocator, path, storage.options);
     return storage;
 }

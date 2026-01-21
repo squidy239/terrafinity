@@ -99,20 +99,21 @@ pub const DefaultGenerator = struct {
 
     pub fn genChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, allocator: std.mem.Allocator) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
-        const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
-        const heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
-        gc.End();
-        var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
-        var rand = rng.random();
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
-        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
             try blocks.merge(.{ .oneBlock = .air }, allocator);
             return;
-        } else if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
+        }
+        const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
+        const heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
+        gc.End();
+        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
+        if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
             try blocks.merge(.{ .oneBlock = .stone }, allocator);
         } else {
+            var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
+            var rand = rng.random();
             const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
             generateTerrain(&blockgrid, Pos, &heights, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();

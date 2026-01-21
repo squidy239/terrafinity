@@ -83,6 +83,18 @@ pub const ChunkPos = struct {
         return levelToBlockRatioFloat(level) / ChunkSize;
     }
 
+    pub inline fn listChildren(self: ChunkPos) [scale_factor][scale_factor][scale_factor]ChunkPos {
+        var children: [scale_factor][scale_factor][scale_factor]ChunkPos = undefined;
+        inline for (0..scale_factor) |x| {
+            inline for (0..scale_factor) |y| {
+                inline for (0..scale_factor) |z| {
+                    children[x][y][z] = self.toLevel(self.level + 1).add(comptime .{ @intCast(x), @intCast(y), @intCast(z) });
+                }
+            }
+        }
+        return children;
+    }
+
     ///returns the global block position of the chunk where one block is one block at default level
     pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
@@ -324,19 +336,20 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
 pub fn unloadTimeout(self: *@This(), max_ms: u64, current_memory: *std.atomic.Value(usize), memory_target: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
-    var chunks: [self.Chunks.buckets.len]u64 = @splat(0);
+    const timeout = memCurve(max_ms, current_memory.load(.unordered), memory_target);
+    var chunks: usize = 0;
     var unload_chunk_buffer: [32784]ChunkPos = undefined;
+    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
     var it = self.Chunks.iterator();
     defer it.deinit();
     while (true) {
-        var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
+        tounload.clearRetainingCapacity();
         {
             const currenttime = std.time.microTimestamp();
             while (it.next()) |c| {
-                chunks[it.bkt_index] += 1;
+                chunks += 1;
                 const chunk = c.value_ptr.*;
-                const lastaccess = chunk.last_access.load(.unordered); //this might have to happen only once bc it may unbalence map, TODO check
-                const timeout = memCurve(max_ms, current_memory.load(.unordered), memory_target);
+                const lastaccess = chunk.last_access.load(.unordered);
                 if (currenttime - lastaccess < timeout) continue;
                 tounload.appendBounded(c.key_ptr.*) catch break;
             }
@@ -348,7 +361,7 @@ pub fn unloadTimeout(self: *@This(), max_ms: u64, current_memory: *std.atomic.Va
             try self.unloadChunk(Pos);
         }
     }
-    std.debug.print("percent: {d}, timeout: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)), memCurve(max_ms, current_memory.load(.unordered), memory_target) });
+    std.debug.print("percent: {d}, timeout: {d}, chunks loaded: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)) * 100, memCurve(max_ms, current_memory.load(.unordered), memory_target), chunks });
 }
 
 ///returns chunk timeout seconds
@@ -633,6 +646,19 @@ inline fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block
 pub fn unloadChunk(self: *@This(), Pos: ChunkPos) !void {
     const chunk = self.Chunks.fetchremove(Pos) orelse return; //removed from hashmap, no refs added or removed because they would cancel out
     try self.unloadChunkByPtr(chunk, Pos);
+}
+
+///triees to unload a chunk if it is not in use, returns true if the chunk was unloaded
+pub fn tryUnloadChunk(self: *@This(), Pos: ChunkPos) !bool {
+    if (true) @panic("TODO");
+    const chunk = self.Chunks.getandaddref(Pos) orelse return true;
+    if (chunk.ref_count.load(.seq_cst) != 2) {
+        chunk.release();
+        return false;
+    }
+    _ = self.Chunks.remove(Pos);
+    try self.unloadChunkByPtr(chunk, Pos);
+    return true;
 }
 
 pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
