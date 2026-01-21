@@ -333,14 +333,18 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     chunk.lockShared();
     lock.End();
     exbl.End();
-    const scale: f32 = @floatCast(World.ChunkPos.toScale(Pos.level));
-    const mesh = Mesh.fromChunks(Pos, chunk.blocks, &neighbor_faces, scale, playAnimation, self.allocator);
+    var buffer: [100000]u8 = undefined;
+    var mesh_writer: Renderer.OpenGl.MeshWriter = .init(&buffer);
+    try Mesh.fromChunks(
+        chunk.blocks,
+        &neighbor_faces,
+        &mesh_writer.interface,
+    );
+    try mesh_writer.interface.flush();
+    _ = playAnimation;
+    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = mesh_writer.pos, .vbo = mesh_writer.vbo orelse return });
+
     chunk.releaseAndUnlockShared();
-    if (try mesh) |m| {
-        try self.renderer.addChunk(m);
-    } else {
-        self.renderer.removeChunk(Pos);
-    }
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {

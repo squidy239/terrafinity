@@ -27,32 +27,26 @@ pub const Face = packed struct(u64) {
     BlockType: u20,
     _: u12,
 };
-//TODO remove threadlocal vars to prepare for async
-threadlocal var faceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
-threadlocal var TransparentfaceBuffer: [ChunkSize * ChunkSize * ChunkSize * 6]Face = undefined;
-threadlocal var ExtendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
 
-faces: ?[]const Face,
-TransperentFaces: ?[]const Face,
-Pos: ChunkPos,
-scale: f32,
-animation: bool,
+pub const Header = struct {
+    Pos: ChunkPos,
+    scale: f32,
+    animation: bool,
+};
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn fromChunks(chunkPos: ChunkPos, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
+pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, writer: *std.Io.Writer) !void {
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
     const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
+    var ExtendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
     GenerateExtendedChunk(&ExtendedBlocks, mainblocks, neighbor_faces);
     ecp.End();
     if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
-    return try meshSimple(chunkPos, &ExtendedBlocks, scale, animation, allocator);
+    return try meshSimple(&ExtendedBlocks, writer);
 }
 
-fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, scale: f32, animation: bool, allocator: std.mem.Allocator) !?@This() {
-    //buffers are threadlocal so they only get init once, HUGE speedup
-    var pos: usize = 0;
-    var Tpos: usize = 0;
+fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, writer: *std.Io.Writer) !void {
     const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
     for (1..ChunkSize + 1) |x| {
         for (1..ChunkSize + 1) |y| {
@@ -72,8 +66,7 @@ fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSi
                     inner: {
                         if (!neighboring_blocks[i].isTransparent()) break :inner;
                         if (!block_transparent) {
-                            std.debug.assert(pos < faceBuffer.len);
-                            faceBuffer[pos] = Face{
+                            const face = Face{
                                 .BlockType = @intFromEnum(block),
                                 .isGreedy = false,
                                 .height = 1,
@@ -84,10 +77,9 @@ fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSi
                                 .z = @intCast(z - 1),
                                 ._ = undefined,
                             };
-                            pos += 1;
+                            try writer.writeAll(std.mem.asBytes(&face));
                         } else if (block != neighboring_blocks[i]) {
-                            std.debug.assert(Tpos < TransparentfaceBuffer.len);
-                            TransparentfaceBuffer[Tpos] = Face{
+                            const face = Face{
                                 .BlockType = @intFromEnum(block),
                                 .isGreedy = false,
                                 .height = 1,
@@ -98,7 +90,7 @@ fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSi
                                 .z = @intCast(z - 1),
                                 ._ = undefined,
                             };
-                            Tpos += 1;
+                            try writer.writeAll(std.mem.asBytes(&face));
                         }
                     }
                 }
@@ -106,24 +98,8 @@ fn meshSimple(chunkPos: ChunkPos, extendedBlocks: *const [ChunkSize + 2][ChunkSi
         }
     }
     loop.End();
-    if (pos > 0 or Tpos > 0) {
-        //std.debug.print("mlen:{d}, faces:{any}\n", .{ pos, (faceBuffer[0..pos]) });
-        const aa = ztracy.ZoneNC(@src(), "AllocFaces", 222344);
-        defer aa.End();
-        return @This(){
-            .faces = if (pos > 0) try allocator.dupe(Face, faceBuffer[0..pos]) else null,
-            .TransperentFaces = if (Tpos > 0) try allocator.dupe(Face, TransparentfaceBuffer[0..Tpos]) else null,
-            .Pos = chunkPos,
-            .scale = scale,
-            .animation = animation,
-        };
-    } else return null;
 }
 
-pub fn free(self: *const @This(), allocator: std.mem.Allocator) void {
-    if (self.faces) |f| allocator.free(f);
-    if (self.TransperentFaces) |f| allocator.free(f);
-}
 ///x+,x-,y+,y-,z+,z-
 fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block) void {
     const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);

@@ -11,12 +11,12 @@ const gl = @import("gl");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 const keepLoaded = @import("../../Loader.zig").keepLoaded;
-
+const sdl = @import("sdl3");
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
 const Renderer = @import("../../Renderer.zig");
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
-
+const OpenGlRenderer = @This();
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
 indecies: c_uint,
@@ -25,11 +25,16 @@ shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
 uniforms: UniformLocations,
 cameraFront: @Vector(3, f32),
-load_queue: ConcurrentQueue(Mesh, 32, true),
+load_queue: ConcurrentQueue(toRenderData, 32, true),
 renderlist: ConcurrentHashMap(ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(ChunkPos), 80, 32),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 
+const toRenderData = struct {
+    vbo: c_uint,
+    Pos: ChunkPos,
+    face_count: usize,
+};
 pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     self.* = @This(){
         .allocator = allocator,
@@ -62,8 +67,8 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
 }
 
 pub fn deinit(self: *@This()) void {
-    while (self.load_queue.popFirst()) |mesh| {
-        mesh.free(self.allocator);
+    while (self.load_queue.popFirst()) |vbo| {
+        gl.DeleteBuffers(1, @ptrCast(&vbo));
     }
     self.load_queue.deinit(true);
 
@@ -109,50 +114,96 @@ pub fn Draw(self: *@This(), game: *@import("../../Game.zig"), viewport_pixels: @
     {
         const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
         defer if (glSync) |sync| gl.DeleteSync(sync);
-        _ = try loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
+        //  _ = try loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
     }
     return drawn;
 }
 
-pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    _ = try self.load_queue.append(mesh);
+threadlocal var context: ?sdl.video.gl.Context = null;
+
+pub const MeshWriter = struct {
+    vbo: ?c_uint,
+    pos: usize,
+    interface: std.Io.Writer,
+
+    pub fn init(buffer: []u8) MeshWriter {
+        return .{
+            .interface = initInterface(buffer),
+            .vbo = null,
+            .pos = 0,
+        };
+    }
+
+    pub fn initInterface(buffer: []u8) std.Io.Writer {
+        return .{
+            .vtable = &.{
+                .drain = drain,
+                .sendFile = std.Io.Writer.unimplementedSendFile,
+            },
+            .buffer = buffer,
+        };
+    }
+    const main = @import("../../main.zig");
+    
+    
+    pub fn drain(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) error{WriteFailed}!usize {
+        _ = splat;
+        _ = data;
+        const buffered = io_w.buffered();
+        if (buffered.len == 0) return 0;
+        gl.makeProcTableCurrent(&main.proc_table);
+        if (context == null) {
+            context = main.contexts[std.crypto.random.intRangeAtMost(usize, 0, 511)]; //terrable solution
+            context.?.makeCurrent(main.window) catch return error.WriteFailed;
+        }
+        context.?.makeCurrent(main.window) catch return error.WriteFailed;
+        const mesh_writer: *MeshWriter = @alignCast(@fieldParentPtr("interface", io_w));
+        var new_vbo: c_uint = undefined;
+        gl.GenBuffers(1, @ptrCast(&new_vbo));
+        glError() catch return error.WriteFailed;
+        if (mesh_writer.vbo) |vbo| {
+            gl.DeleteBuffers(1, @ptrCast(&vbo));
+            @panic("TODO copy data");
+        }
+        gl.BindBuffer(gl.ARRAY_BUFFER, new_vbo);
+        gl.BufferData(gl.ARRAY_BUFFER, @intCast(buffered.len), buffered.ptr, gl.STATIC_DRAW);
+        gl.Finish();
+        glError() catch {
+            gl.DeleteBuffers(1, @ptrCast(&new_vbo));
+            mesh_writer.vbo = null;
+            return error.WriteFailed;
+        };
+
+        mesh_writer.vbo = new_vbo;
+        mesh_writer.pos += buffered.len;
+        _ = io_w.consumeAll();
+        return buffered.len;
+    }
+};
+
+fn glError() !void {
+    if (true) return;
+    switch (gl.GetError()) {
+        gl.NO_ERROR => return,
+        gl.INVALID_ENUM => return error.InvalidEnum,
+        gl.INVALID_VALUE => return error.InvalidValue,
+        gl.INVALID_OPERATION => return error.InvalidOperation,
+        gl.INVALID_FRAMEBUFFER_OPERATION => return error.InvalidFramebufferOperation,
+        gl.OUT_OF_MEMORY => return error.OutOfMemory,
+        else => unreachable,
+    }
 }
 
-fn loadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 {
-    const lm = ztracy.ZoneNC(@src(), "LoadMeshes", 156567756);
-    defer lm.End();
-    const st = std.time.microTimestamp();
-    var amount: u64 = 0;
-    while (true) {
-        var syncStatus: c_int = undefined;
-        if (glSync) |sync| gl.GetSynciv(sync, gl.SYNC_STATUS, @sizeOf(c_int), null, @ptrCast(&syncStatus)) else syncStatus = gl.UNSIGNALED;
-        if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
-        const mesh = self.load_queue.popFirst() orelse break;
-        defer mesh.free(self.allocator);
-        const isempty = mesh.faces == null and mesh.TransperentFaces == null;
-        if (isempty) {
-            self.remove(mesh.Pos);
-            continue;
-        }
-        const ex = self.renderlist.get(mesh.Pos);
-        defer amount += 1;
-        var oldtime: ?i64 = null;
-        if (ex) |m| {
-            oldtime = m.time;
-        }
-        if (!mesh.animation) {
-            oldtime = 0;
-        }
-        const mesh_buffer_ids = LoadMesh(self, mesh, oldtime);
-        {
-            const oldChunk = try self.renderlist.fetchPut(mesh.Pos, mesh_buffer_ids);
-            if (oldChunk) |old_mesh| {
-                old_mesh.free();
-            }
-        }
+fn frameLoadBuffers(self: *@This())!void{
+    while (self.load_queue.popFirst()) |vbo| {
+        try self.loadBuffer(vbo.Pos, vbo.vbo, vbo.face_count, false);
     }
-    return amount;
+}
+
+pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
+    if(true)unreachable;
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    _ = try self.load_queue.append(mesh);
 }
 
 pub fn remove(self: *@This(), Pos: ChunkPos) void {
@@ -161,8 +212,11 @@ pub fn remove(self: *@This(), Pos: ChunkPos) void {
 }
 
 fn removeChunk(userdata: *anyopaque, Pos: ChunkPos) void {
-    const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
-    addChunk(userdata, emptyMesh) catch std.log.err("removemesh failed", .{});
+    _ = userdata;
+    _ = Pos;
+    unreachable;
+    //const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
+    //addChunk(userdata, emptyMesh) catch std.log.err("removemesh failed", .{});
 }
 
 fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
@@ -170,47 +224,43 @@ fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
     return self.renderlist.contains(Pos);
 }
 
-fn LoadMesh(renderer: *@This(), mesh: Mesh, CreationTime: ?i64) MeshBufferIDs {
+pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, CreationTime: ?i64) MeshBufferIDs {
     var NewMeshIDs: MeshBufferIDs = .{
         .vao = [2]?c_uint{ null, null },
         .vbo = [2]?c_uint{ null, null },
         .count = [2]u32{ 0, 0 },
         .drawCommand = [2]?c_uint{ null, null },
         .UBO = undefined,
-        .pos = mesh.Pos.position,
+        .pos = Pos.position,
         .time = 0,
-        .scale = @floatCast(ChunkPos.toScale(mesh.Pos.level)),
+        .scale = @floatCast(ChunkPos.toScale(Pos.level)),
     };
 
     gl.GenBuffers(1, @ptrCast(&NewMeshIDs.UBO));
     gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
     const UniformBuffer = UBO{
-        .chunkPos = mesh.Pos.position,
-        .scale = @floatCast(ChunkPos.toScale(mesh.Pos.level)),
+        .chunkPos = Pos.position,
+        .scale = @floatCast(ChunkPos.toScale(Pos.level)),
         .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
         ._0 = undefined,
     };
     gl.BufferData(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), gl.STATIC_DRAW);
 
     inline for (0..2) |i| {
-        const faces = if (i == 0) mesh.faces else mesh.TransperentFaces;
-        if (faces) |f| {
+        const faces = if (i == 0) true else false;
+        if (faces) {
             var a: c_uint = undefined;
-            var b: c_uint = undefined;
             gl.GenVertexArrays(1, @ptrCast(&a));
             gl.BindVertexArray(a);
-            gl.GenBuffers(1, @ptrCast(&b));
-            gl.BindBuffer(gl.ARRAY_BUFFER, b);
+            gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
             NewMeshIDs.vao[i] = a;
-            NewMeshIDs.vbo[i] = b;
-            const bytes = std.mem.sliceAsBytes(f);
-            gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(Mesh.Face) * f.len), bytes.ptr, gl.STATIC_DRAW);
-            NewMeshIDs.count[i] = @intCast(f.len);
+            NewMeshIDs.vbo[i] = vbo;
+            NewMeshIDs.count[i] = @intCast(face_count);
             gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.indecies);
             gl.BindBuffer(gl.ARRAY_BUFFER, renderer.facebuffer);
             gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
             gl.EnableVertexAttribArray(0);
-            gl.BindBuffer(gl.ARRAY_BUFFER, b);
+            gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
             gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
             gl.EnableVertexAttribArray(1);
             gl.VertexAttribDivisor(1, 1);
@@ -233,6 +283,25 @@ fn LoadMesh(renderer: *@This(), mesh: Mesh, CreationTime: ?i64) MeshBufferIDs {
     gl.BindBuffer(gl.ARRAY_BUFFER, 0);
     gl.BindVertexArray(0);
     return NewMeshIDs;
+}
+
+pub fn loadBuffer(self: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, animation: bool) !void {
+    const ex = self.renderlist.get(Pos);
+    var oldtime: ?i64 = null;
+    if (ex) |m| {
+        oldtime = m.time;
+    }
+    if (!animation) {
+        oldtime = 0;
+    }
+    const mesh_buffer_ids = LoadVbo(self, Pos, vbo, face_count, oldtime);
+    {
+        std.debug.print("putting\n", .{});
+        const oldChunk = try self.renderlist.fetchPut(Pos, mesh_buffer_ids);
+        if (oldChunk) |old_mesh| {
+            old_mesh.free();
+        }
+    }
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
@@ -355,7 +424,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
             torenderchunks += 1;
             const buffer_ids = item.value_ptr;
             const Pos = item.key_ptr.*;
-
+            //std.debug.print("rendering: {any}\n", .{buffer_ids});
             const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
             const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
             const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
@@ -365,6 +434,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
             gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
             gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand[i].?);
             gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
+            try glError();
         }
     }
 }
@@ -372,9 +442,9 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
-    const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
-    defer if (glSync) |sync| gl.DeleteSync(sync);
-    _ = loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms) catch return error.DrawFailed;
+    //const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
+    //defer if (glSync) |sync| gl.DeleteSync(sync);
+    self.frameLoadBuffers() catch return error.DrawFailed;
 }
 
 fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {

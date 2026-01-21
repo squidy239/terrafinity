@@ -24,8 +24,10 @@ const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
-var proc_table: gl.ProcTable = undefined;
-
+pub var proc_table: gl.ProcTable = undefined;
+pub var window: sdl.video.Window = undefined;
+pub var game_render_context: sdl.video.gl.Context = undefined;
+pub var contexts: [512]sdl.video.gl.Context = undefined;
 const config_path = "Config.zon";
 
 pub fn main() !void {
@@ -58,7 +60,7 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-    const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
+    window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
         .resizable = true,
         .high_pixel_density = true,
@@ -72,14 +74,20 @@ pub fn main() !void {
     try sdl.keyboard.startTextInput(window);
     defer sdl.keyboard.stopTextInput(window) catch unreachable;
 
+    try sdl.video.gl.setAttribute(.share_with_current_context, 1);
+
     // Create SDL renderer for UI (uses OpenGL backend internally)
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
 
-    const game_render_context = try sdl.video.gl.Context.init(window);
+    game_render_context = try sdl.video.gl.Context.init(window);
     defer game_render_context.deinit() catch unreachable;
 
     try sdl_renderer.setDrawBlendMode(.blend);
+
+    for (&contexts) |*ctx| {
+        ctx.* = try sdl.video.gl.Context.init(window);
+    }
     try game_render_context.makeCurrent(window);
 
     // Initialize OpenGL
@@ -173,7 +181,7 @@ pub fn main() !void {
     }
 }
 
-fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !f32 {
+fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
@@ -181,7 +189,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
     }
     var scroll: f32 = 0;
     while (sdl.events.poll()) |event| {
-        _ = try ui_backend.addEvent(window, @bitCast(event.toSdl()));
+        _ = try ui_backend.addEvent(win, @bitCast(event.toSdl()));
         switch (event) {
             .key_up => |key| {
                 //TODO modifiers
