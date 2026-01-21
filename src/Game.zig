@@ -30,7 +30,7 @@ world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 tracking_allocator: TrackingAllocator,
 
-rendered_chunks: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 32), //TODO remove this and replace it
+loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
 
 // Threads
 loaderThread: ?std.Thread,
@@ -153,7 +153,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
-        .rendered_chunks = .init(allocator),
+        .loaded_or_meshed = .init(allocator),
         .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
@@ -341,9 +341,45 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     }
 }
 
+pub fn unloadChunkMeshes(self: *@This()) void {
+    const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
+    defer unload.End();
+
+    const playerpos = self.player.physics.getPos();
+    const renderdistance = self.getGenDistance();
+    const levels = self.getLevels();
+    var buffer: [256]World.ChunkPos = undefined;
+    var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
+
+    var list_it = self.opengl_renderer.renderlist.iterator();
+    defer list_it.deinit();
+    while (true) {
+        {
+            const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
+            defer loop.End();
+            while (list_it.next()) |entry| {
+                const Pos = entry.key_ptr.*;
+                const innerRadius: @Vector(2, u32) = self.getInnerGenRadius(renderdistance, Pos.level);
+                const keep = Loader.keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
+                if (keep) continue;
+                tounload.appendBounded(Pos) catch break;
+            }
+        }
+        if (tounload.items.len == 0) break;
+        const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
+        defer free.End();
+        list_it.pause();
+        defer list_it.unpause();
+        while (tounload.pop()) |Pos| {
+            self.opengl_renderer.remove(Pos);
+            _ = self.loaded_or_meshed.remove(Pos);
+        }
+    }
+}
+
 pub fn addChunkToRenderAsync(self: *@This(), Pos: World.ChunkPos, genStructures: bool) !void {
-    try self.rendered_chunks.put(Pos, {});
-    errdefer _ = self.rendered_chunks.remove(Pos);
+    try self.loaded_or_meshed.put(Pos, {});
+    errdefer _ = self.loaded_or_meshed.remove(Pos);
     try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, .Medium);
 }
 
@@ -356,7 +392,7 @@ fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
     const running = self.running.load(.monotonic);
     if (!inside_range or !running) {
-        _ = self.rendered_chunks.remove(Pos);
+        _ = self.loaded_or_meshed.remove(Pos);
         return;
     }
     self.addChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
@@ -379,7 +415,7 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     self.pool.deinit();
     std.log.info("closed threadpool", .{});
 
-    self.rendered_chunks.deinit();
+    self.loaded_or_meshed.deinit();
 
     self.world.deinit();
 

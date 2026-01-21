@@ -52,7 +52,6 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
                 .containsChunk = containsChunk,
                 .clear = clear,
                 .setViewport = setViewport,
-                .unloadChunks = unloadChunks,
             },
         },
     };
@@ -131,7 +130,6 @@ fn loadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 
         if (std.time.microTimestamp() - st > max_us or (syncStatus == gl.SIGNALED and std.time.microTimestamp() - st > min_us)) break;
         const mesh = self.load_queue.popFirst() orelse break;
         defer mesh.free(self.allocator);
-        //defer _ = game.chunkManager.LoadingChunks.remove(mesh.Pos); i will probubly forget to readd this
         const isempty = mesh.faces == null and mesh.TransperentFaces == null;
         if (isempty) {
             self.remove(mesh.Pos);
@@ -157,7 +155,7 @@ fn loadMeshes(self: *@This(), glSync: ?*gl.sync, min_us: u32, max_us: u32) !u64 
     return amount;
 }
 
-fn remove(self: *@This(), Pos: ChunkPos) void {
+pub fn remove(self: *@This(), Pos: ChunkPos) void {
     const ids = self.renderlist.fetchremove(Pos) orelse return;
     ids.free();
 }
@@ -170,33 +168,6 @@ fn removeChunk(userdata: *anyopaque, Pos: ChunkPos) void {
 fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     return self.renderlist.contains(Pos);
-}
-
-fn unloadChunks(userdata: *anyopaque, playerPos: @Vector(3, f64), mesh_distance: @Vector(2, u32), min_level: i32, max_level: i32, inner_radius: @Vector(2, u32)) void {
-    const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
-    defer unload.End();
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    var buffer: [256]ChunkPos = undefined;
-    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&buffer);
-    {
-        const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
-        defer loop.End();
-        var list_it = self.renderlist.iterator();
-        defer list_it.deinit();
-        while (list_it.next()) |entry| {
-            const Pos: ChunkPos = entry.key_ptr.*;
-            const innerRadius: @Vector(2, u32) = if (Pos.level > min_level) inner_radius else @splat(0);
-            const keep = keepLoaded(min_level, max_level, playerPos, Pos, innerRadius, mesh_distance);
-            if (keep) continue;
-            tounload.appendBounded(Pos) catch break;
-        }
-    }
-
-    const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
-    defer free.End();
-    for (tounload.items) |Pos| {
-        self.remove(Pos);
-    }
 }
 
 fn LoadMesh(renderer: *@This(), mesh: Mesh, CreationTime: ?i64) MeshBufferIDs {

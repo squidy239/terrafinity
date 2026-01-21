@@ -87,11 +87,10 @@ fn loadChunksSpiral(game: *Game, playerPos: @Vector(3, f64), dist: @Vector(2, u3
                 const Pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
                 const in_range = keepLoaded(null, null, playerPos, Pos, innerdistance, distance);
-                if (!in_range or game.rendered_chunks.contains(Pos)) {
+                if (!in_range)
                     continue;
-                }
 
-                const loaded = game.renderer.containsChunk(Pos);
+                const loaded = game.renderer.containsChunk(Pos) or game.loaded_or_meshed.contains(Pos);
 
                 if ((!loaded or (game.world.getGenState(Pos) orelse continue) == .TerrainGenerated)) {
                     amount_loaded += 1;

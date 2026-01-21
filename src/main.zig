@@ -153,8 +153,8 @@ pub fn main() !void {
             try game_render_context.makeCurrent(window);
             game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
             try game.renderer.clear(game.player.physics.getPos());
+            game.unloadChunkMeshes();
             try game.renderer.drawChunks(game.player.physics.getPos());
-            game.renderer.unloadChunks(game.player.physics.getPos(), game.getGenDistance(), game.getLevels()[0], game.getLevels()[1], game.getInnerGenRadius(game.getGenDistance(), game.getLevels()[1]));
         }
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
