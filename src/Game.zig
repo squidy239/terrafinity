@@ -169,6 +169,10 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
+    std.fs.cwd().makeDir(folder) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 
     var world_options = WorldOptions.fromWorldFolder(folder, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
@@ -177,7 +181,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     world_options.generator_config.setSeeds();
     try world_options.save(folder);
 
-    const terrain_height_cache_memory = 100_000_000; //100 mb
+    const terrain_height_cache_memory = 100 * 1024 * 1024;
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
         .terrain_height_cache = try .init(game.allocator, thc_size),
@@ -379,7 +383,6 @@ pub fn unloadChunkMeshes(self: *@This()) void {
         list_it.pause();
         defer list_it.unpause();
         while (tounload.pop()) |Pos| {
-            std.debug.print("U", .{});
             self.opengl_renderer.remove(Pos);
             _ = self.loaded_or_meshed.remove(Pos);
         }
@@ -407,7 +410,6 @@ fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
     const running = self.running.load(.monotonic);
     if (!inside_range or !running) {
-        std.debug.print("L", .{});
         _ = self.loaded_or_meshed.remove(Pos);
         return;
     }

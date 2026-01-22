@@ -56,7 +56,6 @@ pub fn ChunkLoaderThread(game: *Game, intervel_ns: u64) void {
         while (level < levels[1]) : (level += 1) {
             amount_loaded += loadChunksSpiral(game, (playerPos), genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
         }
-        std.debug.print("loaded {d} chunks, count: {d}\n", .{ amount_loaded, game.loaded_or_meshed.count() });
         addChunkstoLoad.End();
     }
 }

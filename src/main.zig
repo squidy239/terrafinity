@@ -87,6 +87,7 @@ pub fn main() !void {
     try sdl_renderer.setDrawBlendMode(.blend);
     const cpu_count = try std.Thread.getCpuCount();
     contexts = try allocator.alloc(?sdl.video.gl.Context, cpu_count);
+    defer allocator.free(contexts);
     for (contexts) |*ctx| ctx.* = null;
     defer for (contexts) |ctx| if (ctx != null) ctx.?.deinit() catch unreachable;
 

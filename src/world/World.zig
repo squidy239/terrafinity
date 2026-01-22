@@ -361,7 +361,7 @@ pub fn unloadTimeout(self: *@This(), max_ms: u64, current_memory: *std.atomic.Va
             try self.unloadChunk(Pos);
         }
     }
-    std.debug.print("percent: {d}, timeout: {d}, chunks loaded: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)) * 100, memCurve(max_ms, current_memory.load(.unordered), memory_target), chunks });
+    std.log.debug("percent: {d}, timeout: {d}, chunks loaded: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)) * 100, memCurve(max_ms, current_memory.load(.unordered), memory_target), chunks });
 }
 
 ///returns chunk timeout seconds
