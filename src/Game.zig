@@ -137,9 +137,9 @@ pub const WorldOptions = struct {
         try worldconfwriter.end();
         try generatorconfwriter.end();
     }
-
+    const main = @import("main.zig");
     pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
-        @import("main.zig").context_index.store(0, .seq_cst);
+        main.context_index.store(0, .seq_cst);
         std.zon.parse.free(allocator, self.world_config);
         std.zon.parse.free(allocator, self.generator_config);
     }
@@ -340,7 +340,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     defer chunk.unlockShared();
     lock.End();
     exbl.End();
-    var buffer: [1000000]u8 = undefined;
+    var buffer: [65535]u8 = undefined;
     var mesh_writer: Renderer.OpenGl.MeshWriter = .init(&buffer);
     try Mesh.fromChunks(
         chunk.blocks,
@@ -349,7 +349,8 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     );
     try mesh_writer.interface.flush();
     _ = playAnimation;
-    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = mesh_writer.pos / @sizeOf(Mesh.Face), .vbo = mesh_writer.vbo orelse return });
+    if (mesh_writer.pos == 0) return;
+    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = mesh_writer.pos / @sizeOf(Mesh.Face), .buffer = mesh_writer.buffer });
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {

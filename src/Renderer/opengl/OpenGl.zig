@@ -34,7 +34,7 @@ interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 
 const toRenderData = struct {
-    vbo: c_uint,
+    buffer: GpuBuffer,
     Pos: ChunkPos,
     face_count: usize,
 };
@@ -70,8 +70,8 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
 }
 
 pub fn deinit(self: *@This()) void {
-    while (self.load_queue.popFirst()) |vbo| {
-        gl.DeleteBuffers(1, @ptrCast(&vbo));
+    while (self.load_queue.popFirst()) |trd| {
+        gl.DeleteBuffers(1, @ptrCast(&trd.buffer.buffer));
     }
     self.load_queue.deinit(true);
 
@@ -92,47 +92,17 @@ pub fn deinit(self: *@This()) void {
     std.log.info("renderer deinit", .{});
 }
 
-pub fn Draw(self: *@This(), game: *@import("../../Game.zig"), viewport_pixels: @Vector(2, f32)) ![2]u64 {
-    const playerPos = self.player.physics.getPos();
-    //draw chunks
-    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
-    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, playerPos[1] / 4096)))))));
-    const c = ztracy.ZoneNC(@src(), "Clear", 32213);
-    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
-    gl.Clear(gl.DEPTH_BUFFER_BIT);
-    c.End();
-    if (!std.meta.eql(last_viewport, viewport_pixels)) gl.Viewport(0, 0, @intFromFloat(viewport_pixels[0]), @intFromFloat(viewport_pixels[1]));
-    last_viewport = viewport_pixels;
-    const dc = ztracy.ZoneNC(@src(), "DrawChunks", 24342);
-    const drawn = self.DrawChunks(playerPos, skyColor, viewport_pixels);
-    dc.End();
-    const drawEntities = ztracy.ZoneNC(@src(), "drawEntities", 24342);
-    try self.DrawEntities(game, playerPos, viewport_pixels);
-    drawEntities.End();
-    const um = ztracy.ZoneNC(@src(), "unloadMeshes", 54333);
-    self.unloadMeshes(playerPos, game);
-    um.End();
-    {
-        const glSync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse null;
-        defer if (glSync) |sync| gl.DeleteSync(sync);
-        //  _ = try loadMeshes(self, glSync, 10 * std.time.us_per_ms, 40 * std.time.us_per_ms);
-    }
-    return drawn;
-}
-
 threadlocal var context: ?sdl.video.gl.Context = null;
 
 pub const MeshWriter = struct {
-    vbo: ?c_uint,
+    buffer: GpuBuffer,
     pos: usize,
     interface: std.Io.Writer,
 
     pub fn init(buffer: []u8) MeshWriter {
         return .{
             .interface = initInterface(buffer),
-            .vbo = null,
+            .buffer = .{},
             .pos = 0,
         };
     }
@@ -161,23 +131,8 @@ pub const MeshWriter = struct {
         }
         context.?.makeCurrent(main.window) catch return error.WriteFailed;
         const mesh_writer: *MeshWriter = @alignCast(@fieldParentPtr("interface", io_w));
-        var new_vbo: c_uint = undefined;
-        gl.GenBuffers(1, @ptrCast(&new_vbo));
-        glError() catch return error.WriteFailed;
-        if (mesh_writer.vbo) |vbo| {
-            gl.DeleteBuffers(1, @ptrCast(&vbo));
-            @panic("TODO copy data");
-        }
-        gl.BindBuffer(gl.ARRAY_BUFFER, new_vbo);
-        gl.BufferStorage(gl.ARRAY_BUFFER, @intCast(buffered.len), buffered.ptr, 0x0);
-        gl.Flush();
-        glError() catch {
-            gl.DeleteBuffers(1, @ptrCast(&new_vbo));
-            mesh_writer.vbo = null;
-            return error.WriteFailed;
-        };
-
-        mesh_writer.vbo = new_vbo;
+        glError() catch unreachable; //ensure no errors before expanding
+        mesh_writer.buffer.writeSegment(mesh_writer.pos, buffered) catch return error.WriteFailed;
         mesh_writer.pos += buffered.len;
         _ = io_w.consumeAll();
         return buffered.len;
@@ -185,13 +140,12 @@ pub const MeshWriter = struct {
 };
 
 fn glError() !void {
-    if (true) return;
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
-        gl.INVALID_ENUM => return error.InvalidEnum,
-        gl.INVALID_VALUE => return error.InvalidValue,
-        gl.INVALID_OPERATION => return error.InvalidOperation,
-        gl.INVALID_FRAMEBUFFER_OPERATION => return error.InvalidFramebufferOperation,
+        gl.INVALID_ENUM => unreachable,
+        gl.INVALID_VALUE => unreachable,
+        gl.INVALID_OPERATION => unreachable,
+        gl.INVALID_FRAMEBUFFER_OPERATION => unreachable,
         gl.OUT_OF_MEMORY => return error.OutOfMemory,
         else => unreachable,
     }
@@ -200,8 +154,8 @@ fn glError() !void {
 fn frameLoadBuffers(self: *@This()) !void {
     const flb = ztracy.ZoneNC(@src(), "frameLoadBuffers", 32213);
     defer flb.End();
-    while (self.load_queue.popFirst()) |vbo| {
-        try self.loadBuffer(vbo.Pos, vbo.vbo, vbo.face_count, false);
+    while (self.load_queue.popFirst()) |data| {
+        try self.loadBuffer(data.Pos, data.buffer.buffer.?, data.buffer.len, false);
     }
 }
 
@@ -425,7 +379,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
         gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand.?);
         gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
-        try glError();
+        glError() catch return error.DrawFailed;
     }
 }
 
@@ -524,5 +478,123 @@ const UniformLocations = struct {
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
         };
+    }
+};
+
+const GpuBuffer = struct {
+    len: usize = 0,
+    buffer: ?c_uint = null,
+    pub fn expand(self: *GpuBuffer, new_size: usize) !void {
+        std.debug.assert(new_size != 0);
+        if (self.buffer != null and new_size <= self.len) return;
+        var new_buffer: c_uint = undefined;
+        gl.CreateBuffers(1, @ptrCast(&new_buffer));
+        try glError();
+        gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.DYNAMIC_STORAGE_BIT);
+        glError() catch |err| {
+            gl.DeleteBuffers(1, @ptrCast(&new_buffer));
+            return err;
+        };
+        if (self.buffer) |oldbuffer| {
+            gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(self.len));
+            glError() catch |err| {
+                gl.DeleteBuffers(1, @ptrCast(&new_buffer));
+                return err;
+            };
+            self.buffer = new_buffer;
+            self.len = new_size;
+            gl.DeleteBuffers(1, @ptrCast(&oldbuffer));
+        } else {
+            self.buffer = new_buffer;
+            self.len = new_size;
+        }
+    }
+
+    pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
+        try self.expand(offset + data.len);
+        gl.NamedBufferSubData(self.buffer.?, @intCast(offset), @intCast(data.len), data.ptr);
+        gl.Flush();
+        try glError();
+    }
+
+    pub fn free(self: *GpuBuffer) void {
+        if (self.buffer) |buffer| {
+            gl.DeleteBuffers(1, @ptrCast(&buffer));
+        }
+        self.buffer = null;
+        self.len = 0;
+    }
+};
+
+const MultiRenderBuffer = struct {
+    allocator: std.mem.Allocator,
+    buffer: GpuBuffer = .{},
+    linked_list: std.DoublyLinkedList = .{},
+    list_lock: std.Thread.Mutex = .{},
+    map: std.AutoHashMap([]const u8, *std.DoublyLinkedList.Node) = .{},
+    map_lock: std.Thread.Mutex = .{},
+
+    const Space = struct {
+        node: *std.DoublyLinkedList.Node,
+        free: bool,
+        start: usize,
+        length: usize,
+    };
+
+    pub fn put(key: []const u8, value: []const u8) !void {
+        _ = key;
+        _ = value;
+    }
+
+    fn addValue(self: *@This(), value: []const u8) !*Space {
+        self.list_lock.lock();
+        defer self.list_lock.unlock();
+        var node = self.linked_list.first orelse self.expand(self.buffer.len * 1.5);
+        while (true) {
+            node = node.next orelse self.expand(self.buffer.len * 1.5);
+            const space: *Space = @fieldParentPtr("node", node);
+            if (space.free and space.length >= value.len) {
+                space.free = false;
+                if (space.length > value.len) {
+                    const space_ptr = try self.allocator.create(Space);
+                    space_ptr.* = Space{
+                        .node = undefined,
+                        .free = true,
+                        .start = space.start + value.len,
+                        .length = space.length - value.len,
+                    };
+                    self.linked_list.insertAfter(node, space_ptr.node);
+                    return space_ptr;
+                }
+            }
+        }
+    }
+
+    fn expand(self: *@This(), new_size: usize) !*Space {
+        const old_size = self.buffer.len;
+        std.debug.assert(new_size > old_size);
+        self.buffer.expand(new_size);
+        const size_diff = new_size - old_size;
+        var add_one: bool = self.linked_list.last == null;
+        if (!add_one) {
+            const last: *Space = @fieldParentPtr("node", self.linked_list.last.?);
+            if (!last.free) {
+                add_one = true;
+            } else {
+                last += size_diff;
+                return last;
+            }
+        }
+        if (add_one) {
+            const space_ptr = try self.allocator.create(Space);
+            space_ptr.* = Space{
+                .node = undefined,
+                .free = true,
+                .start = old_size,
+                .length = size_diff,
+            };
+            self.linked_list.append(space_ptr.node);
+            return space_ptr;
+        }
     }
 };

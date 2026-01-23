@@ -154,7 +154,7 @@ fn setupDependencies(
     // OpenGL bindings
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
-        .version = .@"4.4",
+        .version = .@"4.5",
         .profile = .core,
     });
     root_module.addImport("gl", gl_bindings);
