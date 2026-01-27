@@ -4,12 +4,13 @@ const builtin = @import("builtin");
 const Pool = @This();
 const WaitGroup = std.Thread.WaitGroup;
 const ConcurrentQueue = @import("ConcurrentQueue");
+const sdl = @import("sdl3");
 mutex: std.Thread.Mutex = .{},
 cond: std.Thread.Condition = .{},
 run_queue: [7]ConcurrentQueue.ConcurrentQueue(*Runnable, 32, false) = undefined,
 is_running: std.atomic.Value(bool) = .init(true),
 allocator: std.mem.Allocator,
-threads: if (builtin.single_threaded) [0]std.Thread else []std.Thread,
+threads: []std.Thread,
 isempty: std.Thread.Condition = .{},
 isemptymutex: std.Thread.Mutex = .{},
 
@@ -150,6 +151,7 @@ fn worker(pool: *Pool) void {
             pool.isemptymutex.unlock();
         }
         if (run == null and !pool.is_running.load(.monotonic)) {
+            sdl.thread.cleanupTls(); //there has to be a better way to do this
             break;
         } else run = null;
     }

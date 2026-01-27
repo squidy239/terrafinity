@@ -70,6 +70,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
 }
 
 pub fn deinit(self: *@This()) void {
+    gl.Finish();
     while (self.load_queue.popFirst()) |trd| {
         gl.DeleteBuffers(1, @ptrCast(&trd.buffer.buffer));
     }
@@ -130,6 +131,7 @@ pub const MeshWriter = struct {
             gl.makeProcTableCurrent(&main.proc_table);
         }
         context.?.makeCurrent(main.window) catch return error.WriteFailed;
+        defer _ = sdl.c.SDL_GL_MakeCurrent(main.window.value, null);
         const mesh_writer: *MeshWriter = @alignCast(@fieldParentPtr("interface", io_w));
         glError() catch unreachable; //ensure no errors before expanding
         mesh_writer.buffer.writeSegment(mesh_writer.pos, buffered) catch return error.WriteFailed;

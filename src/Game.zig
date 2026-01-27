@@ -350,7 +350,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     try mesh_writer.interface.flush();
     _ = playAnimation;
     if (mesh_writer.pos == 0) return;
-    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = mesh_writer.pos / @sizeOf(Mesh.Face), .buffer = mesh_writer.buffer });
+    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = @divExact(mesh_writer.pos, @sizeOf(Mesh.Face)), .buffer = mesh_writer.buffer });
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {

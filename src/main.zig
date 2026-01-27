@@ -89,7 +89,9 @@ pub fn main() !void {
     contexts = try allocator.alloc(?sdl.video.gl.Context, cpu_count);
     defer allocator.free(contexts);
     for (contexts) |*ctx| ctx.* = null;
-    defer for (contexts) |ctx| if (ctx != null) ctx.?.deinit() catch unreachable;
+    defer for (contexts) |ctx| if (ctx) |c| {
+        c.deinit() catch std.log.err("error closing context", .{});
+    };
 
     for (contexts) |*ctx| {
         ctx.* = try sdl.video.gl.Context.init(window);
@@ -221,6 +223,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
 }
 
 test {
+    @setEvalBranchQuota(10000);
     std.testing.refAllDeclsRecursive(@This());
 }
 
