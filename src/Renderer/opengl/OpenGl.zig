@@ -530,52 +530,72 @@ const GpuBuffer = struct {
 
 const MultiRenderBuffer = struct {
     allocator: std.mem.Allocator,
+
+    ///exclusive lock is for resizing, shared lock is for reading/writing
+    buff_lock: std.Thread.RwLock = .{},
     buffer: GpuBuffer = .{},
+
     linked_list: std.DoublyLinkedList = .{},
     list_lock: std.Thread.Mutex = .{},
-    map: std.AutoHashMap([]const u8, *std.DoublyLinkedList.Node) = .{},
+
+    map: std.AutoHashMap([]const u8, *Space) = .{},
     map_lock: std.Thread.Mutex = .{},
 
+    buffer_changed: std.atomic.Value(bool) = .init(false),
+    indirect_buffer: ?c_uint,
+
     const Space = struct {
-        node: *std.DoublyLinkedList.Node,
+        node: std.DoublyLinkedList.Node,
         free: bool,
         start: usize,
         length: usize,
     };
 
-    pub fn put(key: []const u8, value: []const u8) !void {
-        _ = key;
-        _ = value;
+    pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
+        const space = try self.add(value.len);
+        {
+            self.buff_lock.lockShared();
+            defer self.buff_lock.unlockShared();
+            try self.buffer.writeSegment(space.start, value);
+        }
+        gl.Flush();
+        self.map_lock.lock();
+        defer self.map_lock.unlock();
+        self.buffer_changed.store(true, .seq_cst);
+        const existing = try self.map.fetchPut(key, space);
+        std.debug.assert(existing == null); //TODO free existing and handle errors in fetchput
     }
 
-    fn addValue(self: *@This(), value: []const u8) !*Space {
+    fn add(self: *@This(), length: usize) !*Space {
         self.list_lock.lock();
         defer self.list_lock.unlock();
         var node = self.linked_list.first orelse self.expand(self.buffer.len * 1.5);
         while (true) {
-            node = node.next orelse self.expand(self.buffer.len * 1.5);
+            node = node.next orelse try self.expand(self.buffer.len * 1.5);
             const space: *Space = @fieldParentPtr("node", node);
-            if (space.free and space.length >= value.len) {
+            if (space.free and space.length >= length) {
                 space.free = false;
-                if (space.length > value.len) {
+                if (space.length > length) {
                     const space_ptr = try self.allocator.create(Space);
                     space_ptr.* = Space{
                         .node = undefined,
                         .free = true,
-                        .start = space.start + value.len,
-                        .length = space.length - value.len,
+                        .start = space.start + length,
+                        .length = space.length - length,
                     };
-                    self.linked_list.insertAfter(node, space_ptr.node);
-                    return space_ptr;
+                    self.linked_list.insertAfter(node, &space_ptr.node);
                 }
+                return space;
             }
         }
     }
 
     fn expand(self: *@This(), new_size: usize) !*Space {
+        self.buff_lock.lock();
+        defer self.buff_lock.unlock();
         const old_size = self.buffer.len;
         std.debug.assert(new_size > old_size);
-        self.buffer.expand(new_size);
+        try self.buffer.expand(new_size);
         const size_diff = new_size - old_size;
         var add_one: bool = self.linked_list.last == null;
         if (!add_one) {
@@ -583,11 +603,10 @@ const MultiRenderBuffer = struct {
             if (!last.free) {
                 add_one = true;
             } else {
-                last += size_diff;
+                last.length += size_diff;
                 return last;
             }
-        }
-        if (add_one) {
+        } else {
             const space_ptr = try self.allocator.create(Space);
             space_ptr.* = Space{
                 .node = undefined,
@@ -595,8 +614,32 @@ const MultiRenderBuffer = struct {
                 .start = old_size,
                 .length = size_diff,
             };
-            self.linked_list.append(space_ptr.node);
+            self.linked_list.append(&space_ptr.node);
             return space_ptr;
         }
+    }
+
+    fn rebuildCommands(self: *@This(), element_size: usize) !void {
+        if (!self.buffer_changed.swap(false, .seq_cst)) return;
+
+        var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, self.map.count());
+        defer commands.deinit();
+
+        self.map_lock.lock();
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            const space = entry.value_ptr.*;
+            commands.appendAssumeCapacity(DrawElementsIndirectCommand{
+                .count = 6,
+                .firstIndex = 0,
+                .baseInstance = 0,
+                .baseVertex = @divExact(space.start, element_size),
+                .instanceCount = @divExact(space.length, element_size),
+            });
+        }
+        self.map_lock.unlock();
+
+        gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer);
+        gl.BufferData(gl.DRAW_INDIRECT_BUFFER, commands.items.len * @sizeOf(DrawElementsIndirectCommand), commands.items.ptr, gl.DYNAMIC_DRAW);
     }
 };
