@@ -26,10 +26,11 @@ indecies: c_uint,
 entityshaderprogram: c_uint,
 shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
+vao: c_uint,
 uniforms: UniformLocations,
 cameraFront: @Vector(3, f32),
 load_queue: ConcurrentQueue(toRenderData, 32, true),
-renderlist: ConcurrentHashMap(ChunkPos, MeshBufferIDs, std.hash_map.AutoContext(ChunkPos), 80, 32),
+render_buffer: MultiRenderBuffer,
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 
@@ -44,12 +45,13 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
+        .render_buffer = .{ .allocator = allocator },
         .load_queue = .init(allocator),
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
-        .renderlist = .init(allocator),
-        .blockAtlasTextureId = undefined,
-        .uniforms = undefined,
+        .vao = undefined,
+        .blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator),
+        .uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram), //TODO remove the MANY unused uniforms
         .viewport_pixels = .{ 0, 0 },
         .interface = .{
             .userdata = @ptrCast(self),
@@ -57,16 +59,30 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
                 .addChunk = addChunk,
                 .removeChunk = removeChunk,
                 .drawChunks = drawChunksFn,
-                .containsChunk = containsChunk,
+                .containsChunk = undefined,
                 .clear = clear,
                 .setViewport = setViewport,
             },
         },
     };
+
     try self.CompileShaders();
+
+    gl.GenVertexArrays(1, @ptrCast(&self.vao));
+    gl.BindVertexArray(self.vao);
+
+    gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
+    gl.EnableVertexAttribArray(0);
+
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0); // Unbind for now, will bind actual buffer later
+    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+    gl.EnableVertexAttribArray(1);
+    gl.VertexAttribDivisor(1, 1);
+
+    gl.BindVertexArray(0);
+
     self.LoadFacebuffer();
-    self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
-    self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
 }
 
 pub fn deinit(self: *@This()) void {
@@ -76,14 +92,7 @@ pub fn deinit(self: *@This()) void {
     }
     self.load_queue.deinit(true);
 
-    var it = self.renderlist.iterator();
-    while (it.next()) |entry| {
-        const mesh = entry.value_ptr;
-        mesh.free();
-    }
-
-    it.deinit();
-    self.renderlist.deinit();
+    //TODO deinit renderbuffer
 
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
@@ -153,14 +162,6 @@ fn glError() !void {
     }
 }
 
-fn frameLoadBuffers(self: *@This()) !void {
-    const flb = ztracy.ZoneNC(@src(), "frameLoadBuffers", 32213);
-    defer flb.End();
-    while (self.load_queue.popFirst()) |data| {
-        try self.loadBuffer(data.Pos, data.buffer.buffer.?, data.buffer.len, false);
-    }
-}
-
 pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
     if (true) unreachable;
     const self: *@This() = @ptrCast(@alignCast(userdata));
@@ -178,11 +179,6 @@ fn removeChunk(userdata: *anyopaque, Pos: ChunkPos) void {
     unreachable;
     //const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
     //addChunk(userdata, emptyMesh) catch std.log.err("removemesh failed", .{});
-}
-
-fn containsChunk(userdata: *anyopaque, Pos: ChunkPos) bool {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    return self.renderlist.contains(Pos);
 }
 
 pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, CreationTime: ?i64) MeshBufferIDs {
@@ -232,24 +228,6 @@ pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize
     gl.BufferStorage(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, 0x0);
     NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
     return NewMeshIDs;
-}
-
-pub fn loadBuffer(self: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, animation: bool) !void {
-    const ex = self.renderlist.get(Pos);
-    var oldtime: ?i64 = null;
-    if (ex) |m| {
-        oldtime = m.time;
-    }
-    if (!animation) {
-        oldtime = 0;
-    }
-    const mesh_buffer_ids = LoadVbo(self, Pos, vbo, face_count, oldtime);
-    {
-        const oldChunk = try self.renderlist.fetchPut(Pos, mesh_buffer_ids);
-        if (oldChunk) |old_mesh| {
-            old_mesh.free();
-        }
-    }
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
@@ -315,6 +293,7 @@ fn CompileShaders(self: *@This()) !void {
     gl.DeleteShader(entityvertexshader);
     gl.DeleteShader(entityfragshader);
     self.entityshaderprogram = entityshaderprogram;
+    try glError();
 }
 
 fn LoadFacebuffer(self: *@This()) void {
@@ -365,19 +344,23 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const frustrum = Frustum.extractFrustumPlanes(projview);
     //if (i == 1) gl.Disable(gl.CULL_FACE);
     //defer gl.Enable(gl.CULL_FACE);
-    var list_it = self.renderlist.iterator();
+    try self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face));
+    self.render_buffer.map_lock.lock();
+    defer self.render_buffer.map_lock.unlock();
+    var list_it = self.render_buffer.map.iterator();
     defer list_it.deinit();
     while (list_it.next()) |item| {
         torenderchunks += 1;
-        const buffer_ids = item.value_ptr;
-        const Pos = item.key_ptr.*;
-        //std.debug.print("rendering: {any}\n", .{buffer_ids});
-        const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * buffer_ids.scale));
+        const space = item.value_ptr.*;
+        const Pos = std.mem.bytesToValue(ChunkPos, item.key_ptr.*);
+        const scale = ChunkPos.toScale(Pos.level);
+
+        const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
         const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
         const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
         if (!cull) continue;
         drawnchunks += 1;
-        gl.BindVertexArray(buffer_ids.vao orelse continue);
+        gl.BindVertexArray(self.vao orelse continue);
         gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
         gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand.?);
         gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
@@ -388,7 +371,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
-    self.frameLoadBuffers() catch return error.DrawFailed;
 }
 
 fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -538,11 +520,11 @@ const MultiRenderBuffer = struct {
     linked_list: std.DoublyLinkedList = .{},
     list_lock: std.Thread.Mutex = .{},
 
-    map: std.AutoHashMap([]const u8, *Space) = .{},
+    map: std.AutoArrayHashMapUnmanaged([]const u8, *Space) = .empty,
     map_lock: std.Thread.Mutex = .{},
 
     buffer_changed: std.atomic.Value(bool) = .init(false),
-    indirect_buffer: ?c_uint,
+    indirect_buffer: ?c_uint = null,
 
     const Space = struct {
         node: std.DoublyLinkedList.Node,

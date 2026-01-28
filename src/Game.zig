@@ -354,6 +354,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {
+    if (true) unreachable; //TODO
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
