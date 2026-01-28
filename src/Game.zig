@@ -340,21 +340,22 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     defer chunk.unlockShared();
     lock.End();
     exbl.End();
-    var buffer: [65535]u8 = undefined;
-    var mesh_writer: Renderer.OpenGl.MeshWriter = .init(&buffer);
+    var sfa = std.heap.stackFallback(65536, self.allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(sfa.get());
+    defer alloc_writer.deinit();
     try Mesh.fromChunks(
         chunk.blocks,
         &neighbor_faces,
-        &mesh_writer.interface,
+        &alloc_writer.writer,
     );
-    try mesh_writer.interface.flush();
+    const written = alloc_writer.written();
+    if (written.len == 0) return;
+    try self.opengl_renderer.render_buffer.put(Pos, written);
     _ = playAnimation;
-    if (mesh_writer.pos == 0) return;
-    _ = try self.opengl_renderer.load_queue.append(.{ .Pos = Pos, .face_count = @divExact(mesh_writer.pos, @sizeOf(Mesh.Face)), .buffer = mesh_writer.buffer });
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {
-    if (true) unreachable; //TODO
+    if (true) return; //TODO
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 

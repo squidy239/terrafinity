@@ -29,29 +29,23 @@ blockAtlasTextureId: c_uint,
 vao: c_uint,
 uniforms: UniformLocations,
 cameraFront: @Vector(3, f32),
-load_queue: ConcurrentQueue(toRenderData, 32, true),
-render_buffer: MultiRenderBuffer,
+render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 
-const toRenderData = struct {
-    buffer: GpuBuffer,
-    Pos: ChunkPos,
-    face_count: usize,
-};
 pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
+    try glError();
     self.* = @This(){
         .allocator = allocator,
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
         .render_buffer = .{ .allocator = allocator },
-        .load_queue = .init(allocator),
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
         .blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator),
-        .uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram), //TODO remove the MANY unused uniforms
+        .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
         .interface = .{
             .userdata = @ptrCast(self),
@@ -65,8 +59,11 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
             },
         },
     };
+    try glError();
 
     try self.CompileShaders();
+
+    self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
@@ -81,17 +78,14 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     gl.VertexAttribDivisor(1, 1);
 
     gl.BindVertexArray(0);
+    try glError();
 
     self.LoadFacebuffer();
+    try glError();
 }
 
 pub fn deinit(self: *@This()) void {
     gl.Finish();
-    while (self.load_queue.popFirst()) |trd| {
-        gl.DeleteBuffers(1, @ptrCast(&trd.buffer.buffer));
-    }
-    self.load_queue.deinit(true);
-
     //TODO deinit renderbuffer
 
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
@@ -126,7 +120,6 @@ pub const MeshWriter = struct {
             .buffer = buffer,
         };
     }
-    const main = @import("../../main.zig");
 
     pub fn drain(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) error{WriteFailed}!usize {
         const d = ztracy.ZoneNC(@src(), "drain", 32213);
@@ -149,6 +142,16 @@ pub const MeshWriter = struct {
         return buffered.len;
     }
 };
+
+const main = @import("../../main.zig");
+
+fn ensureContext() !void {
+    if (context == null) {
+        context = main.contexts[main.context_index.fetchAdd(1, .seq_cst)];
+        gl.makeProcTableCurrent(&main.proc_table);
+    }
+    try context.?.makeCurrent(main.window);
+}
 
 fn glError() !void {
     switch (gl.GetError()) {
@@ -336,36 +339,29 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    var drawnchunks: u64 = 0;
-    var torenderchunks: u64 = 0;
+    //var drawnchunks: u64 = 0;
+    //var torenderchunks: u64 = 0;
     const millitimestamp = std.time.milliTimestamp();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
-    const frustrum = Frustum.extractFrustumPlanes(projview);
+    //const frustrum = Frustum.extractFrustumPlanes(projview);
     //if (i == 1) gl.Disable(gl.CULL_FACE);
     //defer gl.Enable(gl.CULL_FACE);
-    try self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face));
-    self.render_buffer.map_lock.lock();
-    defer self.render_buffer.map_lock.unlock();
-    var list_it = self.render_buffer.map.iterator();
-    defer list_it.deinit();
-    while (list_it.next()) |item| {
-        torenderchunks += 1;
-        const space = item.value_ptr.*;
-        const Pos = std.mem.bytesToValue(ChunkPos, item.key_ptr.*);
-        const scale = ChunkPos.toScale(Pos.level);
+    glError() catch return error.DrawFailed;
+    const count = self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face)) catch return error.DrawFailed;
+    self.render_buffer.buff_lock.lockShared();
+    gl.BindVertexArray(self.vao);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+    glError() catch return error.DrawFailed;
+    //gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
+    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
+    glError() catch return error.DrawFailed;
+    std.log.debug("drawing {d} chunks\n", .{count});
+    gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(count), 0);
+    self.render_buffer.buff_lock.unlockShared();
 
-        const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
-        const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(Pos.position)) * chunkSizeVec) - playerPos);
-        const cull = frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-        if (!cull) continue;
-        drawnchunks += 1;
-        gl.BindVertexArray(self.vao orelse continue);
-        gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
-        gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, buffer_ids.drawCommand.?);
-        gl.DrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0);
-        glError() catch return error.DrawFailed;
-    }
+    glError() catch return error.DrawFailed;
 }
 
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -510,118 +506,130 @@ const GpuBuffer = struct {
     }
 };
 
-const MultiRenderBuffer = struct {
-    allocator: std.mem.Allocator,
+fn MultiRenderBuffer(comptime K: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
 
-    ///exclusive lock is for resizing, shared lock is for reading/writing
-    buff_lock: std.Thread.RwLock = .{},
-    buffer: GpuBuffer = .{},
+        ///exclusive lock is for resizing, shared lock is for reading/writing
+        buff_lock: std.Thread.RwLock = .{},
+        buffer: GpuBuffer = .{},
 
-    linked_list: std.DoublyLinkedList = .{},
-    list_lock: std.Thread.Mutex = .{},
+        linked_list: std.DoublyLinkedList = .{},
+        list_lock: std.Thread.Mutex = .{},
 
-    map: std.AutoArrayHashMapUnmanaged([]const u8, *Space) = .empty,
-    map_lock: std.Thread.Mutex = .{},
+        map: std.AutoArrayHashMapUnmanaged(K, *Space) = .empty,
+        map_lock: std.Thread.Mutex = .{},
 
-    buffer_changed: std.atomic.Value(bool) = .init(false),
-    indirect_buffer: ?c_uint = null,
+        buffer_changed: std.atomic.Value(bool) = .init(false),
+        indirect_buffer: ?c_uint = null,
 
-    const Space = struct {
-        node: std.DoublyLinkedList.Node,
-        free: bool,
-        start: usize,
-        length: usize,
-    };
+        const Space = struct {
+            node: std.DoublyLinkedList.Node,
+            free: bool,
+            start: usize,
+            length: usize,
+        };
 
-    pub fn put(self: *@This(), key: []const u8, value: []const u8) !void {
-        const space = try self.add(value.len);
-        {
-            self.buff_lock.lockShared();
-            defer self.buff_lock.unlockShared();
-            try self.buffer.writeSegment(space.start, value);
+        pub fn put(self: *@This(), key: K, value: []const u8) !void {
+            try ensureContext();
+            const space = try self.add(value.len);
+            {
+                self.buff_lock.lockShared();
+                defer self.buff_lock.unlockShared();
+                try self.buffer.writeSegment(space.start, value);
+            }
+            gl.Flush();
+            self.map_lock.lock();
+            defer self.map_lock.unlock();
+            self.buffer_changed.store(true, .seq_cst);
+            const existing = try self.map.fetchPut(self.allocator, key, space);
+            if(existing != null)std.log.err("TODO remove mesh", .{});
         }
-        gl.Flush();
-        self.map_lock.lock();
-        defer self.map_lock.unlock();
-        self.buffer_changed.store(true, .seq_cst);
-        const existing = try self.map.fetchPut(key, space);
-        std.debug.assert(existing == null); //TODO free existing and handle errors in fetchput
-    }
 
-    fn add(self: *@This(), length: usize) !*Space {
-        self.list_lock.lock();
-        defer self.list_lock.unlock();
-        var node = self.linked_list.first orelse self.expand(self.buffer.len * 1.5);
-        while (true) {
-            node = node.next orelse try self.expand(self.buffer.len * 1.5);
-            const space: *Space = @fieldParentPtr("node", node);
-            if (space.free and space.length >= length) {
-                space.free = false;
-                if (space.length > length) {
-                    const space_ptr = try self.allocator.create(Space);
-                    space_ptr.* = Space{
-                        .node = undefined,
-                        .free = true,
-                        .start = space.start + length,
-                        .length = space.length - length,
-                    };
-                    self.linked_list.insertAfter(node, &space_ptr.node);
+        fn add(self: *@This(), length: usize) !*Space {
+            self.list_lock.lock();
+            defer self.list_lock.unlock();
+            var node = self.linked_list.first orelse &(try self.expand(self.buffer.len + length)).node;
+            while (true) {
+                node = node.next orelse &(try self.expand(self.buffer.len + length)).node;
+                const space: *Space = @fieldParentPtr("node", node);
+                if (space.free and space.length >= length) {
+                    space.free = false;
+                    if (space.length > length) {
+                        const space_ptr = try self.allocator.create(Space);
+                        space_ptr.* = Space{
+                            .node = undefined,
+                            .free = true,
+                            .start = space.start + length,
+                            .length = space.length - length,
+                        };
+                        self.linked_list.insertAfter(node, &space_ptr.node);
+                    }
+                    return space;
                 }
-                return space;
             }
         }
-    }
 
-    fn expand(self: *@This(), new_size: usize) !*Space {
-        self.buff_lock.lock();
-        defer self.buff_lock.unlock();
-        const old_size = self.buffer.len;
-        std.debug.assert(new_size > old_size);
-        try self.buffer.expand(new_size);
-        const size_diff = new_size - old_size;
-        var add_one: bool = self.linked_list.last == null;
-        if (!add_one) {
-            const last: *Space = @fieldParentPtr("node", self.linked_list.last.?);
-            if (!last.free) {
-                add_one = true;
-            } else {
+        fn expand(self: *@This(), new_size: usize) !*Space {
+            self.buff_lock.lock();
+            defer self.buff_lock.unlock();
+            const old_size = self.buffer.len;
+            std.debug.assert(new_size > old_size);
+            try self.buffer.expand(new_size);
+            const size_diff = new_size - old_size;
+            const add_one: bool = self.linked_list.last == null or !@as(*Space, @fieldParentPtr("node", self.linked_list.last.?)).free;
+            if (!add_one) {
+                const last: *Space = @fieldParentPtr("node", self.linked_list.last.?);
+                std.debug.assert(last.free);
                 last.length += size_diff;
                 return last;
+            } else {
+                const space_ptr = try self.allocator.create(Space);
+                space_ptr.* = Space{
+                    .node = undefined,
+                    .free = true,
+                    .start = old_size,
+                    .length = size_diff,
+                };
+                self.linked_list.append(&space_ptr.node);
+                return space_ptr;
             }
-        } else {
-            const space_ptr = try self.allocator.create(Space);
-            space_ptr.* = Space{
-                .node = undefined,
-                .free = true,
-                .start = old_size,
-                .length = size_diff,
+        }
+
+        fn rebuildCommands(self: *@This(), element_size: usize) !usize {
+            //if (!self.buffer_changed.swap(false, .seq_cst)) return;
+            if (self.indirect_buffer == null) {
+                var ib: c_uint = undefined;
+                gl.GenBuffers(1, @ptrCast(&ib));
+                try glError();
+                self.indirect_buffer = ib;
+            }
+            
+            self.map_lock.lock();
+
+            var commands =  std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
+                self.map_lock.unlock();
+                return err;
             };
-            self.linked_list.append(&space_ptr.node);
-            return space_ptr;
+            
+            defer commands.deinit(self.allocator);
+
+            var it = self.map.iterator();
+            while (it.next()) |entry| {
+                const space = entry.value_ptr.*;
+                commands.appendAssumeCapacity(DrawElementsIndirectCommand{
+                    .count = 6,
+                    .firstIndex = 0,
+                    .baseInstance = 0,
+                    .baseVertex = @intCast(@divExact(space.start, element_size)),
+                    .instanceCount = @intCast(@divExact(space.length, element_size)),
+                });
+            }
+            self.map_lock.unlock();
+
+            gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer.?);
+            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
+            return commands.items.len;
         }
-    }
-
-    fn rebuildCommands(self: *@This(), element_size: usize) !void {
-        if (!self.buffer_changed.swap(false, .seq_cst)) return;
-
-        var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, self.map.count());
-        defer commands.deinit();
-
-        self.map_lock.lock();
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            const space = entry.value_ptr.*;
-            commands.appendAssumeCapacity(DrawElementsIndirectCommand{
-                .count = 6,
-                .firstIndex = 0,
-                .baseInstance = 0,
-                .baseVertex = @divExact(space.start, element_size),
-                .instanceCount = @divExact(space.length, element_size),
-            });
-        }
-        self.map_lock.unlock();
-
-        gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer);
-        gl.BufferData(gl.DRAW_INDIRECT_BUFFER, commands.items.len * @sizeOf(DrawElementsIndirectCommand), commands.items.ptr, gl.DYNAMIC_DRAW);
-    }
-};
+    };
+}

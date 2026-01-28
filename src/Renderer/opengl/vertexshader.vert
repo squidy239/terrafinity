@@ -16,11 +16,10 @@ const float Far = 10000000.0;  // Your far plane distance
 const float C = 1.0;  // Resolution constant (adjust as needed)
 
 out float logz;  // Pass to fragment shader
-layout(std140, binding = 0) uniform UBO {
-    float scale;
-    double creationTime;
-    ivec4 chunkPos;
-};
+
+float scale = 1;
+double creationTime = 0;
+ivec4 chunkPos = ivec4(0);
 
 const vec3 offset[6] = vec3[6](
         vec3(0.5, 0.0, 0.0), // +X
@@ -133,15 +132,9 @@ void main() {
     }
 
     coordss = coords;
-    float animationMs = 2500;
-    float animationSpeed = 0.25;
-    float chunktime = float(time - creationTime);
     dvec3 relativeChunkPos = (dvec3(dvec3(chunkPos.xyz) * double(ChunkSize) * double(scale)) - playerPos);
-   // coords.y += pow((animationMs - min(chunktime, animationMs))/animationMs, 2) * animationMs * animationSpeed; //replace with pos.y for other aniamtion
-    float newscale = scale;
-   // newscale *= 1 - (pow((animationMs - min(chunktime, animationMs))/animationMs, 2)); //replace with pos.y for other aniamtion
 
-    gl_Position = vec4(dmat4(projview) * dvec4(dvec4(dvec3(coords * newscale) + dvec3(pos * scale) + (relativeChunkPos), 1)));
+    gl_Position = vec4(dmat4(projview) * dvec4(dvec4(dvec3(coords * scale) + dvec3(pos * scale) + (relativeChunkPos), 1)));
     
     logz = log(C * gl_Position.w + 1.0) / log(C * Far + 1.0);
        
