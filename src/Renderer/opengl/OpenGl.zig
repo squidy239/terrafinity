@@ -64,6 +64,8 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     try self.CompileShaders();
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
+    
+    self.LoadFacebuffer();
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
@@ -71,16 +73,11 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
-
-    gl.BindBuffer(gl.ARRAY_BUFFER, 0); // Unbind for now, will bind actual buffer later
-    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-    gl.EnableVertexAttribArray(1);
-    gl.VertexAttribDivisor(1, 1);
+ 
 
     gl.BindVertexArray(0);
     try glError();
 
-    self.LoadFacebuffer();
     try glError();
 }
 
@@ -350,8 +347,15 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     const count = self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face)) catch return error.DrawFailed;
     self.render_buffer.buff_lock.lockShared();
+    defer self.render_buffer.buff_lock.unlockShared();
     gl.BindVertexArray(self.vao);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
+
+    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
+    gl.EnableVertexAttribArray(1);
+    gl.VertexAttribDivisor(1, 1);
+    
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     glError() catch return error.DrawFailed;
     //gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
@@ -359,7 +363,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     std.log.debug("drawing {d} chunks\n", .{count});
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(count), 0);
-    self.render_buffer.buff_lock.unlockShared();
 
     glError() catch return error.DrawFailed;
 }
@@ -571,6 +574,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn expand(self: *@This(), new_size: usize) !*Space {
+            std.log.debug("expanding to {d} bytes", .{new_size});
             self.buff_lock.lock();
             defer self.buff_lock.unlock();
             const old_size = self.buffer.len;
@@ -598,6 +602,8 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         fn rebuildCommands(self: *@This(), element_size: usize) !usize {
             //if (!self.buffer_changed.swap(false, .seq_cst)) return;
+            const rc = ztracy.ZoneNC(@src(), "rebuildCommands", 32213);
+            defer rc.End();
             if (self.indirect_buffer == null) {
                 var ib: c_uint = undefined;
                 gl.GenBuffers(1, @ptrCast(&ib));
@@ -606,30 +612,35 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
             
             self.map_lock.lock();
-
+            const ac = ztracy.ZoneNC(@src(), "allocCommands", 32213);
             var commands =  std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
                 self.map_lock.unlock();
                 return err;
             };
-            
-            defer commands.deinit(self.allocator);
-
+            ac.End();
+            const loop = ztracy.ZoneNC(@src(), "loop", 32213);
             var it = self.map.iterator();
             while (it.next()) |entry| {
                 const space = entry.value_ptr.*;
                 commands.appendAssumeCapacity(DrawElementsIndirectCommand{
                     .count = 6,
                     .firstIndex = 0,
-                    .baseInstance = 0,
-                    .baseVertex = @intCast(@divExact(space.start, element_size)),
+                    .baseInstance = @intCast(@divExact(space.start, element_size)),
+                    .baseVertex = 0,
                     .instanceCount = @intCast(@divExact(space.length, element_size)),
                 });
             }
+            loop.End();
             self.map_lock.unlock();
-
+            
+            const amount = commands.items.len;
+            const bd  = ztracy.ZoneNC(@src(), "BufferData", 32213);
+            defer bd.End();
             gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer.?);
-            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
-            return commands.items.len;
+            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(amount * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
+            commands.deinit(self.allocator);
+            return amount;
         }
+        
     };
 }
