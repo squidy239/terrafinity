@@ -95,59 +95,14 @@ pub fn deinit(self: *@This()) void {
 
 threadlocal var context: ?sdl.video.gl.Context = null;
 
-pub const MeshWriter = struct {
-    buffer: GpuBuffer,
-    pos: usize,
-    interface: std.Io.Writer,
-
-    pub fn init(buffer: []u8) MeshWriter {
-        return .{
-            .interface = initInterface(buffer),
-            .buffer = .{},
-            .pos = 0,
-        };
-    }
-
-    pub fn initInterface(buffer: []u8) std.Io.Writer {
-        return .{
-            .vtable = &.{
-                .drain = drain,
-                .sendFile = std.Io.Writer.unimplementedSendFile,
-            },
-            .buffer = buffer,
-        };
-    }
-
-    pub fn drain(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) error{WriteFailed}!usize {
-        const d = ztracy.ZoneNC(@src(), "drain", 32213);
-        defer d.End();
-        _ = splat;
-        _ = data;
-        const buffered = io_w.buffered();
-        if (buffered.len == 0) return 0;
-        if (context == null) {
-            context = main.contexts[main.context_index.fetchAdd(1, .seq_cst)];
-            gl.makeProcTableCurrent(&main.proc_table);
-        }
-        context.?.makeCurrent(main.window) catch return error.WriteFailed;
-        defer _ = sdl.c.SDL_GL_MakeCurrent(main.window.value, null);
-        const mesh_writer: *MeshWriter = @alignCast(@fieldParentPtr("interface", io_w));
-        glError() catch unreachable; //ensure no errors before expanding
-        mesh_writer.buffer.writeSegment(mesh_writer.pos, buffered) catch return error.WriteFailed;
-        mesh_writer.pos += buffered.len;
-        _ = io_w.consumeAll();
-        return buffered.len;
-    }
-};
-
 const main = @import("../../main.zig");
 
 fn ensureContext() !void {
     if (context == null) {
         context = main.contexts[main.context_index.fetchAdd(1, .seq_cst)];
+        try context.?.makeCurrent(main.window);
         gl.makeProcTableCurrent(&main.proc_table);
     }
-    try context.?.makeCurrent(main.window);
 }
 
 fn glError() !void {
@@ -179,55 +134,6 @@ fn removeChunk(userdata: *anyopaque, Pos: ChunkPos) void {
     unreachable;
     //const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
     //addChunk(userdata, emptyMesh) catch std.log.err("removemesh failed", .{});
-}
-
-pub fn LoadVbo(renderer: *@This(), Pos: ChunkPos, vbo: c_uint, face_count: usize, CreationTime: ?i64) MeshBufferIDs {
-    var tempb: [2]c_uint = undefined;
-    gl.GenBuffers(2, @ptrCast(&tempb));
-    var NewMeshIDs: MeshBufferIDs = .{
-        .vao = null,
-        .vbo = vbo,
-        .count = @intCast(face_count),
-        .drawCommand = tempb[1],
-        .UBO = tempb[0],
-        .pos = Pos.position,
-        .time = 0,
-        .scale = @floatCast(ChunkPos.toScale(Pos.level)),
-    };
-
-    gl.BindBuffer(gl.UNIFORM_BUFFER, NewMeshIDs.UBO);
-    const UniformBuffer = UBO{
-        .chunkPos = Pos.position,
-        .scale = @floatCast(ChunkPos.toScale(Pos.level)),
-        .creationTime = @floatFromInt(CreationTime orelse std.time.milliTimestamp()),
-        ._0 = undefined,
-    };
-    gl.BufferStorage(gl.UNIFORM_BUFFER, @sizeOf(UBO), @ptrCast(&UniformBuffer), 0x0);
-
-    var a: c_uint = undefined;
-    gl.GenVertexArrays(1, @ptrCast(&a));
-    gl.BindVertexArray(a);
-    NewMeshIDs.vao = a;
-    NewMeshIDs.count = @intCast(face_count);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.indecies);
-    gl.BindBuffer(gl.ARRAY_BUFFER, renderer.facebuffer);
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-    gl.EnableVertexAttribArray(0);
-    gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-    gl.EnableVertexAttribArray(1);
-    gl.VertexAttribDivisor(1, 1);
-    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, NewMeshIDs.drawCommand.?);
-    const IndirectCommand: DrawElementsIndirectCommand = .{
-        .count = 6,
-        .baseInstance = 0,
-        .baseVertex = 0,
-        .firstIndex = 0,
-        .instanceCount = @intCast(NewMeshIDs.count),
-    };
-    gl.BufferStorage(gl.DRAW_INDIRECT_BUFFER, @sizeOf(DrawElementsIndirectCommand), &IndirectCommand, 0x0);
-    NewMeshIDs.time = CreationTime orelse std.time.milliTimestamp();
-    return NewMeshIDs;
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
@@ -558,16 +464,19 @@ fn MultiRenderBuffer(comptime K: type) type {
                 const space: *Space = @fieldParentPtr("node", node);
                 if (space.free and space.length >= length) {
                     space.free = false;
-                    if (space.length > length) {
+                    const extra_space = space.length - length;
+                    if (extra_space > 0) {
                         const space_ptr = try self.allocator.create(Space);
                         space_ptr.* = Space{
                             .node = undefined,
                             .free = true,
                             .start = space.start + length,
-                            .length = space.length - length,
+                            .length = extra_space,
                         };
                         self.linked_list.insertAfter(node, &space_ptr.node);
+                        space.length -= extra_space;
                     }
+                    std.debug.assert(space.length == length);
                     return space;
                 }
             }
@@ -604,6 +513,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             //if (!self.buffer_changed.swap(false, .seq_cst)) return;
             const rc = ztracy.ZoneNC(@src(), "rebuildCommands", 32213);
             defer rc.End();
+            var dcount: u64 = 0;
             if (self.indirect_buffer == null) {
                 var ib: c_uint = undefined;
                 gl.GenBuffers(1, @ptrCast(&ib));
@@ -613,7 +523,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             
             self.map_lock.lock();
             const ac = ztracy.ZoneNC(@src(), "allocCommands", 32213);
-            var commands =  std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
+            var commands = std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
                 self.map_lock.unlock();
                 return err;
             };
@@ -622,6 +532,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             var it = self.map.iterator();
             while (it.next()) |entry| {
                 const space = entry.value_ptr.*;
+                dcount += space.length;
                 commands.appendAssumeCapacity(DrawElementsIndirectCommand{
                     .count = 6,
                     .firstIndex = 0,
@@ -632,7 +543,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
             loop.End();
             self.map_lock.unlock();
-            
+            std.log.debug("drawing {d} faces", .{dcount});
             const amount = commands.items.len;
             const bd  = ztracy.ZoneNC(@src(), "BufferData", 32213);
             defer bd.End();
