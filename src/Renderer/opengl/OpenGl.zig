@@ -244,15 +244,17 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const millitimestamp = std.time.milliTimestamp();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
-    //const frustrum = Frustum.extractFrustumPlanes(projview);
-    //if (i == 1) gl.Disable(gl.CULL_FACE);
-    //defer gl.Enable(gl.CULL_FACE);
+    const frustrum = Frustum.extractFrustumPlanes(projview);
+    gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
     
     self.render_buffer.buff_lock.lockShared();
-    defer self.render_buffer.buff_lock.unlockShared();  
-    const count = self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face)) catch return error.DrawFailed;
-  
+    defer self.render_buffer.buff_lock.unlockShared(); 
+    
+    var command_buffer = std.ArrayList(DrawElementsIndirectCommand).empty;//TODO move
+    const count = self.render_buffer.rebuildCommands(&command_buffer, @sizeOf(Mesh.Face), cullChunkFn, .{.frustrum = frustrum, .playerPos = playerPos}) catch return error.DrawFailed;
+    command_buffer.deinit(self.allocator);
+    
     gl.BindVertexArray(self.vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
@@ -264,13 +266,23 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
 
     
     glError() catch return error.DrawFailed;
-    //gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
     glError() catch return error.DrawFailed;
     std.log.debug("drawing {d} chunks\n", .{count});
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(count), 0);
     gl.Finish();
     glError() catch return error.DrawFailed;
+}
+
+fn cullChunkFn(userdata: anytype, chunkpos: ChunkPos)bool{
+    return cullChunk(&userdata.frustrum, chunkpos, userdata.playerPos);
+}
+
+fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64))bool{
+    const scale = ChunkPos.toScale(chunkpos.level);
+    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
+    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
+    return !frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
 fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -296,37 +308,6 @@ fn setViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) void {
     self.viewport_pixels = viewport_pixels;
 }
 
-//TODO update entity rendering
-fn DrawEntities(self: *@This(), game: *@import("../../Game.zig"), playerPos: @Vector(3, f64), viewport_pixels: @Vector(2, f32)) !void {
-    gl.FrontFace(gl.CCW);
-    gl.UseProgram(self.entityshaderprogram);
-    const projview = @as(@Vector(16, f32), @floatCast(zm.Mat4.perspective(std.math.degreesToRadians(90.0), viewport_pixels[0] / viewport_pixels[1], 0.1, @floatFromInt(2000 * 32)).multiply(zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, @Vector(3, f32){ 0, 0, 0 } + self.cameraFront, @This().cameraUp)).data));
-    gl.UniformMatrix4fv(self.uniforms.entityprojviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    var it = game.world.Entitys.iterator();
-    defer it.deinit();
-    while (it.next()) |c| {
-        try c.value_ptr.*.draw(playerPos, c.key_ptr.*, &game.world, self);
-    }
-}
-
-const MeshBufferIDs = struct {
-    time: i64,
-    vbo: ?c_uint,
-    vao: ?c_uint,
-    drawCommand: ?c_uint,
-    UBO: c_uint,
-    pos: [3]i32,
-    count: u32,
-    scale: f32,
-
-    pub fn free(self: *const @This()) void {
-        if (self.vbo) |vbo| gl.DeleteBuffers(1, @ptrCast(@constCast(&vbo)));
-        if (self.vao) |vao| gl.DeleteVertexArrays(1, @ptrCast(@constCast(&vao)));
-        if (self.drawCommand) |drawCommand| gl.DeleteBuffers(1, @ptrCast(@constCast(&drawCommand)));
-        gl.DeleteBuffers(1, @ptrCast(&self.UBO));
-    }
-};
-
 const DrawElementsIndirectCommand = extern struct {
     count: c_uint,
     instanceCount: c_uint,
@@ -335,11 +316,9 @@ const DrawElementsIndirectCommand = extern struct {
     baseInstance: c_uint,
 };
 
-const UBO = packed struct {
-    scale: f32,
-    _0: u32,
-    creationTime: f64,
-    chunkPos: @Vector(3, i32),
+const ChunkDrawData = extern struct {
+    relative_chunkpos: [3]f32,
+    scale:f32,
 };
 
 const UniformLocations = struct {
@@ -432,8 +411,9 @@ fn MultiRenderBuffer(comptime K: type) type {
         map: std.AutoArrayHashMapUnmanaged(K, *Space) = .empty,
         map_lock: std.Thread.Mutex = .{},
 
-        buffer_changed: std.atomic.Value(bool) = .init(false),
         indirect_buffer: ?c_uint = null,
+        ssbo: ?c_uint = null,
+
 
         const Space = struct {
             node: std.DoublyLinkedList.Node,
@@ -453,7 +433,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             gl.Flush();
             self.map_lock.lock();
             defer self.map_lock.unlock();
-            self.buffer_changed.store(true, .seq_cst);
             const existing = try self.map.fetchPut(self.allocator, key, space);
             if (existing != null) std.log.err("TODO remove mesh", .{});
         }
@@ -504,9 +483,8 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.linked_list.append(&space_ptr.node);
             return space_ptr;
         }
-
-        fn rebuildCommands(self: *@This(), element_size: usize) !usize {
-            //if (!self.buffer_changed.swap(false, .seq_cst)) return;
+        const cullFunction = fn(userdata: anytype, key: K) bool;
+        pub fn rebuildCommands(self: *@This(), command_buffer: *std.ArrayList(DrawElementsIndirectCommand), element_size: usize, cull: ?cullFunction, cull_userdata: anytype) !usize {
             const rc = ztracy.ZoneNC(@src(), "rebuildCommands", 32213);
             defer rc.End();
             var dcount: u64 = 0;
@@ -519,7 +497,8 @@ fn MultiRenderBuffer(comptime K: type) type {
 
             self.map_lock.lock();
             const ac = ztracy.ZoneNC(@src(), "allocCommands", 32213);
-            var commands = std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
+            std.debug.assert(command_buffer.items.len == 0);
+            command_buffer.ensureTotalCapacity(self.allocator, self.map.count()) catch |err| {
                 self.map_lock.unlock();
                 return err;
             };
@@ -527,9 +506,13 @@ fn MultiRenderBuffer(comptime K: type) type {
             const loop = ztracy.ZoneNC(@src(), "loop", 32213);
             var it = self.map.iterator();
             while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if(cull) |cullFn| {
+                    if(cullFn(cull_userdata, key)) continue;
+                }
                 const space = entry.value_ptr.*;
                 dcount += space.length;
-                commands.appendAssumeCapacity(DrawElementsIndirectCommand{
+                command_buffer.appendAssumeCapacity(DrawElementsIndirectCommand{
                     .count = 6,
                     .firstIndex = 0,
                     .baseInstance = @intCast(@divExact(space.start, element_size)),
@@ -540,12 +523,12 @@ fn MultiRenderBuffer(comptime K: type) type {
             loop.End();
             self.map_lock.unlock();
             std.log.debug("drawing {d} faces", .{dcount});
-            const amount = commands.items.len;
+            const amount = command_buffer.items.len;
             const bd = ztracy.ZoneNC(@src(), "BufferData", 32213);
             defer bd.End();
             gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer.?);
-            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(amount * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
-            commands.deinit(self.allocator);
+            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(amount * @sizeOf(DrawElementsIndirectCommand)), command_buffer.items.ptr, gl.DYNAMIC_DRAW);
+            command_buffer.clearRetainingCapacity();
             return amount;
         }
     };

@@ -3,7 +3,6 @@
 in vec3 coordss;
 in vec3 fragpos;
 flat in vec3 sunpos;
-flat in uint blocktype;
 flat in uint side;
 flat in uint blockArrayLayer;
 //uniform vec4 skyColor;
@@ -79,10 +78,7 @@ gl_FragDepth = logz;
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
 
-    //  result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 2048));
-    //if(HeadUnderwater)result = mix(result, vec3(0, 0.3, 0.5), pow(gl_FragCoord.z, 64));
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
     FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
 }
-//    FragColor = vec4((sin(pow(cos(fragpos / coordss), tan(fragpos * -coordss)))+1)/2, 1);

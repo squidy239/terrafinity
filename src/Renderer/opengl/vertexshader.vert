@@ -11,6 +11,7 @@ flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
+
 const float ChunkSize = 32.0;
 const float Far = 10000000.0;  // Your far plane distance
 const float C = 1.0;  // Resolution constant (adjust as needed)
@@ -138,10 +139,5 @@ void main() {
     
     logz = log(C * gl_Position.w + 1.0) / log(C * Far + 1.0);
        
-    // Multiply by w to undo the perspective divide that happens later
     gl_Position.z = logz * gl_Position.w;
 }
-
-
-
-//    float scale = mod(float(time) / 1000, 4) / max(0.000001,(((abs(pow(pow(vertexposition.x, 2.0) + pow(vertexposition.y, 2.0) + pow(vertexposition.z, 2.0),0.5))))));
