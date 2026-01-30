@@ -64,20 +64,17 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     try self.CompileShaders();
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
-    
+
     self.LoadFacebuffer();
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
-
+    
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
- 
-
     gl.BindVertexArray(0);
-    try glError();
-
+    
     try glError();
 }
 
@@ -251,25 +248,28 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     //if (i == 1) gl.Disable(gl.CULL_FACE);
     //defer gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
-    const count = self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face)) catch return error.DrawFailed;
+    
     self.render_buffer.buff_lock.lockShared();
-    defer self.render_buffer.buff_lock.unlockShared();
+    defer self.render_buffer.buff_lock.unlockShared();  
+    const count = self.render_buffer.rebuildCommands(@sizeOf(Mesh.Face)) catch return error.DrawFailed;
+  
     gl.BindVertexArray(self.vao);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
-
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
     
-    gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+    
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+
+    
     glError() catch return error.DrawFailed;
     //gl.BindBufferBase(gl.UNIFORM_BUFFER, 0, buffer_ids.UBO);
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
     glError() catch return error.DrawFailed;
     std.log.debug("drawing {d} chunks\n", .{count});
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(count), 0);
-
+    gl.Finish();
     glError() catch return error.DrawFailed;
 }
 
@@ -327,7 +327,7 @@ const MeshBufferIDs = struct {
     }
 };
 
-const DrawElementsIndirectCommand = packed struct {
+const DrawElementsIndirectCommand = extern struct {
     count: c_uint,
     instanceCount: c_uint,
     firstIndex: c_uint,
@@ -385,6 +385,7 @@ const GpuBuffer = struct {
             return err;
         };
         if (self.buffer) |oldbuffer| {
+            gl.Finish();
             gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(self.len));
             glError() catch |err| {
                 gl.DeleteBuffers(1, @ptrCast(&new_buffer));
@@ -392,7 +393,9 @@ const GpuBuffer = struct {
             };
             self.buffer = new_buffer;
             self.len = new_size;
+            gl.Finish();
             gl.DeleteBuffers(1, @ptrCast(&oldbuffer));
+            gl.Finish();
         } else {
             self.buffer = new_buffer;
             self.len = new_size;
@@ -452,15 +455,15 @@ fn MultiRenderBuffer(comptime K: type) type {
             defer self.map_lock.unlock();
             self.buffer_changed.store(true, .seq_cst);
             const existing = try self.map.fetchPut(self.allocator, key, space);
-            if(existing != null)std.log.err("TODO remove mesh", .{});
+            if (existing != null) std.log.err("TODO remove mesh", .{});
         }
 
         fn add(self: *@This(), length: usize) !*Space {
             self.list_lock.lock();
             defer self.list_lock.unlock();
-            var node = self.linked_list.first orelse &(try self.expand(self.buffer.len + length)).node;
+            var node = self.linked_list.first orelse &(try self.append(length)).node;
             while (true) {
-                node = node.next orelse &(try self.expand(self.buffer.len + length)).node;
+                node = node.next orelse &(try self.append(length)).node;
                 const space: *Space = @fieldParentPtr("node", node);
                 if (space.free and space.length >= length) {
                     space.free = false;
@@ -482,31 +485,24 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
         }
 
-        fn expand(self: *@This(), new_size: usize) !*Space {
-            std.log.debug("expanding to {d} bytes", .{new_size});
+        fn append(self: *@This(), size: usize) !*Space {
             self.buff_lock.lock();
-            defer self.buff_lock.unlock();
             const old_size = self.buffer.len;
-            std.debug.assert(new_size > old_size);
-            try self.buffer.expand(new_size);
-            const size_diff = new_size - old_size;
-            const add_one: bool = self.linked_list.last == null or !@as(*Space, @fieldParentPtr("node", self.linked_list.last.?)).free;
-            if (!add_one) {
-                const last: *Space = @fieldParentPtr("node", self.linked_list.last.?);
-                std.debug.assert(last.free);
-                last.length += size_diff;
-                return last;
-            } else {
-                const space_ptr = try self.allocator.create(Space);
-                space_ptr.* = Space{
-                    .node = undefined,
-                    .free = true,
-                    .start = old_size,
-                    .length = size_diff,
-                };
-                self.linked_list.append(&space_ptr.node);
-                return space_ptr;
-            }
+            std.debug.assert(size > 0);
+            self.buffer.expand(old_size + size) catch |err| {
+                self.buff_lock.unlock();
+                return err;
+            };
+            self.buff_lock.unlock();
+            const space_ptr = try self.allocator.create(Space);
+            space_ptr.* = Space{
+                .node = undefined,
+                .free = true,
+                .start = old_size,
+                .length = size,
+            };
+            self.linked_list.append(&space_ptr.node);
+            return space_ptr;
         }
 
         fn rebuildCommands(self: *@This(), element_size: usize) !usize {
@@ -520,7 +516,7 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try glError();
                 self.indirect_buffer = ib;
             }
-            
+
             self.map_lock.lock();
             const ac = ztracy.ZoneNC(@src(), "allocCommands", 32213);
             var commands = std.ArrayList(DrawElementsIndirectCommand).initCapacity(self.allocator, self.map.count()) catch |err| {
@@ -545,13 +541,12 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.map_lock.unlock();
             std.log.debug("drawing {d} faces", .{dcount});
             const amount = commands.items.len;
-            const bd  = ztracy.ZoneNC(@src(), "BufferData", 32213);
+            const bd = ztracy.ZoneNC(@src(), "BufferData", 32213);
             defer bd.End();
             gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer.?);
             gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(amount * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
             commands.deinit(self.allocator);
             return amount;
         }
-        
     };
 }
