@@ -160,6 +160,8 @@ pub fn main() !void {
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
+            const ig = ztracy.ZoneN(@src(), "ingame");
+            defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleButtonActions(action_set, dt);
@@ -172,6 +174,7 @@ pub fn main() !void {
             try game.renderer.drawChunks(game.player.physics.getPos());
             game.unloadChunkMeshes();
         }
+        const dw = ztracy.ZoneN(@src(), "draw ui");
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
 
@@ -181,10 +184,14 @@ pub fn main() !void {
         if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator, game_render_context);
 
         _ = try ui_window.end(.{});
+        dw.End();
         try backend.setCursor(ui_window.cursorRequested());
-
+        const sf = ztracy.ZoneN(@src(), "sdl flush");
         try sdl_renderer.flush();
+        sf.End();
+        const sw = ztracy.ZoneN(@src(), "swap");
         try sdl.video.gl.swapWindow(window);
+        sw.End();
         ztracy.FrameMark();
         std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }

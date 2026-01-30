@@ -252,8 +252,9 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const frustrum = Frustum.extractFrustumPlanes(projview);
     gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
-
+    const lb = ztracy.ZoneN(@src(), "lock buffer");
     self.render_buffer.buff_lock.lockShared();
+    lb.End();
     defer self.render_buffer.buff_lock.unlockShared();
 
     const count = self.render_buffer.rebuildCommands(&self.command_buffer, @sizeOf(Mesh.Face), cullChunkFn, .{ .frustrum = frustrum, .playerPos = playerPos }) catch return error.DrawFailed;
@@ -422,6 +423,8 @@ fn MultiRenderBuffer(comptime K: type) type {
         };
 
         pub fn put(self: *@This(), key: K, value: []const u8) !void {
+            const z = ztracy.Zone(@src());
+            defer z.End();
             try ensureContext();
             const space = try self.add(value.len);
             {
@@ -432,11 +435,14 @@ fn MultiRenderBuffer(comptime K: type) type {
             gl.Flush();
             self.map_lock.lock();
             defer self.map_lock.unlock();
+            std.debug.assert(space.length == value.len);
             const existing = try self.map.fetchPut(self.allocator, key, space);
             if (existing != null) std.log.err("TODO remove mesh", .{});
         }
 
         fn add(self: *@This(), length: usize) !*Space {
+            const z = ztracy.Zone(@src());
+            defer z.End();
             self.list_lock.lock();
             defer self.list_lock.unlock();
             var node = self.linked_list.first orelse &(try self.append(length)).node;
@@ -463,11 +469,15 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
         }
 
-        fn append(self: *@This(), size: usize) !*Space {
+        fn append(self: *@This(), minsize: usize) !*Space {
+            const z = ztracy.Zone(@src());
+            defer z.End();
             self.buff_lock.lock();
             const old_size = self.buffer.len;
-            std.debug.assert(size > 0);
-            self.buffer.expand(old_size + size) catch |err| {
+            std.debug.assert(minsize > 0);
+            const newsize = @max(old_size + minsize, old_size * 2);
+            std.debug.assert(newsize > old_size);
+            self.buffer.expand(newsize) catch |err| {
                 self.buff_lock.unlock();
                 return err;
             };
@@ -477,15 +487,15 @@ fn MultiRenderBuffer(comptime K: type) type {
                 .node = undefined,
                 .free = true,
                 .start = old_size,
-                .length = size,
+                .length = newsize - old_size,
             };
             self.linked_list.append(&space_ptr.node);
             return space_ptr;
         }
         const cullFunction = fn (userdata: anytype, key: K) bool;
         pub fn rebuildCommands(self: *@This(), command_buffer: *std.ArrayList(DrawElementsIndirectCommand), element_size: usize, cull: ?cullFunction, cull_userdata: anytype) !usize {
-            const rc = ztracy.ZoneNC(@src(), "rebuildCommands", 32213);
-            defer rc.End();
+            const z = ztracy.Zone(@src());
+            defer z.End();
             var dcount: u64 = 0;
             if (self.indirect_buffer == null) {
                 var ib: c_uint = undefined;

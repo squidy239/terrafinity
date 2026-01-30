@@ -33,7 +33,7 @@ pub const Header = struct {
     scale: f32,
     animation: bool,
 };
-
+//TODO make neighbor faces like blockencoding to handle empty chunks better
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, writer: *std.Io.Writer) !void {
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
@@ -43,7 +43,7 @@ pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][Ch
     GenerateExtendedChunk(&ExtendedBlocks, mainblocks, neighbor_faces);
     ecp.End();
     if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
-    return try meshSimple(&ExtendedBlocks, writer);
+    try meshSimple(&ExtendedBlocks, writer);
 }
 
 fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, writer: *std.Io.Writer) !void {
