@@ -23,6 +23,7 @@ const OpenGlRenderer = @This();
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
 indecies: c_uint,
+command_buffer: std.ArrayList(DrawElementsIndirectCommand) = .empty,
 entityshaderprogram: c_uint,
 shaderprogram: c_uint,
 blockAtlasTextureId: c_uint,
@@ -69,22 +70,24 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
-    
+
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     gl.BindVertexArray(0);
-    
+
     try glError();
 }
 
 pub fn deinit(self: *@This()) void {
     gl.Finish();
     //TODO deinit renderbuffer
-
+    self.command_buffer.deinit(self.allocator);
+    self.render_buffer.deinit();
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
+
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
     std.log.info("renderer deinit", .{});
@@ -225,6 +228,8 @@ fn LoadFacebuffer(self: *@This()) void {
 var last_viewport: [2]f32 = undefined;
 
 fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
+    const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
+    defer c.End();
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -247,38 +252,33 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const frustrum = Frustum.extractFrustumPlanes(projview);
     gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
-    
+
     self.render_buffer.buff_lock.lockShared();
-    defer self.render_buffer.buff_lock.unlockShared(); 
-    
-    var command_buffer = std.ArrayList(DrawElementsIndirectCommand).empty;//TODO move
-    const count = self.render_buffer.rebuildCommands(&command_buffer, @sizeOf(Mesh.Face), cullChunkFn, .{.frustrum = frustrum, .playerPos = playerPos}) catch return error.DrawFailed;
-    command_buffer.deinit(self.allocator);
-    
+    defer self.render_buffer.buff_lock.unlockShared();
+
+    const count = self.render_buffer.rebuildCommands(&self.command_buffer, @sizeOf(Mesh.Face), cullChunkFn, .{ .frustrum = frustrum, .playerPos = playerPos }) catch return error.DrawFailed;
+
     gl.BindVertexArray(self.vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
-    
-    
+
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
 
-    
     glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
     glError() catch return error.DrawFailed;
     std.log.debug("drawing {d} chunks\n", .{count});
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(count), 0);
-    gl.Finish();
     glError() catch return error.DrawFailed;
 }
 
-fn cullChunkFn(userdata: anytype, chunkpos: ChunkPos)bool{
+fn cullChunkFn(userdata: anytype, chunkpos: ChunkPos) bool {
     return cullChunk(&userdata.frustrum, chunkpos, userdata.playerPos);
 }
 
-fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64))bool{
+fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
     const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
     const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
@@ -318,7 +318,7 @@ const DrawElementsIndirectCommand = extern struct {
 
 const ChunkDrawData = extern struct {
     relative_chunkpos: [3]f32,
-    scale:f32,
+    scale: f32,
 };
 
 const UniformLocations = struct {
@@ -414,7 +414,6 @@ fn MultiRenderBuffer(comptime K: type) type {
         indirect_buffer: ?c_uint = null,
         ssbo: ?c_uint = null,
 
-
         const Space = struct {
             node: std.DoublyLinkedList.Node,
             free: bool,
@@ -483,7 +482,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.linked_list.append(&space_ptr.node);
             return space_ptr;
         }
-        const cullFunction = fn(userdata: anytype, key: K) bool;
+        const cullFunction = fn (userdata: anytype, key: K) bool;
         pub fn rebuildCommands(self: *@This(), command_buffer: *std.ArrayList(DrawElementsIndirectCommand), element_size: usize, cull: ?cullFunction, cull_userdata: anytype) !usize {
             const rc = ztracy.ZoneNC(@src(), "rebuildCommands", 32213);
             defer rc.End();
@@ -507,8 +506,8 @@ fn MultiRenderBuffer(comptime K: type) type {
             var it = self.map.iterator();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
-                if(cull) |cullFn| {
-                    if(cullFn(cull_userdata, key)) continue;
+                if (cull) |cullFn| {
+                    if (cullFn(cull_userdata, key)) continue;
                 }
                 const space = entry.value_ptr.*;
                 dcount += space.length;
@@ -530,6 +529,30 @@ fn MultiRenderBuffer(comptime K: type) type {
             gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(amount * @sizeOf(DrawElementsIndirectCommand)), command_buffer.items.ptr, gl.DYNAMIC_DRAW);
             command_buffer.clearRetainingCapacity();
             return amount;
+        }
+
+        pub fn deinit(self: *@This()) void {
+            std.debug.assert(self.map_lock.tryLock());
+            std.debug.assert(self.list_lock.tryLock());
+            self.buffer.free();
+
+            var node = self.linked_list.first;
+            while (node) |n| {
+                const space: *Space = @fieldParentPtr("node", n);
+                node = n.next;
+                self.allocator.destroy(space);
+            }
+            self.map.deinit(self.allocator);
+
+            if (self.ssbo) |ssbo| {
+                gl.DeleteBuffers(1, @ptrCast(&ssbo));
+            }
+            if (self.indirect_buffer) |indirect_buffer| {
+                gl.DeleteBuffers(1, @ptrCast(&indirect_buffer));
+            }
+            if (self.buffer.buffer) |buffer| {
+                gl.DeleteBuffers(1, @ptrCast(&buffer));
+            }
         }
     };
 }
