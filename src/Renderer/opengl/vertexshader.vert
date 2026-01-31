@@ -1,9 +1,8 @@
-#version 430 core
+#version 460 core
 layout(location = 1) in uvec2 data;
 layout(location = 0) in vec3 incoords;
 uniform mat4 projview;
 uniform mat4 sunrot;
-uniform dvec3 playerPos;
 uniform double time;
 out vec3 coordss;
 flat out uint blockArrayLayer;
@@ -12,15 +11,20 @@ out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
 
-const float ChunkSize = 32.0;
 const float Far = 10000000.0;  // Your far plane distance
 const float C = 1.0;  // Resolution constant (adjust as needed)
 
 out float logz;  // Pass to fragment shader
 
-float scale = 1;
-double creationTime = 0;
-ivec4 chunkPos = ivec4(0);
+struct Chunk {
+    vec3 absolute_position;
+    vec3 relative_position;
+    float scale;
+};
+
+layout(std430, binding = 0) buffer ChunkData {
+    Chunk chunks[];
+};
 
 const vec3 offset[6] = vec3[6](
         vec3(0.5, 0.0, 0.0), // +X
@@ -113,31 +117,30 @@ float rand(vec2 co) {
 }
 
 void main() {
+    vec3 relative_position = chunks[gl_DrawID].relative_position;
+    vec3 absolute_position = chunks[gl_DrawID].absolute_position;
+    float scale = chunks[gl_DrawID].scale;
+    
     uvec3 pos = DecodePosition(data);
     blocktype = DecodeBlockType(data);
     side = DecodeSide(data);
     blockArrayLayer = blocktype;
     vec3 coords = rotateVertex(side, incoords);
-    fragpos = vec3((pos * scale) + (coords * scale) + (chunkPos.xyz * ChunkSize * scale));
+    fragpos = vec3((pos * scale) + (coords * scale) + absolute_position);
     sunpos = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 
-    float speed = 2000.0;
-
-    float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
-
-    vec3 vertexposition = coords * scale + ((vec3(pos) * scale) + (vec3(chunkPos.xyz) * ChunkSize * scale));
-
     if (blocktype == 7) {
+        float speed = 2000.0;
+        float t = 1.0 + ((float(mod(time, 100000000.0))) / 10000000);
+        vec3 vertexposition = coords * scale + ((vec3(pos) * scale) + absolute_position);
         float p = 1.0 + bouncingMod(vertexposition.x * vertexposition.y * vertexposition.z * (vertexposition.x / vertexposition.y / vertexposition.z) * (sin(vertexposition.x) * sin(vertexposition.y) * sin(vertexposition.z)), 400.0) / 400.0;
         coords.y -= bouncingMod((p * t * speed), 0.4);
     }
 
     coordss = coords;
-    dvec3 relativeChunkPos = (dvec3(dvec3(chunkPos.xyz) * double(ChunkSize) * double(scale)) - playerPos);
 
-    gl_Position = vec4(dmat4(projview) * dvec4(dvec4(dvec3(coords * scale) + dvec3(pos * scale) + (relativeChunkPos), 1)));
+    gl_Position = projview * vec4((coords * scale) + (pos * scale) + relative_position, 1);
     
     logz = log(C * gl_Position.w + 1.0) / log(C * Far + 1.0);
-       
     gl_Position.z = logz * gl_Position.w;
 }

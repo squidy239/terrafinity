@@ -193,7 +193,7 @@ pub fn main() !void {
         try sdl.video.gl.swapWindow(window);
         sw.End();
         ztracy.FrameMark();
-        std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
+        std.debug.print("    using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }
 

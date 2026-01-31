@@ -270,13 +270,14 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.VertexAttribDivisor(1, 1);
 
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.?);
 
     glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
-    std.log.info("drawing {d}/{d} chunks and {d} faces\r", .{ draw_info.drawn, draw_info.total, draw_info.faces });
+    std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
 fn getChunkData(userdata: anytype, chunkpos: ChunkPos)ChunkDrawData{
@@ -285,6 +286,7 @@ fn getChunkData(userdata: anytype, chunkpos: ChunkPos)ChunkDrawData{
     const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
     const relative_blockpos = chunk_blockpos - playerpos;
     return ChunkDrawData{
+        .absolute_position = @as(@Vector(3, f32), @floatCast(chunk_blockpos)),
         .relative_position = @as(@Vector(3, f32), @floatCast(relative_blockpos)),
         .scale = ChunkPos.toScale(chunkpos.level),
     };
@@ -333,7 +335,8 @@ const DrawElementsIndirectCommand = extern struct {
 };
 
 const ChunkDrawData = extern struct {
-    relative_position: [3]f32,
+    absolute_position: [3]f32 align(4 * @sizeOf(f32)),
+    relative_position: [3]f32 align(4 * @sizeOf(f32)),
     scale: f32,
 };
 

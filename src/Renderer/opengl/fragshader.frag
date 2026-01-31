@@ -42,7 +42,7 @@ float bouncingMod(float x, float n) {
 
 void main()
 {
-gl_FragDepth = logz;
+    gl_FragDepth = logz;
     vec2 texcoords = vec2(0, 0);
     vec3 Normal;
     if (side == 0) {
