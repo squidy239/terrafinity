@@ -258,9 +258,9 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         @sizeOf(Mesh.Face),
         cullChunkFn,
         .{ .frustrum = frustrum, .playerPos = playerPos },
-        void,
-        undefined,
-        {},
+        ChunkDrawData,
+        getChunkData,
+        .{.playerpos = playerPos},
     ) catch return error.DrawFailed;
     if (draw_info.drawn == 0) return;
     gl.BindVertexArray(self.vao);
@@ -277,6 +277,17 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
     std.log.info("drawing {d}/{d} chunks and {d} faces\r", .{ draw_info.drawn, draw_info.total, draw_info.faces });
+}
+
+fn getChunkData(userdata: anytype, chunkpos: ChunkPos)ChunkDrawData{
+    const playerpos: @Vector(3, f64) = userdata.playerpos;
+    const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
+    const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
+    const relative_blockpos = chunk_blockpos - playerpos;
+    return ChunkDrawData{
+        .relative_position = @as(@Vector(3, f32), @floatCast(relative_blockpos)),
+        .scale = ChunkPos.toScale(chunkpos.level),
+    };
 }
 
 fn cullChunkFn(userdata: anytype, chunkpos: ChunkPos) bool {
@@ -322,7 +333,7 @@ const DrawElementsIndirectCommand = extern struct {
 };
 
 const ChunkDrawData = extern struct {
-    relative_chunkpos: [3]f32,
+    relative_position: [3]f32,
     scale: f32,
 };
 
@@ -369,7 +380,6 @@ const GpuBuffer = struct {
             return err;
         };
         if (self.buffer) |oldbuffer| {
-            gl.Finish();
             gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(self.len));
             glError() catch |err| {
                 gl.DeleteBuffers(1, @ptrCast(&new_buffer));
@@ -377,9 +387,7 @@ const GpuBuffer = struct {
             };
             self.buffer = new_buffer;
             self.len = new_size;
-            gl.Finish();
             gl.DeleteBuffers(1, @ptrCast(&oldbuffer));
-            gl.Finish();
         } else {
             self.buffer = new_buffer;
             self.len = new_size;
@@ -502,30 +510,31 @@ fn MultiRenderBuffer(comptime K: type) type {
             element_size: usize,
             culler: ?fn (userdata: anytype, key: K) bool,
             cull_userdata: anytype,
-            itemdata: type,
-            get_itemdata: fn (userdata: anytype, key: K) itemdata,
+            ItemData: type,
+            get_itemdata: fn (userdata: anytype, key: K) ItemData,
             item_userdata: anytype,
         ) !struct { faces: u64, drawn: u64, total: u64 } {
-            _ = get_itemdata;
-            _ = item_userdata;
             const z = ztracy.Zone(@src());
             defer z.End();
             var face_count: u64 = 0;
             if (self.indirect_buffer == null) {
                 var ib: c_uint = undefined;
-                gl.GenBuffers(1, @ptrCast(&ib));
+                gl.CreateBuffers(1, @ptrCast(&ib));
                 try glError();
                 self.indirect_buffer = ib;
             }
             if (self.ssbo == null) {
                 var sb: c_uint = undefined;
-                gl.GenBuffers(1, @ptrCast(&sb));
+                gl.CreateBuffers(1, @ptrCast(&sb));
                 try glError();
                 self.ssbo = sb;
             }
-
+            
+            var item_data: std.ArrayList(ItemData) = .empty;
+            defer item_data.deinit(self.allocator);
             var commands: std.ArrayList(DrawElementsIndirectCommand) = .empty;
             defer commands.deinit(self.allocator);
+            
             var total: u64 = 0;
             {
                 self.map_lock.lock();
@@ -556,11 +565,12 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(space.length, element_size)),
                     };
                     try commands.append(self.allocator, command);
+                    try item_data.append(self.allocator, get_itemdata(item_userdata, key));                    
                 }
                 loop.End();
             }
-            gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.indirect_buffer.?);
-            gl.BufferData(gl.DRAW_INDIRECT_BUFFER, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), commands.items.ptr, gl.DYNAMIC_DRAW);
+            gl.NamedBufferData(self.indirect_buffer.?, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), @ptrCast(commands.items), gl.DYNAMIC_DRAW); 
+            gl.NamedBufferData(self.ssbo.?, @intCast(item_data.items.len * @sizeOf(ItemData)), @ptrCast(item_data.items), gl.DYNAMIC_DRAW);
             gl.Flush();
             return .{ .faces = face_count, .drawn = commands.items.len, .total = total };
         }
