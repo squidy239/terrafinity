@@ -251,7 +251,7 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator, game_render_co
 
 fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8, render_context: sdl.video.gl.Context) !void {
     try render_context.makeCurrent(window);
-    try gameptr.init(allocator, game_config, options_lock, folder);
+    try gameptr.init(allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(window);
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});

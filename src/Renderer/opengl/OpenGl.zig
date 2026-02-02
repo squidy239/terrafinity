@@ -32,21 +32,29 @@ cameraFront: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
+window: sdl.video.Window,
+gen_context_lock: std.Thread.Mutex = .{},
+contexts: std.ArrayList(sdl.video.gl.Context),
+context_index: std.atomic.Value(usize) = .init(0),
+proc_table: gl.ProcTable,
 
-pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
-    try glError();
+pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Window) !void {
+    const cpu_count = try std.Thread.getCpuCount();
     self.* = @This(){
         .allocator = allocator,
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
+        .proc_table = undefined,
         .render_buffer = .{ .allocator = allocator },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
-        .blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator),
+        .window = window,
+        .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
+        .contexts = try .initCapacity(allocator, cpu_count),
         .interface = .{
             .userdata = @ptrCast(self),
             .vtable = &.{
@@ -59,6 +67,14 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
             },
         },
     };
+    if (!gl.ProcTable.init(&self.proc_table, sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
+    gl.makeProcTableCurrent(&self.proc_table);
+
+    self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
+
+    for (0..cpu_count) |_| {
+        try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
+    }
     try glError();
 
     try self.CompileShaders();
@@ -69,6 +85,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
+    try glError();
 
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
@@ -76,11 +93,29 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
     gl.BindVertexArray(0);
 
     try glError();
+
+    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
+
+    gl.Enable(gl.MULTISAMPLE);
+    gl.Enable(gl.DEPTH_TEST);
+    gl.Enable(gl.CULL_FACE);
+    gl.CullFace(gl.BACK);
+    gl.FrontFace(gl.CW);
+    gl.DepthFunc(gl.LESS);
+    gl.Enable(gl.BLEND);
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    try glError();
 }
 
 pub fn deinit(self: *@This()) void {
     gl.Finish();
     self.render_buffer.deinit();
+    self.context_index.store(0, .seq_cst);
+    for (0..self.contexts.items.len) |i| {
+        self.contexts.items[i].deinit() catch unreachable;
+    }
+    self.contexts.deinit(self.allocator);
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
@@ -90,16 +125,14 @@ pub fn deinit(self: *@This()) void {
     std.log.info("renderer deinit", .{});
 }
 
-threadlocal var context: ?sdl.video.gl.Context = null;
+threadlocal var thread_index: ?usize = null;
 
-const main = @import("../../main.zig");
-
-fn ensureContext() !void {
-    if (context == null) {
-        context = main.contexts[main.context_index.fetchAdd(1, .seq_cst)];
-        try context.?.makeCurrent(main.window);
-        gl.makeProcTableCurrent(&main.proc_table);
+pub fn ensureContext(self: *@This()) !void {
+    if (thread_index == null) {
+        thread_index = self.context_index.fetchAdd(1, .seq_cst);
     }
+    try self.contexts.items[thread_index.?].makeCurrent(self.window);
+    gl.makeProcTableCurrent(&self.proc_table);
 }
 
 fn glError() !void {
@@ -227,6 +260,7 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
+    gl.makeProcTableCurrent(&self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -260,14 +294,17 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         .{ .frustrum = frustrum, .playerPos = playerPos },
         ChunkDrawData,
         getChunkData,
-        .{.playerpos = playerPos},
+        .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
     if (draw_info.drawn == 0) return;
     gl.BindVertexArray(self.vao);
+    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
+    glError() catch return error.DrawFailed;
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
+    glError() catch return error.DrawFailed;
 
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.?);
@@ -280,7 +317,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
-fn getChunkData(userdata: anytype, chunkpos: ChunkPos)ChunkDrawData{
+fn getChunkData(userdata: anytype, chunkpos: ChunkPos) ChunkDrawData {
     const playerpos: @Vector(3, f64) = userdata.playerpos;
     const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
     const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
@@ -440,7 +477,6 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn put(self: *@This(), key: K, value: []const u8) !void {
             const z = ztracy.Zone(@src());
             defer z.End();
-            try ensureContext();
             const space = try self.add(value.len);
             {
                 self.buff_lock.lockShared();
@@ -532,12 +568,12 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try glError();
                 self.ssbo = sb;
             }
-            
+
             var item_data: std.ArrayList(ItemData) = .empty;
             defer item_data.deinit(self.allocator);
             var commands: std.ArrayList(DrawElementsIndirectCommand) = .empty;
             defer commands.deinit(self.allocator);
-            
+
             var total: u64 = 0;
             {
                 self.map_lock.lock();
@@ -568,11 +604,11 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(space.length, element_size)),
                     };
                     try commands.append(self.allocator, command);
-                    try item_data.append(self.allocator, get_itemdata(item_userdata, key));                    
+                    try item_data.append(self.allocator, get_itemdata(item_userdata, key));
                 }
                 loop.End();
             }
-            gl.NamedBufferData(self.indirect_buffer.?, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), @ptrCast(commands.items), gl.DYNAMIC_DRAW); 
+            gl.NamedBufferData(self.indirect_buffer.?, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), @ptrCast(commands.items), gl.DYNAMIC_DRAW);
             gl.NamedBufferData(self.ssbo.?, @intCast(item_data.items.len * @sizeOf(ItemData)), @ptrCast(item_data.items), gl.DYNAMIC_DRAW);
             gl.Flush();
             return .{ .faces = face_count, .drawn = commands.items.len, .total = total };

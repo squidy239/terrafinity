@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const EntityTypes = @import("world/EntityTypes.zig");
-const gl = @import("gl");
 pub const Block = @import("world/Block.zig").Block;
 pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("world/Chunk.zig");
@@ -24,11 +23,7 @@ const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
-pub var proc_table: gl.ProcTable = undefined;
-pub var window: sdl.video.Window = undefined;
 pub var game_render_context: sdl.video.gl.Context = undefined;
-pub var contexts: []?sdl.video.gl.Context = undefined;
-pub var context_index: std.atomic.Value(usize) = .init(0);
 const config_path = "Config.zon";
 
 pub fn main() !void {
@@ -61,7 +56,7 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-    window = try sdl.video.Window.init("terrafinity", 800, 600, .{
+    var window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
         .resizable = true,
         .high_pixel_density = true,
@@ -85,33 +80,8 @@ pub fn main() !void {
     defer game_render_context.deinit() catch unreachable;
 
     try sdl_renderer.setDrawBlendMode(.blend);
-    const cpu_count = try std.Thread.getCpuCount();
-    contexts = try allocator.alloc(?sdl.video.gl.Context, cpu_count);
-    defer allocator.free(contexts);
-    for (contexts) |*ctx| ctx.* = null;
-    defer for (contexts) |ctx| if (ctx) |c| {
-        c.deinit() catch std.log.err("error closing context", .{});
-    };
 
-    for (contexts) |*ctx| {
-        ctx.* = try sdl.video.gl.Context.init(window);
-    }
     try game_render_context.makeCurrent(window);
-
-    // Initialize OpenGL
-    if (!proc_table.init(sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
-    gl.makeProcTableCurrent(&proc_table);
-
-    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
-
-    gl.Enable(gl.MULTISAMPLE);
-    gl.Enable(gl.DEPTH_TEST);
-    gl.Enable(gl.CULL_FACE);
-    gl.CullFace(gl.BACK);
-    gl.FrontFace(gl.CW);
-    gl.DepthFunc(gl.LESS);
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
@@ -160,6 +130,7 @@ pub fn main() !void {
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
+            try game_render_context.makeCurrent(window);
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);

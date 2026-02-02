@@ -137,15 +137,13 @@ pub const WorldOptions = struct {
         try worldconfwriter.end();
         try generatorconfwriter.end();
     }
-    const main = @import("main.zig");
     pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
-        main.context_index.store(0, .seq_cst);
         std.zon.parse.free(allocator, self.world_config);
         std.zon.parse.free(allocator, self.generator_config);
     }
 };
-
-pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8) !void {
+const gl = @import("gl");
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8, window: sdl.video.Window) !void {
     game.* = .{
         .game_arena = .init(allocator),
         .options = game_options,
@@ -164,7 +162,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .loaderThread = null,
         .unloaderThread = null,
     };
-    try game.opengl_renderer.init(allocator);
+    try game.opengl_renderer.init(allocator, window);
     game.renderer = game.opengl_renderer.interface;
     game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
@@ -350,6 +348,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     );
     const written = alloc_writer.written();
     if (written.len == 0) return;
+    try self.opengl_renderer.ensureContext();
     try self.opengl_renderer.render_buffer.put(Pos, written);
     _ = playAnimation;
 }
@@ -431,11 +430,9 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
     std.log.info("stopped threads", .{});
 
-    self.opengl_renderer.deinit();
-
     self.pool.deinit();
     std.log.info("closed threadpool", .{});
-
+    self.opengl_renderer.deinit();
     self.loaded_or_meshed.deinit();
 
     self.world.deinit();
