@@ -493,12 +493,12 @@ fn MultiRenderBuffer(comptime K: type) type {
             gl.Flush();
             self.map_lock.lock();
             std.debug.assert(space.length == value.len);
-            const existing = self.map.fetchPut(self.allocator, key, space) catch |err|{
+            const existing = self.map.fetchPut(self.allocator, key, space) catch |err| {
                 self.map_lock.unlock();
                 return err;
             };
             self.map_lock.unlock();
-            if (existing)|e| self.removeSpace(e.value);
+            if (existing) |e| self.removeSpace(e.value);
         }
 
         fn add(self: *@This(), length: usize) !*Space {
@@ -553,7 +553,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.linked_list.append(&space_ptr.node);
             return space_ptr;
         }
-        
+
         pub fn remove(self: *@This(), key: K) void {
             self.map_lock.lock();
             const entry = self.map.fetchSwapRemove(key) orelse {
@@ -564,24 +564,24 @@ fn MultiRenderBuffer(comptime K: type) type {
             const space = entry.value;
             self.removeSpace(space);
         }
-        
+
         pub fn removeSpace(self: *@This(), space: *Space) void {
             self.list_lock.lock();
             space.free = true;
             const behind = space.node.prev;
             const ahead = space.node.next;
-            if(ahead)|node|{
-                const aspace:*Space = @fieldParentPtr("node", node);
-                if(aspace.free){
+            if (ahead) |node| {
+                const aspace: *Space = @fieldParentPtr("node", node);
+                if (aspace.free) {
                     std.debug.assert(space.start + space.length == aspace.start);
                     space.length += aspace.length;
                     self.linked_list.remove(&aspace.node);
                     self.allocator.destroy(aspace);
                 }
             }
-            if(behind)|node|{
-                const bspace:*Space = @fieldParentPtr("node", node);
-                if(bspace.free){
+            if (behind) |node| {
+                const bspace: *Space = @fieldParentPtr("node", node);
+                if (bspace.free) {
                     std.debug.assert(bspace.start + bspace.length == space.start);
                     space.length += bspace.length;
                     space.start = bspace.start;
@@ -616,7 +616,7 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try glError();
                 self.ssbo = sb;
             }
-            
+
             const a = ztracy.ZoneN(@src(), "alloc");
             var item_data: std.ArrayList(ItemData) = try .initCapacity(self.allocator, 1_000);
             defer item_data.deinit(self.allocator);

@@ -354,7 +354,6 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {
-    if (true) return; //TODO
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
@@ -364,30 +363,23 @@ pub fn unloadChunkMeshes(self: *@This()) void {
     var buffer: [1024]World.ChunkPos = undefined;
     var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
 
-    var list_it = self.opengl_renderer.renderlist.iterator();
-    defer list_it.deinit();
-    while (true) {
-        tounload.clearRetainingCapacity();
-        {
-            const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
-            defer loop.End();
-            while (list_it.next()) |entry| {
-                const Pos = entry.key_ptr.*;
-                const innerRadius: @Vector(2, u32) = self.getInnerGenRadius(renderdistance, Pos.level);
-                const keep = Loader.keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
-                if (keep) continue;
-                tounload.appendBounded(Pos) catch break;
-            }
+    {
+        if (!self.opengl_renderer.render_buffer.map_lock.tryLock()) return;
+        defer self.opengl_renderer.render_buffer.map_lock.unlock();
+        var it = self.opengl_renderer.render_buffer.map.iterator();
+        const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
+        defer loop.End();
+        while (it.next()) |entry| {
+            const Pos = entry.key_ptr.*;
+            const innerRadius: @Vector(2, u32) = self.getInnerGenRadius(renderdistance, Pos.level);
+            const keep = Loader.keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
+            if (keep) continue;
+            tounload.appendBounded(Pos) catch break;
         }
-        if (tounload.items.len == 0) break;
-        const free = ztracy.ZoneNC(@src(), "freeMeshes", 8799877);
-        defer free.End();
-        list_it.pause();
-        defer list_it.unpause();
-        while (tounload.pop()) |Pos| {
-            self.opengl_renderer.remove(Pos);
-            _ = self.loaded_or_meshed.remove(Pos);
-        }
+    }
+    for (tounload.items) |Pos| {
+        self.opengl_renderer.render_buffer.remove(Pos);
+        _ = self.loaded_or_meshed.remove(Pos); //TODO no mesh entrys in this leak
     }
 }
 
