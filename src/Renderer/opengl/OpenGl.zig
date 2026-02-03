@@ -575,15 +575,19 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try glError();
                 self.ssbo = sb;
             }
-
-            var item_data: std.ArrayList(ItemData) = .empty;
+            
+            const a = ztracy.ZoneN(@src(), "alloc");
+            var item_data: std.ArrayList(ItemData) = try .initCapacity(self.allocator, 1_000);
             defer item_data.deinit(self.allocator);
-            var commands: std.ArrayList(DrawElementsIndirectCommand) = .empty;
+            var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, 1_000);
             defer commands.deinit(self.allocator);
-
+            a.End();
+            //TODO persistently map buffer
             var total: u64 = 0;
             {
+                const l = ztracy.ZoneN(@src(), "lock");
                 self.map_lock.lock();
+                l.End();
                 defer self.map_lock.unlock();
 
                 total = self.map.count();
