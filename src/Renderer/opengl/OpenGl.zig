@@ -37,6 +37,7 @@ gen_context_lock: std.Thread.Mutex = .{},
 contexts: std.ArrayList(sdl.video.gl.Context),
 context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
+draw_context: sdl.video.gl.Context,
 
 pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Window) !void {
     const cpu_count = try std.Thread.getCpuCount();
@@ -51,6 +52,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
+        .draw_context = try sdl.video.gl.Context.init(window),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -75,7 +77,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     for (0..cpu_count) |_| {
         try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
     }
-    try glError();
+    try self.draw_context.makeCurrent(self.window);
 
     try self.CompileShaders();
 
@@ -109,6 +111,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
 }
 
 pub fn deinit(self: *@This()) void {
+    self.draw_context.makeCurrent(self.window) catch unreachable;
     gl.Finish();
     self.render_buffer.deinit();
     self.context_index.store(0, .seq_cst);
@@ -260,6 +263,7 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
+    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
     gl.makeProcTableCurrent(&self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
@@ -346,7 +350,8 @@ fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed
 }
 
 fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    _ = userdata;
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
@@ -357,9 +362,11 @@ fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void 
     c.End();
 }
 
-fn setViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) void {
+fn setViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
+    self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
+    glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
 }
 

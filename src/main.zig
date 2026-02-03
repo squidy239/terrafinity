@@ -23,7 +23,6 @@ const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
-pub var game_render_context: sdl.video.gl.Context = undefined;
 const config_path = "Config.zon";
 
 pub fn main() !void {
@@ -76,12 +75,7 @@ pub fn main() !void {
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
 
-    game_render_context = try sdl.video.gl.Context.init(window);
-    defer game_render_context.deinit() catch unreachable;
-
     try sdl_renderer.setDrawBlendMode(.blend);
-
-    try game_render_context.makeCurrent(window);
 
     var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
@@ -130,7 +124,6 @@ pub fn main() !void {
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
-            try game_render_context.makeCurrent(window);
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
@@ -139,8 +132,7 @@ pub fn main() !void {
             game.handleScroll(scroll);
 
             const size = try window.getSizeInPixels();
-            try game_render_context.makeCurrent(window);
-            game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
+            try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
             try game.renderer.clear(game.player.physics.getPos());
             try game.renderer.drawChunks(game.player.physics.getPos());
             game.unloadChunkMeshes();
@@ -150,9 +142,9 @@ pub fn main() !void {
         var menuchanged: bool = false;
 
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
-        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator, game_render_context);
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator);
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator, game_render_context);
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
 
         _ = try ui_window.end(.{});
         dw.End();

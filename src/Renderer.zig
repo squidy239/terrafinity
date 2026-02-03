@@ -14,7 +14,7 @@ pub const VTable = struct {
     drawChunks: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
     containsChunk: *const fn (*anyopaque, ChunkPos) bool,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
-    setViewport: *const fn (*anyopaque, @Vector(2, u32)) void,
+    setViewport: *const fn (*anyopaque, @Vector(2, u32)) error{ViewportSetFailed}!void,
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
@@ -44,8 +44,8 @@ pub fn clear(self: *@This(), viewpos: @Vector(3, f64)) error{DrawFailed}!void {
 }
 
 ///sets the viewport dimensions in pixels, this function should only be called on the main thread
-pub fn setViewport(self: *@This(), viewport_pixels: @Vector(2, u32)) void {
+pub fn setViewport(self: *@This(), viewport_pixels: @Vector(2, u32)) !void {
     if (self.last_viewport) |lvp| if (std.meta.eql(lvp, viewport_pixels)) return;
-    self.vtable.setViewport(self.userdata, viewport_pixels);
+    try self.vtable.setViewport(self.userdata, viewport_pixels);
     self.last_viewport = viewport_pixels;
 }

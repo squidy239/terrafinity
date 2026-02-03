@@ -116,7 +116,7 @@ pub fn settingsMenu(self: *@This()) !bool {
 }
 
 var new_world_options: Game.WorldOptions = .default;
-pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator, game_render_context: sdl.video.gl.Context) !bool {
+pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
@@ -144,7 +144,7 @@ pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator, game_render_con
             const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(game_path);
-            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, game_path, game_render_context);
+            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, game_path);
             self.menu_state.ingame = true;
             self.menu_state.newgame = false;
             return true;
@@ -155,7 +155,7 @@ pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator, game_render_con
     return menuchanged;
 }
 
-pub fn mainPage(self: *@This(), allocator: std.mem.Allocator, game_render_context: sdl.video.gl.Context) !bool {
+pub fn mainPage(self: *@This(), allocator: std.mem.Allocator) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
     //background
@@ -175,7 +175,7 @@ pub fn mainPage(self: *@This(), allocator: std.mem.Allocator, game_render_contex
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    changed |= try self.continueMenu(allocator, game_render_context);
+    changed |= try self.continueMenu(allocator);
     return changed;
 }
 
@@ -194,7 +194,7 @@ pub fn sidebar(self: *@This()) bool {
     return false;
 }
 
-pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator, game_render_context: sdl.video.gl.Context) !bool {
+pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
@@ -240,7 +240,7 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator, game_render_co
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.config.worlds_path, item.name });
             defer allocator.free(jpath);
-            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, jpath, game_render_context); //TODO popup when game cant be opened
+            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, jpath); //TODO popup when game cant be opened
             self.menu_state.ingame = true;
             self.menu_state.main = false;
             return true;
@@ -249,8 +249,7 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator, game_render_co
     return false;
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8, render_context: sdl.video.gl.Context) !void {
-    try render_context.makeCurrent(window);
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8) !void {
     try gameptr.init(allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(window);
     try gameptr.startThreads();
