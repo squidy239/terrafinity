@@ -597,7 +597,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             const wa = ztracy.ZoneN(@src(), "wait_futures");
             while (self.write_futures.items.len > 0) {
                 var wf = self.write_futures.swapRemove(0);
-                try wf.wait(std.math.maxInt(u64));
+                try wf.wait(10 * std.time.ns_per_ms);
             }
             wa.End();
             self.buffer.expand(newsize) catch |err| {
@@ -775,9 +775,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
             if (self.indirect_buffer) |indirect_buffer| {
                 gl.DeleteBuffers(1, @ptrCast(&indirect_buffer));
-            }
-            if (self.buffer.buffer) |buffer| {
-                gl.DeleteBuffers(1, @ptrCast(&buffer));
             }
         }
     };

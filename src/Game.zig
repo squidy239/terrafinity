@@ -367,6 +367,7 @@ pub fn unloadChunkMeshes(self: *@This()) void {
         if (!self.opengl_renderer.render_buffer.lock.tryLock()) return;
         defer self.opengl_renderer.render_buffer.lock.unlock();
         var it = self.opengl_renderer.render_buffer.map.iterator();
+        defer it.deinit();
         const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
         defer loop.End();
         while (it.next()) |entry| {
