@@ -455,6 +455,8 @@ const GpuBuffer = struct {
     pub fn expand(self: *GpuBuffer, new_size: usize) !void {
         std.debug.assert(new_size != 0);
         if (self.buffer != null and new_size <= self.len) return;
+        const e = ztracy.ZoneN(@src(), "Expand");
+        defer e.End();
         std.log.debug("Expanding buffer to {d}", .{new_size});
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
@@ -481,6 +483,8 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
+        const e = ztracy.ZoneN(@src(), "writeSegment");
+        defer e.End();
         try self.expand(offset + data.len);
         gl.NamedBufferSubData(self.buffer.?, @intCast(offset), @intCast(data.len), data.ptr);
         try glError();
