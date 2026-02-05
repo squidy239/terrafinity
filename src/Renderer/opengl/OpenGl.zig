@@ -758,6 +758,8 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         pub fn deinit(self: *@This()) void {
             std.debug.assert(self.lock.tryLock());
+            for(self.write_futures.items)|*f|f.wait(10 * std.time.ns_per_s) catch |err| std.log.err("error waiting for buffer write futures: {any}", .{err});
+            self.write_futures.deinit(self.allocator);
             self.buffer.free();
 
             var node = self.linked_list.first;
