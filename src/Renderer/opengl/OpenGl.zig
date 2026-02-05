@@ -630,7 +630,6 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         pub fn removeSpace(self: *@This(), space: *Space) void {
             space.freelist_node = .{};
-            self.free_list.append(&space.freelist_node.?);
             const behind = space.node.prev;
             const ahead = space.node.next;
             if (ahead) |node| {
