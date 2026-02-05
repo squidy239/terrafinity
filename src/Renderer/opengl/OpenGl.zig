@@ -427,15 +427,19 @@ const GpuBuffer = struct {
             return .{ .sync = sync };
         }
 
-        pub fn isComplete(sync: *anyopaque) bool {
-            const result = gl.ClientWaitSync(sync, 0, 0); // timeout=0, non-blocking
-            return result == gl.ALREADY_SIGNALED or result == gl.CONDITION_SATISFIED;
+        pub fn isComplete(self: *@This()) bool {
+            const result = gl.ClientWaitSync(self.sync orelse return true, 0, 0); // timeout=0, non-blocking
+            const complete = result == gl.ALREADY_SIGNALED or result == gl.CONDITION_SATISFIED;
+            if(complete) {
+                self.cleanup();
+            }
+            return complete;
         }
 
         pub fn wait(self: *@This(), timeout_ns: u64) !void {
             const result = gl.ClientWaitSync(self.sync orelse return, gl.SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
             switch (result) {
-                gl.ALREADY_SIGNALED, gl.CONDITION_SATISFIED => self.sync = null,
+                gl.ALREADY_SIGNALED, gl.CONDITION_SATISFIED => self.cleanup(),
                 gl.TIMEOUT_EXPIRED => return error.Timeout,
                 gl.WAIT_FAILED => return error.WaitFailed,
                 else => unreachable,
@@ -520,12 +524,21 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn put(self: *@This(), key: K, value: []const u8) !void {
             const z = ztracy.Zone(@src());
             defer z.End();
+            const l = ztracy.ZoneN(@src(), "lock");
             self.lock.lock();
+            l.End();
             const space = try self.add(value.len);
             {
+                const w = ztracy.ZoneN(@src(), "write");
+                defer w.End();
+                const bl = ztracy.ZoneN(@src(), "buffer_lock");
                 self.buff_lock.lockShared();
+                bl.End();
                 defer self.buff_lock.unlockShared();
                 try self.write_futures.append(self.allocator, try self.buffer.writeSegment(space.start, value));
+            }
+            if(self.write_futures.items.len > 0 and self.write_futures.items[0].isComplete() == true) {
+                std.debug.assert(self.write_futures.swapRemove(0).sync == null);
             }
             std.debug.assert(space.length == value.len);
             const existing = self.map.fetchPut(self.allocator, key, space) catch |err| {
@@ -537,7 +550,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn add(self: *@This(), length: usize) !*Space {
-            const z = ztracy.Zone(@src());
+            const z = ztracy.ZoneN(@src(), "add");
             defer z.End();
             var node = self.linked_list.first orelse &(try self.append(length)).node;
             while (true) {
@@ -564,17 +577,19 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn append(self: *@This(), minsize: usize) !*Space {
-            const z = ztracy.Zone(@src());
+            const z = ztracy.ZoneN(@src(), "append");
             defer z.End();
             self.buff_lock.lock();
             const old_size = self.buffer.len;
             std.debug.assert(minsize > 0);
             const newsize = @max(old_size + minsize, old_size * 2);
             std.debug.assert(newsize > old_size);
+            const wa = ztracy.ZoneN(@src(), "wait_futures");
             while (self.write_futures.items.len > 0) {
                 var wf = self.write_futures.swapRemove(0);
                 try wf.wait(std.math.maxInt(u64));
             }
+            wa.End();
             self.buffer.expand(newsize) catch |err| {
                 self.buff_lock.unlock();
                 return err;
