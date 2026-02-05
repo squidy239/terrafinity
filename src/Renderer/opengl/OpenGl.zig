@@ -48,7 +48,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
         .indecies = undefined,
         .shaderprogram = undefined,
         .proc_table = undefined,
-        .render_buffer = .{ .allocator = allocator },
+        .render_buffer = .{ .allocator = allocator, .map = .init(allocator) },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
@@ -288,7 +288,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const frustrum = Frustum.extractFrustumPlanes(projview);
     gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
-    const lb = ztracy.ZoneN(@src(), "lock buffer");
 
     const draw_info = self.render_buffer.rebuild(
         @sizeOf(Mesh.Face),
@@ -298,6 +297,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         getChunkData,
         .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
+    const lb = ztracy.ZoneN(@src(), "lock buffer");
     self.render_buffer.buff_lock.lockShared();
     lb.End();
     defer self.render_buffer.buff_lock.unlockShared();
@@ -430,7 +430,7 @@ const GpuBuffer = struct {
         pub fn isComplete(self: *@This()) bool {
             const result = gl.ClientWaitSync(self.sync orelse return true, 0, 0); // timeout=0, non-blocking
             const complete = result == gl.ALREADY_SIGNALED or result == gl.CONDITION_SATISFIED;
-            if(complete) {
+            if (complete) {
                 self.cleanup();
             }
             return complete;
@@ -510,7 +510,9 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         linked_list: std.DoublyLinkedList = .{},
 
-        map: std.AutoArrayHashMapUnmanaged(K, *Space) = .empty,
+        free_list: std.DoublyLinkedList = .{},
+
+        map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
         lock: std.Thread.Mutex = .{},
 
         indirect_buffer: ?c_uint = null,
@@ -520,7 +522,7 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         const Space = struct {
             node: std.DoublyLinkedList.Node,
-            free: bool,
+            freelist_node: ?std.DoublyLinkedList.Node,
             start: usize,
             length: usize,
         };
@@ -532,6 +534,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.lock.lock();
             l.End();
             const space = try self.add(value.len);
+            std.debug.assert(space.freelist_node == null);
             {
                 const w = ztracy.ZoneN(@src(), "write");
                 defer w.End();
@@ -541,39 +544,42 @@ fn MultiRenderBuffer(comptime K: type) type {
                 defer self.buff_lock.unlockShared();
                 try self.write_futures.append(self.allocator, try self.buffer.writeSegment(space.start, value));
             }
-            if(self.write_futures.items.len > 0 and self.write_futures.items[0].isComplete() == true) {
+            if (self.write_futures.items.len > 0 and self.write_futures.items[0].isComplete() == true) {
                 std.debug.assert(self.write_futures.swapRemove(0).sync == null);
             }
             std.debug.assert(space.length == value.len);
-            const existing = self.map.fetchPut(self.allocator, key, space) catch |err| {
+            const existing = self.map.fetchPut(key, space) catch |err| {
                 self.lock.unlock();
                 return err;
             };
+            if (existing) |e| self.removeSpace(e);
             self.lock.unlock();
-            if (existing) |e| self.removeSpace(e.value);
         }
 
         fn add(self: *@This(), length: usize) !*Space {
             const z = ztracy.ZoneN(@src(), "add");
             defer z.End();
-            var node = self.linked_list.first orelse &(try self.append(length)).node;
+            var space: *Space = undefined;
+            var next = self.free_list.first;
             while (true) {
-                node = node.next orelse &(try self.append(length)).node;
-                const space: *Space = @fieldParentPtr("node", node);
-                if (space.free and space.length >= length) {
-                    space.free = false;
+                space = if(next != null) @fieldParentPtr("freelist_node", @as(*?std.DoublyLinkedList.Node, @ptrCast(next))) else try self.append(length);
+                if(next)|n| next = n.next;
+                if (space.length >= length) {
                     const extra_space = space.length - length;
                     if (extra_space > 0) {
                         const space_ptr = try self.allocator.create(Space);
                         space_ptr.* = Space{
                             .node = undefined,
-                            .free = true,
+                            .freelist_node = .{},
                             .start = space.start + length,
                             .length = extra_space,
                         };
-                        self.linked_list.insertAfter(node, &space_ptr.node);
+                        self.free_list.append(&space_ptr.freelist_node.?);
+                        self.linked_list.insertAfter(&space.node, &space_ptr.node);
                         space.length -= extra_space;
                     }
+                    self.free_list.remove(&space.freelist_node.?);
+                    space.freelist_node = null;
                     std.debug.assert(space.length == length);
                     return space;
                 }
@@ -602,50 +608,53 @@ fn MultiRenderBuffer(comptime K: type) type {
             const space_ptr = try self.allocator.create(Space);
             space_ptr.* = Space{
                 .node = undefined,
-                .free = true,
+                .freelist_node = .{},
                 .start = old_size,
                 .length = newsize - old_size,
             };
+            self.free_list.append(&space_ptr.freelist_node.?);
             self.linked_list.append(&space_ptr.node);
+            std.debug.assert(space_ptr.length >= minsize);
             return space_ptr;
         }
 
         pub fn remove(self: *@This(), key: K) void {
             self.lock.lock();
-            const entry = self.map.fetchSwapRemove(key) orelse {
-                self.lock.unlock();
+            defer self.lock.unlock();
+            const entry = self.map.fetchremove(key) orelse {
                 return;
             };
-            self.lock.unlock();
-            const space = entry.value;
+            const space = entry;
             self.removeSpace(space);
         }
 
         pub fn removeSpace(self: *@This(), space: *Space) void {
-            self.lock.lock();
-            space.free = true;
+            space.freelist_node = .{};
+            self.free_list.append(&space.freelist_node.?);
             const behind = space.node.prev;
             const ahead = space.node.next;
             if (ahead) |node| {
                 const aspace: *Space = @fieldParentPtr("node", node);
-                if (aspace.free) {
+                if (aspace.freelist_node != null) {
                     std.debug.assert(space.start + space.length == aspace.start);
                     space.length += aspace.length;
                     self.linked_list.remove(&aspace.node);
+                    self.free_list.remove(&aspace.freelist_node.?);
                     self.allocator.destroy(aspace);
                 }
             }
             if (behind) |node| {
                 const bspace: *Space = @fieldParentPtr("node", node);
-                if (bspace.free) {
+                if (bspace.freelist_node != null) {
                     std.debug.assert(bspace.start + bspace.length == space.start);
                     space.length += bspace.length;
                     space.start = bspace.start;
                     self.linked_list.remove(&bspace.node);
+                    self.free_list.remove(&bspace.freelist_node.?);
                     self.allocator.destroy(bspace);
                 }
             }
-            self.lock.unlock();
+            self.free_list.append(&space.freelist_node.?);
         }
 
         pub fn rebuild(
@@ -676,19 +685,14 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
 
             const a = ztracy.ZoneN(@src(), "alloc");
-            var item_data: std.ArrayList(ItemData) = try .initCapacity(self.allocator, 1_000);
+            var item_data: std.ArrayList(ItemData) = try .initCapacity(self.allocator, 5_000);
             defer item_data.deinit(self.allocator);
-            var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, 1_000);
+            var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, 5_000);
             defer commands.deinit(self.allocator);
             a.End();
             //TODO persistently map buffer
             var total: u64 = 0;
             {
-                const l = ztracy.ZoneN(@src(), "lock");
-                self.lock.lock();
-                l.End();
-                defer self.lock.unlock();
-
                 total = self.map.count();
 
                 if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
@@ -697,22 +701,30 @@ fn MultiRenderBuffer(comptime K: type) type {
                 ac.End();
 
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
+                self.lock.lock();
+                defer self.lock.unlock();
                 var it = self.map.iterator();
+                defer it.deinit();
                 while (it.next()) |entry| {
                     const key = entry.key_ptr.*;
                     if (culler) |cullFn| {
                         if (cullFn(cull_userdata, key)) continue;
                     }
-                    const space = entry.value_ptr.*;
-                    std.debug.assert(!space.free);
-                    const faces = @divExact(space.length, element_size);
+
+                    const start = entry.value_ptr.*.start;
+                    const length = entry.value_ptr.*.length;
+                    const free = entry.value_ptr.*.freelist_node != null;
+
+                    std.debug.assert(!free);
+
+                    const faces = @divExact(length, element_size);
                     face_count += faces;
                     const command: DrawElementsIndirectCommand = .{
                         .count = 6,
                         .firstIndex = 0,
-                        .baseInstance = @intCast(@divExact(space.start, element_size)),
+                        .baseInstance = @intCast(@divExact(start, element_size)),
                         .baseVertex = 0,
-                        .instanceCount = @intCast(@divExact(space.length, element_size)),
+                        .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     try commands.append(self.allocator, command);
                     try item_data.append(self.allocator, get_itemdata(item_userdata, key));
@@ -728,7 +740,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn verify(self: *@This()) void {
             const v = ztracy.ZoneN(@src(), "verify");
             defer v.End();
-            self.lock.lock();
+            if(!self.lock.tryLock()) return;
             defer self.lock.unlock();
             var node = self.linked_list.first;
             var lastpos: usize = 0;
@@ -755,7 +767,7 @@ fn MultiRenderBuffer(comptime K: type) type {
                 node = n.next;
                 self.allocator.destroy(space);
             }
-            self.map.deinit(self.allocator);
+            self.map.deinit();
 
             if (self.ssbo) |ssbo| {
                 gl.DeleteBuffers(1, @ptrCast(&ssbo));
