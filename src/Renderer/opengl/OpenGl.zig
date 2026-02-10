@@ -493,13 +493,21 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
+        try self.writeNoFlush(offset, data);
+        try self.flushRange(offset, data.len);
+    }
+
+    pub fn flushRange(self: *GpuBuffer, offset: usize, length: usize) !void {
+        gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
+        try glError();
+    }
+
+    pub fn writeNoFlush(self: *GpuBuffer, offset: usize, data: []const u8) !void {
         std.debug.assert(data.len > 0);
-        const e = ztracy.ZoneN(@src(), "writeSegment");
+        const e = ztracy.ZoneN(@src(), "writeNoFlush");
         defer e.End();
         try self.ensureCapacity(offset + data.len);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
-        gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(data.len));
-        try glError();
     }
 
     pub fn free(self: *GpuBuffer) void {
@@ -692,7 +700,6 @@ fn MultiRenderBuffer(comptime K: type) type {
                 const ac = ztracy.ZoneN(@src(), "mapCommands");
                 try glError();
                 ac.End();
-
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
                 self.lock.lock();
                 defer self.lock.unlock();
@@ -720,13 +727,17 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
-                    try self.indirect_buffer.writeSegment(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
-                    try self.ssbo.writeSegment(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
+                    try self.indirect_buffer.writeNoFlush(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
+                    try self.ssbo.writeNoFlush(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
                 }
                 loop.End();
             }
-            gl.Flush();
+            if (drawn > 0) {
+                try self.indirect_buffer.flushRange(0, drawn * @sizeOf(DrawElementsIndirectCommand));
+                try self.ssbo.flushRange(0, drawn * @sizeOf(ItemData));
+                gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+            }
             return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
         }
 
@@ -741,7 +752,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             while (node) |n| {
                 const space: *Space = @fieldParentPtr("node", n);
                 std.debug.assert(space.length > 0);
-                //std.debug.assert(space.start == lastpos);
+                std.debug.assert(space.start == lastpos);
                 lastpos += space.length;
                 std.debug.assert(lastpos <= self.buffer.mapping.?.len);
                 node = n.next;
