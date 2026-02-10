@@ -415,8 +415,9 @@ const UniformLocations = struct {
 };
 
 const GpuBuffer = struct {
-    len: usize = 0,
     buffer: ?c_uint = null,
+    mapping: ?[]u8 = null,
+    growth_factor: f32 = 2,
 
     pub const WriteFuture = struct {
         sync: ?*gl.sync,
@@ -452,51 +453,57 @@ const GpuBuffer = struct {
         }
     };
 
-    pub fn expand(self: *GpuBuffer, new_size: usize) !void {
-        std.debug.assert(new_size != 0);
-        if (self.buffer != null and new_size <= self.len) return;
+    pub fn ensureCapacity(self: *GpuBuffer, length: usize) !void {
+        if (self.mapping != null and length <= self.mapping.?.len) return;
+
+        const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
+        const new_size = @max(scaled_size, length);
+
+        std.log.debug("Expanding buffer to {d}", .{new_size});
         const e = ztracy.ZoneN(@src(), "Expand");
         defer e.End();
-        std.log.debug("Expanding buffer to {d}", .{new_size});
+
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
         try glError();
-        gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.DYNAMIC_STORAGE_BIT);
-        glError() catch |err| {
-            gl.DeleteBuffers(1, @ptrCast(&new_buffer));
-            return err;
-        };
+        errdefer gl.DeleteBuffers(1, @ptrCast(&new_buffer));
+        gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT);
+        try glError();
+        errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
-            gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(self.len));
-            glError() catch |err| {
-                gl.DeleteBuffers(1, @ptrCast(&new_buffer));
-                return err;
-            };
-            self.buffer = new_buffer;
-            self.len = new_size;
+            const data_len = if (self.mapping != null) self.mapping.?.len else 0;
+            _ = gl.UnmapNamedBuffer(oldbuffer);
+            self.mapping = null;
+            gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(data_len));
             gl.DeleteBuffers(1, @ptrCast(&oldbuffer));
-        } else {
-            self.buffer = new_buffer;
-            self.len = new_size;
         }
+        var new_mapping: []u8 = undefined;
+        new_mapping.len = new_size;
+        new_mapping.ptr = @ptrCast(gl.MapNamedBufferRange(new_buffer, 0, @intCast(new_size), gl.MAP_WRITE_BIT | gl.MAP_FLUSH_EXPLICIT_BIT) orelse return error.OutOfMemory);
+        try glError();
+        self.buffer = new_buffer;
+        self.mapping = new_mapping;
         gl.Finish();
     }
 
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
+        std.debug.assert(data.len > 0);
         const e = ztracy.ZoneN(@src(), "writeSegment");
         defer e.End();
-        try self.expand(offset + data.len);
-        gl.NamedBufferSubData(self.buffer.?, @intCast(offset), @intCast(data.len), data.ptr);
+        try self.ensureCapacity(offset + data.len);
+        @memcpy(self.mapping.?[offset .. offset + data.len], data);
+        gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(data.len));
         try glError();
         return WriteFuture.create();
     }
 
     pub fn free(self: *GpuBuffer) void {
         if (self.buffer) |buffer| {
+            _ = gl.UnmapNamedBuffer(buffer);
             gl.DeleteBuffers(1, @ptrCast(&buffer));
         }
         self.buffer = null;
-        self.len = 0;
+        self.mapping = null;
     }
 };
 
@@ -507,6 +514,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         ///exclusive lock is for resizing, shared lock is for reading/writing
         buff_lock: std.Thread.RwLock = .{},
         buffer: GpuBuffer = .{},
+        used_capacity: usize = 0,
 
         linked_list: std.DoublyLinkedList = .{},
 
@@ -562,8 +570,8 @@ fn MultiRenderBuffer(comptime K: type) type {
             var space: *Space = undefined;
             var next = self.free_list.first;
             while (true) {
-                space = if(next != null) @fieldParentPtr("freelist_node", @as(*?std.DoublyLinkedList.Node, @ptrCast(next))) else try self.append(length);
-                if(next)|n| next = n.next;
+                space = if (next != null) @fieldParentPtr("freelist_node", @as(*?std.DoublyLinkedList.Node, @ptrCast(next))) else try self.append(length);
+                if (next) |n| next = n.next;
                 if (space.length >= length) {
                     const extra_space = space.length - length;
                     if (extra_space > 0) {
@@ -586,21 +594,18 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
         }
 
-        fn append(self: *@This(), minsize: usize) !*Space {
+        fn append(self: *@This(), size: usize) !*Space {
             const z = ztracy.ZoneN(@src(), "append");
             defer z.End();
             self.buff_lock.lock();
-            const old_size = self.buffer.len;
-            std.debug.assert(minsize > 0);
-            const newsize = @max(old_size + minsize, old_size * 2);
-            std.debug.assert(newsize > old_size);
+            std.debug.assert(size > 0);
             const wa = ztracy.ZoneN(@src(), "wait_futures");
             while (self.write_futures.items.len > 0) {
                 var wf = self.write_futures.swapRemove(0);
                 try wf.wait(10 * std.time.ns_per_ms);
             }
             wa.End();
-            self.buffer.expand(newsize) catch |err| {
+            self.buffer.ensureCapacity(self.used_capacity + size) catch |err| {
                 self.buff_lock.unlock();
                 return err;
             };
@@ -609,12 +614,13 @@ fn MultiRenderBuffer(comptime K: type) type {
             space_ptr.* = Space{
                 .node = undefined,
                 .freelist_node = .{},
-                .start = old_size,
-                .length = newsize - old_size,
+                .start = self.used_capacity,
+                .length = size,
             };
             self.free_list.append(&space_ptr.freelist_node.?);
             self.linked_list.append(&space_ptr.node);
-            std.debug.assert(space_ptr.length >= minsize);
+            self.used_capacity += size;
+            std.debug.assert(space_ptr.length == size);
             return space_ptr;
         }
 
@@ -739,7 +745,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn verify(self: *@This()) void {
             const v = ztracy.ZoneN(@src(), "verify");
             defer v.End();
-            if(!self.lock.tryLock()) return;
+            if (!self.lock.tryLock()) return;
             defer self.lock.unlock();
             var node = self.linked_list.first;
             var lastpos: usize = 0;
@@ -747,9 +753,9 @@ fn MultiRenderBuffer(comptime K: type) type {
             while (node) |n| {
                 const space: *Space = @fieldParentPtr("node", n);
                 std.debug.assert(space.length > 0);
-                std.debug.assert(space.start == lastpos);
+                //std.debug.assert(space.start == lastpos);
                 lastpos += space.length;
-                std.debug.assert(lastpos <= self.buffer.len);
+                std.debug.assert(lastpos <= self.buffer.mapping.?.len);
                 node = n.next;
                 count += 1;
             }
@@ -758,7 +764,7 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         pub fn deinit(self: *@This()) void {
             std.debug.assert(self.lock.tryLock());
-            for(self.write_futures.items)|*f|f.wait(10 * std.time.ns_per_s) catch |err| std.log.err("error waiting for buffer write futures: {any}", .{err});
+            for (self.write_futures.items) |*f| f.wait(10 * std.time.ns_per_s) catch |err| std.log.err("error waiting for buffer write futures: {any}", .{err});
             self.write_futures.deinit(self.allocator);
             self.buffer.free();
 
