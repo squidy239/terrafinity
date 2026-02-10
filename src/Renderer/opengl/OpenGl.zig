@@ -311,12 +311,12 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
     glError() catch return error.DrawFailed;
-
+    self.render_buffer.indirect_buffer.unmap();
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.?);
+    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
     glError() catch return error.DrawFailed;
-    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.?);
+    gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
@@ -472,7 +472,7 @@ const GpuBuffer = struct {
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
-            _ = gl.UnmapNamedBuffer(oldbuffer);
+            if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;
             gl.CopyNamedBufferSubData(oldbuffer, new_buffer, 0, 0, @intCast(data_len));
             gl.DeleteBuffers(1, @ptrCast(&oldbuffer));
@@ -486,7 +486,17 @@ const GpuBuffer = struct {
         gl.Finish();
     }
 
-    pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
+    pub fn unmap(self: *@This()) void {
+        _ = gl.UnmapNamedBuffer(self.buffer orelse return);
+        self.mapping = null;
+    }
+
+    pub fn writeSegmentFuture(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
+        try self.writeSegment(offset, data);
+        return WriteFuture.create();
+    }
+
+    pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
         std.debug.assert(data.len > 0);
         const e = ztracy.ZoneN(@src(), "writeSegment");
         defer e.End();
@@ -494,7 +504,6 @@ const GpuBuffer = struct {
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(data.len));
         try glError();
-        return WriteFuture.create();
     }
 
     pub fn free(self: *GpuBuffer) void {
@@ -511,6 +520,9 @@ fn MultiRenderBuffer(comptime K: type) type {
     return struct {
         allocator: std.mem.Allocator,
 
+        ssbo: GpuBuffer = .{},
+        indirect_buffer: GpuBuffer = .{},
+
         ///exclusive lock is for resizing, shared lock is for reading/writing
         buff_lock: std.Thread.RwLock = .{},
         buffer: GpuBuffer = .{},
@@ -522,9 +534,6 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
         lock: std.Thread.Mutex = .{},
-
-        indirect_buffer: ?c_uint = null,
-        ssbo: ?c_uint = null,
 
         write_futures: std.ArrayList(GpuBuffer.WriteFuture) = .{},
 
@@ -550,7 +559,7 @@ fn MultiRenderBuffer(comptime K: type) type {
                 self.buff_lock.lockShared();
                 bl.End();
                 defer self.buff_lock.unlockShared();
-                try self.write_futures.append(self.allocator, try self.buffer.writeSegment(space.start, value));
+                try self.write_futures.append(self.allocator, try self.buffer.writeSegmentFuture(space.start, value));
             }
             if (self.write_futures.items.len > 0 and self.write_futures.items[0].isComplete() == true) {
                 std.debug.assert(self.write_futures.swapRemove(0).sync == null);
@@ -676,31 +685,14 @@ fn MultiRenderBuffer(comptime K: type) type {
 
             if (builtin.mode == .Debug) self.verify();
             var face_count: u64 = 0;
-            if (self.indirect_buffer == null) {
-                var ib: c_uint = undefined;
-                gl.CreateBuffers(1, @ptrCast(&ib));
-                try glError();
-                self.indirect_buffer = ib;
-            }
-            if (self.ssbo == null) {
-                var sb: c_uint = undefined;
-                gl.CreateBuffers(1, @ptrCast(&sb));
-                try glError();
-                self.ssbo = sb;
-            }
 
             const a = ztracy.ZoneN(@src(), "alloc");
-            var item_data: std.ArrayList(ItemData) = try .initCapacity(self.allocator, 5_000);
-            defer item_data.deinit(self.allocator);
-            var commands: std.ArrayList(DrawElementsIndirectCommand) = try .initCapacity(self.allocator, 5_000);
-            defer commands.deinit(self.allocator);
-            a.End();
-            //TODO persistently map buffer
-            var total: u64 = 0;
-            {
-                total = self.map.count();
 
-                if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
+            a.End();
+            var drawn: usize = 0;
+            const total = self.map.count();
+            if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
+            {
                 const ac = ztracy.ZoneN(@src(), "mapCommands");
                 try glError();
                 ac.End();
@@ -731,15 +723,15 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .baseVertex = 0,
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
-                    try commands.append(self.allocator, command);
-                    try item_data.append(self.allocator, get_itemdata(item_userdata, key));
+                    const itemdata = get_itemdata(item_userdata, key);
+                    try self.indirect_buffer.writeSegment(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
+                    try self.ssbo.writeSegment(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
+                    drawn += 1;
                 }
                 loop.End();
             }
-            gl.NamedBufferData(self.indirect_buffer.?, @intCast(commands.items.len * @sizeOf(DrawElementsIndirectCommand)), @ptrCast(commands.items), gl.DYNAMIC_DRAW);
-            gl.NamedBufferData(self.ssbo.?, @intCast(item_data.items.len * @sizeOf(ItemData)), @ptrCast(item_data.items), gl.DYNAMIC_DRAW);
             gl.Flush();
-            return .{ .faces = face_count, .drawn = commands.items.len, .total = total };
+            return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
         }
 
         pub fn verify(self: *@This()) void {
@@ -776,12 +768,8 @@ fn MultiRenderBuffer(comptime K: type) type {
             }
             self.map.deinit();
 
-            if (self.ssbo) |ssbo| {
-                gl.DeleteBuffers(1, @ptrCast(&ssbo));
-            }
-            if (self.indirect_buffer) |indirect_buffer| {
-                gl.DeleteBuffers(1, @ptrCast(&indirect_buffer));
-            }
+            self.ssbo.free();
+            self.indirect_buffer.free();
         }
     };
 }
