@@ -489,6 +489,7 @@ const GpuBuffer = struct {
 
     pub fn writeSegmentFuture(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
         try self.writeSegment(offset, data);
+        gl.Flush();
         return WriteFuture.create();
     }
 
@@ -615,7 +616,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             const wa = ztracy.ZoneN(@src(), "wait_futures");
             while (self.write_futures.items.len > 0) {
                 var wf = self.write_futures.swapRemove(0);
-                try wf.wait(10 * std.time.ns_per_ms);
+                try wf.wait(10 * std.time.ns_per_s);
             }
             wa.End();
             self.buffer.ensureCapacity(self.used_capacity + size) catch |err| {
