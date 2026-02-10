@@ -311,7 +311,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
     glError() catch return error.DrawFailed;
-    self.render_buffer.indirect_buffer.unmap();
+    // const len = self.render_buffer.indirect_buffer.unmap();
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
@@ -320,6 +320,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
+    //self.render_buffer.indirect_buffer.remap(len) catch return error.DrawFailed;
     std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
@@ -479,16 +480,11 @@ const GpuBuffer = struct {
         }
         var new_mapping: []u8 = undefined;
         new_mapping.len = new_size;
-        new_mapping.ptr = @ptrCast(gl.MapNamedBufferRange(new_buffer, 0, @intCast(new_size), gl.MAP_WRITE_BIT | gl.MAP_FLUSH_EXPLICIT_BIT) orelse return error.OutOfMemory);
+        new_mapping.ptr = @ptrCast(gl.MapNamedBufferRange(new_buffer, 0, @intCast(new_size), gl.MAP_WRITE_BIT | gl.MAP_FLUSH_EXPLICIT_BIT | gl.MAP_PERSISTENT_BIT) orelse return error.OutOfMemory);
         try glError();
         self.buffer = new_buffer;
         self.mapping = new_mapping;
         gl.Finish();
-    }
-
-    pub fn unmap(self: *@This()) void {
-        _ = gl.UnmapNamedBuffer(self.buffer orelse return);
-        self.mapping = null;
     }
 
     pub fn writeSegmentFuture(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
