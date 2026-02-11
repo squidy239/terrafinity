@@ -468,7 +468,7 @@ const GpuBuffer = struct {
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
         try glError();
         errdefer gl.DeleteBuffers(1, @ptrCast(&new_buffer));
-        gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT);
+        gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT | gl.CLIENT_STORAGE_BIT);
         try glError();
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
