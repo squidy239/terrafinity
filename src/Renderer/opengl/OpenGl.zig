@@ -297,6 +297,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         getChunkData,
         .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
+    gl.Finish();//TODO better syncronization, double/triple buffer?
     const lb = ztracy.ZoneN(@src(), "lock buffer");
     self.render_buffer.buff_lock.lockShared();
     lb.End();
@@ -320,7 +321,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
-    //self.render_buffer.indirect_buffer.remap(len) catch return error.DrawFailed;
+    gl.Finish();//TODO better syncronization
     std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
