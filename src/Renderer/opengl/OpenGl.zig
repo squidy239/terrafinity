@@ -426,6 +426,7 @@ const GpuBuffer = struct {
 
         pub fn create() !WriteFuture {
             const sync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse return error.FailedToCreateSync;
+            gl.Flush();
             try glError();
             return .{ .sync = sync };
         }
@@ -490,7 +491,6 @@ const GpuBuffer = struct {
 
     pub fn writeSegmentFuture(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
         try self.writeSegment(offset, data);
-        gl.Flush();
         return WriteFuture.create();
     }
 
