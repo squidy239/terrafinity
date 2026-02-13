@@ -72,6 +72,11 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     };
     if (!gl.ProcTable.init(&self.proc_table, sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
+    
+    //preallocate vram to prevent costly buffer resizes
+    try self.render_buffer.buffer.ensureCapacity(128_000_000);
+    try self.render_buffer.ssbo.ensureCapacity(8_000_000);
+    try self.render_buffer.indirect_buffer.ensureCapacity(8_000_000);
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
 
