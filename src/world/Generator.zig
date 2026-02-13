@@ -99,34 +99,34 @@ pub const DefaultGenerator = struct {
 
     pub fn genChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, allocator: std.mem.Allocator) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
-        const gc = ztracy.ZoneNC(@src(), "GenChunkHeights", 1);
-        const heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
-        gc.End();
-        var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
-        var rand = rng.random();
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
-        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
             try blocks.merge(.{ .oneBlock = .air }, allocator);
             return;
-        } else if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
+        }
+        var heights: ?[ChunkSize][ChunkSize]i32 = null;
+        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
+        if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
             try blocks.merge(.{ .oneBlock = .stone }, allocator);
         } else {
+            var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
+            var rand = rng.random();
+            heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
             const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
-            generateTerrain(&blockgrid, Pos, &heights, &self.params, &rand, @floatCast(chunkscale));
+            generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
             const oneblock = Chunk.IsOneBlock(&blockgrid);
             if (oneblock != null and oneblock.? == .air) return try blocks.merge(.{ .oneBlock = .air }, allocator);
         }
-        generateCavesInterpolate(&blockgrid, Pos, &heights, @floatCast(chunkscale), self.params);
+        generateCavesInterpolate(&blockgrid, Pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.IsOneBlock(&blockgrid);
         if (oneblock) |block| {
             try blocks.merge(.{ .oneBlock = block }, allocator);
         } else try blocks.merge(.{ .blocks = &blockgrid }, allocator);
     }
 
-    fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
+    fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
         const terrainScaleUp: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmax)));
         const terrainScaleDown: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrainmin)));
         const terrainScales: [2]f32 = .{ terrainScaleUp, terrainScaleDown };
@@ -143,7 +143,7 @@ pub const DefaultGenerator = struct {
             }
         }
     }
-    fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
+    fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: ?[ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
         const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
         defer caves.End();
         var grid: [4][4][4]f32 = undefined;
@@ -237,12 +237,17 @@ pub const DefaultGenerator = struct {
         return if (block_height < seaLevel) Block.dirt else if (a < 0.25) Block.grass else if (a < 0.4) Block.dirt else if (a < 0.6) Block.stone else Block.snow;
     }
 
+    var get_requests: std.atomic.Value(usize) = .init(0);
+    var cache_misses: std.atomic.Value(usize) = .init(0);
     pub fn getTerrainHeight(self: *DefaultGenerator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
+        const req = get_requests.fetchAdd(1, .monotonic);
         if (self.terrain_height_cache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
+        const miss = cache_misses.fetchAdd(1, .monotonic);
         const generatedHeights = genTerrainHeight(self.params, level, Pos);
-        self.terrain_height_cache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch {};
+        _ = self.terrain_height_cache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch unreachable;
+        if (std.crypto.random.float(f32) < 0.01) std.debug.print("{d}% thc miss\n", .{miss * 100 / req});
         return generatedHeights;
     }
 

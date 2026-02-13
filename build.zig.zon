@@ -21,8 +21,8 @@
             .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#b624cc7d2e984f61c63a83a3d0ad6c686782f961",
-            .hash = "zigglgen-0.4.0-bmyqLV6PLwAt0VCiGVgz6kZ448zaiTix2Z8MXEEuN4Vi",
+            .url = "git+https://github.com/castholm/zigglgen#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
+            .hash = "zigglgen-0.5.0-zigglr_CLwBs1aABtYVtxNPo1SB8AzgKMVouoqULqkDQ",
         },
         .obj = .{
             .url = "git+https://github.com/chip2n/zig-obj.git#47410383c81d24454e370ffadc0980af7abea522",
@@ -41,29 +41,20 @@
             .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
         },
         .sdl3 = .{
-            .url = "git+https://github.com/Gota7/zig-sdl3?ref=master#79b0d1f1ef10a424037025f6af44fe06bf7e062c",
-            .hash = "sdl3-0.1.5-NmT1Q3ARJgDmFWtbbK3KBb7vufbQD0EjD4Me4Fbdq0p3",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3#92b83602cdfa59262e73c023df906c78eef73455",
+            .hash = "sdl3-0.1.7-NmT1Q_YHJwA7QnAm7_SIfh1UZpQUqWKCZwM2u_TAHF-w",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui?ref=main#1bc9c4e29c12779d067566f00e63817277a1dd1d",
-            .hash = "dvui-0.4.0-dev-AQFJmeVS2gBr_UZImna5jjqJewaW2LBD6fve0Lt9Lc70",
+            .url = "git+https://github.com/david-vanderson/dvui#0ca4d5c7a7915ee53a7f69c7facb8b48b7807f40",
+            .hash = "dvui-0.4.0-dev-AQFJmc3h2gBHoPtLm2KO1NEWuqV-kPm1cusWeY6OkHKf",
         },
     },
 
-    // Specifies the set of files and directories that are included in this package.
-    // Only files and directories listed here are included in the `hash` that
-    // is computed for this package. Only files listed here will remain on disk
-    // when using the zig package manager. As a rule of thumb, one should list
-    // files required for compilation plus any license(s).
-    // Paths are relative to the build root. Use the empty string (`""`) to refer to
-    // the build root itself.
-    // A directory listed here means that all files within, recursively, are included.
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        "LICENSE.md",
+        "README.md",
     },
 }

@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const EntityTypes = @import("world/EntityTypes.zig");
-const gl = @import("gl");
 pub const Block = @import("world/Block.zig").Block;
 pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("world/Chunk.zig");
@@ -12,7 +11,6 @@ pub const ConcurrentQueue = @import("ConcurrentQueue");
 pub const Entity = @import("world/Entity.zig");
 pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
-pub const ChunkManager = @import("ChunkManager.zig").ChunkManager;
 const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
@@ -20,13 +18,10 @@ pub const ztracy = @import("ztracy");
 const Ui = @import("Ui.zig");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
-pub const Renderer = @import("client/Renderer.zig");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 const TrackingAllocator = @import("libs/TrackingAllocator.zig");
-
-var proc_table: gl.ProcTable = undefined;
 
 const config_path = "Config.zon";
 
@@ -43,7 +38,7 @@ pub fn main() !void {
     var config_lock: std.Thread.RwLock = .{};
 
     var config: Config = try .load(allocator, config_path);
-    defer config.deinit(allocator); //TODO fix invalid free that happends sometimes
+    defer config.deinit(allocator);
 
     try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
 
@@ -60,7 +55,7 @@ pub fn main() !void {
     try sdl.video.gl.setAttribute(.context_profile_mask, @intFromEnum(sdl.video.gl.Profile.core));
     try sdl.video.gl.setAttribute(.multi_sample_samples, 4);
     try sdl.video.gl.setAttribute(.double_buffer, @intFromBool(true));
-    const window = try sdl.video.Window.init("terrafinity", 800, 600, .{
+    var window = try sdl.video.Window.init("terrafinity", 800, 600, .{
         .open_gl = true,
         .resizable = true,
         .high_pixel_density = true,
@@ -74,30 +69,13 @@ pub fn main() !void {
     try sdl.keyboard.startTextInput(window);
     defer sdl.keyboard.stopTextInput(window) catch unreachable;
 
+    try sdl.video.gl.setAttribute(.share_with_current_context, 1);
+
     // Create SDL renderer for UI (uses OpenGL backend internally)
     const sdl_renderer = try sdl.render.Renderer.init(window, "opengl");
     defer sdl_renderer.deinit();
 
-    const game_render_context = try sdl.video.gl.Context.init(window);
-    defer game_render_context.deinit() catch unreachable;
-
     try sdl_renderer.setDrawBlendMode(.blend);
-    try game_render_context.makeCurrent(window);
-
-    // Initialize OpenGL
-    if (!proc_table.init(sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
-    gl.makeProcTableCurrent(&proc_table);
-
-    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
-
-    gl.Enable(gl.MULTISAMPLE);
-    gl.Enable(gl.DEPTH_TEST);
-    gl.Enable(gl.CULL_FACE);
-    gl.CullFace(gl.BACK);
-    gl.FrontFace(gl.CW);
-    gl.DepthFunc(gl.LESS);
-    gl.Enable(gl.BLEND);
-    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
@@ -146,34 +124,43 @@ pub fn main() !void {
         const dt = frame_time.lap();
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
+            const ig = ztracy.ZoneN(@src(), "ingame");
+            defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
             try game.handleButtonActions(action_set, dt);
             game.handleScroll(scroll);
 
             const size = try window.getSizeInPixels();
-            const viewport_pixels = @Vector(2, f32){ @floatFromInt(size[0]), @floatFromInt(size[1]) };
-            try game_render_context.makeCurrent(window);
-            _ = try game.renderer.Draw(&game, viewport_pixels);
+            try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
+            try game.renderer.clear(game.player.physics.getPos());
+            try game.renderer.drawChunks(game.player.physics.getPos());
+            game.unloadChunkMeshes();
         }
+        const dw = ztracy.ZoneN(@src(), "draw ui");
         try ui_window.begin(std.time.nanoTimestamp());
         var menuchanged: bool = false;
 
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
-        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator, game_render_context);
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator);
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator, game_render_context);
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
 
         _ = try ui_window.end(.{});
+        dw.End();
         try backend.setCursor(ui_window.cursorRequested());
-
+        const sf = ztracy.ZoneN(@src(), "sdl flush");
         try sdl_renderer.flush();
+        sf.End();
+        const sw = ztracy.ZoneN(@src(), "swap");
         try sdl.video.gl.swapWindow(window);
-        std.debug.print("using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
+        sw.End();
+        ztracy.FrameMark();
+        std.debug.print("    using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }
 
-fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, window: *dvui.Window) !f32 {
+fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
@@ -181,7 +168,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
     }
     var scroll: f32 = 0;
     while (sdl.events.poll()) |event| {
-        _ = try ui_backend.addEvent(window, @bitCast(event.toSdl()));
+        _ = try ui_backend.addEvent(win, @bitCast(event.toSdl()));
         switch (event) {
             .key_up => |key| {
                 //TODO modifiers
@@ -192,9 +179,10 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
                 const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.insert(action);
             },
-            .quit, .terminating, .window_close_requested => {
+            .quit, .window_close_requested => {
                 running.store(false, .unordered);
             },
+            .terminating => {},
             .mouse_wheel => |wheel| {
                 scroll += wheel.scroll_y;
             },
@@ -205,6 +193,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
 }
 
 test {
+    @setEvalBranchQuota(10000);
     std.testing.refAllDeclsRecursive(@This());
 }
 

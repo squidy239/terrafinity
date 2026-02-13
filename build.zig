@@ -98,12 +98,20 @@ fn setupDependencies(
     });
     root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
 
+    // SDL3
+    const sdl3 = b.dependency("sdl3", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("sdl3", sdl3.module("sdl3"));
+
     // ThreadPool
     const ThreadPool = b.addModule("ThreadPool", .{
         .root_source_file = b.path("src/libs/ThreadPool.zig"),
         .optimize = optimize,
         .imports = &.{
             .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
+            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
         },
     });
     root_module.addImport("ThreadPool", ThreadPool);
@@ -135,13 +143,6 @@ fn setupDependencies(
     }).module("obj");
     root_module.addImport("obj", obj_mod);
 
-    // SDL3
-    const sdl3 = b.dependency("sdl3", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    root_module.addImport("sdl3", sdl3.module("sdl3"));
-
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
@@ -154,7 +155,7 @@ fn setupDependencies(
     // OpenGL bindings
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
-        .version = .@"4.1",
+        .version = .@"4.5",
         .profile = .core,
     });
     root_module.addImport("gl", gl_bindings);

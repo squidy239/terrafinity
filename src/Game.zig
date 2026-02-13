@@ -1,31 +1,38 @@
 const std = @import("std");
-const World = @import("world/World.zig");
-const ChunkManager = @import("ChunkManager.zig").ChunkManager;
-const Renderer = @import("client/Renderer.zig");
+const builtin = @import("builtin");
+
+const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const dvui = @import("dvui");
+const sdl = @import("sdl3");
 const ThreadPool = @import("ThreadPool");
+const zm = @import("zm");
+const ztracy = @import("ztracy");
+
+const Key = @import("Key.zig");
+const TrackingAllocator = @import("libs/TrackingAllocator.zig");
+const utils = @import("libs/utils.zig");
+const Loader = @import("Loader.zig");
+const Mesh = @import("Mesh.zig");
+pub const Renderer = @import("Renderer.zig");
+const Chunk = @import("world/Chunk.zig");
 const Entity = @import("world/Entity.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
-const utils = @import("libs/utils.zig");
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const builtin = @import("builtin");
-const Chunk = @import("world/Chunk.zig");
-const Loader = @import("Loader.zig");
-const sdl = @import("sdl3");
-const Key = @import("Key.zig");
-const zm = @import("zm");
-const dvui = @import("dvui");
-const TrackingAllocator = @import("libs/TrackingAllocator.zig");
+const World = @import("world/World.zig");
+const ChunkSize = World.ChunkSize;
+const Block = World.Block;
 
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
 pool: ThreadPool,
-chunkManager: ChunkManager,
+opengl_renderer: Renderer.OpenGl,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 tracking_allocator: TrackingAllocator,
+
+loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
 
 // Threads
 loaderThread: ?std.Thread,
@@ -130,14 +137,13 @@ pub const WorldOptions = struct {
         try worldconfwriter.end();
         try generatorconfwriter.end();
     }
-
     pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
         std.zon.parse.free(allocator, self.world_config);
         std.zon.parse.free(allocator, self.generator_config);
     }
 };
-
-pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8) !void {
+const gl = @import("gl");
+pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Thread.RwLock, folder: []const u8, window: sdl.video.Window) !void {
     game.* = .{
         .game_arena = .init(allocator),
         .options = game_options,
@@ -145,9 +151,10 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .running = .init(true),
         .allocator = undefined,
         .pool = undefined,
-        .chunkManager = undefined,
+        .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
+        .loaded_or_meshed = .init(allocator),
         .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
@@ -155,9 +162,15 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .loaderThread = null,
         .unloaderThread = null,
     };
+    try game.opengl_renderer.init(allocator, window);
+    game.renderer = game.opengl_renderer.interface;
     game.allocator = game.tracking_allocator.get_allocator();
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
+    std.fs.cwd().makeDir(folder) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 
     var world_options = WorldOptions.fromWorldFolder(folder, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
@@ -166,7 +179,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     world_options.generator_config.setSeeds();
     try world_options.save(folder);
 
-    const terrain_height_cache_memory = 10_000_000; //10 mb
+    const terrain_height_cache_memory = 100 * 1024 * 1024;
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
         .terrain_height_cache = try .init(game.allocator, thc_size),
@@ -229,15 +242,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
-    game.chunkManager = .{
-        .pool = &game.pool,
-        .ChunkRenderList = .init(game.allocator),
-        .LoadingChunks = .init(game.allocator),
-        .MeshesToLoad = .init(game.allocator),
-        .world = &game.world,
-        .allocator = game.allocator,
-    };
-    game.renderer = try .init(game.allocator, game.player);
+    game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
 }
 
 pub fn getGenDistance(self: *@This()) @Vector(2, u32) {
@@ -252,9 +257,9 @@ pub fn getLevels(self: *@This()) [2]i32 {
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-pub fn getInnerGenRadius(self: *@This(), level: i32) @Vector(2, u32) {
+pub fn getInnerGenRadius(self: *@This(), gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
     if (level <= self.getLevels()[0]) return @splat(0);
-    const inner_radius = self.getGenDistance() / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+    const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 }; //subtract 1 so their is one chunk of overlap
 }
 
@@ -268,8 +273,8 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32)
     self.player.viewDirectionLock.lock();
     self.player.viewDirection -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
     self.player.viewDirection[0] = std.math.clamp(self.player.viewDirection[0], -90 + smallf32, 90 - smallf32);
+    self.opengl_renderer.updateCameraDirection(self.player.viewDirection);
     self.player.viewDirectionLock.unlock();
-    self.renderer.updateCameraDirection();
 }
 
 pub fn handleScroll(self: *@This(), scroll: f32) void {
@@ -302,15 +307,112 @@ pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time_ns
 
 fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !void {
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.vec.cross(self.renderer.cameraFront, Renderer.cameraUp);
+    const c = zm.vec.cross(self.opengl_renderer.cameraFront, Renderer.OpenGl.cameraUp);
     const cross: ?@Vector(3, f64) = if (std.meta.eql(c, @Vector(3, f64){ 0, 0, 0 })) null else zm.vec.normalize(c); //prevent divide by zero
 
-    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.renderer.cameraFront);
-    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.renderer.cameraFront);
+    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.opengl_renderer.cameraFront);
+    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.opengl_renderer.cameraFront);
     if (actions.contains(.up)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, veldiff[1], 0 });
     if (actions.contains(.down)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, -veldiff[1], 0 });
     if (actions.contains(.right) and cross != null) _ = self.player.physics.fetchAddVelocity(veldiff * cross.?);
     if (actions.contains(.left) and cross != null) _ = self.player.physics.fetchAddVelocity(-veldiff * cross.?);
+}
+
+///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
+pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool, playAnimation: bool) !void {
+    const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
+    defer GenMeshAndAdd.End();
+    const chunk = try self.world.loadChunk(Pos, genStructures);
+    defer chunk.release();
+    const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
+        (try self.world.loadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, -1, 0 }), false)).extractFace(.yPlus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 0, 1 }), false)).extractFace(.zMinus, true),
+        (try self.world.loadChunk(Pos.add(.{ 0, 0, -1 }), false)).extractFace(.zPlus, true),
+    };
+    const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
+    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
+    chunk.lockShared();
+    defer chunk.unlockShared();
+    lock.End();
+    exbl.End();
+    var sfa = std.heap.stackFallback(65536, self.allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(sfa.get());
+    defer alloc_writer.deinit();
+    try Mesh.fromChunks(
+        chunk.blocks,
+        &neighbor_faces,
+        &alloc_writer.writer,
+    );
+    const written = alloc_writer.written();
+    if (written.len == 0) return;
+    try self.opengl_renderer.ensureContext();
+    try self.opengl_renderer.render_buffer.put(Pos, written);
+    _ = playAnimation;
+}
+
+pub fn unloadChunkMeshes(self: *@This()) void {
+    const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
+    defer unload.End();
+
+    const playerpos = self.player.physics.getPos();
+    const renderdistance = self.getGenDistance();
+    const levels = self.getLevels();
+    var buffer: [1024]World.ChunkPos = undefined;
+    var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
+
+    {
+        if (!self.opengl_renderer.render_buffer.lock.tryLock()) return;
+        defer self.opengl_renderer.render_buffer.lock.unlock();
+        var it = self.opengl_renderer.render_buffer.map.iterator();
+        defer it.deinit();
+        const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
+        defer loop.End();
+        while (it.next()) |entry| {
+            const Pos = entry.key_ptr.*;
+            const innerRadius: @Vector(2, u32) = self.getInnerGenRadius(renderdistance, Pos.level);
+            const keep = Loader.keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
+            if (keep) continue;
+            tounload.appendBounded(Pos) catch break;
+        }
+    }
+    for (tounload.items) |Pos| {
+        self.opengl_renderer.render_buffer.remove(Pos);
+        _ = self.loaded_or_meshed.remove(Pos); //TODO no mesh entrys in this leak
+    }
+}
+
+pub fn addChunkToRenderAsync(self: *@This(), Pos: World.ChunkPos, genStructures: bool) !void {
+    try self.loaded_or_meshed.put(Pos, {});
+    errdefer _ = self.loaded_or_meshed.remove(Pos);
+    const priority: ThreadPool.Priority = switch (Pos.level) {
+        std.math.minInt(i32)...1 => .High,
+        2...3 => .Medium,
+        4...8 => .Low,
+        9...std.math.maxInt(i32) => .VeryLow,
+    };
+    try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, priority);
+}
+
+fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool) void {
+    self.options_lock.lockShared();
+    const lowest_level = self.options.lowest_level;
+    const highest_level = self.options.highest_level;
+    self.options_lock.unlockShared();
+
+    const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, self.getInnerGenRadius(self.getGenDistance(), Pos.level), self.getGenDistance());
+    const running = self.running.load(.monotonic);
+    if (!inside_range or !running) {
+        _ = self.loaded_or_meshed.remove(Pos);
+        return;
+    }
+    self.addChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+}
+pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
+    const game: *@This() = @ptrCast(@alignCast(args));
+    game.addChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
 }
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {
@@ -321,24 +423,10 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
     std.log.info("stopped threads", .{});
 
-    self.renderer.deinit();
-
-    self.chunkManager.pool.deinit();
+    self.pool.deinit();
     std.log.info("closed threadpool", .{});
-
-    var it = self.chunkManager.ChunkRenderList.iterator();
-    while (it.next()) |entry| {
-        const mesh = entry.value_ptr;
-        mesh.free();
-    }
-
-    it.deinit();
-    self.chunkManager.ChunkRenderList.deinit();
-    self.chunkManager.LoadingChunks.deinit();
-    while (self.chunkManager.MeshesToLoad.popFirst()) |mesh| {
-        mesh.free(self.allocator);
-    }
-    self.chunkManager.MeshesToLoad.deinit(true);
+    self.opengl_renderer.deinit();
+    self.loaded_or_meshed.deinit();
 
     self.world.deinit();
 
@@ -350,5 +438,5 @@ pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
     self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
     self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
-    self.chunkManager.world.onEdit = .{ .onEditFn = ChunkManager.onEditFn, .onEditFnArgs = @ptrCast(&self.chunkManager), .callIfNeighborFacesChanged = true };
+    self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }
