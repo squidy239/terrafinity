@@ -11,11 +11,6 @@ out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
 
-const float Far = 10000000.0;  // Your far plane distance
-const float C = 1.0;  // Resolution constant (adjust as needed)
-
-out float logz;  // Pass to fragment shader
-
 struct Chunk {
     vec3 absolute_position;
     vec3 relative_position;
@@ -140,7 +135,4 @@ void main() {
     coordss = coords;
 
     gl_Position = projview * vec4((coords * scale) + (pos * scale) + relative_position, 1);
-    
-    logz = log(C * gl_Position.w + 1.0) / log(C * Far + 1.0);
-    gl_Position.z = logz * gl_Position.w;
 }

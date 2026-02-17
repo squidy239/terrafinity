@@ -72,7 +72,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     };
     if (!gl.ProcTable.init(&self.proc_table, sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
-    
+
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(128_000_000);
     try self.render_buffer.ssbo.ensureCapacity(8_000_000);
@@ -109,7 +109,8 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     gl.Enable(gl.CULL_FACE);
     gl.CullFace(gl.BACK);
     gl.FrontFace(gl.CW);
-    gl.DepthFunc(gl.LESS);
+    gl.DepthFunc(gl.GREATER);
+    gl.ClipControl(gl.LOWER_LEFT, gl.ZERO_TO_ONE);
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -276,10 +277,13 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
-    const projdist = 10000000;
+    //const projdist = 10000000;
 
-    const view = zm.Mat4.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
-    const projection = zm.Mat4.perspective(std.math.degreesToRadians(90.0), @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1])), 0.1, @floatFromInt(projdist));
+    const view = zm.Mat4f.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
+    const fov = std.math.degreesToRadians(90.0);
+    const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
+    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
+    const projection = reverse_z_matrix;
     const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Uniform1f(self.uniforms.fogDensity, 0);
@@ -291,7 +295,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
-    gl.Enable(gl.CULL_FACE);
+    //gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
 
     const draw_info = self.render_buffer.rebuild(
@@ -302,7 +306,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         getChunkData,
         .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
-    gl.Finish();//TODO better syncronization, double/triple buffer?
+    gl.Finish(); //TODO better syncronization, double/triple buffer?
     const lb = ztracy.ZoneN(@src(), "lock buffer");
     self.render_buffer.buff_lock.lockShared();
     lb.End();
@@ -326,7 +330,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
-    gl.Finish();//TODO better syncronization
+    gl.Finish(); //TODO better syncronization
     std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
@@ -358,6 +362,18 @@ fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed
     (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
+fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
+    const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
+    return .{
+        .data = .{
+            f / aspectWbyH, 0.0, 0.0,   0.0,
+            0.0,            f,   0.0,   0.0,
+            0.0,            0.0, 0.0,   -1.0,
+            0.0,            0.0, zNear, 0.0,
+        },
+    };
+}
+
 fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
     self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
@@ -367,6 +383,7 @@ fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void 
     const c = ztracy.ZoneNC(@src(), "Clear", 32213);
     gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Clear(gl.COLOR_BUFFER_BIT);
+    gl.ClearDepth(0.0);
     gl.Clear(gl.DEPTH_BUFFER_BIT);
     c.End();
 }

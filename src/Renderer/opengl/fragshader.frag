@@ -5,8 +5,6 @@ in vec3 fragpos;
 flat in vec3 sunpos;
 flat in uint side;
 flat in uint blockArrayLayer;
-//uniform vec4 skyColor;
-in float logz;
 uniform float fogDensity;
 uniform sampler2DArray TextureArray;
 out vec4 FragColor;
@@ -42,8 +40,7 @@ float bouncingMod(float x, float n) {
 
 void main()
 {
-    gl_FragDepth = logz;
-    vec2 texcoords = vec2(0, 0);
+    vec2 texcoords;
     vec3 Normal;
     if (side == 0) {
         texcoords = coordss.yz;
@@ -71,7 +68,7 @@ void main()
         texcoords = coordss.xy;
         Normal = vec3(0.0, 0.0, 1.0);
     }
-    texcoords = texcoords * 2;
+    texcoords *= 2;
     vec3 lightColor = vec3(1.0, 1.0, 1.0);
     vec3 norm = normalize(Normal);
     vec3 lightDir = normalize(sunpos - fragpos);
