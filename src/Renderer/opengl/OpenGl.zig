@@ -308,9 +308,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     ) catch return error.DrawFailed;
     gl.Finish(); //TODO better syncronization, double/triple buffer?
     const lb = ztracy.ZoneN(@src(), "lock buffer");
-    self.render_buffer.buff_lock.lockShared();
     lb.End();
-    defer self.render_buffer.buff_lock.unlockShared();
 
     if (draw_info.drawn == 0) return;
     gl.BindVertexArray(self.vao);
@@ -442,41 +440,8 @@ const GpuBuffer = struct {
     buffer: ?c_uint = null,
     mapping: ?[]u8 = null,
     growth_factor: f32 = 2,
-
-    pub const WriteFuture = struct {
-        sync: ?*gl.sync,
-
-        pub fn create() !WriteFuture {
-            const sync = gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) orelse return error.FailedToCreateSync;
-            gl.Flush();
-            try glError();
-            return .{ .sync = sync };
-        }
-
-        pub fn isComplete(self: *@This()) bool {
-            const result = gl.ClientWaitSync(self.sync orelse return true, 0, 0); // timeout=0, non-blocking
-            const complete = result == gl.ALREADY_SIGNALED or result == gl.CONDITION_SATISFIED;
-            if (complete) {
-                self.cleanup();
-            }
-            return complete;
-        }
-
-        pub fn wait(self: *@This(), timeout_ns: u64) !void {
-            const result = gl.ClientWaitSync(self.sync orelse return, gl.SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
-            switch (result) {
-                gl.ALREADY_SIGNALED, gl.CONDITION_SATISFIED => self.cleanup(),
-                gl.TIMEOUT_EXPIRED => return error.Timeout,
-                gl.WAIT_FAILED => return error.WaitFailed,
-                else => unreachable,
-            }
-        }
-
-        pub fn cleanup(self: *@This()) void {
-            gl.DeleteSync(self.sync orelse return);
-            self.sync = null;
-        }
-    };
+    ///shared is for starting writes, exclusive is for resizing
+    resize_lock: std.Thread.RwLock = .{},
 
     pub fn ensureCapacity(self: *GpuBuffer, length: usize) !void {
         if (self.mapping != null and length <= self.mapping.?.len) return;
@@ -487,7 +452,9 @@ const GpuBuffer = struct {
         std.log.debug("Expanding buffer to {d}", .{new_size});
         const e = ztracy.ZoneN(@src(), "Expand");
         defer e.End();
-
+        self.resize_lock.lock();
+        defer self.resize_lock.unlock();
+        gl.Finish();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
         try glError();
@@ -511,13 +478,14 @@ const GpuBuffer = struct {
         gl.Finish();
     }
 
-    pub fn writeSegmentFuture(self: *GpuBuffer, offset: usize, data: []const u8) !WriteFuture {
-        try self.writeSegment(offset, data);
-        return WriteFuture.create();
-    }
-
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
-        try self.writeNoFlush(offset, data);
+        self.resize_lock.lockShared();
+        defer self.resize_lock.unlockShared();
+        std.debug.assert(data.len > 0);
+        const e = ztracy.ZoneN(@src(), "writeNoFlush");
+        defer e.End();
+        try self.ensureCapacity(offset + data.len);
+        @memcpy(self.mapping.?[offset .. offset + data.len], data);
         try self.flushRange(offset, data.len);
     }
 
@@ -526,15 +494,9 @@ const GpuBuffer = struct {
         try glError();
     }
 
-    pub fn writeNoFlush(self: *GpuBuffer, offset: usize, data: []const u8) !void {
-        std.debug.assert(data.len > 0);
-        const e = ztracy.ZoneN(@src(), "writeNoFlush");
-        defer e.End();
-        try self.ensureCapacity(offset + data.len);
-        @memcpy(self.mapping.?[offset .. offset + data.len], data);
-    }
-
     pub fn free(self: *GpuBuffer) void {
+        self.resize_lock.lock();
+        defer self.resize_lock.unlock();
         if (self.buffer) |buffer| {
             _ = gl.UnmapNamedBuffer(buffer);
             gl.DeleteBuffers(1, @ptrCast(&buffer));
@@ -551,8 +513,6 @@ fn MultiRenderBuffer(comptime K: type) type {
         ssbo: GpuBuffer = .{},
         indirect_buffer: GpuBuffer = .{},
 
-        ///exclusive lock is for resizing, shared lock is for reading/writing
-        buff_lock: std.Thread.RwLock = .{},
         buffer: GpuBuffer = .{},
         used_capacity: usize = 0,
 
@@ -562,8 +522,6 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
         lock: std.Thread.Mutex = .{},
-
-        write_futures: std.ArrayList(GpuBuffer.WriteFuture) = .{},
 
         const Space = struct {
             node: std.DoublyLinkedList.Node,
@@ -584,13 +542,8 @@ fn MultiRenderBuffer(comptime K: type) type {
                 const w = ztracy.ZoneN(@src(), "write");
                 defer w.End();
                 const bl = ztracy.ZoneN(@src(), "buffer_lock");
-                self.buff_lock.lockShared();
                 bl.End();
-                defer self.buff_lock.unlockShared();
-                try self.write_futures.append(self.allocator, try self.buffer.writeSegmentFuture(space.start, value));
-            }
-            if (self.write_futures.items.len > 0 and self.write_futures.items[0].isComplete() == true) {
-                std.debug.assert(self.write_futures.swapRemove(0).sync == null);
+                try self.buffer.writeSegment(space.start, value);
             }
             std.debug.assert(space.length == value.len);
             const existing = self.map.fetchPut(key, space) catch |err| {
@@ -634,19 +587,9 @@ fn MultiRenderBuffer(comptime K: type) type {
         fn append(self: *@This(), size: usize) !*Space {
             const z = ztracy.ZoneN(@src(), "append");
             defer z.End();
-            self.buff_lock.lock();
             std.debug.assert(size > 0);
             const wa = ztracy.ZoneN(@src(), "wait_futures");
-            while (self.write_futures.items.len > 0) {
-                var wf = self.write_futures.swapRemove(0);
-                try wf.wait(10 * std.time.ns_per_s);
-            }
             wa.End();
-            self.buffer.ensureCapacity(self.used_capacity + size) catch |err| {
-                self.buff_lock.unlock();
-                return err;
-            };
-            self.buff_lock.unlock();
             const space_ptr = try self.allocator.create(Space);
             space_ptr.* = Space{
                 .node = undefined,
@@ -751,15 +694,13 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
-                    try self.indirect_buffer.writeNoFlush(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
-                    try self.ssbo.writeNoFlush(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
+                    try self.indirect_buffer.writeSegment(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
+                    try self.ssbo.writeSegment(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
                 }
                 loop.End();
             }
             if (drawn > 0) {
-                try self.indirect_buffer.flushRange(0, drawn * @sizeOf(DrawElementsIndirectCommand));
-                try self.ssbo.flushRange(0, drawn * @sizeOf(ItemData));
                 gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
             }
             return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
@@ -787,8 +728,6 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         pub fn deinit(self: *@This()) void {
             std.debug.assert(self.lock.tryLock());
-            for (self.write_futures.items) |*f| f.wait(10 * std.time.ns_per_s) catch |err| std.log.err("error waiting for buffer write futures: {any}", .{err});
-            self.write_futures.deinit(self.allocator);
             self.buffer.free();
 
             var node = self.linked_list.first;
