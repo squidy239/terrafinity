@@ -197,7 +197,6 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     errdefer game.pool.deinit();
     game.world = .{
         .running = .init(true),
-        .entityUpdaterThread = null,
         .allocator = game.allocator,
         .threadPool = &game.pool,
         .Entitys = .init(game.allocator),
@@ -437,6 +436,5 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
     self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
-    self.world.entityUpdaterThread = try std.Thread.spawn(.{}, World.updateEntitiesThread, .{ &self.world, 5 * std.time.ns_per_ms });
     self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }

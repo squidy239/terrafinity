@@ -134,7 +134,9 @@ pub fn main() !void {
             const size = try window.getSizeInPixels();
             try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
             try game.renderer.clear(game.player.physics.getPos());
+            try game.player.physics.update(&game.world, allocator);
             try game.renderer.drawChunks(game.player.physics.getPos());
+            try game.world.updateEntitys(allocator);
             game.unloadChunkMeshes();
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");

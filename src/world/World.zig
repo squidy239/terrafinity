@@ -21,7 +21,6 @@ const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 running: std.atomic.Value(bool),
-entityUpdaterThread: ?std.Thread,
 allocator: std.mem.Allocator,
 threadPool: *ThreadPool,
 
@@ -243,57 +242,24 @@ pub fn getGenState(self: *@This(), Pos: ChunkPos) ?Chunk.Genstate {
 }
 
 //TODO replace this with tick certen amount of entitys or certen amount of time
-pub fn tickEntitiesBucketTask(self: *@This(), complete: *std.atomic.Value(u32), bucketindex: usize, allocator: std.mem.Allocator) void {
-    defer _ = complete.fetchAdd(1, .seq_cst);
-    if (!self.running.load(.monotonic)) return;
-    const bucket = &self.Entitys.buckets[bucketindex];
-    const TickEntitiesTask = ztracy.ZoneNC(@src(), "TickEntitiesTask", 324);
+pub fn updateEntitys(self: *@This(), allocator: std.mem.Allocator) !void {
+    const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
     defer TickEntitiesTask.End();
-    var keys: []u128 = undefined; //makes an array of keys not owned by the hashmap so update can unload the entity
-    {
-        bucket.lock.lockShared();
-        defer bucket.lock.unlockShared();
-        const keyit = bucket.hash_map.keyIterator();
-        keys = allocator.dupe(u128, keyit.items[0..keyit.len]) catch |err| std.debug.panic("err: {any}\n", .{err});
-    }
-    defer allocator.free(keys);
-    for (keys) |uuid| {
-        const entity = bucket.getandaddref(uuid);
+    var it = self.Entitys.iterator();
+    defer it.deinit();
+    while (it.next()) |entry| {
+        const uuid = entry.key_ptr.*;
+        it.pause();
+        defer it.unpause();
+        const entity = self.Entitys.getandaddref(uuid);
         if (entity) |en| {
             en.update(self, uuid, allocator) catch |err| {
                 switch (err) {
                     error.TimedOut => continue,
-                    error.Unrecoverable => std.debug.panic("entity update err Unrecoverable\n", .{}),
+                    else => return err,
                 }
             };
         }
-    }
-}
-var tasksComplete: std.atomic.Value(u32) = .init(0);
-
-//TODO use async when it is added instead of this
-pub fn updateEntitiesThread(self: *@This(), interval_ns: u64) void {
-    const enbktamount = self.Entitys.buckets.len;
-    var st = std.time.nanoTimestamp();
-    while (self.running.load(.seq_cst)) {
-        const AddEntitiesToTick = ztracy.ZoneNC(@src(), "AddEntitiesToTick", 45354345);
-        tasksComplete.store(0, .seq_cst);
-        for (0..enbktamount) |bucket| {
-            self.threadPool.spawn(tickEntitiesBucketTask, .{ self, &tasksComplete, bucket, self.allocator }, .VeryHigh) catch std.debug.panic("error adding task to pool", .{});
-        }
-        AddEntitiesToTick.End();
-        std.Thread.sleep(interval_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
-        st = std.time.nanoTimestamp();
-        const WaitingForTasksToComplete = ztracy.ZoneNC(@src(), "WaitingForTasksToComplete", 2344326);
-        var c: u32 = 0;
-        while (tasksComplete.load(.seq_cst) < enbktamount and self.running.load(.monotonic)) { //checks if all tasks finished before spawning new ones, check if running because the tasks exit if its not
-            std.Thread.yield() catch {};
-            c += 1;
-            if (c > 10000) break; //temporary very bad workaround for a bug in the threadpool
-            //I think the bug is that popFirst in the queue might not return an item if their is one if it got out of sync
-            //Im not fixing it now because I will switch to the Io async when 0.16 is released, entity updates will happen every frame for clients while chunks are being drawn and meshes loaded
-        }
-        WaitingForTasksToComplete.End();
     }
 }
 
@@ -682,8 +648,6 @@ pub fn unloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
 
 pub fn stop(self: *@This()) void {
     self.running.store(false, .monotonic);
-    if (self.entityUpdaterThread) |thread| thread.join();
-    self.entityUpdaterThread = null;
 }
 
 pub fn deinit(self: *@This()) void {
@@ -753,7 +717,6 @@ test "world" {
         .running = .init(true),
         .Chunks = .init(std.testing.allocator),
         .Entitys = .init(std.testing.allocator),
-        .entityUpdaterThread = null,
         .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
     };
     defer world.deinit();
@@ -777,7 +740,6 @@ test "cube benchmark" {
         .running = .init(true),
         .Chunks = .init(allocator),
         .Entitys = .init(allocator),
-        .entityUpdaterThread = null,
         .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
     };
     defer world.deinit();

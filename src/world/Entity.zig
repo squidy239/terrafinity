@@ -13,9 +13,8 @@ ref_count: std.atomic.Value(u32) = .init(0),
 vtable: interface,
 
 pub const interface = struct {
-    ///this function must remove a ref from the entity when it returns
-    ///it may unload the entity or modify
-    update: ?*const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void = null,
+    ///updates the entity, returns true if the entity was unloaded
+    update: ?*const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool = null,
     ///unloads the entity and frees all resorces allocated by it
     ///the entity ptr is not valid after this
     unload: *const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
@@ -27,7 +26,8 @@ pub const interface = struct {
 ///the entity may be unloaded by this function
 pub fn update(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allocator) !void {
     if (self.vtable.update) |updateFn| {
-        return try updateFn(self, world, uuid, allocator);
+        const unloaded = try updateFn(self, world, uuid, allocator);
+        if (!unloaded) _ = self.ref_count.fetchSub(1, .seq_cst);
     } else _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 

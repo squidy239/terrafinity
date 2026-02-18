@@ -168,11 +168,11 @@ pub const Player = struct {
         return self.viewDirection;
     }
 
-    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {
+    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
         _ = uuid;
-        defer _ = entity.ref_count.fetchSub(1, .seq_cst);
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         self.physics.update(world, allocator) catch return error.Unrecoverable;
+        return false;
     }
 
     pub fn getInterface(self: *const @This()) Entity.interface {
