@@ -239,8 +239,14 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         },
         .gameMode = .init(.Spectator),
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
+        .main_inventory = undefined,
     });
     game.player = @ptrCast(@alignCast(playerentity.ptr));
+    game.player.main_inventory = .{
+        .width = 10,
+        .height = 16,
+        .items = .initBuffer(&game.player.inventory_buffer),
+    };
     game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
 }
 

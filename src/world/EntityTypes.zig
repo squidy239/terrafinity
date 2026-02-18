@@ -8,7 +8,7 @@ const gl = @import("gl");
 const obj = @import("obj");
 const ztracy = @import("ztracy");
 const Physics = @import("Physics.zig");
-
+const Item = @import("Item.zig");
 const pack = "default";
 const EntityMeshBufferIDs = struct {
     vbo: c_uint,
@@ -86,7 +86,9 @@ pub const Player = struct {
     gameMode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32),
     fly_speed_linear: std.atomic.Value(f32),
-
+    inventory_buffer: [256]?Item.Item = @splat(null),
+    ///main inventory and hotbar
+    main_inventory: Item.Inventory,
     ///pitch, yaw, roll, in degrees
     viewDirection: @Vector(3, f32),
     viewDirectionLock: std.Thread.RwLock = .{},
