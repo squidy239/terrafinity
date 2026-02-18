@@ -479,14 +479,18 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
+        const e = ztracy.ZoneN(@src(), "writeSegment");
+        defer e.End();
+        try self.writeSegmentNoFlush(offset, data);
+        try self.flushRange(offset, data.len);
+    }
+
+    pub fn writeSegmentNoFlush(self: *GpuBuffer, offset: usize, data: []const u8) !void {
         self.resize_lock.lockShared();
         defer self.resize_lock.unlockShared();
         std.debug.assert(data.len > 0);
-        const e = ztracy.ZoneN(@src(), "writeNoFlush");
-        defer e.End();
         try self.ensureCapacity(offset + data.len);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
-        try self.flushRange(offset, data.len);
     }
 
     pub fn flushRange(self: *GpuBuffer, offset: usize, length: usize) !void {
@@ -533,25 +537,20 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn put(self: *@This(), key: K, value: []const u8) !void {
             const z = ztracy.Zone(@src());
             defer z.End();
-            const l = ztracy.ZoneN(@src(), "lock");
-            self.lock.lock();
-            l.End();
-            const space = try self.add(value.len);
-            std.debug.assert(space.freelist_node == null);
+            var start: usize = undefined;
             {
-                const w = ztracy.ZoneN(@src(), "write");
-                defer w.End();
-                const bl = ztracy.ZoneN(@src(), "buffer_lock");
-                bl.End();
-                try self.buffer.writeSegment(space.start, value);
+                const l = ztracy.ZoneN(@src(), "lock");
+                self.lock.lock();
+                defer self.lock.unlock();
+                l.End();
+                const space = try self.add(value.len);
+                std.debug.assert(space.freelist_node == null);
+                std.debug.assert(space.length == value.len);
+                start = space.start;
+                const existing = try self.map.fetchPut(key, space);
+                if (existing) |e| self.removeSpace(e);
             }
-            std.debug.assert(space.length == value.len);
-            const existing = self.map.fetchPut(key, space) catch |err| {
-                self.lock.unlock();
-                return err;
-            };
-            if (existing) |e| self.removeSpace(e);
-            self.lock.unlock();
+            try self.buffer.writeSegment(start, value);
         }
 
         fn add(self: *@This(), length: usize) !*Space {
@@ -615,6 +614,8 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         pub fn removeSpace(self: *@This(), space: *Space) void {
+            const rs = ztracy.ZoneN(@src(), "removeSpace");
+            defer rs.End();
             space.freelist_node = .{};
             const behind = space.node.prev;
             const ahead = space.node.next;
@@ -694,13 +695,15 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
-                    try self.indirect_buffer.writeSegment(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
-                    try self.ssbo.writeSegment(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
+                    try self.indirect_buffer.writeSegmentNoFlush(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
+                    try self.ssbo.writeSegmentNoFlush(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
                 }
                 loop.End();
             }
             if (drawn > 0) {
+                try self.ssbo.flushRange(0, drawn * @sizeOf(ItemData));
+                try self.indirect_buffer.flushRange(0, drawn * @sizeOf(DrawElementsIndirectCommand));
                 gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
             }
             return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
