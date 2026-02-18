@@ -277,7 +277,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
-    //const projdist = 10000000;
 
     const view = zm.Mat4f.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
     const fov = std.math.degreesToRadians(90.0);
@@ -289,13 +288,10 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    //var drawnchunks: u64 = 0;
-    //var torenderchunks: u64 = 0;
     const millitimestamp = std.time.milliTimestamp();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
-    //gl.Enable(gl.CULL_FACE);
     glError() catch return error.DrawFailed;
 
     const draw_info = self.render_buffer.rebuild(
@@ -306,9 +302,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
         getChunkData,
         .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
-    gl.Finish(); //TODO better syncronization, double/triple buffer?
-    const lb = ztracy.ZoneN(@src(), "lock buffer");
-    lb.End();
 
     if (draw_info.drawn == 0) return;
     gl.BindVertexArray(self.vao);
@@ -319,7 +312,6 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
     glError() catch return error.DrawFailed;
-    // const len = self.render_buffer.indirect_buffer.unmap();
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
@@ -328,7 +320,9 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
     glError() catch return error.DrawFailed;
+    const ff = ztracy.ZoneN(@src(), "finish");
     gl.Finish(); //TODO better syncronization
+    ff.End();
     std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
@@ -655,7 +649,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             const z = ztracy.Zone(@src());
             defer z.End();
 
-            if (builtin.mode == .Debug) self.verify();
             var face_count: u64 = 0;
 
             const a = ztracy.ZoneN(@src(), "alloc");
@@ -674,16 +667,18 @@ fn MultiRenderBuffer(comptime K: type) type {
                 var it = self.map.iterator();
                 defer it.deinit();
                 while (it.next()) |entry| {
-                    const key = entry.key_ptr.*;
-                    if (culler) |cullFn| {
-                        if (cullFn(cull_userdata, key)) continue;
-                    }
-
                     const start = entry.value_ptr.*.start;
                     const length = entry.value_ptr.*.length;
                     const free = entry.value_ptr.*.freelist_node != null;
 
+                    std.debug.assert(length > 0);
                     std.debug.assert(!free);
+                    const key = entry.key_ptr.*;
+                    if (culler) |cullFn| {
+                        const cu = ztracy.ZoneN(@src(), "cull");
+                        defer cu.End();
+                        if (cullFn(cull_userdata, key)) continue;
+                    }
 
                     const faces = @divExact(length, element_size);
                     face_count += faces;
@@ -695,6 +690,8 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
+                    const wr = ztracy.ZoneN(@src(), "write");
+                    defer wr.End();
                     try self.indirect_buffer.writeSegmentNoFlush(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
                     try self.ssbo.writeSegmentNoFlush(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
@@ -705,28 +702,9 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try self.ssbo.flushRange(0, drawn * @sizeOf(ItemData));
                 try self.indirect_buffer.flushRange(0, drawn * @sizeOf(DrawElementsIndirectCommand));
                 gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+                gl.Flush();
             }
             return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
-        }
-
-        pub fn verify(self: *@This()) void {
-            const v = ztracy.ZoneN(@src(), "verify");
-            defer v.End();
-            if (!self.lock.tryLock()) return;
-            defer self.lock.unlock();
-            var node = self.linked_list.first;
-            var lastpos: usize = 0;
-            var count: usize = 0;
-            while (node) |n| {
-                const space: *Space = @fieldParentPtr("node", n);
-                std.debug.assert(space.length > 0);
-                std.debug.assert(space.start == lastpos);
-                lastpos += space.length;
-                std.debug.assert(lastpos <= self.buffer.mapping.?.len);
-                node = n.next;
-                count += 1;
-            }
-            std.log.debug("{d} nodes", .{count});
         }
 
         pub fn deinit(self: *@This()) void {

@@ -3,14 +3,14 @@ const std = @import("std");
 const zm = @import("zm");
 
 pub const Frustum = struct {
-    frus: [6]@Vector(4, f64),
+    frus: [6]@Vector(4, f32),
 
     pub const Box = struct {
-        min: @Vector(3, f64),
-        max: @Vector(3, f64),
+        min: @Vector(3, f32),
+        max: @Vector(3, f32),
     };
 
-    pub fn extractFrustumPlanes(mat: @Vector(16, f64)) Frustum {
+    pub fn extractFrustumPlanes(mat: @Vector(16, f32)) Frustum {
         // zm row-major
         const m00 = mat[0];
         const m01 = mat[1];
@@ -29,18 +29,18 @@ pub const Frustum = struct {
         const m32 = mat[14];
         const m33 = mat[15];
 
-        var planes: [6]@Vector(4, f64) = undefined;
+        var planes: [6]@Vector(4, f32) = undefined;
 
-        planes[0] = @Vector(4, f64){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
-        planes[1] = @Vector(4, f64){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
-        planes[2] = @Vector(4, f64){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
-        planes[3] = @Vector(4, f64){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
-        planes[4] = @Vector(4, f64){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
-        planes[5] = @Vector(4, f64){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
+        planes[0] = @Vector(4, f32){ m30 + m00, m31 + m01, m32 + m02, m33 + m03 }; // Left
+        planes[1] = @Vector(4, f32){ m30 - m00, m31 - m01, m32 - m02, m33 - m03 }; // Right
+        planes[2] = @Vector(4, f32){ m30 + m10, m31 + m11, m32 + m12, m33 + m13 }; // Bottom
+        planes[3] = @Vector(4, f32){ m30 - m10, m31 - m11, m32 - m12, m33 - m13 }; // Top
+        planes[4] = @Vector(4, f32){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
+        planes[5] = @Vector(4, f32){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
 
         // Normalize planes
         for (0..6) |i| {
-            const n = @Vector(3, f64){ planes[i][0], planes[i][1], planes[i][2] };
+            const n = @Vector(3, f32){ planes[i][0], planes[i][1], planes[i][2] };
             const len = @sqrt(zm.vec.dot(n, n));
             planes[i] /= @splat(len);
         }
@@ -56,21 +56,21 @@ pub const Frustum = struct {
 
             // Test all 8 corners of the box against this plane
             // Corner 1: min.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
             // Corner 2: max.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
             // Corner 3: min.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
             // Corner 4: max.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
             // Corner 5: min.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
             // Corner 6: max.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
             // Corner 7: min.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
             // Corner 8: max.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f64){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
 
             // If all 8 corners are outside this plane, the box is completely outside the frustum
             if (out == 8) return false;
@@ -79,7 +79,7 @@ pub const Frustum = struct {
         return true;
     }
 
-    pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f64), radius: f64) bool {
+    pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f32), radius: f32) bool {
         for (self.frus) |plane| {
             const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
             if (dist < -radius) return false;
