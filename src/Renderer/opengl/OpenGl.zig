@@ -80,7 +80,8 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
 
-    for (0..cpu_count) |_| {
+    //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
+    for (0..cpu_count + 1) |_| {
         try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
     }
     try self.draw_context.makeCurrent(self.window);

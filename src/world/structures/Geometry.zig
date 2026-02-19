@@ -4,9 +4,11 @@ pub fn Cone(comptime T: type) type {
     return struct {
         position: @Vector(3, T), // top center of cone
         axis: @Vector(3, T), // normalized axis (direction from top → base)
+        oneDlength: T,
         length: T,
         radiusTop: T,
         radiusBase: T,
+        precalcRadius: T,
         boundingBox: @Vector(6, T),
         pub fn init(pos: @Vector(3, T), axisVec: @Vector(3, T), coneLength: T, baseR: T, topR: T) @This() {
             // normalize axis
@@ -14,26 +16,28 @@ pub fn Cone(comptime T: type) type {
             var cone: @This() = .{
                 .position = pos,
                 .axis = normAxis,
+                .oneDlength = 1.0 / coneLength,
                 .length = coneLength,
                 .radiusTop = topR,
                 .radiusBase = baseR,
+                .precalcRadius = (topR - baseR) / coneLength,
                 .boundingBox = undefined,
             };
             cone.updateBoundingBox();
             return cone;
         }
 
-        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+        pub inline fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
             const v = P - self.position;
             const t = utils.dot(v, self.axis);
 
-            if (t < 0 or t > self.length) return false;
+            if (t < 0 or t > self.length) {
+                @branchHint(.unlikely);
+                return false;
+            }
 
-            const len2 = utils.dot(v, v);
-            const perp2 = len2 - t * t;
-
-            const r = self.radiusBase + (self.radiusTop - self.radiusBase) * (t / self.length);
-            return perp2 < r * r;
+            const r = @mulAdd(T, self.precalcRadius, t, self.radiusBase);
+            return utils.dot(v, v) - t * t < r * r;
         }
 
         pub fn updateBoundingBox(self: *@This()) void {
@@ -58,21 +62,23 @@ pub fn Sphere(comptime T: type) type {
     return struct {
         position: @Vector(3, T),
         radius: T,
+        radiusSquared: T,
         boundingBox: @Vector(6, T),
         pub fn init(pos: @Vector(3, T), radius: T) @This() {
             var sphere: @This() = .{
                 .position = pos,
                 .radius = radius,
+                .radiusSquared = radius * radius,
                 .boundingBox = undefined,
             };
             sphere.updateBoundingBox();
             return sphere;
         }
 
-        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+        pub inline fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
             const diff = P - self.position;
             const dist2 = utils.dot(diff, diff);
-            return dist2 <= self.radius * self.radius;
+            return dist2 <= self.radiusSquared;
         }
 
         pub fn updateBoundingBox(self: *@This()) void {

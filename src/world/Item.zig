@@ -4,7 +4,17 @@ pub const Inventory = struct {
     lock: std.Thread.RwLock = .{},
     width: u32,
     height: u32,
-    items: std.ArrayList(?Item),
+    items: []?Item,
+
+    pub fn initBuffer(width: u32, height: u32, buffer: []?Item) Inventory {
+        std.debug.assert(buffer.len == width * height);
+        @memset(buffer, null);
+        return .{
+            .width = width,
+            .height = height,
+            .items = buffer,
+        };
+    }
 
     /// Gets an item at the given position in the inventory.
     pub fn get(self: *Inventory, row: u32, col: u32) ?Item {
@@ -12,7 +22,7 @@ pub const Inventory = struct {
         defer self.lock.unlockShared();
         std.debug.assert(row < self.height and col < self.width);
         const index = (row * self.width) + col;
-        return self.items.items[index];
+        return self.items[index];
     }
 
     /// Sets an item at the given position in the inventory.
@@ -22,8 +32,8 @@ pub const Inventory = struct {
         defer self.lock.unlock();
         std.debug.assert(row < self.height and col < self.width);
         const index = (row * self.width) + col;
-        defer self.items.items[index] = item;
-        return self.items.items[index];
+        defer self.items[index] = item;
+        return self.items[index];
     }
 
     ///swaps 2 items in the inventory, can be used as move if one item is null
@@ -34,20 +44,19 @@ pub const Inventory = struct {
         std.debug.assert(row2 < self.height and col2 < self.width);
         const index1 = (row1 * self.width) + col1;
         const index2 = (row2 * self.width) + col2;
-        const temp = self.items.items[index1];
-        self.items.items[index1] = self.items.items[index2];
-        self.items.items[index2] = temp;
+        const temp = self.items[index1];
+        self.items[index1] = self.items[index2];
+        self.items[index2] = temp;
     }
 };
 
 pub const Item = struct {
     item_type: ItemType,
     amount: u32,
-    metadata: ?*MetaData,
+    metadata: ?*MetaData = null,
 };
 
 pub const ItemType = enum {
-    Hand,
     Explosive,
 };
 

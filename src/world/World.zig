@@ -209,14 +209,15 @@ pub fn unloadEntity(self: *@This(), entityUUID: u128) void {
     en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
 }
 
-pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype) !*Entity {
+pub fn spawnEntity(self: *@This(), uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
     const UUID = uuid orelse World.prng.random().int(u128);
     if (self.Entitys.contains(UUID)) return error.EntityAlreadyExists;
     const allocated_entity = try Entity.make(entity, self.allocator);
     errdefer allocated_entity.unload(self, UUID, self.allocator, false) catch unreachable;
+    if (return_entity) _ = allocated_entity.ref_count.fetchAdd(1, .seq_cst); //add a ref for hashmap, putNoOverrideaddRef only adds a ref to an existing one
     const existing = try self.Entitys.putNoOverrideaddRef(UUID, allocated_entity);
     std.debug.assert(existing == null);
-    return allocated_entity;
+    if (return_entity) return allocated_entity;
 }
 
 pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
@@ -242,9 +243,10 @@ pub fn getGenState(self: *@This(), Pos: ChunkPos) ?Chunk.Genstate {
 }
 
 //TODO replace this with tick certen amount of entitys or certen amount of time
-pub fn updateEntitys(self: *@This(), allocator: std.mem.Allocator) !void {
+pub fn updateEntitys(self: *@This(), update_finished: *std.atomic.Value(bool), allocator: std.mem.Allocator) void {
     const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
     defer TickEntitiesTask.End();
+    defer update_finished.store(true, .seq_cst);
     var it = self.Entitys.iterator();
     defer it.deinit();
     while (it.next()) |entry| {
@@ -256,7 +258,7 @@ pub fn updateEntitys(self: *@This(), allocator: std.mem.Allocator) !void {
             en.update(self, uuid, allocator) catch |err| {
                 switch (err) {
                     error.TimedOut => continue,
-                    else => return err,
+                    else => @panic("err"),
                 }
             };
         }

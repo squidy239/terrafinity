@@ -1,5 +1,4 @@
 const std = @import("std");
-const Renderer = @import("../main.zig").Renderer;
 const World = @import("World.zig");
 const zm = @import("zm");
 const Block = @import("Block.zig").Block;
@@ -86,7 +85,7 @@ pub const Player = struct {
     gameMode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32),
     fly_speed_linear: std.atomic.Value(f32),
-    inventory_buffer: [256]?Item.Item = @splat(null),
+    inventory_buffer: [10 * 16]?Item.Item = @splat(null),
     ///main inventory and hotbar
     main_inventory: Item.Inventory,
     ///pitch, yaw, roll, in degrees
@@ -187,43 +186,49 @@ pub const Player = struct {
     }
 };
 
-pub const Cube = struct {
+pub const Explosive = struct {
+    pub const Type: Entity.Type = .Explosive;
     lock: std.Thread.RwLock = .{},
     pos: @Vector(3, f64),
-    velocity: @Vector(3, f64),
+    dir: @Vector(3, f64),
     timestamp: i64,
 
-    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!void {
+    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
         const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
         defer u.End();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
-        const timestamp = self.timestamp;
-        self.timestamp = std.time.microTimestamp();
         const l = ztracy.ZoneNC(@src(), "lock", 6553);
         self.lock.lock();
         l.End();
-        const dt: @Vector(3, f64) = @splat(@as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001);
-        //self.velocity[world.random.intRangeAtMost(usize, 0, 2)] += 100 * (world.random.float(f64) - 0.5) * dt[0];
-        self.pos += self.velocity * dt;
+        const timestamp = self.timestamp;
+        self.timestamp = std.time.microTimestamp();
+        const dt = @as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001;
+        self.dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
+        self.dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
+        self.dir[2] += (std.crypto.random.float(f64) - 0.5) * dt;
+        if (!std.meta.eql(self.dir, .{ 0, 0, 0 })) self.dir = zm.vec.normalize(self.dir);
+        self.dir *= @splat(10 * dt);
+        self.pos += self.dir;
         self.lock.unlock();
+        std.debug.print("refs: {d}, id: {any}\n\n\n\n", .{ entity.ref_count.load(.seq_cst), std.Thread.getCurrentId() });
         var worldReader = World.Reader{ .world = world };
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
-        if ((worldReader.getBlockUncached(@intFromFloat(self.pos), World.standard_level) catch unreachable) != .air) {
+        if (true or (worldReader.getBlockUncached(@intFromFloat(self.pos), World.standard_level) catch unreachable) != .air) {
             g.End();
             var worldEditor = World.Editor{
                 .world = world,
                 .tempallocator = allocator,
             };
-            const sphere = World.Editor.TexturedSphere.TexturedSphere(f64, texture, void).init(self.pos, 32, {}, 0.6);
-            //const sphere = World.WorldEditor.Sphere(f64).init(self.pos, 128);
-            worldEditor.placeSamplerShape(.air, sphere, World.standard_level) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(self.pos), 8);
+            worldEditor.placeSamplerShape(.grass, sphere, World.standard_level) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
             _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
-            //_ = uuid;
-            _ = entity.ref_count.fetchSub(1, .seq_cst);
-            world.unloadEntity(uuid);
-            return;
+            return false;
+            //_ = entity.ref_count.fetchSub(1, .seq_cst);
+            //world.unloadEntity(uuid);
+            //return true;
         } else g.End();
-        _ = entity.ref_count.fetchSub(1, .seq_cst);
+        _ = uuid;
+        return false;
     }
 
     pub fn unload(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
@@ -248,28 +253,14 @@ pub const Cube = struct {
             .getPos = getPos,
             .unload = unload,
             .update = update,
-            .draw = draw,
+            .draw = null,
         };
-    }
-
-    pub fn draw(ptr: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void {
-        _ = world;
-        _ = uuid;
-        _ = allocator;
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockShared();
-        const relativePos: @Vector(3, f32) = @floatCast(self.pos - playerPos);
-        self.lock.unlockShared();
-        gl.Uniform3f(renderer.uniforms.relativeEntityposlocation, relativePos[0], relativePos[1], relativePos[2]);
-        gl.BindVertexArray(EntityMeshes[@intFromEnum(Entity.Type.Cube)].?.vao);
-        gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, EntityMeshes[@intFromEnum(Entity.Type.Cube)].?.ebo);
-        gl.DrawElements(gl.TRIANGLES, EntityMeshesLen[@intFromEnum(Entity.Type.Cube)], gl.UNSIGNED_INT, 0);
     }
 };
 fn texture(u: f64, v: f64, args: anytype) f64 {
     const noise = World.DefaultGenerator.Noise.Noise(f32){
         .noise_type = .simplex,
-        .frequency = 4,
+        .frequency = 0.5,
     };
     _ = args;
     const sampled = noise.genNoise2DRange(@floatCast(u), @floatCast(v), f32, 0, 1);

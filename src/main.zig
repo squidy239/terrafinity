@@ -99,6 +99,7 @@ pub fn main() !void {
     try keymap.setActionKey(.{ .key = .d }, .right);
     try keymap.setActionKey(.{ .key = .space }, .up);
     try keymap.setActionKey(.{ .key = .left_shift }, .down);
+    try keymap.setActionKey(.{ .key = .f }, .use_item_primary);
 
     var game: Game = undefined;
 
@@ -116,7 +117,7 @@ pub fn main() !void {
     defer if (ui.menu_state.ingame) game.deinit(window);
     var frame_time: std.time.Timer = try .start();
     var action_set = Key.ActionSet.initEmpty();
-
+    var update_finished: std.atomic.Value(bool) = .init(true);
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         const scroll = try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
@@ -136,7 +137,10 @@ pub fn main() !void {
             try game.renderer.clear(game.player.physics.getPos());
             try game.player.physics.update(&game.world, allocator);
             try game.renderer.drawChunks(game.player.physics.getPos());
-            try game.world.updateEntitys(allocator);
+            if (update_finished.load(.seq_cst)) {
+                update_finished.store(false, .seq_cst);
+                try game.pool.spawn(World.updateEntitys, .{ &game.world, &update_finished, allocator }, .VeryHigh);
+            }
             game.unloadChunkMeshes();
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");

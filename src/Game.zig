@@ -31,9 +31,10 @@ generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 tracking_allocator: TrackingAllocator,
-
 loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
 
+selected_inventory_row: std.atomic.Value(u32) = .init(0),
+selected_inventory_col: std.atomic.Value(u32) = .init(0),
 // Threads
 loaderThread: ?std.Thread,
 unloaderThread: ?std.Thread,
@@ -207,15 +208,6 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     };
     errdefer game.world.deinit();
 
-    for (0..0) |_| {
-        _ = try game.world.spawnEntity(null, EntityTypes.Cube{
-            .lock = .{},
-            .pos = @splat(0),
-            .velocity = @splat(0),
-            .timestamp = std.time.microTimestamp(),
-        });
-    }
-
     const playerentity = try game.world.spawnEntity(null, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .fly_speed = .init(100),
@@ -240,13 +232,15 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
         .gameMode = .init(.Spectator),
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
-    });
+    }, true);
+    playerentity.release();
     game.player = @ptrCast(@alignCast(playerentity.ptr));
-    game.player.main_inventory = .{
-        .width = 10,
-        .height = 16,
-        .items = .initBuffer(&game.player.inventory_buffer),
-    };
+    game.player.main_inventory = .initBuffer(
+        10,
+        16,
+        &game.player.inventory_buffer,
+    );
+    _ = game.player.main_inventory.set(0, 0, .{ .item_type = .Explosive, .amount = 65536 });
     game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
 }
 
@@ -308,6 +302,31 @@ pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time_ns
         .Creative, .Spectator => try self.flyMove(actions, delta_time_seconds),
         else => @panic("TODO"),
     }
+    self.setSelectedSlot(actions);
+    try self.itemAction(actions);
+}
+
+fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
+    if (actions.contains(.hotbar_key_0)) self.selected_inventory_col.store(0, .seq_cst);
+    if (actions.contains(.hotbar_key_1)) self.selected_inventory_col.store(1, .seq_cst);
+    if (actions.contains(.hotbar_key_2)) self.selected_inventory_col.store(2, .seq_cst);
+    if (actions.contains(.hotbar_key_3)) self.selected_inventory_col.store(3, .seq_cst);
+    if (actions.contains(.hotbar_key_4)) self.selected_inventory_col.store(4, .seq_cst);
+    if (actions.contains(.hotbar_key_5)) self.selected_inventory_col.store(5, .seq_cst);
+    if (actions.contains(.hotbar_key_6)) self.selected_inventory_col.store(6, .seq_cst);
+    if (actions.contains(.hotbar_key_7)) self.selected_inventory_col.store(7, .seq_cst);
+    if (actions.contains(.hotbar_key_8)) self.selected_inventory_col.store(8, .seq_cst);
+    if (actions.contains(.hotbar_key_9)) self.selected_inventory_col.store(9, .seq_cst);
+    if (actions.contains(.hotbar_scroll_up)) _ = self.selected_inventory_row.fetchAdd(1, .seq_cst);
+    if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
+}
+
+pub fn itemAction(self: *@This(), actions: Key.ActionSet) !void {
+    if (actions.contains(.use_item_primary)) try self.world.spawnEntity(null, EntityTypes.Explosive{
+        .pos = self.player.physics.getPos(),
+        .dir = @splat(0),
+        .timestamp = std.time.microTimestamp(),
+    }, false);
 }
 
 fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !void {
@@ -417,6 +436,10 @@ fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool
 }
 pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
+    const lowest_level = game.options.lowest_level;
+    const highest_level = game.options.highest_level;
+    const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), chunkPos, game.getInnerGenRadius(game.getGenDistance(), chunkPos.level), game.getGenDistance());
+    if (!inside_range) return;
     game.addChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
 }
 
@@ -432,7 +455,8 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     std.log.info("closed threadpool", .{});
     self.opengl_renderer.deinit();
     self.loaded_or_meshed.deinit();
-
+    //const player_entity: *Entity = @fieldParentPtr("ptr", @as(**anyopaque, @ptrCast(&self.player)));
+    //player_entity.release();
     self.world.deinit();
 
     self.game_arena.deinit();

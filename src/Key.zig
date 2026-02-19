@@ -9,6 +9,20 @@ pub const Action = enum {
     up,
     down,
     escape_menu,
+    hotbar_key_0,
+    hotbar_key_1,
+    hotbar_key_2,
+    hotbar_key_3,
+    hotbar_key_4,
+    hotbar_key_5,
+    hotbar_key_6,
+    hotbar_key_7,
+    hotbar_key_8,
+    hotbar_key_9,
+    hotbar_scroll_up,
+    hotbar_scroll_down,
+    use_item_primary,
+    use_item_secondary,
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);

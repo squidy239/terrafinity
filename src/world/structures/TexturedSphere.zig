@@ -15,19 +15,9 @@ pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype
         samplerArgs: samplerArgsType,
 
         pub fn init(pos: @Vector(3, T), radius: T, samplerArgs: samplerArgsType, minRadiusFraction: T) @This() {
-            var sphere: World.Editor.Geometry.Sphere(T) = .{
-                .position = pos,
-                .radius = radius,
-                .boundingBox = undefined,
-            };
-            sphere.updateBoundingBox();
+            const sphere: World.Editor.Geometry.Sphere(T) = .init(pos, radius);
+            const innersphere: World.Editor.Geometry.Sphere(T) = .init(pos, radius * minRadiusFraction);
 
-            var innersphere: World.Editor.Geometry.Sphere(T) = .{
-                .position = pos,
-                .radius = radius * minRadiusFraction,
-                .boundingBox = undefined,
-            };
-            innersphere.updateBoundingBox();
             return .{
                 .sphere = sphere,
                 .innerSphere = innersphere,

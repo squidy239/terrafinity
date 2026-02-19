@@ -9,7 +9,7 @@ const Entity = @This();
 
 type: Type,
 ptr: *anyopaque,
-ref_count: std.atomic.Value(u32) = .init(0),
+ref_count: std.atomic.Value(u32),
 vtable: interface,
 
 pub const interface = struct {
@@ -26,6 +26,7 @@ pub const interface = struct {
 ///the entity may be unloaded by this function
 pub fn update(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allocator) !void {
     if (self.vtable.update) |updateFn| {
+        errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
         const unloaded = try updateFn(self, world, uuid, allocator);
         if (!unloaded) _ = self.ref_count.fetchSub(1, .seq_cst);
     } else _ = self.ref_count.fetchSub(1, .seq_cst);
@@ -76,6 +77,10 @@ pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
     const entity = try allocator.create(Entity);
     entity.* = en;
     return entity;
+}
+
+pub fn release(self: *@This()) void {
+    _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
 pub const Type = enum(u32) {
