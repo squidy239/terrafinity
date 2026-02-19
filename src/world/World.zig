@@ -523,7 +523,6 @@ pub const Editor = struct {
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var isoneblock: bool = false;
         chunk.lockShared();
-        defer chunk.unlockShared();
         switch (chunk.blocks) {
             .blocks => |blocks| {
                 simplified_blocks = simplifyBlocksAvg(blocks);
@@ -533,18 +532,15 @@ pub const Editor = struct {
                 isoneblock = true;
             },
         }
+        chunk.unlockShared();
         const pos_in_parent = Pos.posInParent() * @as(@Vector(3, u8), @splat(simplified_size));
         const block_pos = parent_pos.toLocalBlockPos() + pos_in_parent;
         const parent = try self.world.loadChunk(parent_pos, false);
         defer parent.release();
-        if (isoneblock) {
-            parent.lockShared();
-            defer parent.unlockShared();
-            if (parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
-        }
         var changed_parent = false;
-        parent.lockExclusive();
-        defer parent.unlockExclusive();
+        parent.lockShared();
+        defer parent.unlockShared();
+        if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
         _ = try parent.ToBlocks(self.world.allocator, false);
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {

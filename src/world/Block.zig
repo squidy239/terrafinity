@@ -35,7 +35,7 @@ pub const Block = enum(u16) {
     pub inline fn getPropagationWeight(self: Block) f32 {
         return switch (self) {
             .grass => 1.1,
-            .air => 0.1,
+            .air => 0.7,
             else => 1,
         };
     }
