@@ -31,7 +31,11 @@ Config: WorldConfig,
 
 block_grid_pool_mutex: std.Thread.Mutex = .{},
 block_grid_count: u64 = 0,
-block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .of([ChunkSize][ChunkSize][ChunkSize]Block) }),
+block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false }),
+
+chunk_pool_mutex: std.Thread.Mutex = .{},
+chunk_count: u64 = 0,
+chunk_pool: std.heap.MemoryPoolExtra(Chunk, .{ .growable = false }),
 
 ///tries each source in order until of priority, 0 is highest
 ///if a source returns false, the next source will be tried
@@ -277,19 +281,19 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
     const chunk = self.Chunks.getandaddref(Pos);
     if (chunk == null) {
         const chunkencoding = try self.getBlocks(Pos);
-        const chunkptr: *Chunk = try .from(chunkencoding, self.allocator);
+        const chunkptr: *Chunk = .from(chunkencoding, &self.chunk_pool, &self.chunk_count, &self.chunk_pool_mutex);
         _ = chunkptr.add_ref();
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
             chunkptr.free(&self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-            self.allocator.destroy(chunkptr);
+            self.destroyChunkPtr(chunkptr);
             return err;
         };
         //chptr is in hashmap past this point
         if (existing) |d| {
             chunkptr.release(); //ref was added before putting
             chunkptr.free(&self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-            self.allocator.destroy(chunkptr);
+            self.destroyChunkPtr(chunkptr);
             return d;
         }
         if (structures) {
@@ -306,15 +310,22 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
     }
 }
 
-pub fn unloadTimeout(self: *@This(), max_ms: u64, max_grids: u64) !void {
+pub fn unloadTimeout(self: *@This(), max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
     self.block_grid_pool_mutex.lock();
-    const count = self.block_grid_count;
+    const grid_count = self.block_grid_count;
     self.block_grid_pool_mutex.unlock();
-    const fraction: f32 = @min(1, @as(f32, @floatFromInt(count)) / @as(f32, @floatFromInt(max_grids)));
-    const timeout = memCurve(max_ms, fraction);
+    self.chunk_pool_mutex.lock();
+    const chunk_count = self.chunk_count;
+    self.chunk_pool_mutex.unlock();
+    const grid_fraction: f32 = @min(1, @as(f32, @floatFromInt(grid_count)) / @as(f32, @floatFromInt(max_grids)));
+    const chunk_fraction: f32 = @min(1, @as(f32, @floatFromInt(chunk_count)) / @as(f32, @floatFromInt(max_chunks)));
+    const grid_timeout = memCurve(max_grid_ms, grid_fraction);
+    const chunk_timeout = memCurve(max_chunk_ms, chunk_fraction);
+
     var chunks: usize = 0;
+    var grids: usize = 0;
     var unload_chunk_buffer: [32784]ChunkPos = undefined;
     var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
     var it = self.Chunks.iterator();
@@ -327,6 +338,11 @@ pub fn unloadTimeout(self: *@This(), max_ms: u64, max_grids: u64) !void {
                 chunks += 1;
                 const chunk = c.value_ptr.*;
                 const lastaccess = chunk.last_access.load(.unordered);
+                const timeout = switch (chunk.blocks) {
+                    .blocks => @min(chunk_timeout, grid_timeout),
+                    .oneBlock => chunk_timeout,
+                };
+                if (chunk.blocks == .blocks) grids += 1;
                 if (currenttime - lastaccess < timeout) continue;
                 tounload.appendBounded(c.key_ptr.*) catch break;
             }
@@ -338,7 +354,7 @@ pub fn unloadTimeout(self: *@This(), max_ms: u64, max_grids: u64) !void {
             _ = try self.tryUnloadChunk(Pos);
         }
     }
-    std.log.debug("chunks loaded: {d}\n", .{chunks});
+    std.log.debug("total chunks loaded: {d}, grids loaded: {d}\n", .{ chunks, grids });
 }
 
 ///returns chunk timeout seconds
@@ -355,11 +371,13 @@ pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std
         defer unloadChunks.End();
         const st = std.time.nanoTimestamp();
         options_lock.lockShared();
-        const unload_timeout = options.max_chunk_timeout_ms;
+        const max_grid_timeout_ms = options.max_grid_timeout_ms;
+        const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
         const block_grid_capacity = options.block_grid_capacity;
+        const chunk_capacity = options.chunk_capacity;
         const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
         options_lock.unlockShared();
-        self.unloadTimeout(unload_timeout, block_grid_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
+        self.unloadTimeout(max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
         std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
     }
 }
@@ -642,14 +660,20 @@ pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
 pub fn unloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
     _ = chunk.WaitForRefAmount(1, null);
     try onUnload(self, chunk, Pos);
-    _ = chunk.free(&self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-    self.allocator.destroy(chunk);
+    self.unloadChunkByPtrNoSave(chunk);
 }
 
 pub fn unloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
     _ = chunk.WaitForRefAmount(1, null);
     _ = chunk.free(&self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-    self.allocator.destroy(chunk);
+    self.destroyChunkPtr(chunk);
+}
+
+fn destroyChunkPtr(self: *@This(), chunk: *Chunk) void {
+    self.chunk_pool_mutex.lock();
+    self.chunk_pool.destroy(chunk);
+    self.chunk_count -= 1;
+    self.chunk_pool_mutex.unlock();
 }
 
 pub fn stop(self: *@This()) void {
@@ -677,6 +701,8 @@ pub fn deinit(self: *@This()) void {
     }
     std.debug.assert(self.block_grid_pool_mutex.tryLock());
     self.block_grid_pool.deinit();
+    std.debug.assert(self.chunk_pool_mutex.tryLock());
+    self.chunk_pool.deinit();
     self.Entitys.deinit();
     std.log.info("entitys unloaded", .{});
     for (self.ChunkSources) |source| {
@@ -718,6 +744,7 @@ test "world" {
     defer threadPool.deinit();
 
     var world: World = .{
+        .chunk_pool = try .initPreheated(std.testing.allocator, 1000),
         .block_grid_pool = try .initPreheated(std.testing.allocator, 1000),
         .thread_pool = &threadPool,
         .allocator = std.testing.allocator,
@@ -742,7 +769,8 @@ test "cube benchmark" {
     var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = try .init(allocator, 1024) };
     generator.params.setSeeds();
     var world: World = .{
-        .block_grid_pool = try .initPreheated(allocator, 16000),
+        .chunk_pool = try .initPreheated(allocator, 100000),
+        .block_grid_pool = try .initPreheated(allocator, 6000),
         .thread_pool = &threadPool,
         .allocator = allocator,
         .onEdit = null,

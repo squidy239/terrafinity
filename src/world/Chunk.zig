@@ -93,8 +93,20 @@ pub const Genstate = enum(u8) {
 };
 
 ///Returns a chunk made from a given blockencoding. The blocks and returned chunk are allocated by the allocator.
-pub fn from(blockEncoding: BlockEncoding, allocator: std.mem.Allocator) !*@This() {
-    const chunk = try allocator.create(@This());
+pub fn from(blockEncoding: BlockEncoding, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) *@This() {
+    var chunk: *@This() = undefined;
+    while (true) {
+        pool_mutex.lock();
+        chunk = chunk_pool.create() catch {
+            pool_mutex.unlock();
+            std.log.err("Failed to allocate memory for chunk, retrying...", .{});
+            std.Thread.yield() catch {};
+            continue;
+        };
+        pool_count.* += 1;
+        pool_mutex.unlock();
+        break;
+    }
     chunk.* = .{
         .blocks = blockEncoding,
         .lock = .{},

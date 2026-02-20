@@ -481,10 +481,10 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegmentNoFlush(self: *GpuBuffer, offset: usize, data: []const u8) !void {
-        self.resize_lock.lockShared();
-        defer self.resize_lock.unlockShared();
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(offset + data.len);
+        self.resize_lock.lockShared();
+        defer self.resize_lock.unlockShared();
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
     }
 
