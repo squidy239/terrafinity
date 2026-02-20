@@ -54,7 +54,7 @@ pub const Options = struct {
     generation_distance_y: u32 = 6,
 
     max_chunk_timeout_ms: u64 = 10000,
-    memory_target: u64 = 2 * 1024 * 1024 * 1024, //1 GiB
+    block_grid_capacity: u64 = 1024,
     ///how often the unloader thread will try to unload chunks
     unloader_frequency_ms: u64 = 1000,
 
@@ -196,8 +196,11 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     const cpu_count = try std.Thread.getCpuCount();
     try game.pool.init(.{ .n_jobs = cpu_count, .allocator = game.allocator });
     errdefer game.pool.deinit();
+    game.options_lock.lockShared();
+    const capacity = game.options.block_grid_capacity;
+    game.options_lock.unlockShared();
     game.world = .{
-        .block_grid_pool = try .initPreheated(game.allocator, 10000),
+        .block_grid_pool = try .initPreheated(game.allocator, capacity),
         .running = .init(true),
         .allocator = game.allocator,
         .thread_pool = &game.pool,
@@ -466,6 +469,6 @@ pub fn deinit(self: *@This(), window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This()) !void {
     self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock, &self.tracking_allocator.used_memory });
+    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, self.options, self.options_lock});
     self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }

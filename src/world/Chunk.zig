@@ -19,7 +19,7 @@ pub const BlockEncoding = union(enum(u8)) {
     blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 
-    pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_mutex: *std.Thread.Mutex) void {
+    pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
 
@@ -35,6 +35,7 @@ pub const BlockEncoding = union(enum(u8)) {
                         if (mergeBlocks.oneBlock != .null) {
                             pool_mutex.lock();
                             memory_pool.destroy(@alignCast(self.blocks));
+                            pool_count.* -= 1;
                             pool_mutex.unlock();
                             self.* = .{ .oneBlock = mergeBlocks.oneBlock };
                         }
@@ -42,7 +43,7 @@ pub const BlockEncoding = union(enum(u8)) {
                 }
             },
             .blocks => {
-                self.toBlocks(memory_pool, pool_mutex);
+                self.toBlocks(memory_pool, pool_count, pool_mutex);
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks);
                 const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
                 for (flatArray, flatMergeArray) |*item, mergeItem| {
@@ -53,6 +54,7 @@ pub const BlockEncoding = union(enum(u8)) {
                     defer f.End();
                     pool_mutex.lock();
                     memory_pool.destroy(@alignCast(self.blocks));
+                    pool_count.* -= 1;
                     pool_mutex.unlock();
                     self.* = .{ .oneBlock = block };
                 }
@@ -60,7 +62,7 @@ pub const BlockEncoding = union(enum(u8)) {
         }
     }
 
-    pub fn toBlocks(self: *@This(), memory_pool: anytype, pool_mutex: *std.Thread.Mutex) void {
+    pub fn toBlocks(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
         if (self.* == .blocks) return;
         const t = ztracy.ZoneNC(@src(), "toBlocks", 10);
         defer t.End();
@@ -74,6 +76,7 @@ pub const BlockEncoding = union(enum(u8)) {
                 std.Thread.yield() catch {};
                 continue;
             };
+            pool_count.* += 1;
             pool_mutex.unlock();
             break;
         }
@@ -112,12 +115,12 @@ pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 }
 
 ///merges the chunk with the mergeBlocks, copies all non null mergeBlocks to blocks
-pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_mutex: *std.Thread.Mutex, comptime lock: bool) void {
+pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex, comptime lock: bool) void {
     self.add_ref();
     defer self.release();
     if (lock) self.lockExclusive();
     defer if (lock) self.unlockExclusive();
-    self.blocks.merge(mergeBlocks, memory_pool, pool_mutex);
+    self.blocks.merge(mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
 pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
@@ -149,26 +152,27 @@ pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, y
     return result;
 }
 ///returns true if the chunk was converted to blocks, false if it was already blocks
-pub fn ToBlocks(self: *@This(), memory_pool: anytype, pool_mutex: *std.Thread.Mutex, comptime lock: bool) !bool {
+pub fn ToBlocks(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex, comptime lock: bool) !bool {
     self.add_ref();
     defer self.release();
     if (lock) self.lockExclusive();
     defer if (lock) self.unlockExclusive();
     if (self.blocks != .oneBlock) return false;
-    self.blocks.toBlocks(memory_pool, pool_mutex);
+    self.blocks.toBlocks(memory_pool, pool_count, pool_mutex);
     return true;
 }
 
 ///frees the chunk's blocks, does not free the chunk itself
 ///the chunk must only be 1 ref before calling, use WaitForRefAmount
 ///locks the chunk
-pub fn free(self: *@This(), memory_pool: anytype, pool_mutex: *std.Thread.Mutex) void {
+pub fn free(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
     std.debug.assert(self.ref_count.load(.seq_cst) == 1);
     self.lockExclusive();
     switch (self.blocks) {
         .blocks => {
             pool_mutex.lock();
             memory_pool.destroy(@alignCast(self.blocks.blocks));
+            pool_count.* -= 1;
             pool_mutex.unlock();
         },
         .oneBlock => {},
