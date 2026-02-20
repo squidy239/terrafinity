@@ -46,15 +46,14 @@ pub const Tree = struct {
         lastRadius: f32,
         recursionDepth: usize,
     };
-
+    threadlocal var index: usize = 0;
     pub fn place(self: *const @This(), editor: *WorldEditor, level: i32) !u64 {
         var step_buffer: [64]StepGenData = undefined;
         std.debug.assert(step_buffer.len > self.steps.len);
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);
-        var index: usize = 0;
         var branchesCount: u64 = 0;
-        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, &index, -0.05, 0.05);
+        const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, -0.05, 0.05);
 
         try stack.appendBounded(.{
             .pos = @floatFromInt(self.pos),
@@ -75,7 +74,7 @@ pub const Tree = struct {
             const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
 
             for (0..firstBranches) |i| {
-                const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, &index, -step.branchRandomness, step.branchRandomness);
+                const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, -step.branchRandomness, step.branchRandomness);
                 const length = data.lastLength * step.lengthPercent + getRand(&index) * step.lengthPercentRandomness;
                 const radius = data.lastRadius * step.radiusPercent + getRand(&index) * step.radiusPercentRandomness;
                 if (length < self.minLength * lenscale or data.recursionDepth >= self.maxRecursionDepth) {
@@ -108,8 +107,8 @@ pub const Tree = struct {
         return branchesCount;
     }
 
-    fn rand3Vec(comptime T: type, index: *usize, rangeBase: T, rangeTop: T) @Vector(3, T) {
-        const vec = @Vector(3, T){ getRand(index), getRand(index), getRand(index) };
+    fn rand3Vec(comptime T: type, rangeBase: T, rangeTop: T) @Vector(3, T) {
+        const vec = @Vector(3, T){ getRand(&index), getRand(&index), getRand(&index) };
         return NormilizeInRange(@Vector(3, T), vec, @splat(0), @splat(1), @splat(rangeBase), @splat(rangeTop));
     }
     pub fn NormilizeInRange(comptime T: type, num: T, oldLowerBound: T, oldUpperBound: T, newLowerBound: T, newUpperBound: T) T {
@@ -151,7 +150,7 @@ pub const Tree = struct {
 fn getRand(i: *usize) f32 {
     const v = rand_table[i.*];
     i.* +%= 1;
-    if (i.* == rand_table.len) i.* = 0;
+    i.* = i.* % rand_table.len;
     return v;
 }
 

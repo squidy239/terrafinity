@@ -210,7 +210,6 @@ pub const Explosive = struct {
         self.dir *= @splat(10 * dt);
         self.pos += self.dir;
         self.lock.unlock();
-        std.debug.print("refs: {d}, id: {any}\n\n\n\n", .{ entity.ref_count.load(.seq_cst), std.Thread.getCurrentId() });
         var worldReader = World.Reader{ .world = world };
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
         if (true or (worldReader.getBlockUncached(@intFromFloat(self.pos), World.standard_level) catch unreachable) != .air) {
