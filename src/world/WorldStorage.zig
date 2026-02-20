@@ -87,10 +87,10 @@ pub fn getBlocks(source: World.ChunkSource, world: *World, blocks: *Chunk.BlockE
     const encoding: std.meta.Tag(Chunk.BlockEncoding) = @enumFromInt(buf_reader.takeInt(EncodingTagType, .little) catch unreachable);
     switch (encoding) {
         .blocks => {
-            try blocks.toBlocks(world.allocator);
+            blocks.toBlocks(&world.block_grid_pool, &world.block_grid_pool_mutex);
             buf_reader.readSliceEndian(Block, @as([]Block, @ptrCast(blocks.blocks)), .little) catch unreachable;
         },
-        .oneBlock => try blocks.merge(.{ .oneBlock = @enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable) }, world.allocator),
+        .oneBlock => blocks.merge(.{ .oneBlock = @enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable) }, &world.block_grid_pool, &world.block_grid_pool_mutex),
     }
     rocksdb.free(value.?);
     return true;

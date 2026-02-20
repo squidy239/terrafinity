@@ -22,12 +22,16 @@ threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 running: std.atomic.Value(bool),
 allocator: std.mem.Allocator,
-threadPool: *ThreadPool,
+thread_pool: *ThreadPool,
 
 Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256),
 
 Chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 256),
 Config: WorldConfig,
+
+block_grid_pool_mutex: std.Thread.Mutex = .{},
+block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .of([ChunkSize][ChunkSize][ChunkSize]Block) }),
+
 ///tries each source in order until of priority, 0 is highest
 ///if a source returns false, the next source will be tried
 ///at least one source must be able to load the chunk
@@ -276,14 +280,14 @@ pub fn loadChunk(self: *@This(), Pos: ChunkPos, structures: bool) error{ OutOfMe
         _ = chunkptr.add_ref();
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.Chunks.putNoOverrideaddRef(Pos, chunkptr) catch |err| {
-            chunkptr.free(self.allocator);
+            chunkptr.free(&self.block_grid_pool, &self.block_grid_pool_mutex);
             self.allocator.destroy(chunkptr);
             return err;
         };
         //chptr is in hashmap past this point
         if (existing) |d| {
             chunkptr.release(); //ref was added before putting
-            chunkptr.free(self.allocator);
+            chunkptr.free(&self.block_grid_pool, &self.block_grid_pool_mutex);
             self.allocator.destroy(chunkptr);
             return d;
         }
@@ -326,7 +330,7 @@ pub fn unloadTimeout(self: *@This(), max_ms: u64, current_memory: *std.atomic.Va
         it.pause();
         defer it.unpause();
         while (tounload.pop()) |Pos| {
-            try self.unloadChunk(Pos);
+            _ = try self.tryUnloadChunk(Pos);
         }
     }
     std.log.debug("percent: {d}, timeout: {d}, chunks loaded: {d}\n", .{ @as(f32, @floatFromInt(current_memory.load(.unordered))) / @as(f32, @floatFromInt(memory_target)) * 100, memCurve(max_ms, current_memory.load(.unordered), memory_target), chunks });
@@ -431,7 +435,7 @@ pub const Editor = struct {
                     sides[side] = chunk.extractFace(@enumFromInt(side), false);
                 }
             }
-            try chunk.Merge(encoding, self.world.allocator, true);
+            chunk.merge(encoding, &self.world.block_grid_pool, &self.world.block_grid_pool_mutex, true);
 
             if (self.propagateChanges) {
                 var coords: ChunkPos = diffChunk.key_ptr.*;
@@ -541,7 +545,7 @@ pub const Editor = struct {
         parent.lockShared();
         defer parent.unlockShared();
         if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
-        _ = try parent.ToBlocks(self.world.allocator, false);
+        _ = try parent.ToBlocks(&self.world.block_grid_pool, &self.world.block_grid_pool_mutex, false);
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {
@@ -612,15 +616,15 @@ pub fn unloadChunk(self: *@This(), Pos: ChunkPos) !void {
     try self.unloadChunkByPtr(chunk, Pos);
 }
 
-///triees to unload a chunk if it is not in use, returns true if the chunk was unloaded
+///tries to unload a chunk if it is not in use, returns true if the chunk was unloaded by this function
 pub fn tryUnloadChunk(self: *@This(), Pos: ChunkPos) !bool {
-    if (true) @panic("TODO");
-    const chunk = self.Chunks.getandaddref(Pos) orelse return true;
+    const chunk = self.Chunks.getandaddref(Pos) orelse return false;
     if (chunk.ref_count.load(.seq_cst) != 2) {
         chunk.release();
         return false;
     }
     _ = self.Chunks.remove(Pos);
+    chunk.release();
     try self.unloadChunkByPtr(chunk, Pos);
     return true;
 }
@@ -634,13 +638,13 @@ pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
 pub fn unloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
     _ = chunk.WaitForRefAmount(1, null);
     try onUnload(self, chunk, Pos);
-    _ = chunk.free(self.allocator);
+    _ = chunk.free(&self.block_grid_pool, &self.block_grid_pool_mutex);
     self.allocator.destroy(chunk);
 }
 
 pub fn unloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
     _ = chunk.WaitForRefAmount(1, null);
-    _ = chunk.free(self.allocator);
+    _ = chunk.free(&self.block_grid_pool, &self.block_grid_pool_mutex);
     self.allocator.destroy(chunk);
 }
 
@@ -708,7 +712,8 @@ test "world" {
     defer threadPool.deinit();
 
     var world: World = .{
-        .threadPool = &threadPool,
+        .block_grid_pool = try .initPreheated(std.testing.allocator, 1000),
+        .thread_pool = &threadPool,
         .allocator = std.testing.allocator,
         .onEdit = null,
         .ChunkSources = @splat(null),
@@ -731,7 +736,8 @@ test "cube benchmark" {
     var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = try .init(allocator, 1024) };
     generator.params.setSeeds();
     var world: World = .{
-        .threadPool = &threadPool,
+        .block_grid_pool = try .initPreheated(allocator, 16000),
+        .thread_pool = &threadPool,
         .allocator = allocator,
         .onEdit = null,
         .ChunkSources = .{ generator.getSource(), null, null, null },

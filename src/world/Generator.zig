@@ -37,7 +37,7 @@ pub const DefaultGenerator = struct {
 
     fn genChunkBlocks(source: World.ChunkSource, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        try self.genChunk(Pos, blocks, world.allocator);
+        self.genChunk(Pos, blocks, world);
         return true;
     }
 
@@ -97,18 +97,18 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, allocator: std.mem.Allocator) !void {
+    pub fn genChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) void {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
-            try blocks.merge(.{ .oneBlock = .air }, allocator);
+            blocks.merge(.{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_pool_mutex);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
-            try blocks.merge(.{ .oneBlock = .stone }, allocator);
+            blocks.merge(.{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_pool_mutex);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
             var rand = rng.random();
@@ -117,13 +117,13 @@ pub const DefaultGenerator = struct {
             generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
             const oneblock = Chunk.IsOneBlock(&blockgrid);
-            if (oneblock != null and oneblock.? == .air) return try blocks.merge(.{ .oneBlock = .air }, allocator);
+            if (oneblock != null and oneblock.? == .air) return blocks.merge(.{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_pool_mutex);
         }
         generateCavesInterpolate(&blockgrid, Pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.IsOneBlock(&blockgrid);
         if (oneblock) |block| {
-            try blocks.merge(.{ .oneBlock = block }, allocator);
-        } else try blocks.merge(.{ .blocks = &blockgrid }, allocator);
+            blocks.merge(.{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_pool_mutex);
+        } else blocks.merge(.{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_pool_mutex);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
@@ -242,12 +242,12 @@ pub const DefaultGenerator = struct {
     pub fn getTerrainHeight(self: *DefaultGenerator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
-        const req = get_requests.fetchAdd(1, .monotonic);
+        //const req = get_requests.fetchAdd(1, .monotonic);
         if (self.terrain_height_cache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
-        const miss = cache_misses.fetchAdd(1, .monotonic);
+        // const miss = cache_misses.fetchAdd(1, .monotonic);
         const generatedHeights = genTerrainHeight(self.params, level, Pos);
         _ = self.terrain_height_cache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch unreachable;
-        if (std.crypto.random.float(f32) < 0.01) std.debug.print("{d}% thc miss\n", .{miss * 100 / req});
+        //if (std.crypto.random.float(f32) < 0.01) std.debug.print("{d}% thc miss\n", .{miss * 100 / req});
         return generatedHeights;
     }
 

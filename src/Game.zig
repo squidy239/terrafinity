@@ -197,9 +197,10 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
     try game.pool.init(.{ .n_jobs = cpu_count, .allocator = game.allocator });
     errdefer game.pool.deinit();
     game.world = .{
+        .block_grid_pool = try .initPreheated(game.allocator, 10000),
         .running = .init(true),
         .allocator = game.allocator,
-        .threadPool = &game.pool,
+        .thread_pool = &game.pool,
         .Entitys = .init(game.allocator),
         .Chunks = .init(game.allocator),
         .Config = world_options.world_config,

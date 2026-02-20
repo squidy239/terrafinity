@@ -324,7 +324,7 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     const ff = ztracy.ZoneN(@src(), "finish");
     gl.Finish(); //TODO better syncronization
     ff.End();
-    std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
+    //std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
 fn getChunkData(userdata: anytype, chunkpos: ChunkPos) ChunkDrawData {
