@@ -420,13 +420,7 @@ pub fn unloadChunkMeshes(self: *@This()) void {
 pub fn addChunkToRenderAsync(self: *@This(), Pos: World.ChunkPos, genStructures: bool) !void {
     try self.loaded_or_meshed.put(Pos, {});
     errdefer _ = self.loaded_or_meshed.remove(Pos);
-    const priority: ThreadPool.Priority = switch (Pos.level) {
-        std.math.minInt(i32)...1 => .High,
-        2...3 => .Medium,
-        4...8 => .Low,
-        9...std.math.maxInt(i32) => .VeryLow,
-    };
-    try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, priority);
+    try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, .Medium);
 }
 
 fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool) void {
