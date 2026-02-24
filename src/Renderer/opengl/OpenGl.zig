@@ -305,6 +305,13 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     ) catch return error.DrawFailed;
 
     if (draw_info.drawn == 0) return;
+    self.render_buffer.buffer.resize_lock.lockShared();
+    defer self.render_buffer.buffer.resize_lock.unlockShared();
+    self.render_buffer.ssbo.resize_lock.lockShared();
+    defer self.render_buffer.ssbo.resize_lock.unlockShared();
+    self.render_buffer.indirect_buffer.resize_lock.lockShared();
+    defer self.render_buffer.indirect_buffer.resize_lock.unlockShared();
+    gl.Finish();
     gl.BindVertexArray(self.vao);
     glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
@@ -435,21 +442,24 @@ const GpuBuffer = struct {
     buffer: ?c_uint = null,
     mapping: ?[]u8 = null,
     growth_factor: f32 = 2,
-    ///shared is for starting writes, exclusive is for resizing
+    ///shared is for starting writes and reading variables, exclusive is for resizing
     resize_lock: std.Thread.RwLock = .{},
 
     pub fn ensureCapacity(self: *GpuBuffer, length: usize) !void {
-        if (self.mapping != null and length <= self.mapping.?.len) return;
+        {
+            self.resize_lock.lockShared();
+            defer self.resize_lock.unlockShared();
+            if (self.mapping != null and length <= self.mapping.?.len) return;
+        }
 
+        self.resize_lock.lock();
+        defer self.resize_lock.unlock();
+        if (self.mapping != null and length <= self.mapping.?.len) return;
         const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
         const new_size = @max(scaled_size, length);
-
         std.log.debug("Expanding buffer to {d}", .{new_size});
         const e = ztracy.ZoneN(@src(), "Expand");
         defer e.End();
-        self.resize_lock.lock();
-        defer self.resize_lock.unlock();
-        gl.Finish();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
         try glError();
@@ -458,6 +468,8 @@ const GpuBuffer = struct {
         try glError();
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
+            gl.Finish(); //RACE CONDITION this only syncs the current thread
+            std.Thread.sleep(100 * std.time.ns_per_ms);//very very bad "temporary" fix
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
             if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;
@@ -476,7 +488,12 @@ const GpuBuffer = struct {
     pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
         const e = ztracy.ZoneN(@src(), "writeSegment");
         defer e.End();
-        try self.writeSegmentNoFlush(offset, data);
+        std.debug.assert(data.len > 0);
+        try self.ensureCapacity(offset + data.len);
+        self.resize_lock.lockShared();
+        defer self.resize_lock.unlockShared();
+        std.debug.assert(self.mapping.?.len >= data.len);
+        @memcpy(self.mapping.?[offset .. offset + data.len], data);
         try self.flushRange(offset, data.len);
     }
 
@@ -484,13 +501,17 @@ const GpuBuffer = struct {
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(offset + data.len);
         self.resize_lock.lockShared();
+        std.debug.assert(self.mapping.?.len >= data.len);
         defer self.resize_lock.unlockShared();
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
     }
 
     pub fn flushRange(self: *GpuBuffer, offset: usize, length: usize) !void {
+        self.resize_lock.lockShared();
+        defer self.resize_lock.unlockShared();
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
         try glError();
+        gl.Flush();
     }
 
     pub fn free(self: *GpuBuffer) void {
