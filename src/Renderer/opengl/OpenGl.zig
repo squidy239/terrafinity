@@ -62,7 +62,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
             .userdata = @ptrCast(self),
             .vtable = &.{
                 .addChunk = addChunk,
-                .removeChunk = removeChunk,
+                .removeChunk = undefined,
                 .drawChunks = drawChunksFn,
                 .containsChunk = undefined,
                 .clear = clear,
@@ -169,13 +169,6 @@ pub fn remove(self: *@This(), Pos: ChunkPos) void {
     ids.free();
 }
 
-fn removeChunk(userdata: *anyopaque, Pos: ChunkPos) void {
-    _ = userdata;
-    _ = Pos;
-    unreachable;
-    //const emptyMesh: Mesh = .{ .Pos = Pos, .TransperentFaces = null, .faces = null, .scale = undefined, .animation = undefined };
-    //addChunk(userdata, emptyMesh) catch std.log.err("removemesh failed", .{});
-}
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));

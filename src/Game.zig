@@ -352,7 +352,7 @@ fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !voi
 }
 
 ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
-pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool, playAnimation: bool) !void {
+pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool) !void {
     const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
     defer GenMeshAndAdd.End();
     const chunk = try self.world.loadChunk(Pos, genStructures);
@@ -383,7 +383,6 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     if (written.len == 0) return;
     try self.opengl_renderer.ensureContext();
     try self.opengl_renderer.render_buffer.put(Pos, written);
-    _ = playAnimation;
 }
 
 pub fn unloadChunkMeshes(self: *@This()) void {
@@ -435,7 +434,7 @@ fn addChunkToRenderTask(self: *@This(), Pos: World.ChunkPos, genStructures: bool
         _ = self.loaded_or_meshed.remove(Pos);
         return;
     }
-    self.addChunkToRender(Pos, genStructures, true) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
+    self.addChunkToRender(Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
 }
 pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
@@ -443,7 +442,7 @@ pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const highest_level = game.options.highest_level;
     const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), chunkPos, game.getInnerGenRadius(game.getGenDistance(), chunkPos.level), game.getGenDistance());
     if (!inside_range) return;
-    game.addChunkToRender(chunkPos, false, false) catch return error.OnEditFailed;
+    game.addChunkToRender(chunkPos, false) catch return error.OnEditFailed;
 }
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {

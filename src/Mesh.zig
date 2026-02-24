@@ -28,11 +28,6 @@ pub const Face = packed struct(u64) {
     _: u12,
 };
 
-pub const Header = struct {
-    Pos: ChunkPos,
-    scale: f32,
-    animation: bool,
-};
 //TODO make neighbor faces like blockencoding to handle empty chunks better
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, writer: *std.Io.Writer) !void {
