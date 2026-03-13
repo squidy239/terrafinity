@@ -31,7 +31,7 @@ Config: WorldConfig,
 
 block_grid_pool_mutex: std.Thread.Mutex = .{},
 block_grid_count: u64 = 0,
-block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false }),
+block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }),
 
 chunk_pool_mutex: std.Thread.Mutex = .{},
 chunk_count: u64 = 0,

@@ -44,16 +44,17 @@ pub const BlockEncoding = union(enum(u8)) {
             },
             .blocks => {
                 self.toBlocks(memory_pool, pool_count, pool_mutex);
-                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(self.blocks);
-                const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mergeBlocks.blocks);
-                for (flatArray, flatMergeArray) |*item, mergeItem| {
-                    if (mergeItem != .null) item.* = mergeItem;
-                }
+                const tag = @typeInfo(Block).@"enum".tag_type;
+                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
+                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
+                const pred = flatArray.* == @as(@Vector(ChunkSize * ChunkSize * ChunkSize, tag), @splat(@intFromEnum(Block.null)));
+                flatArray.* = @select(tag, pred, flatArray.*, flatMergeArray.*);
+
                 if (IsOneBlock(self.blocks)) |block| {
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
                     pool_mutex.lock();
-                    memory_pool.destroy(@alignCast(self.blocks));
+                    memory_pool.destroy(@alignCast(self.blocks)); //if it was created in the pool it has the alignment of the pool
                     pool_count.* -= 1;
                     pool_mutex.unlock();
                     self.* = .{ .oneBlock = block };

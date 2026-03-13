@@ -12,10 +12,8 @@ pub const Block = enum(u16) {
     snow = 8,
 
     pub inline fn isTransparent(self: Block) bool {
-        return switch (self) {
-            .air, .water, .leaves, .null => true,
-            else => false,
-        };
+        const enum_arr: std.enums.EnumSet(Block) = comptime .initMany(&.{ .air, .water, .leaves });
+        return enum_arr.contains(self);
     }
 
     pub inline fn isSolid(self: Block) bool {
@@ -26,10 +24,8 @@ pub const Block = enum(u16) {
     }
 
     pub inline fn isVisible(self: Block) bool {
-        return switch (self) {
-            .air, .null => false,
-            else => true,
-        };
+        const enum_arr: std.enums.EnumSet(Block) = comptime .initMany(&.{.air});
+        return !enum_arr.contains(self);
     }
 
     pub inline fn getPropagationWeight(self: Block) f32 {

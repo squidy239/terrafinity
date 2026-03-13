@@ -169,7 +169,6 @@ pub fn remove(self: *@This(), Pos: ChunkPos) void {
     ids.free();
 }
 
-
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
@@ -462,7 +461,7 @@ const GpuBuffer = struct {
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             gl.Finish(); //RACE CONDITION this only syncs the current thread
-            std.Thread.sleep(100 * std.time.ns_per_ms);//very very bad "temporary" fix
+            std.Thread.sleep(100 * std.time.ns_per_ms); //very very bad "temporary" fix
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
             if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;

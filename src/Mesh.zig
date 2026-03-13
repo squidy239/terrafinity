@@ -58,35 +58,20 @@ fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 
                 };
                 const block_transparent = block.isTransparent();
                 inline for (0..6) |i| {
-                    inner: {
-                        if (!neighboring_blocks[i].isTransparent()) break :inner;
-                        if (!block_transparent) {
-                            const face = Face{
-                                .BlockType = @intFromEnum(block),
-                                .isGreedy = false,
-                                .height = 1,
-                                .width = 1,
-                                .rot = @enumFromInt(i),
-                                .x = @intCast(x - 1),
-                                .y = @intCast(y - 1),
-                                .z = @intCast(z - 1),
-                                ._ = undefined,
-                            };
-                            try writer.writeAll(std.mem.asBytes(&face));
-                        } else if (block != neighboring_blocks[i]) {
-                            const face = Face{
-                                .BlockType = @intFromEnum(block),
-                                .isGreedy = false,
-                                .height = 1,
-                                .width = 1,
-                                .rot = @enumFromInt(i),
-                                .x = @intCast(x - 1),
-                                .y = @intCast(y - 1),
-                                .z = @intCast(z - 1),
-                                ._ = undefined,
-                            };
-                            try writer.writeAll(std.mem.asBytes(&face));
-                        }
+                    if (neighboring_blocks[i].isTransparent() and (!block_transparent or block != neighboring_blocks[i])) {
+                        @branchHint(.unlikely); //face is unlikely
+                        const face = Face{
+                            .BlockType = @intFromEnum(block),
+                            .isGreedy = false,
+                            .height = 1,
+                            .width = 1,
+                            .rot = @enumFromInt(i),
+                            .x = @intCast(x - 1),
+                            .y = @intCast(y - 1),
+                            .z = @intCast(z - 1),
+                            ._ = undefined,
+                        };
+                        try writer.writeAll(std.mem.asBytes(&face));
                     }
                 }
             }
