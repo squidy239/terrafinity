@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Inventory = struct {
-    lock: std.Thread.RwLock = .{},
+    lock: std.Io.RwLock = .init,
     width: u32,
     height: u32,
     items: []?Item,

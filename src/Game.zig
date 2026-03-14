@@ -4,12 +4,10 @@ const builtin = @import("builtin");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
 const sdl = @import("sdl3");
-const ThreadPool = @import("ThreadPool");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
 const Key = @import("Key.zig");
-const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 const utils = @import("libs/utils.zig");
 const Loader = @import("Loader.zig");
 const Mesh = @import("Mesh.zig");
@@ -24,13 +22,11 @@ const Block = World.Block;
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
-pool: ThreadPool,
 opengl_renderer: Renderer.OpenGl,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
-tracking_allocator: TrackingAllocator,
 loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
 
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
@@ -40,7 +36,7 @@ loaderThread: ?std.Thread,
 unloaderThread: ?std.Thread,
 
 options: *Options,
-options_lock: *std.Thread.RwLock,
+options_lock: *std.Io.RwLock,
 running: std.atomic.Value(bool),
 
 pub const Options = struct {
@@ -236,7 +232,7 @@ pub fn init(game: *@This(), allocator: std.mem.Allocator, game_options: *Options
             },
             .pos = try game.world.getPlayerSpawnPos(),
             .velocity = @splat(0),
-            .updateTimer = try .start(),
+            .last_update = try .start(),
         },
         .gameMode = .init(.Spectator),
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
@@ -298,14 +294,14 @@ pub fn handleScroll(self: *@This(), scroll: f32) void {
     }
 }
 
-pub fn getMouseSensitivity(self: *@This()) f32 {
-    self.options_lock.lockShared();
-    defer self.options_lock.unlockShared();
+pub fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
     return self.options.mouse_sensitivity;
 }
 
-pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time_ns: u64) !void {
-    const delta_time_seconds = @as(f32, @floatFromInt(delta_time_ns)) / std.time.ns_per_s;
+pub fn handleButtonActions(self: *@This(), actions: Key.ActionSet, delta_time: std.Io.Duration) !void {
+    const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
         .Creative, .Spectator => try self.flyMove(actions, delta_time_seconds),
@@ -332,7 +328,7 @@ fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
 
 pub fn itemAction(self: *@This(), actions: Key.ActionSet) !void {
     if (actions.contains(.use_item_primary)) try self.world.spawnEntity(null, EntityTypes.Explosive{
-        .pos = self.player.physics.getPos(),
+        .pos = self.player.physics.pos.load(.seq_cst),
         .dir = @splat(0),
         .timestamp = std.time.microTimestamp(),
     }, false);
@@ -343,12 +339,12 @@ fn flyMove(self: *@This(), actions: Key.ActionSet, delta_time_seconds: f32) !voi
     const c = zm.vec.cross(self.opengl_renderer.cameraFront, Renderer.OpenGl.cameraUp);
     const cross: ?@Vector(3, f64) = if (std.meta.eql(c, @Vector(3, f64){ 0, 0, 0 })) null else zm.vec.normalize(c); //prevent divide by zero
 
-    if (actions.contains(.forward)) _ = self.player.physics.fetchAddVelocity(veldiff * self.opengl_renderer.cameraFront);
-    if (actions.contains(.backward)) _ = self.player.physics.fetchAddVelocity(-veldiff * self.opengl_renderer.cameraFront);
-    if (actions.contains(.up)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, veldiff[1], 0 });
-    if (actions.contains(.down)) _ = self.player.physics.fetchAddVelocity(@Vector(3, f64){ 0, -veldiff[1], 0 });
-    if (actions.contains(.right) and cross != null) _ = self.player.physics.fetchAddVelocity(veldiff * cross.?);
-    if (actions.contains(.left) and cross != null) _ = self.player.physics.fetchAddVelocity(-veldiff * cross.?);
+    if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * self.opengl_renderer.cameraFront, .seq_cst);
+    if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * self.opengl_renderer.cameraFront, .seq_cst);
+    if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
+    if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
+    if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?, .seq_cst);
+    if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?, .seq_cst);
 }
 
 ///Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it dosent exist
@@ -447,14 +443,11 @@ pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
 
 pub fn deinit(self: *@This(), window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
-    self.world.stop();
     if (self.loaderThread) |thread| thread.join();
     if (self.unloaderThread) |thread| thread.join();
 
     std.log.info("stopped threads", .{});
 
-    self.pool.deinit();
-    std.log.info("closed threadpool", .{});
     self.opengl_renderer.deinit();
     self.loaded_or_meshed.deinit();
     //const player_entity: *Entity = @fieldParentPtr("ptr", @as(**anyopaque, @ptrCast(&self.player)));

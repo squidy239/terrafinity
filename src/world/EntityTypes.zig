@@ -9,6 +9,8 @@ const ztracy = @import("ztracy");
 const Physics = @import("Physics.zig");
 const Item = @import("Item.zig");
 const pack = "default";
+const AtomicVector = @import("../libs/utils.zig").AtomicVector;
+
 const EntityMeshBufferIDs = struct {
     vbo: c_uint,
     vao: c_uint,
@@ -89,8 +91,8 @@ pub const Player = struct {
     ///main inventory and hotbar
     main_inventory: Item.Inventory,
     ///pitch, yaw, roll, in degrees
-    viewDirection: @Vector(3, f32),
-    viewDirectionLock: std.Thread.RwLock = .{},
+    viewDirection: AtomicVector(3, f32),
+
     physics: Physics.getInterface(struct {
         gravity: Physics.Gravity,
         resistance: Physics.Resistance,
@@ -163,12 +165,6 @@ pub const Player = struct {
         }
     }
 
-    pub fn getViewDirection(self: *@This()) @Vector(3, f32) {
-        self.viewDirectionLock.lockShared();
-        defer self.viewDirectionLock.unlockShared();
-        return self.viewDirection;
-    }
-
     pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
         _ = uuid;
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
@@ -188,17 +184,17 @@ pub const Player = struct {
 
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
-    lock: std.Thread.RwLock = .{},
+    lock: std.Io.RwLock = .init,
     pos: @Vector(3, f64),
     dir: @Vector(3, f64),
-    timestamp: i64,
+    timestamp: std.Io.Timestamp,
 
-    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
+    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
         const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
         defer u.End();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         const l = ztracy.ZoneNC(@src(), "lock", 6553);
-        self.lock.lock();
+        self.lock.lockUncancelable(io);
         l.End();
         const timestamp = self.timestamp;
         self.timestamp = std.time.microTimestamp();

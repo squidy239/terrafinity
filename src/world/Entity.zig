@@ -14,10 +14,10 @@ vtable: interface,
 
 pub const interface = struct {
     ///updates the entity, returns true if the entity was unloaded
-    update: ?*const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool = null,
+    update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool = null,
     ///unloads the entity and frees all resorces allocated by it
     ///the entity ptr is not valid after this
-    unload: *const fn (self: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
+    unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
     getPos: ?*const fn (self: *anyopaque) @Vector(3, f64) = null,
     draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };

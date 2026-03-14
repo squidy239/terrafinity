@@ -4,54 +4,21 @@ const zm = @import("zm");
 
 const Block = @import("Block.zig").Block;
 const World = @import("World.zig");
+const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 
 ///gets a Physics interface, all functions are thread-safe
 pub fn getInterface(physicsElements: anytype) type {
     return struct {
         elements: physicsElements,
-        updateTimer: std.time.Timer,
-        updateTimerLock: std.Thread.RwLock = .{},
-        pos: @Vector(3, f64),
-        posLock: std.Thread.RwLock = .{},
-        velocity: @Vector(3, f64),
-        velocityLock: std.Thread.RwLock = .{},
-
-        pub fn getPos(self: *@This()) @Vector(3, f64) {
-            self.posLock.lockShared();
-            defer self.posLock.unlockShared();
-            return self.pos;
-        }
+        last_update: std.Io.Timestamp,
+        updateTimerLock: std.Io.RwLock = .init,
+        pos: AtomicVector(3, f64),
+        velocity: AtomicVector(3, f64),
 
         pub fn lapUpdateTimer(self: *@This()) u64 {
             self.updateTimerLock.lock();
             defer self.updateTimerLock.unlock();
-            return self.updateTimer.lap();
-        }
-
-        pub fn fetchAddPos(self: *@This(), offset: @Vector(3, f64)) @Vector(3, f64) {
-            self.posLock.lock();
-            defer self.posLock.unlock();
-            self.pos += offset;
-            return self.pos;
-        }
-
-        pub fn getVelocity(self: *@This()) @Vector(3, f64) {
-            self.velocityLock.lockShared();
-            defer self.velocityLock.unlockShared();
-            return self.velocity;
-        }
-
-        pub fn setVelocity(self: *@This(), velocity: @Vector(3, f64)) void {
-            self.velocityLock.lock();
-            defer self.velocityLock.unlock();
-            self.velocity = velocity;
-        }
-
-        pub fn fetchAddVelocity(self: *@This(), offset: @Vector(3, f64)) @Vector(3, f64) {
-            self.velocityLock.lock();
-            defer self.velocityLock.unlock();
-            self.velocity += offset;
-            return self.velocity;
+            return self.last_update.lap();
         }
 
         pub fn update(self: *@This(), world: *World, allocator: std.mem.Allocator) !void {
@@ -72,7 +39,7 @@ pub const simpleMover = struct {
         _ = world;
         _ = allocator;
         const posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.fetchAddPos(posOffset);
+        _ = physics.pos.fetchAdd(posOffset);
     }
 };
 
@@ -254,7 +221,7 @@ test "Gravity" {
     const physics_interface = getInterface(struct { gravity: Gravity });
     var physics_object = physics_interface{
         .elements = .{ .gravity = .{} },
-        .updateTimer = try std.time.Timer.start(),
+        .last_update = try std.time.Timer.start(),
         .pos = .{ 0, 0, 0 },
         .velocity = .{ 0, 0, 0 },
     };
@@ -269,7 +236,7 @@ test "simpleMover" {
     const physics_interface = getInterface(struct { mover: simpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
-        .updateTimer = try std.time.Timer.start(),
+        .last_update = try std.time.Timer.start(),
         .pos = .{ 0, 0, 0 },
         .velocity = .{ 1, 0, 0 },
     };

@@ -9,7 +9,6 @@ pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const ConcurrentQueue = @import("ConcurrentQueue");
 pub const Entity = @import("world/Entity.zig");
-pub const ThreadPool = @import("ThreadPool");
 pub const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
@@ -21,7 +20,6 @@ const dvui = @import("dvui");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
-const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 const config_path = "Config.zon";
 
@@ -34,10 +32,10 @@ pub fn main(init: std.process.Init) !void {
 
     var config_lock: std.Io.RwLock = .init;
 
-    var config: Config = try .load(allocator, config_path);
+    var config: Config = try .load(allocator, io, config_path);
     defer config.deinit(allocator);
 
-    try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
+    try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
 
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -74,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
 
     try sdl_renderer.setDrawBlendMode(.blend);
 
-    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
+    var backend = SDLBackend.init(io, @ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
@@ -85,18 +83,18 @@ pub fn main(init: std.process.Init) !void {
 
     var singlepress = Key.Singlepress.initEmpty();
     //TODO load keymap from file
-    try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
-    try keymap.setActionKey(.{ .key = .left_gui }, .escape_menu);
+    try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
+    try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
 
     singlepress.insert(.escape_menu);
 
-    try keymap.setActionKey(.{ .key = .w }, .forward);
-    try keymap.setActionKey(.{ .key = .s }, .backward);
-    try keymap.setActionKey(.{ .key = .a }, .left);
-    try keymap.setActionKey(.{ .key = .d }, .right);
-    try keymap.setActionKey(.{ .key = .space }, .up);
-    try keymap.setActionKey(.{ .key = .left_shift }, .down);
-    try keymap.setActionKey(.{ .key = .f }, .use_item_primary);
+    try keymap.setActionKey(io, .{ .key = .w }, .forward);
+    try keymap.setActionKey(io, .{ .key = .s }, .backward);
+    try keymap.setActionKey(io, .{ .key = .a }, .left);
+    try keymap.setActionKey(io, .{ .key = .d }, .right);
+    try keymap.setActionKey(io, .{ .key = .space }, .up);
+    try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
+    try keymap.setActionKey(io, .{ .key = .f }, .use_item_primary);
 
     var game: Game = undefined;
 
@@ -112,20 +110,21 @@ pub fn main(init: std.process.Init) !void {
     try Ui.loadFonts(&ui_window);
 
     defer if (ui.menu_state.ingame) game.deinit(window);
-    var frame_time: std.time.Timer = try .start();
+    var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.initEmpty();
     var update_finished: std.atomic.Value(bool) = .init(true);
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
-        const scroll = try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
+        const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &ui_window);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
-        const dt = frame_time.lap();
+        const dt = frame_time.untilNow(io, .awake);
+        frame_time = .now(io, .awake);
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
+            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
             try game.handleButtonActions(action_set, dt);
             game.handleScroll(scroll);
 
@@ -162,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
+fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
@@ -174,11 +173,11 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
         switch (event) {
             .key_up => |key| {
                 //TODO modifiers
-                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
+                const action = key_map.getAction(io, Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.remove(action);
             },
             .key_down => |key| {
-                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
+                const action = key_map.getAction(io, Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.insert(action);
             },
             .quit, .window_close_requested => {
@@ -203,30 +202,30 @@ pub const Config = struct {
     game_config: Game.Options = .{},
     worlds_path: []const u8 = "worlds",
 
-    pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
+    pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
+        const configFile: ?std.Io.File = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
             error.FileNotFound => {
                 std.log.info("Config file not found, creating default config file", .{});
                 break :sw null;
             },
             else => return err,
         };
-        defer if (configFile) |file| file.close();
+        defer if (configFile) |file| file.close(io);
         var config: Config = undefined;
-        config = if (configFile) |file| try utils.loadZON(Config, file, allocator, allocator) else .{};
+        config = if (configFile) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
 
         if (configFile == null) config.worlds_path = try allocator.dupe(u8, config.worlds_path); //world path must be owned by the allocator so it dosent free invalid memory
         return config;
     }
 
-    pub fn save(self: *const Config, path: []const u8, config_lock: ?*std.Thread.RwLock) !void {
-        const configFile = try std.fs.cwd().createFile(path, .{ .lock = .exclusive });
-        defer configFile.close();
+    pub fn save(self: *const Config, io: std.Io, path: []const u8, config_lock: ?*std.Io.RwLock) !void {
+        const configFile = try std.Io.Dir.cwd().createFile(io, path, .{ .lock = .exclusive });
+        defer configFile.close(io);
         var buffer: [512]u8 = undefined;
-        var filewriter = configFile.writer(&buffer);
+        var filewriter = configFile.writer(io, &buffer);
         {
-            if (config_lock) |lock| lock.lockShared();
-            defer if (config_lock) |lock| lock.unlockShared();
+            if (config_lock) |lock| lock.lockSharedUncancelable(io);
+            defer if (config_lock) |lock| lock.unlockShared(io);
             try std.zon.stringify.serialize(self, .{}, &filewriter.interface);
         }
         try filewriter.end();
@@ -241,7 +240,7 @@ pub const Config = struct {
 
 fn sdlLog(
     user_data: ?*anyopaque,
-    category: ?sdl.log.Category,
+    category: sdl.log.Category,
     priority: ?sdl.log.Priority,
     message: [:0]const u8,
 ) void {

@@ -37,25 +37,24 @@ pub const Key = struct {
 };
 
 pub const Map = struct {
-    lock: std.Io.RwLock = .{},
+    lock: std.Io.RwLock = .init,
     map: std.AutoHashMap(Key, Action),
 
     pub fn init(allocator: std.mem.Allocator) Map {
         return .{
             .map = std.AutoHashMap(Key, Action).init(allocator),
-            .lock = .{},
         };
     }
 
-    pub fn setActionKey(self: *Map, key: Key, action: Action) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+    pub fn setActionKey(self: *Map, io: std.Io, key: Key, action: Action) !void {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
         try self.map.put(key, action);
     }
 
-    pub fn getAction(self: *Map, key: Key) ?Action {
-        self.lock.lock();
-        defer self.lock.unlock();
+    pub fn getAction(self: *Map, io: std.Io, key: Key) ?Action {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
         return self.map.get(key);
     }
 };

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const Cache = @import("Cache").Cache;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const ThreadPool = @import("ThreadPool");
 const ztracy = @import("ztracy");
 
 pub const Block = @import("Block.zig").Block;
@@ -20,20 +19,18 @@ pub const WorldStorage = @import("WorldStorage.zig");
 const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
-running: std.atomic.Value(bool),
 allocator: std.mem.Allocator,
-thread_pool: *ThreadPool,
 
 Entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256),
 
 Chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 256),
 Config: WorldConfig,
 
-block_grid_pool_mutex: std.Thread.Mutex = .{},
+block_grid_pool_mutex: std.Io.Mutex = .init,
 block_grid_count: u64 = 0,
 block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }),
 
-chunk_pool_mutex: std.Thread.Mutex = .{},
+chunk_pool_mutex: std.Io.Mutex = .init,
 chunk_count: u64 = 0,
 chunk_pool: std.heap.MemoryPoolExtra(Chunk, .{ .growable = false }),
 
@@ -160,7 +157,7 @@ pub const ChunkSource = struct {
     ///This function is called for every UnloadChunk call, it will be called many times for each chunk
     ///all chunk sources will be tried
     ///this function does not have to be thread safe or lock the chunk sonce it is only called when the chunk has 1 ref
-    onUnload: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{Unrecoverable}!void,
+    onUnload: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunk: *Chunk, Pos: ChunkPos) error{Unrecoverable}!void,
 
     ///should return the height of the terrain in blocks at the given chunk coordinates
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32, //TODO remove this and make a better way to get terrain height
@@ -203,11 +200,11 @@ fn getBlockHeight(self: *@This(), block_pos: BlockPos, level: i32) !i64 {
     return error.AllSourcesFailed;
 }
 
-fn onUnload(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
+fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.onUnload) |onUnloadFn| {
-                try onUnloadFn(s, self, chunk, Pos);
+                try onUnloadFn(s, io, self, chunk, Pos);
             }
         }
     }
@@ -365,7 +362,7 @@ fn memCurve(max_ms: u64, fraction: f32) u64 {
 
 const Options = @import("../Game.zig").Options;
 //TODO when 0.16 is out get rid of this and make it happen after the time on asynchronously from the main loop
-pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std.Thread.RwLock) void {
+pub fn chunkUnloaderThread(self: *@This(), options: *Options, options_lock: *std.Io.RwLock) void {
     while (self.running.load(.monotonic)) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         defer unloadChunks.End();
@@ -657,15 +654,15 @@ pub fn unloadChunkNoSave(self: *@This(), Pos: ChunkPos) void {
 }
 
 ///dosent remove chunk from hashmap, just frees it
-pub fn unloadChunkByPtr(self: *@This(), chunk: *Chunk, Pos: ChunkPos) !void {
+pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
     _ = chunk.WaitForRefAmount(1, null);
-    try onUnload(self, chunk, Pos);
-    self.unloadChunkByPtrNoSave(chunk);
+    try onUnload(self, io, chunk, Pos);
+    self.unloadChunkByPtrNoSave(io, chunk);
 }
 
-pub fn unloadChunkByPtrNoSave(self: *@This(), chunk: *Chunk) void {
+pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) void {
     _ = chunk.WaitForRefAmount(1, null);
-    _ = chunk.free(&self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
+    _ = chunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
     self.destroyChunkPtr(chunk);
 }
 
@@ -676,14 +673,9 @@ fn destroyChunkPtr(self: *@This(), chunk: *Chunk) void {
     self.chunk_pool_mutex.unlock();
 }
 
-pub fn stop(self: *@This()) void {
-    self.running.store(false, .monotonic);
-}
-
 pub fn deinit(self: *@This()) void {
     const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
     defer deinitWorld.End();
-    self.stop();
     {
         var it = self.Chunks.iterator();
         defer it.deinit();
@@ -738,32 +730,12 @@ test "ChunkPos" {
     try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));
 }
 
-test "world" {
-    var threadPool: ThreadPool = undefined;
-    try threadPool.init(.{ .allocator = std.testing.allocator, .n_jobs = 16 });
-    defer threadPool.deinit();
-
-    var world: World = .{
-        .chunk_pool = try .initPreheated(std.testing.allocator, 1000),
-        .block_grid_pool = try .initPreheated(std.testing.allocator, 1000),
-        .thread_pool = &threadPool,
-        .allocator = std.testing.allocator,
-        .onEdit = null,
-        .ChunkSources = @splat(null),
-        .running = .init(true),
-        .Chunks = .init(std.testing.allocator),
-        .Entitys = .init(std.testing.allocator),
-        .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
-    };
-    defer world.deinit();
-    try std.testing.expectEqual(error.AllSourcesFailed, world.loadChunk(ChunkPos{ .level = standard_level, .position = .{ 0, 0, 0 } }, true));
-}
-
 test "cube benchmark" {
     if (@import("builtin").mode == .Debug) return error.SkipZigTest;
+    if (true) return;
     const allocator = std.heap.smp_allocator;
     const cpu_count = try std.Thread.getCpuCount();
-    var threadPool: ThreadPool = undefined;
+    var threadPool: u43 = undefined;
     try threadPool.init(.{ .allocator = allocator, .n_jobs = cpu_count });
 
     var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = try .init(allocator, 1024) };

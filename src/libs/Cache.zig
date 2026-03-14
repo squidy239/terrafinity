@@ -11,32 +11,32 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             next: ?*Node,
         };
 
-        allocator: std.mem.Allocator,
-        map: std.AutoHashMap(K, *Node),
+        map: std.AutoHashMapUnmanaged(K, *Node),
         head: ?*Node = null, // Most recently used
         tail: ?*Node = null, // Least recently used
         capacity: usize,
-        mutex: std.Io.Mutex = .{},
+        mutex: std.Io.Mutex = .init,
 
-        pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+        pub fn init(capacity: usize) Self {
             return Self{
-                .allocator = allocator,
-                .map = std.AutoHashMap(K, *Node).init(allocator),
+                .map = .empty,
                 .capacity = capacity,
             };
         }
 
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             var it = self.map.iterator();
             while (it.next()) |entry| {
-                self.allocator.destroy(entry.value_ptr.*);
+                allocator.destroy(entry.value_ptr.*);
             }
-            self.map.deinit();
+            self.map.deinit(allocator);
         }
 
-        pub fn get(self: *Self, key: K) ?V {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn get(self: *Self, io: std.Io, key: K) ?V {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const node_ptr = self.map.get(key) orelse return null;
 
@@ -46,9 +46,9 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             return node_ptr.value;
         }
 
-        pub fn put(self: *Self, key: K, value: V) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             // If key exists, update value and move to front
             if (self.map.get(key)) |node_ptr| {
@@ -58,7 +58,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             }
 
             // Create new node
-            const node = try self.allocator.create(Node);
+            const node = try allocator.create(Node);
             node.* = .{
                 .key = key,
                 .value = value,
@@ -67,7 +67,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             };
 
             // Add to map
-            try self.map.put(key, node);
+            try self.map.put(allocator, key, node);
 
             // If we have a head, update its prev pointer
             if (self.head) |head| {
@@ -84,13 +84,13 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
             // If we're over capacity, remove tail (LRU element)
             if (self.map.count() > self.capacity) {
-                self.removeTail();
+                self.removeTail(allocator);
             }
         }
 
-        pub fn remove(self: *Self, key: K) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn remove(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K) bool {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const node_ptr = self.map.get(key) orelse return false;
 
@@ -111,7 +111,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
             // Remove from map and free memory
             _ = self.map.remove(key);
-            self.allocator.destroy(node_ptr);
+            allocator.destroy(node_ptr);
 
             return true;
         }
@@ -137,7 +137,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             self.head = node;
         }
 
-        fn removeTail(self: *Self) void {
+        fn removeTail(self: *Self, allocator: std.mem.Allocator) void {
             const tail = self.tail orelse return;
 
             // Update tail pointer
@@ -153,24 +153,26 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
             // Remove from map and free memory
             _ = self.map.remove(tail.key);
-            self.allocator.destroy(tail);
+            allocator.destroy(tail);
         }
     };
 }
 
 test "LRUCache" {
-    var cache = try Cache(u32, u32, 2).init(std.testing.allocator);
-    defer cache.deinit();
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var cache = Cache(u32, u32).init(2);
+    defer cache.deinit(io, allocator);
 
-    try cache.put(1, 10);
-    try cache.put(2, 20);
+    try cache.put(io, allocator, 1, 10);
+    try cache.put(io, allocator, 2, 20);
 
-    try std.testing.expectEqual(@as(?u32, 10), cache.get(1));
+    try std.testing.expectEqual(@as(?u32, 10), cache.get(io, 1));
 
     // This will evict key 2 because 1 was recently accessed
-    try cache.put(3, 30);
+    try cache.put(io, allocator, 3, 30);
 
-    try std.testing.expectEqual(@as(?u32, null), cache.get(2));
-    try std.testing.expectEqual(@as(?u32, 10), cache.get(1));
-    try std.testing.expectEqual(@as(?u32, 30), cache.get(3));
+    try std.testing.expectEqual(@as(?u32, null), cache.get(io, 2));
+    try std.testing.expectEqual(@as(?u32, 10), cache.get(io, 1));
+    try std.testing.expectEqual(@as(?u32, 30), cache.get(io, 3));
 }
