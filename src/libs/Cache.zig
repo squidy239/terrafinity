@@ -16,7 +16,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         head: ?*Node = null, // Most recently used
         tail: ?*Node = null, // Least recently used
         capacity: usize,
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.Io.Mutex = .{},
 
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             return Self{

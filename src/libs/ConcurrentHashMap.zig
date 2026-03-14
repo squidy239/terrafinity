@@ -199,7 +199,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
 fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64) type {
     return struct {
         pub const Map = std.HashMap(K, V, Context, maxloadpercentage);
-        lock: std.Thread.RwLock,
+        lock: std.Io.RwLock,
         hash_map: Map,
 
         const Self = @This();

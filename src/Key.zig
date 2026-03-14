@@ -37,7 +37,7 @@ pub const Key = struct {
 };
 
 pub const Map = struct {
-    lock: std.Thread.RwLock = .{},
+    lock: std.Io.RwLock = .{},
     map: std.AutoHashMap(Key, Action),
 
     pub fn init(allocator: std.mem.Allocator) Map {

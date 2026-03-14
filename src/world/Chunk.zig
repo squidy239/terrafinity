@@ -5,7 +5,7 @@ const ztracy = @import("ztracy");
 
 pub const ChunkSize = 32;
 blocks: BlockEncoding,
-lock: std.Thread.RwLock,
+lock: std.Io.RwLock,
 genstate: std.atomic.Value(Genstate),
 ref_count: std.atomic.Value(u32),
 
@@ -19,7 +19,7 @@ pub const BlockEncoding = union(enum(u8)) {
     blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 
-    pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
+    pub fn merge(self: *@This(),io:std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
 
@@ -33,10 +33,10 @@ pub const BlockEncoding = union(enum(u8)) {
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            pool_mutex.lock();
+                            pool_mutex.lock(io);
                             memory_pool.destroy(@alignCast(self.blocks));
                             pool_count.* -= 1;
-                            pool_mutex.unlock();
+                            pool_mutex.unlock(io);
                             self.* = .{ .oneBlock = mergeBlocks.oneBlock };
                         }
                     },
@@ -53,24 +53,24 @@ pub const BlockEncoding = union(enum(u8)) {
                 if (IsOneBlock(self.blocks)) |block| {
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
-                    pool_mutex.lock();
+                    pool_mutex.lock(io);
                     memory_pool.destroy(@alignCast(self.blocks)); //if it was created in the pool it has the alignment of the pool
                     pool_count.* -= 1;
-                    pool_mutex.unlock();
+                    pool_mutex.unlock(io);
                     self.* = .{ .oneBlock = block };
                 }
             },
         }
     }
 
-    pub fn toBlocks(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
+    pub fn toBlocks(self: *@This(),io:std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) void {
         if (self.* == .blocks) return;
         const t = ztracy.ZoneNC(@src(), "toBlocks", 10);
         defer t.End();
         const a = ztracy.ZoneNC(@src(), "alloc", 54334);
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         while (true) {
-            pool_mutex.lock();
+            pool_mutex.lock(io);
             mem = memory_pool.create() catch {
                 pool_mutex.unlock();
                 std.log.err("Failed to allocate memory for chunk blocks, retrying...", .{});
@@ -78,7 +78,7 @@ pub const BlockEncoding = union(enum(u8)) {
                 continue;
             };
             pool_count.* += 1;
-            pool_mutex.unlock();
+            pool_mutex.unlock(io);
             break;
         }
         a.End();
@@ -94,10 +94,10 @@ pub const Genstate = enum(u8) {
 };
 
 ///Returns a chunk made from a given blockencoding. The blocks and returned chunk are allocated by the allocator.
-pub fn from(blockEncoding: BlockEncoding, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) *@This() {
+pub fn from(blockEncoding: BlockEncoding,io:std.Io, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) *@This() {
     var chunk: *@This() = undefined;
     while (true) {
-        pool_mutex.lock();
+        pool_mutex.lock(io);
         chunk = chunk_pool.create() catch {
             pool_mutex.unlock();
             std.log.err("Failed to allocate memory for chunk, retrying...", .{});
@@ -105,7 +105,7 @@ pub fn from(blockEncoding: BlockEncoding, chunk_pool: anytype, pool_count: *u64,
             continue;
         };
         pool_count.* += 1;
-        pool_mutex.unlock();
+        pool_mutex.unlock(io);
         break;
     }
     chunk.* = .{
@@ -221,12 +221,12 @@ pub fn release(self: *@This()) void {
     self.touch();
 }
 
-pub fn lockExclusive(self: *@This()) void {
-    self.lock.lock();
+pub fn lockExclusive(self: *@This(), io: std.Io) void {
+    self.lock.lockUncancelable(io);//TODO make this regualar lock, I think they frogot to add it
     self.touchModify();
 }
 
-pub fn unlockExclusive(self: *@This()) void {
+pub fn unlockExclusive(self: *@This(), io: std.Io) void {
     self.lock.unlock();
     self.touchModify();
 }
@@ -245,7 +245,7 @@ pub fn addAndLockShared(self: *@This()) void {
     _ = self.ref_count.fetchAdd(1, .seq_cst);
     self.lockShared();
 }
-pub fn addAndlock(self: *@This()) void {
+pub fn addAndlock(self: *@This(), io: std.Io) void {
     _ = self.ref_count.fetchAdd(1, .seq_cst);
     self.lockExclusive();
 }

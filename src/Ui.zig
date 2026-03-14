@@ -14,7 +14,7 @@ const Ui = @This();
 
 window: sdl.video.Window,
 config: *Config,
-config_lock: *std.Thread.RwLock,
+config_lock: *std.Io.RwLock,
 game: *Game,
 config_path: []const u8,
 worlds_path: []const u8,
@@ -249,7 +249,7 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
     return false;
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Thread.RwLock, folder: []const u8) !void {
+fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
     try gameptr.init(allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(window);
     try gameptr.startThreads();

@@ -807,3 +807,7 @@ fn loadchunktest(self: *World, Pos: ChunkPos, structures: bool, counter: *std.at
     ch.release();
     _ = counter.fetchAdd(1, .seq_cst);
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

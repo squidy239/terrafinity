@@ -25,17 +25,14 @@ const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 const config_path = "Config.zon";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
-    var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    const backing_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
-    var tracking_allocator = TrackingAllocator.init(backing_allocator, std.math.maxInt(usize));
-    const allocator = tracking_allocator.get_allocator();
-    defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
+    const allocator = init.gpa;
+    const io = init.io;
     _ = try sdl.setMemoryFunctionsByAllocator(allocator);
 
-    var config_lock: std.Thread.RwLock = .{};
+    var config_lock: std.Io.RwLock = .init;
 
     var config: Config = try .load(allocator, config_path);
     defer config.deinit(allocator);
@@ -162,7 +159,6 @@ pub fn main() !void {
         try sdl.video.gl.swapWindow(window);
         sw.End();
         ztracy.FrameMark();
-        std.debug.print("    using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }
 
@@ -199,8 +195,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
 }
 
 test {
-    @setEvalBranchQuota(10000);
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }
 
 ///must be locked by the caller

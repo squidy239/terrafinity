@@ -34,7 +34,7 @@ render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 window: sdl.video.Window,
-gen_context_lock: std.Thread.Mutex = .{},
+gen_context_lock: std.Io.Mutex = .{},
 contexts: std.ArrayList(sdl.video.gl.Context),
 context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
@@ -533,7 +533,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         free_list: std.DoublyLinkedList = .{},
 
         map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
-        lock: std.Thread.Mutex = .{},
+        lock: std.Io.Mutex = .{},
 
         const Space = struct {
             node: std.DoublyLinkedList.Node,
@@ -737,4 +737,8 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.indirect_buffer.free();
         }
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

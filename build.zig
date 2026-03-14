@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
         .on_demand = tracy_options.on_demand,
         .optimize = optimize,
     });
-    exe.linkLibrary(ztracy.artifact("tracy"));
+    exe.root_module.linkLibrary(ztracy.artifact("tracy"));
 
     // Check step
     if (check) {
@@ -104,17 +104,6 @@ fn setupDependencies(
         .optimize = optimize,
     });
     root_module.addImport("sdl3", sdl3.module("sdl3"));
-
-    // ThreadPool
-    const ThreadPool = b.addModule("ThreadPool", .{
-        .root_source_file = b.path("src/libs/ThreadPool.zig"),
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
-            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-        },
-    });
-    root_module.addImport("ThreadPool", ThreadPool);
 
     // ConcurrentHashMap
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
