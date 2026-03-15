@@ -66,7 +66,7 @@ pub const Mover = struct {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
             var newPos = physics.pos.fetchAdd(move, .seq_cst);
-            while (try self.collision(io,allocator, newPos, &reader)) |mtv| {
+            while (try self.collision(io, allocator, newPos, &reader)) |mtv| {
                 newPos = physics.pos.fetchAdd(-mtv, .seq_cst);
                 if (mtv[0] != 0.0) @atomicStore(f64, &physics.velocity.vector[0], 0.0, .seq_cst);
                 if (mtv[1] != 0.0) @atomicStore(f64, &physics.velocity.vector[1], 0.0, .seq_cst);
@@ -93,7 +93,7 @@ pub const Mover = struct {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.getBlock(io,allocator, @intFromFloat(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io, allocator, @intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });

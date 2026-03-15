@@ -49,8 +49,6 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
     };
     var card = dvui.widgetAlloc(dvui.BoxWidget);
     card.init(src, init_opts, options.override(opts));
-    card.data().was_allocated_on_widget_stack = true;
-
     const hover: bool = hovered(card.data(), .{});
     if (hover) {
         card.data().options.margin = .all(0);
@@ -60,7 +58,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
     return card;
 }
 
-pub fn escMenu(self: *@This()) !bool {
+pub fn escMenu(self: *@This(), io: std.Io) !bool {
     std.debug.assert(self.menu_state.ingame);
     const size = try self.window.getSizeInPixels();
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
@@ -80,7 +78,7 @@ pub fn escMenu(self: *@This()) !bool {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
-        self.game.deinit(self.window);
+        self.game.deinit(io, self.window);
         self.game.* = undefined;
         return true;
     }
@@ -155,7 +153,7 @@ pub fn newGameMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
     return menuchanged;
 }
 
-pub fn mainPage(self: *@This(), allocator: std.mem.Allocator) !bool {
+pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
     //background
@@ -175,7 +173,7 @@ pub fn mainPage(self: *@This(), allocator: std.mem.Allocator) !bool {
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    changed |= try self.continueMenu(allocator);
+    changed |= try self.continueMenu(io, allocator);
     return changed;
 }
 
@@ -194,7 +192,7 @@ pub fn sidebar(self: *@This()) bool {
     return false;
 }
 
-pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
+pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
         .vertical = .none,
@@ -219,14 +217,14 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
             return true;
         }
     }
-    self.config_lock.lockShared();
+    self.config_lock.lockSharedUncancelable(io);
     const worlds_path = self.config.worlds_path;
-    self.config_lock.unlockShared();
-    var worlds_folder: std.fs.Dir = try std.fs.cwd().openDir(worlds_path, .{ .iterate = true });
-    defer worlds_folder.close();
+    self.config_lock.unlockShared(io);
+    var worlds_folder = try std.Io.Dir.cwd().openDir(io, worlds_path, .{ .iterate = true });
+    defer worlds_folder.close(io);
     var it = worlds_folder.iterate();
     var i: usize = 0;
-    while (try it.next()) |item| : (i += 1) {
+    while (try it.next(io)) |item| : (i += 1) {
         if (item.kind != .directory) continue;
         const game = menuCard(@src(), .{}, .{ .id_extra = i, .expand = .vertical });
         defer game.deinit();
@@ -240,7 +238,7 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.config.worlds_path, item.name });
             defer allocator.free(jpath);
-            try openGame(self.game, allocator, self.window, &self.config.game_config, self.config_lock, jpath); //TODO popup when game cant be opened
+            try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, jpath); //TODO popup when game cant be opened
             self.menu_state.ingame = true;
             self.menu_state.main = false;
             return true;
@@ -249,8 +247,8 @@ pub fn continueMenu(self: *@This(), allocator: std.mem.Allocator) !bool {
     return false;
 }
 
-fn openGame(gameptr: *Game, allocator: std.mem.Allocator, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
-    try gameptr.init(allocator, game_config, options_lock, folder, window);
+fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
+    try gameptr.init(io, allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(window);
     try gameptr.startThreads();
     std.log.info("opening game\n", .{});

@@ -208,7 +208,7 @@ fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
 
 pub fn unloadEntity(self: *@This(), io: std.Io, entityUUID: u128) void {
     const en = self.Entitys.fetchRemove(io, entityUUID) orelse return;
-    en.unload(self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
+    en.unload(io, self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
 }
 
 pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
@@ -256,9 +256,9 @@ pub fn updateEntitys(self: *@This(), io: std.Io, update_finished: *std.atomic.Va
         defer it.unpause(io);
         const entity = self.Entitys.getAndAddRef(io, uuid);
         if (entity) |en| {
-            en.update(self, uuid, allocator) catch |err| {
+            en.update(io, allocator, self, uuid) catch |err| {
                 switch (err) {
-                    error.TimedOut => continue,
+                    error.Canceled => continue,
                     else => @panic("err"),
                 }
             };
@@ -326,7 +326,7 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
     while (true) {
         tounload.clearRetainingCapacity();
         {
-            const currenttime = std.time.microTimestamp();
+            const currenttime = std.Io.Timestamp.now(io, .awake);
             while (it.next(io)) |c| {
                 chunks += 1;
                 const chunk = c.value_ptr.*;
@@ -336,7 +336,7 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
                     .oneBlock => chunk_timeout,
                 };
                 if (chunk.blocks == .blocks) grids += 1;
-                if (currenttime - lastaccess < timeout) continue;
+                if (currenttime.nanoseconds - lastaccess < timeout) continue;
                 tounload.appendBounded(c.key_ptr.*) catch break;
             }
         }
@@ -360,17 +360,19 @@ const Options = @import("../Game.zig").Options;
 pub fn chunkUnloaderThread(self: *@This(), io: std.Io, options: *Options, options_lock: *std.Io.RwLock) void {
     while (true) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-        defer unloadChunks.End();
-        const st = std.time.nanoTimestamp();
-        options_lock.lockSharedUncancelable(io);
+defer unloadChunks.End();
+      //  const st = std.time.nanoTimestamp();
+       options_lock.lockSharedUncancelable(io);
         const max_grid_timeout_ms = options.max_grid_timeout_ms;
-        const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
-        const block_grid_capacity = options.block_grid_capacity;
+     const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
+       const block_grid_capacity = options.block_grid_capacity;
         const chunk_capacity = options.chunk_capacity;
         const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
-        options_lock.unlockShared(io);
+        _ = intervel_ns;
+       options_lock.unlockShared(io);
         self.unloadTimeout(io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
-        std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};//TODO
+        //std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
     }
 }
 
@@ -380,12 +382,12 @@ pub const Reader = struct {
 
     /// Returns a block at the given position. clear() must be called after a series of calls to unlock the cached chunk.
     /// Better for many block reads.
-    pub inline fn getBlock(self: *@This(), io: std.Io,allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
+    pub inline fn getBlock(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
             self.clear(io);
-            self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.loadChunk(io,allocator, chunkPos, false) };
+            self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.loadChunk(io, allocator, chunkPos, false) };
             self.lastChunkReadCache.?.chunk.lockShared(io);
         }
         const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;

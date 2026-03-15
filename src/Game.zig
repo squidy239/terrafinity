@@ -153,12 +153,10 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .options_lock = game_options_lock,
         .running = .init(true),
         .allocator = undefined,
-        .pool = undefined,
         .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
         .loaded_or_meshed = .init(),
-        .tracking_allocator = .init(allocator, std.math.maxInt(usize)),
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
@@ -253,13 +251,13 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
 }
 
 pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
-    try self.options_lock.lockSharedUncancelable(io);
+    self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
 }
 
 pub fn getLevels(self: *@This(), io: std.Io) ![2]i32 {
-    try self.options_lock.lockSharedUncancelable(io);
+    self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.lowest_level, self.options.highest_level };
 }
@@ -388,7 +386,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
-    const playerpos = self.player.physics.getPos();
+    const playerpos = self.player.physics.pos.load(.seq_cst);
     const renderdistance = try self.getGenDistance(io);
     const levels = try self.getLevels(io);
     var buffer: [1024]World.ChunkPos = undefined;

@@ -113,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.initEmpty();
     var update_finished: std.atomic.Value(bool) = .init(true);
+    var update: std.Io.Future(void) = undefined;
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &ui_window);
@@ -134,17 +135,16 @@ pub fn main(init: std.process.Init) !void {
             try game.player.physics.update(&game.world, io, allocator);
             try game.renderer.drawChunks(game.player.physics.pos.load(.seq_cst));
             if (update_finished.load(.seq_cst)) {
-                update_finished.store(false, .seq_cst);
-                try game.pool.spawn(World.updateEntitys, .{ &game.world, &update_finished, allocator }, .VeryHigh);
+                update = io.async(World.updateEntitys, .{ &game.world, io, &update_finished, allocator });
             }
-            game.unloadChunkMeshes();
+            try game.unloadChunkMeshes(io);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
-        try ui_window.begin(std.time.nanoTimestamp());
+        try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
         var menuchanged: bool = false;
 
-        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
-        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator);
+        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(io, allocator);
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
         if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
 
