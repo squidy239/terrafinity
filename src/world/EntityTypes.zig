@@ -20,13 +20,13 @@ const EntityMeshBufferIDs = struct {
 var EntityMeshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
 var EntityMeshesLen: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
 
-pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
-    var cwd = std.fs.cwd(); //cd into packs
-    var packs = try cwd.makeOpenPath("packs", .{});
+pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
+    var cwd = std.Io.Dir.cwd();
+    var packs = try cwd.createDirPathOpen(io, "packs", .{});
     defer packs.close();
-    var packdir = try packs.makeOpenPath(pack, .{});
+    var packdir = try packs.createDirPathOpen(io, pack, .{});
     defer packdir.close();
-    var entities = try packdir.makeOpenPath("Entities", .{});
+    var entities = try packdir.createDirPathOpen(io, "Entities", .{});
     defer entities.close();
     for (&EntityMeshes, 0..) |*mesh, i| {
         const entity: Entity.Type = @enumFromInt(i);
@@ -36,7 +36,7 @@ pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
             continue;
         };
         defer allocator.free(fileContents);
-        var parsedObj = try obj.parseObj(allocator, fileContents); //TODO somehow fetch files if they are missing
+        var parsedObj = try obj.parseObj(allocator, fileContents);
         defer parsedObj.deinit(allocator);
         mesh.* = try GlLoadEntity(parsedObj, &EntityMeshesLen[i], allocator);
     }
@@ -45,7 +45,6 @@ pub fn LoadMeshes(allocator: std.mem.Allocator) !void {
 
 pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {
     if (entity.meshes.len == 0) return null;
-    // std.debug.assert(entity.meshes.len == 1);
     var bufferids: EntityMeshBufferIDs = undefined;
     gl.GenBuffers(1, @ptrCast(&bufferids.vbo));
     gl.BindBuffer(gl.ARRAY_BUFFER, bufferids.vbo);
@@ -66,7 +65,6 @@ pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.m
         }
     }
     EntityMeshLen.* = @intCast(pos);
-    //  std.debug.print("e:{any}\n", .{entity.meshes[0].indices.len});
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(@sizeOf(u32) * pos), @ptrCast(indices[0..pos]), gl.STATIC_DRAW);
     return bufferids;
 }
@@ -88,9 +86,9 @@ pub const Player = struct {
     fly_speed: std.atomic.Value(f32),
     fly_speed_linear: std.atomic.Value(f32),
     inventory_buffer: [10 * 16]?Item.Item = @splat(null),
-    ///main inventory and hotbar
+    /// Main inventory and hotbar.
     main_inventory: Item.Inventory,
-    ///pitch, yaw, roll, in degrees
+    /// Pitch, yaw, roll, in degrees.
     viewDirection: AtomicVector(3, f32),
 
     physics: Physics.getInterface(struct {
@@ -124,10 +122,11 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-    pub fn unload(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
         _ = save;
         _ = uuid;
         _ = world;
+        _ = io;
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         allocator.destroy(self);
         allocator.destroy(entity);
@@ -135,7 +134,7 @@ pub const Player = struct {
 
     pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        return self.physics.getPos();
+        return self.physics.pos.load(.seq_cst);
     }
 
     pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
@@ -165,8 +164,9 @@ pub const Player = struct {
         }
     }
 
-    pub fn update(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
+    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
         _ = uuid;
+        _ = io;
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         self.physics.update(world, allocator) catch return error.Unrecoverable;
         return false;
@@ -184,52 +184,64 @@ pub const Player = struct {
 
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
+    pos: AtomicVector(3, f64),
+    dir: AtomicVector(3, f64),
+    timestamp: std.atomic.Value(i128),
     lock: std.Io.RwLock = .init,
-    pos: @Vector(3, f64),
-    dir: @Vector(3, f64),
-    timestamp: std.Io.Timestamp,
 
-    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
+    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool {
         const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
         defer u.End();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         const l = ztracy.ZoneNC(@src(), "lock", 6553);
         self.lock.lockUncancelable(io);
         l.End();
-        const timestamp = self.timestamp;
-        self.timestamp = std.time.microTimestamp();
-        const dt = @as(f64, @floatFromInt(self.timestamp - timestamp)) * 0.000001;
-        self.dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
-        self.dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
-        self.dir[2] += (std.crypto.random.float(f64) - 0.5) * dt;
-        if (!std.meta.eql(self.dir, .{ 0, 0, 0 })) self.dir = zm.vec.normalize(self.dir);
-        self.dir *= @splat(10 * dt);
-        self.pos += self.dir;
-        self.lock.unlock();
+        defer self.lock.unlock(io);
+
+        const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+        const prev_ns = self.timestamp.load(.seq_cst);
+        self.timestamp.store(now_ns, .seq_cst);
+        const dt = @as(f64, @floatFromInt(now_ns - prev_ns)) * 1e-9;
+
+        var dir = self.dir.load(.seq_cst);
+        var pos = self.pos.load(.seq_cst);
+
+        //dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
+        //dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
+        //dir[2] += (std.crypto.random.float(f64) - 0.5) * dt;
+        if (!std.meta.eql(dir, @Vector(3, f64){ 0, 0, 0 })) dir = zm.vec.normalize(dir);
+        dir *= @splat(10 * dt);
+        pos += dir;
+
+        self.dir.store(dir, .seq_cst);
+        self.pos.store(pos, .seq_cst);
+
         var worldReader = World.Reader{ .world = world };
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
-        if (true or (worldReader.getBlockUncached(@intFromFloat(self.pos), World.standard_level) catch unreachable) != .air) {
+        if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
             g.End();
             var worldEditor = World.Editor{
                 .world = world,
                 .tempallocator = allocator,
             };
-            const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(self.pos), 8);
+            const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(pos), 8);
             worldEditor.placeSamplerShape(.grass, sphere, World.standard_level) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
-            _ = worldEditor.flush() catch |err| std.debug.panic("failed to clear WorldEditor: {any}\n", .{err});
+            worldEditor.flush(io, allocator) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.Unrecoverable,
+            };
             return false;
-            //_ = entity.ref_count.fetchSub(1, .seq_cst);
-            //world.unloadEntity(uuid);
-            //return true;
         } else g.End();
         _ = uuid;
         return false;
     }
 
-    pub fn unload(entity: *Entity, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
         _ = save;
         _ = uuid;
         _ = world;
+        _ = io;
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
         allocator.destroy(self);
         allocator.destroy(entity);
@@ -237,9 +249,7 @@ pub const Explosive = struct {
 
     pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
-        return self.pos;
+        return self.pos.load(.seq_cst);
     }
 
     pub fn getInterface(self: *const @This()) Entity.interface {
@@ -252,6 +262,7 @@ pub const Explosive = struct {
         };
     }
 };
+
 fn texture(u: f64, v: f64, args: anytype) f64 {
     const noise = World.DefaultGenerator.Noise.Noise(f32){
         .noise_type = .simplex,

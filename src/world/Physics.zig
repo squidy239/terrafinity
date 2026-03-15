@@ -11,23 +11,25 @@ pub fn getInterface(physicsElements: anytype) type {
     return struct {
         elements: physicsElements,
         last_update: std.Io.Timestamp,
-        updateTimerLock: std.Io.RwLock = .init,
+        last_update_lock: std.Io.RwLock = .init,
         pos: AtomicVector(3, f64),
         velocity: AtomicVector(3, f64),
 
-        pub fn lapUpdateTimer(self: *@This()) u64 {
-            self.updateTimerLock.lock();
-            defer self.updateTimerLock.unlock();
-            return self.last_update.lap();
+        pub fn lapUpdateTimer(self: *@This(), io: std.Io) std.Io.Duration {
+            self.last_update_lock.lockUncancelable(io);
+            const ola = self.last_update;
+            self.last_update = .now(io, .awake);
+            self.last_update_lock.unlock(io);
+            return ola.durationTo(self.last_update);
         }
 
-        pub fn update(self: *@This(), world: *World, allocator: std.mem.Allocator) !void {
+        pub fn update(self: *@This(), world: *World, io: std.Io, allocator: std.mem.Allocator) !void {
             //deltaT is seconds
-            const deltaT: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer())) / std.time.ns_per_s;
+            const deltaT: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
 
             inline for (std.meta.fields(@TypeOf(self.elements))) |field| {
                 const fieldData = &@field(&self.elements, field.name);
-                try fieldData.update(self, deltaT, world, allocator);
+                try fieldData.update(io, self, deltaT, world, allocator);
             }
         }
     };
@@ -49,35 +51,32 @@ pub const Mover = struct {
     boundingBox: zm.AABB,
     enabled: bool,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
-        defer if (self.zeroVelocity) physics.setVelocity(.{ 0, 0, 0 });
-        _ = allocator;
-        var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
+        defer if (self.zeroVelocity) physics.velocity.store(.{ 0, 0, 0 }, .seq_cst);
+        var posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
         if (!self.collisions) {
-            _ = physics.fetchAddPos(posOffset);
+            _ = physics.pos.fetchAdd(posOffset, .seq_cst);
             return;
         }
         const maxMove: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
-        defer reader.clear();
+        defer reader.clear(io);
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
-            var newPos = physics.fetchAddPos(move);
-            while (try self.collision(newPos, &reader)) |mtv| {
-                newPos = physics.fetchAddPos(-mtv);
-                physics.velocityLock.lock();
-                if (mtv[0] != 0.0) physics.velocity[0] = 0.0;
-                if (mtv[1] != 0.0) physics.velocity[1] = 0.0;
-                if (mtv[2] != 0.0) physics.velocity[2] = 0.0;
-                physics.velocityLock.unlock();
+            var newPos = physics.pos.fetchAdd(move, .seq_cst);
+            while (try self.collision(io,allocator, newPos, &reader)) |mtv| {
+                newPos = physics.pos.fetchAdd(-mtv, .seq_cst);
+                if (mtv[0] != 0.0) @atomicStore(f64, &physics.velocity.vector[0], 0.0, .seq_cst);
+                if (mtv[1] != 0.0) @atomicStore(f64, &physics.velocity.vector[1], 0.0, .seq_cst);
+                if (mtv[2] != 0.0) @atomicStore(f64, &physics.velocity.vector[2], 0.0, .seq_cst);
             }
         }
     }
 
-    pub fn collision(self: *const @This(), pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
-        defer reader.clear();
+    pub fn collision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
+        defer reader.clear(io);
 
         const base = @floor(pos); // floor entity pos once
         var bestMtv: @Vector(3, f64) = @splat(0.0);
@@ -94,7 +93,7 @@ pub const Mover = struct {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.getBlock(@intFromFloat(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io,allocator, @intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });
@@ -167,12 +166,13 @@ pub const Gravity = struct {
     ///the strength of the gravity in blocks per second squared
     strength: f64 = 9.8,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
         _ = world;
         _ = allocator;
+        _ = io;
         const velOffset = @as(@Vector(3, f64), @splat(self.strength)) * self.up * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.fetchAddVelocity(-velOffset);
+        _ = physics.velocity.fetchAdd(-velOffset, .seq_cst);
     }
 };
 
@@ -181,14 +181,13 @@ pub const Resistance = struct {
     ///after one second the velocity will be this fraction of the original velocity
     fraction_per_second: f64 = 0.1,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
         _ = world;
         _ = allocator;
         _ = deltaT;
-        physics.velocityLock.lock();
-        //physics.velocity *= @as(@Vector(3, f64), @splat( self.fraction_per_second));
-        physics.velocityLock.unlock();
+        _ = physics;
+        _ = io;
     }
 };
 

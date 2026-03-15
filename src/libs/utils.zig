@@ -18,28 +18,36 @@ pub fn loadZON(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: 
 }
 
 ///items in the vector are updated individually, not as a whole
-pub fn AtomicVector(len: comptime_int,comptime T: type) type {
+pub fn AtomicVector(len: comptime_int, comptime T: type) type {
     return struct {
         vector: @Vector(len, T),
 
         pub fn load(self: *const @This(), comptime ordering: std.builtin.AtomicOrder) @Vector(len, T) {
             var vec: @Vector(len, T) = undefined;
-            inline for(0..len)|i|{
+            inline for (0..len) |i| {
                 vec[i] = @atomicLoad(T, &self.vector[i], ordering);
             }
             return vec;
         }
 
         pub fn store(self: *@This(), new: @Vector(len, T), comptime ordering: std.builtin.AtomicOrder) void {
-            inline for(0..len)|i|{
-                @atomicStore(T, &self.vector[i], new[i],  ordering);
+            inline for (0..len) |i| {
+                @atomicStore(T, &self.vector[i], new[i], ordering);
             }
         }
 
         pub fn fetchAdd(self: *@This(), offset: @Vector(len, T), comptime ordering: std.builtin.AtomicOrder) @Vector(len, T) {
             var vec: @Vector(len, T) = undefined;
-            inline for(0..len)|i|{
-                vec[i] = @atomicRmw(T, &self.vector[i], .Add, offset[0], ordering);
+            inline for (0..len) |i| {
+                vec[i] = @atomicRmw(T, &self.vector[i], .Add, offset[i], ordering);
+            }
+            return vec;
+        }
+
+        pub fn rmw(self: *@This(), offset: @Vector(len, T), operator: std.builtin.AtomicRmwOp, comptime ordering: std.builtin.AtomicOrder) @Vector(len, T) {
+            var vec: @Vector(len, T) = undefined;
+            inline for (0..len) |i| {
+                vec[i] = @atomicRmw(T, &self.vector[i], operator, offset[i], ordering);
             }
             return vec;
         }

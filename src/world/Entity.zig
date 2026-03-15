@@ -14,7 +14,7 @@ vtable: interface,
 
 pub const interface = struct {
     ///updates the entity, returns true if the entity was unloaded
-    update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool = null,
+    update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool = null,
     ///unloads the entity and frees all resorces allocated by it
     ///the entity ptr is not valid after this
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
@@ -46,19 +46,21 @@ pub fn getPos(self: *@This()) ?@Vector(3, f64) {
 
 ///unloads the entity and frees all resorces allocated by it
 ///the entity ptr is not valid after this
-pub fn unload(self: *@This(), world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
+pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
     const unloadEntity = ztracy.ZoneNC(@src(), "unloadEntity", 5657656);
     defer unloadEntity.End();
-    std.debug.assert(self.waitForRefAmount(1, 10 * std.time.us_per_s));
-    return self.vtable.unload(self, world, uuid, allocator, save);
+    std.debug.assert(try self.waitForRefAmount(io, 1, 10 * std.time.us_per_s));
+    return self.vtable.unload(self, io, world, uuid, allocator, save);
 }
 
-pub fn waitForRefAmount(self: *@This(), amount: u32, comptime maxMicroTime: ?u64) bool {
+//TODO better timeout with Io
+pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
     if (self.ref_count.load(.seq_cst) == amount) return true;
-    const st = std.time.microTimestamp();
+    const st = std.Io.Timestamp.now(io, .awake);
     while (self.ref_count.load(.seq_cst) != amount) {
-        if (maxMicroTime != null and (std.time.microTimestamp() - st) > maxMicroTime.?) return false;
-        std.Thread.yield() catch {};
+        @branchHint(.unlikely);
+        if (maxMicroTime != null and st.untilNow(io, .awake).toMicroseconds() > maxMicroTime.?) return false;
+        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     return true;
 }

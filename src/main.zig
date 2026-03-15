@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     };
     try Ui.loadFonts(&ui_window);
 
-    defer if (ui.menu_state.ingame) game.deinit(window);
+    defer if (ui.menu_state.ingame) game.deinit(io, window);
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.initEmpty();
     var update_finished: std.atomic.Value(bool) = .init(true);
@@ -125,14 +125,14 @@ pub fn main(init: std.process.Init) !void {
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
-            try game.handleButtonActions(action_set, dt);
-            game.handleScroll(scroll);
+            try game.handleButtonActions(io, action_set, dt);
+            try game.handleScroll(io, scroll);
 
             const size = try window.getSizeInPixels();
             try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
-            try game.renderer.clear(game.player.physics.getPos());
-            try game.player.physics.update(&game.world, allocator);
-            try game.renderer.drawChunks(game.player.physics.getPos());
+            try game.renderer.clear(game.player.physics.pos.load(.seq_cst));
+            try game.player.physics.update(&game.world, io, allocator);
+            try game.renderer.drawChunks(game.player.physics.pos.load(.seq_cst));
             if (update_finished.load(.seq_cst)) {
                 update_finished.store(false, .seq_cst);
                 try game.pool.spawn(World.updateEntitys, .{ &game.world, &update_finished, allocator }, .VeryHigh);
