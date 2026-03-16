@@ -38,28 +38,32 @@ pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][Ch
     GenerateExtendedChunk(&ExtendedBlocks, mainblocks, neighbor_faces);
     ecp.End();
     if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
-    try meshSimple(&ExtendedBlocks, writer);
+    try meshSimple(@ptrCast(&ExtendedBlocks), writer);
 }
 
-fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, writer: *std.Io.Writer) !void {
+fn meshSimple(flat_extended_blocks: *const [(ChunkSize + 2) * (ChunkSize + 2) * (ChunkSize + 2)]Block, writer: *std.Io.Writer) !void {
     const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
     for (1..ChunkSize + 1) |x| {
         for (1..ChunkSize + 1) |y| {
             for (1..ChunkSize + 1) |z| {
-                const block = extendedBlocks[x][y][z];
-                if (!block.isVisible()) continue;
+                const index = extendedto1D(x, y, z);
+                const block = flat_extended_blocks[index];
+                if (!block.isVisible()) {
+                    @branchHint(.unpredictable);
+                    continue;
+                }
+
                 const neighboring_blocks = [6]Block{
-                    extendedBlocks[x + 1][y][z],
-                    extendedBlocks[x - 1][y][z],
-                    extendedBlocks[x][y + 1][z],
-                    extendedBlocks[x][y - 1][z],
-                    extendedBlocks[x][y][z + 1],
-                    extendedBlocks[x][y][z - 1],
+                    flat_extended_blocks[index + comptime ((ChunkSize + 2) * (ChunkSize + 2))],
+                    flat_extended_blocks[index - comptime ((ChunkSize + 2) * (ChunkSize + 2))],
+                    flat_extended_blocks[index + comptime (ChunkSize + 2)],
+                    flat_extended_blocks[index - comptime (ChunkSize + 2)],
+                    flat_extended_blocks[index + 1],
+                    flat_extended_blocks[index - 1],
                 };
                 const block_transparent = block.isTransparent();
                 inline for (0..6) |i| {
                     if (neighboring_blocks[i].isTransparent() and (!block_transparent or block != neighboring_blocks[i])) {
-                        @branchHint(.unlikely); //face is unlikely
                         const face = Face{
                             .BlockType = @intFromEnum(block),
                             .isGreedy = false,
@@ -78,6 +82,34 @@ fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 
         }
     }
     loop.End();
+}
+
+inline fn extendedto1D(x: usize, y: usize, z: usize) usize {
+    return (z * (ChunkSize + 2) * (ChunkSize + 2)) + (y * (ChunkSize + 2)) + x;
+}
+test "MeshBenchmark" {
+    var extended_blocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = @splat(@splat(@splat(.air)));
+    for (0..ChunkSize + 2) |x| {
+        for (0..ChunkSize + 2) |y| {
+            for (0..ChunkSize + 2) |z| {
+                extended_blocks[x][y][z] = switch (y) {
+                    0...16 => .stone,
+                    17 => .grass,
+                    else => .air,
+                };
+            }
+        }
+    }
+    var buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.Discarding.init(&buf);
+    const test_amount = 100000;
+    const st = std.time.nanoTimestamp();
+    for (0..test_amount) |_| {
+        try meshSimple(@ptrCast(&extended_blocks), &writer.writer);
+    }
+    const et = std.time.nanoTimestamp();
+
+    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et - st)) / test_amount) / std.time.ns_per_us});
 }
 
 ///x+,x-,y+,y-,z+,z-

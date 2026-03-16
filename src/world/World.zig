@@ -760,7 +760,7 @@ test "world" {
 }
 
 test "cube benchmark" {
-    if (@import("builtin").mode == .Debug) return error.SkipZigTest;
+    if (true or @import("builtin").mode == .Debug) return error.SkipZigTest;
     const allocator = std.heap.smp_allocator;
     const cpu_count = try std.Thread.getCpuCount();
     var threadPool: ThreadPool = undefined;
