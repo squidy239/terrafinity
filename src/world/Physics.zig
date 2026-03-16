@@ -36,12 +36,13 @@ pub fn getInterface(physicsElements: anytype) type {
 }
 
 pub const simpleMover = struct {
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = self;
         _ = world;
+        _ = io;
         _ = allocator;
-        const posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.pos.fetchAdd(posOffset);
+        const posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
+        _ = physics.pos.fetchAdd(posOffset, .seq_cst);
     }
 };
 
@@ -220,14 +221,14 @@ test "Gravity" {
     const physics_interface = getInterface(struct { gravity: Gravity });
     var physics_object = physics_interface{
         .elements = .{ .gravity = .{} },
-        .last_update = try std.time.Timer.start(),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 0, 0, 0 },
+        .last_update = .now(testing.io, .awake),
+        .pos = .{ .vector = .{ 0, 0, 0 } },
+        .velocity = .{ .vector = .{ 0, 0, 0 } },
     };
-    _ = physics_object.lapUpdateTimer();
-    std.Thread.sleep(std.time.ns_per_ms * 10);
-    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.getVelocity()[1] < 0);
+    _ = physics_object.lapUpdateTimer(testing.io);
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.velocity.load(.seq_cst)[1] < 0);
 }
 
 test "simpleMover" {
@@ -235,12 +236,12 @@ test "simpleMover" {
     const physics_interface = getInterface(struct { mover: simpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
-        .last_update = try std.time.Timer.start(),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 1, 0, 0 },
+        .last_update = .now(testing.io, .awake),
+        .pos = .{ .vector = .{ 0, 0, 0 } },
+        .velocity = .{ .vector = .{ 0, 0, 0 } },
     };
-    _ = physics_object.lapUpdateTimer();
-    std.Thread.sleep(std.time.ns_per_ms * 10);
-    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.getPos()[0] > 0);
+    _ = physics_object.lapUpdateTimer(testing.io);
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.pos.load(.seq_cst)[0] > 0);
 }

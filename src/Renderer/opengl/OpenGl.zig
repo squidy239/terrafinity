@@ -78,7 +78,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
     try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
     try self.render_buffer.indirect_buffer.ensureCapacity(io, 8_000_000);
 
-    self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
+    self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
     for (0..cpu_count + 1) |_| {
@@ -165,8 +165,7 @@ pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideo
 }
 
 pub fn remove(self: *@This(), io: std.Io, Pos: ChunkPos) void {
-    const ids = self.renderlist.fetchRemove(io, Pos) orelse return;
-    ids.free();
+    self.render_buffer.remove(io, Pos);
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
@@ -281,7 +280,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    const millitimestamp = std.time.milliTimestamp();
+    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
@@ -462,7 +461,7 @@ const GpuBuffer = struct {
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             gl.Finish(); //RACE CONDITION this only syncs the current thread
-            std.Thread.sleep(100 * std.time.ns_per_ms); //very very bad "temporary" fix
+            try io.sleep(.fromMilliseconds(100), .awake); //very very bad "temporary" fix
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
             if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;

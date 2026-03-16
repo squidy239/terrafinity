@@ -90,46 +90,46 @@ pub const WorldOptions = struct {
     generator_config: World.DefaultGenerator.Params,
     world_config: World.WorldConfig,
 
-    pub fn fromWorldFolder(folder: []const u8, allocator: std.mem.Allocator) !WorldOptions {
-        var world_folder = try std.fs.cwd().openDir(folder, .{});
-        defer world_folder.close();
+    pub fn fromWorldFolder(folder: []const u8, io: std.Io, allocator: std.mem.Allocator) !WorldOptions {
+        var world_folder = try std.Io.Dir.cwd().openDir(io, folder, .{});
+        defer world_folder.close(io);
 
-        const worldConfigFile = try world_folder.openFile("config/World.zon", .{ .lock = .shared });
-        defer worldConfigFile.close();
+        const worldConfigFile = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
+        defer worldConfigFile.close(io);
 
-        const generatorConfigFile = try world_folder.openFile("config/DefaultGenerator.zon", .{ .lock = .shared });
-        defer generatorConfigFile.close();
+        const generatorConfigFile = try world_folder.openFile(io, "config/DefaultGenerator.zon", .{ .lock = .shared });
+        defer generatorConfigFile.close(io);
 
-        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, generatorConfigFile, allocator, allocator);
-        generator_config.setSeeds();
+        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, io, generatorConfigFile, allocator, allocator);
+        generator_config.setSeeds(io);
         return .{
             .generator_config = generator_config,
-            .world_config = try utils.loadZON(World.WorldConfig, worldConfigFile, allocator, allocator),
+            .world_config = try utils.loadZON(World.WorldConfig, io, worldConfigFile, allocator, allocator),
         };
     }
 
     /// Saves the world options to the config directory in the given folder, creating the files if they do not exist.
-    pub fn save(self: WorldOptions, folder: []const u8) !void {
+    pub fn save(self: WorldOptions, io: std.Io, folder: []const u8) !void {
         var wbuffer: [1024]u8 = undefined;
         var gbuffer: [1024]u8 = undefined;
 
-        var world_folder = try std.fs.cwd().openDir(folder, .{});
-        defer world_folder.close();
+        var world_folder = try std.Io.Dir.cwd().openDir(io, folder, .{});
+        defer world_folder.close(io);
 
-        world_folder.makeDir("config") catch |err| switch (err) {
+        world_folder.createDirPath(io, "config") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        const worldConfigFile = try world_folder.createFile("config/World.zon", .{ .lock = .exclusive });
-        defer worldConfigFile.close();
+        const worldConfigFile = try world_folder.createFile(io, "config/World.zon", .{ .lock = .exclusive });
+        defer worldConfigFile.close(io);
 
-        var worldconfwriter = worldConfigFile.writer(&wbuffer);
+        var worldconfwriter = worldConfigFile.writer(io, &wbuffer);
 
-        const generatorConfigFile = try world_folder.createFile("config/DefaultGenerator.zon", .{ .lock = .exclusive });
-        defer generatorConfigFile.close();
+        const generatorConfigFile = try world_folder.createFile(io, "config/DefaultGenerator.zon", .{ .lock = .exclusive });
+        defer generatorConfigFile.close(io);
 
-        var generatorconfwriter = generatorConfigFile.writer(&gbuffer);
+        var generatorconfwriter = generatorConfigFile.writer(io, &gbuffer);
 
         try std.zon.stringify.serialize(self.world_config, .{}, &worldconfwriter.interface);
         try std.zon.stringify.serialize(self.generator_config, .{}, &generatorconfwriter.interface);
@@ -165,56 +165,50 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
     };
     try game.opengl_renderer.init(io, allocator, window);
     game.renderer = game.opengl_renderer.interface;
-    game.allocator = game.tracking_allocator.get_allocator();
+    game.allocator = allocator;
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
-    std.fs.cwd().makeDir(folder) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(io, folder) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var world_options = WorldOptions.fromWorldFolder(folder, arena) catch |err| switch (err) {
+    var world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
         else => return err,
     };
-    world_options.generator_config.setSeeds();
-    try world_options.save(folder);
+    world_options.generator_config.setSeeds(io);
+    try world_options.save(io, folder);
 
     const terrain_height_cache_memory = 100 * 1024 * 1024;
     const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
     game.generator = World.DefaultGenerator{
-        .terrain_height_cache = try .init(game.allocator, thc_size),
+        .terrain_height_cache = .init(thc_size),
         .params = world_options.generator_config,
     };
-    errdefer game.generator.terrain_height_cache.deinit();
+    errdefer game.generator.terrain_height_cache.deinit(io, allocator);
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
         game.world_storage = try .init(storage_path, .{}, game.allocator);
     }
 
-    const cpu_count = try std.Thread.getCpuCount();
-    try game.pool.init(.{ .n_jobs = cpu_count, .allocator = game.allocator });
-    errdefer game.pool.deinit();
-    try game.options_lock.lockSharedUncancelable(io);
+    game.options_lock.lockSharedUncancelable(io);
     const grid_capacity = game.options.block_grid_capacity;
     const chunk_capacity = game.options.chunk_capacity;
     game.options_lock.unlockShared(io);
     game.world = .{
-        .chunk_pool = try .initPreheated(game.allocator, chunk_capacity),
-        .block_grid_pool = try .initPreheated(game.allocator, grid_capacity),
-        .running = .init(true),
-        .allocator = game.allocator,
-        .thread_pool = &game.pool,
+        .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
+        .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
         .Entitys = .init(),
         .Chunks = .init(),
         .Config = world_options.world_config,
         .ChunkSources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = null,
     };
-    errdefer game.world.deinit(io);
+    errdefer game.world.deinit(io, allocator);
 
-    const playerentity = try game.world.spawnEntity(io, null, EntityTypes.Player{
+    const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .fly_speed = .init(100),
         .fly_speed_linear = .init(10),
@@ -231,12 +225,12 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
                 },
                 .resistance = .{ .fraction_per_second = 0.1, .enabled = false },
             },
-            .pos = try game.world.getPlayerSpawnPos(),
-            .velocity = @splat(0),
-            .last_update = try .start(),
+            .pos = .{ .vector = try game.world.getPlayerSpawnPos() },
+            .velocity = .{ .vector = @splat(0) },
+            .last_update = .now(io, .awake),
         },
         .gameMode = .init(.Spectator),
-        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
+        .viewDirection = .{ .vector = @Vector(3, f32){ 0.0001, -0.4, 0.001 } },
         .main_inventory = undefined,
     }, true);
     playerentity.release();
@@ -246,8 +240,8 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         16,
         &game.player.inventory_buffer,
     );
-    _ = game.player.main_inventory.set(0, 0, .{ .item_type = .Explosive, .amount = 65536 });
-    game.opengl_renderer.updateCameraDirection(game.player.getViewDirection());
+    _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
+    game.opengl_renderer.updateCameraDirection(game.player.viewDirection.load(.seq_cst));
 }
 
 pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
@@ -353,14 +347,14 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
     defer GenMeshAndAdd.End();
     const chunk = try self.world.loadChunk(io, allocator, Pos, genStructures);
-    defer chunk.release();
+    defer chunk.release(io);
     const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
-        (try self.world.loadChunk(io, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
-        (try self.world.loadChunk(io, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
-        (try self.world.loadChunk(io, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
-        (try self.world.loadChunk(io, Pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
-        (try self.world.loadChunk(io, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
-        (try self.world.loadChunk(io, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
+        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
     };
     const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
     const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
@@ -436,14 +430,13 @@ fn addChunkToRenderTask(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStru
     self.addChunkToRender(io, Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
 }
 
-pub fn onEditFn(chunkPos: World.ChunkPos, args: *anyopaque) !void {
+pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    // onEditFn has no io parameter — this will need updating when the vtable gains io
     const lowest_level = game.options.lowest_level;
     const highest_level = game.options.highest_level;
-    const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.getPos(), chunkPos, game.getInnerGenRadius(game.getGenDistance() catch return, chunkPos.level) catch return, game.getGenDistance() catch return);
+    const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
     if (!inside_range) return;
-    game.addChunkToRender(chunkPos, false) catch return error.OnEditFailed;
+    game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {

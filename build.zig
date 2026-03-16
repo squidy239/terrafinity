@@ -4,7 +4,6 @@ pub fn build(b: *std.Build) void {
     // Build options
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const check = b.option(bool, "check", "check if the game compiles") orelse false;
 
     // Tracy profiling options
     const tracy_options = .{
@@ -27,7 +26,7 @@ pub fn build(b: *std.Build) void {
     var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = true,
+        .use_llvm = false,
     });
 
     // Link libraries
@@ -39,13 +38,10 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.linkLibrary(ztracy.artifact("tracy"));
 
-    // Check step
-    if (check) {
-        exe.use_llvm = false;
-        const checkStep = b.step("check", "Check if the game compiles");
-        checkStep.dependOn(&exe.step);
-        return;
-    }
+    const check_step = b.step("check", "");
+    check_step.dependOn(&b.addTest(.{
+        .root_module = root_module,
+    }).step);
 
     // Install and run steps
     b.installArtifact(exe);
@@ -90,13 +86,6 @@ fn setupDependencies(
     // RocksDB (requires: sudo apt-get install librocksdb-dev)
     const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false });
     root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
-
-    // ConcurrentQueue
-    const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
 
     // SDL3
     const sdl3 = b.dependency("sdl3", .{

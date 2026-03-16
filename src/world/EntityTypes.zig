@@ -164,11 +164,13 @@ pub const Player = struct {
         }
     }
 
-    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ TimedOut, Unrecoverable }!bool {
+    pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable }!bool {
         _ = uuid;
-        _ = io;
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
-        self.physics.update(world, allocator) catch return error.Unrecoverable;
+        self.physics.update(world, io, allocator) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.Unrecoverable,
+        };
         return false;
     }
 

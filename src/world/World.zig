@@ -38,7 +38,7 @@ chunk_pool: std.heap.MemoryPoolExtra(Chunk, .{ .growable = false }),
 ChunkSources: [4]?ChunkSource,
 
 onEdit: ?struct {
-    onEditFn: *const fn (chunkPos: ChunkPos, args: *anyopaque) error{OnEditFailed}!void,
+    onEditFn: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{OnEditFailed}!void,
     callIfNeighborFacesChanged: bool,
     onEditFnArgs: *anyopaque,
 },
@@ -143,13 +143,13 @@ pub const ChunkSource = struct {
 
     /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
     /// Returns true if the chunk was generated, false if unsuccessful (next source will be tried).
-    getBlocks: ?*const fn (self: ChunkSource, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool,
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool,
 
     /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
     /// All chunk sources will be tried.
     /// onEditFn must be called if chunks are modified, on any modified chunks, once all modifications are complete.
     /// This function is responsible for locking and adding refs to the chunk.
-    onLoad: ?*const fn (self: ChunkSource, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void,
+    onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void,
 
     /// Called for every UnloadChunk call (many times per chunk). All chunk sources will be tried.
     /// Does not have to be thread safe or lock the chunk since it is only called when the chunk has 1 ref.
@@ -159,16 +159,16 @@ pub const ChunkSource = struct {
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, Pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32,
 
     /// Should deinit the chunk source.
-    deinit: ?*const fn (self: ChunkSource, world: *World) void,
+    deinit: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void,
 };
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed }!Chunk.BlockEncoding {
+fn getBlocks(self: *@This(), io: std.Io, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.BlockEncoding {
     var encoding: Chunk.BlockEncoding = .{ .oneBlock = .null };
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, self, &encoding, Pos)) return encoding;
+                if (try getBlocksFn(s, io, self, &encoding, Pos)) return encoding;
             }
         }
     }
@@ -206,9 +206,9 @@ fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
     }
 }
 
-pub fn unloadEntity(self: *@This(), io: std.Io, entityUUID: u128) void {
+pub fn unloadEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, entityUUID: u128) void {
     const en = self.Entitys.fetchRemove(io, entityUUID) orelse return;
-    en.unload(io, self, entityUUID, self.allocator, true) catch std.log.err("error unloading entity\n", .{});
+    en.unload(io, self, entityUUID, allocator, true) catch std.log.err("error unloading entity\n", .{});
 }
 
 pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
@@ -273,7 +273,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
     defer lc.End();
     const chunk = self.Chunks.getAndAddRef(io, Pos);
     if (chunk == null) {
-        const chunkencoding = try self.getBlocks(Pos);
+        const chunkencoding = try self.getBlocks(io, Pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, &self.chunk_pool, &self.chunk_count, &self.chunk_pool_mutex);
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
@@ -360,18 +360,18 @@ const Options = @import("../Game.zig").Options;
 pub fn chunkUnloaderThread(self: *@This(), io: std.Io, options: *Options, options_lock: *std.Io.RwLock) void {
     while (true) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-defer unloadChunks.End();
-      //  const st = std.time.nanoTimestamp();
-       options_lock.lockSharedUncancelable(io);
+        defer unloadChunks.End();
+        //  const st = std.time.nanoTimestamp();
+        options_lock.lockSharedUncancelable(io);
         const max_grid_timeout_ms = options.max_grid_timeout_ms;
-     const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
-       const block_grid_capacity = options.block_grid_capacity;
+        const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
+        const block_grid_capacity = options.block_grid_capacity;
         const chunk_capacity = options.chunk_capacity;
         const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
         _ = intervel_ns;
-       options_lock.unlockShared(io);
+        options_lock.unlockShared(io);
         self.unloadTimeout(io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
-        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};//TODO
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {}; //TODO
         //std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
     }
 }

@@ -93,7 +93,7 @@ fn sliceToBounded(comptime slice: []const u8, comptime max: usize) [max:0]u8 {
     return f;
 }
 
-pub fn settingsMenu(self: *@This()) !bool {
+pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
@@ -102,14 +102,14 @@ pub fn settingsMenu(self: *@This()) !bool {
     const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer settings.deinit();
 
-    self.config_lock.lock();
+    self.config_lock.lockUncancelable(io);
     const firstconfig = self.config.*;
-    dvui.structUI(@src(), "Settings", self.config, 32, .{ Config.structui_options, Game.Options.structui_options });
+    dvui.structUI(@src(), "Settings", self.config, 32, Config.structui_options, .{});
 
     const config_changed = !std.meta.eql(firstconfig, self.config.*);
-    self.config_lock.unlock();
+    self.config_lock.unlock(io);
 
-    if (config_changed) try self.config.save(self.config_path, self.config_lock);
+    if (config_changed) try self.config.save(io, self.config_path, self.config_lock);
     return menuchanged;
 }
 
@@ -249,8 +249,8 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
 fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
     try gameptr.init(io, allocator, game_config, options_lock, folder, window);
-    errdefer gameptr.deinit(window);
-    try gameptr.startThreads();
+    errdefer gameptr.deinit(io, window);
+    try gameptr.startThreads(io);
     std.log.info("opening game\n", .{});
 }
 

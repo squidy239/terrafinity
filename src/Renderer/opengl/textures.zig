@@ -5,13 +5,13 @@ const gl = @import("gl");
 const zigimg = @import("zigimg");
 
 ///must be run in a valid opengl context
-pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator) !c_uint {
+pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.mem.Allocator) !c_uint {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
     const keyword = ".png";
-    const resolution = try allSquares(textures_path, keyword);
+    const resolution = try allSquares(io, textures_path, keyword);
     const missing_texture_pixels = try allocator.alloc(u8, resolution[0] * resolution[1] * 3);
     defer allocator.free(missing_texture_pixels);
-    std.crypto.random.bytes(missing_texture_pixels);
+    io.random(missing_texture_pixels);
     const missing_texture = try zigimg.Image.fromRawPixelsOwned(resolution[0], resolution[1], missing_texture_pixels, .rgb24);
 
     var textureArray = try allocator.alloc(?zigimg.Image, @typeInfo(Block).@"enum".fields.len);
@@ -24,14 +24,14 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
         allocator.free(textureArray);
     }
     std.debug.print("texture resolution: {any}\n", .{resolution});
-    var it = std.fs.Dir.iterate(textures_path);
+    var it = std.Io.Dir.iterate(textures_path);
     var i: usize = 0;
-    while (try it.next()) |image| {
+    while (try it.next(io)) |image| {
         switch (image.kind) {
             .file => {
                 if (image.kind == .file and ((std.mem.indexOf(u8, image.name, keyword) != null))) {
                     std.debug.assert(i < textureArray.len); //should never happen because invalid textures are skipped
-                    var loadedImg = try zigimg.Image.fromFile(allocator, try textures_path.openFile(image.name, .{}), &read_buffer);
+                    var loadedImg = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, image.name, .{}), &read_buffer);
                     errdefer loadedImg.deinit(allocator);
                     try loadedImg.convert(allocator, .rgba32);
                     if (loadedImg.width != resolution[0] or loadedImg.height != resolution[1]) return error.InvalidTextureResolution;
@@ -71,12 +71,12 @@ pub fn loadTextureArray(textures_path: std.fs.Dir, allocator: std.mem.Allocator)
     return gltexarrayid;
 }
 
-fn allSquares(textures_path: std.fs.Dir, keyword: ?[]const u8) ![2]usize {
-    var it1 = std.fs.Dir.iterate(textures_path);
+fn allSquares(io: std.Io, textures_path: std.Io.Dir, keyword: ?[]const u8) ![2]usize {
+    var it1 = std.Io.Dir.iterate(textures_path);
     var resolution: ?[2]usize = null;
-    while (try it1.next()) |image| {
+    while (try it1.next(io)) |image| {
         if (image.kind == .file and (keyword == null or (std.mem.indexOf(u8, image.name, keyword.?) != null))) {
-            const cres = try getResolution(try textures_path.openFile(image.name, .{}));
+            const cres = try getResolution(io, try textures_path.openFile(io, image.name, .{}));
             if (resolution == null) {
                 resolution = cres;
             } else {
@@ -99,12 +99,12 @@ fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
     return count;
 }
 
-fn getResolution(texture: std.fs.File) ![2]usize {
+fn getResolution(io: std.Io, texture: std.Io.File) ![2]usize {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
     var fbuf: [100000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fbuf);
     const alloc = fba.allocator();
-    var img = try zigimg.Image.fromFile(alloc, texture, &read_buffer);
+    var img = try zigimg.Image.fromFile(alloc, io, texture, &read_buffer);
     defer img.deinit(alloc);
     return [2]usize{ img.width, img.height };
 }

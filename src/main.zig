@@ -7,7 +7,6 @@ pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-pub const ConcurrentQueue = @import("ConcurrentQueue");
 pub const Entity = @import("world/Entity.zig");
 pub const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
@@ -133,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
             try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
             try game.renderer.clear(game.player.physics.pos.load(.seq_cst));
             try game.player.physics.update(&game.world, io, allocator);
-            try game.renderer.drawChunks(game.player.physics.pos.load(.seq_cst));
+            try game.renderer.drawChunks(io, game.player.physics.pos.load(.seq_cst));
             if (update_finished.load(.seq_cst)) {
                 update = io.async(World.updateEntitys, .{ &game.world, io, &update_finished, allocator });
             }
@@ -145,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
         if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(io, allocator);
-        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
+        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
         if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
 
         _ = try ui_window.end(.{});

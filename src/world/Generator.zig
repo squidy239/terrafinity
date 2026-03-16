@@ -21,7 +21,7 @@ pub const DefaultGenerator = struct {
     pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,
-            .getTerrainHeight = &getTerrainHeightAtCoords,
+            .getTerrainHeight = null,
             .getBlocks = &genChunkBlocks,
             .onLoad = genStructures,
             .deinit = &deinit,
@@ -29,15 +29,9 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn getTerrainHeightAtCoords(source: World.ChunkSource, world: *World, Pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32 {
-        _ = world;
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        return self.getTerrainHeight(Pos, level);
-    }
-
-    fn genChunkBlocks(source: World.ChunkSource, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!bool {
-        const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        self.genChunk(Pos, blocks, world);
+        self.genChunk(io, allocator, Pos, blocks, world);
         return true;
     }
 
@@ -49,10 +43,10 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn deinit(self: World.ChunkSource, world: *World) void {
+    fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
         _ = world;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        generator.terrain_height_cache.deinit();
+        generator.terrain_height_cache.deinit(io, allocator);
     }
 
     pub const Params = struct {
@@ -76,8 +70,12 @@ pub const DefaultGenerator = struct {
         genStructures: bool,
         trees: []const TreeConfig,
 
-        pub fn setSeeds(self: *Params) void {
-            if (self.seed == null) self.seed = std.crypto.random.int(u64);
+        pub fn setSeeds(self: *Params, io: std.Io) void {
+            if (self.seed == null) {
+                var randomseed: u64 = undefined;
+                io.random(@ptrCast(&randomseed));
+                self.seed = randomseed;
+            }
             self.CaveNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 1));
             self.TreeNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 2));
             self.TerrainNoise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
@@ -97,22 +95,22 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) void {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
-            blocks.merge(.{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
-            blocks.merge(.{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            blocks.merge(io, .{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position))))); //TODO make this more deterministic especially at diffrent scales
             var rand = rng.random();
-            heights = self.getTerrainHeight([2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
+            heights = self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
             const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
             generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
@@ -239,14 +237,14 @@ pub const DefaultGenerator = struct {
 
     var get_requests: std.atomic.Value(usize) = .init(0);
     var cache_misses: std.atomic.Value(usize) = .init(0);
-    pub fn getTerrainHeight(self: *DefaultGenerator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
+    pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
         //const req = get_requests.fetchAdd(1, .monotonic);
-        if (self.terrain_height_cache.get(.{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
+        if (self.terrain_height_cache.get(io, .{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
         // const miss = cache_misses.fetchAdd(1, .monotonic);
         const generatedHeights = genTerrainHeight(self.params, level, Pos);
-        _ = self.terrain_height_cache.put(.{ .pos = Pos, .level = level }, generatedHeights) catch unreachable;
+        _ = self.terrain_height_cache.put(io, allocator, .{ .pos = Pos, .level = level }, generatedHeights) catch unreachable;
         //if (std.crypto.random.float(f32) < 0.01) std.debug.print("{d}% thc miss\n", .{miss * 100 / req});
         return generatedHeights;
     }

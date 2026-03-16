@@ -139,7 +139,7 @@ pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool
 pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
     self.addAndLockShared(io);
     defer {
-        if (removeRef) self.release();
+        if (removeRef) self.release(io);
         self.releaseAndUnlockShared(io);
     }
     var cube: *const [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
