@@ -163,37 +163,26 @@ pub const ChunkSource = struct {
 };
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), io: std.Io, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.BlockEncoding {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.BlockEncoding {
     var encoding: Chunk.BlockEncoding = .{ .oneBlock = .null };
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, io, self, &encoding, Pos)) return encoding;
+                if (try getBlocksFn(s, io, allocator, self, &encoding, Pos)) return encoding;
             }
         }
     }
     return error.AllSourcesFailed;
 }
 
-fn onLoad(self: *@This(), chunk: *Chunk, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!void {
+fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!void {
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.onLoad) |onLoadFn| {
-                try onLoadFn(s, self, chunk, Pos);
+                try onLoadFn(s, io, allocator, self, chunk, Pos);
             }
         }
     }
-}
-
-fn getBlockHeight(self: *@This(), block_pos: BlockPos, level: i32) !i64 {
-    for (self.ChunkSources) |source| {
-        if (source) |s| {
-            if (s.getTerrainHeight) |getTerrainHeight| {
-                return try getTerrainHeight(s, self, block_pos, level);
-            }
-        }
-    }
-    return error.AllSourcesFailed;
 }
 
 fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
@@ -223,7 +212,10 @@ pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uui
 }
 
 pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-    const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){ World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))), World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))) };
+    const pos = @Vector(2, i32){ @intFromFloat(self.Config.SpawnCenterPos[0]), @intFromFloat(self.Config.SpawnCenterPos[2]) } + @Vector(2, i32){
+        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))),
+        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.Config.SpawnRange)), @as(i32, @intCast(self.Config.SpawnRange))),
+    };
     const height = 1000;
     std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
     return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
@@ -244,7 +236,7 @@ pub fn getGenState(self: *@This(), io: std.Io, Pos: ChunkPos) ?Chunk.Genstate {
     return chunk.genstate.load(.seq_cst);
 }
 
-pub fn updateEntitys(self: *@This(), io: std.Io, update_finished: *std.atomic.Value(bool), allocator: std.mem.Allocator) void {
+pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator, update_finished: *std.atomic.Value(bool)) void {
     const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
     defer TickEntitiesTask.End();
     defer update_finished.store(true, .seq_cst);
@@ -256,11 +248,9 @@ pub fn updateEntitys(self: *@This(), io: std.Io, update_finished: *std.atomic.Va
         defer it.unpause(io);
         const entity = self.Entitys.getAndAddRef(io, uuid);
         if (entity) |en| {
-            en.update(io, allocator, self, uuid) catch |err| {
-                switch (err) {
-                    error.Canceled => continue,
-                    else => @panic("err"),
-                }
+            en.update(io, allocator, self, uuid) catch |err| switch (err) {
+                error.Canceled => continue,
+                else => @panic("err"),
             };
         }
     }
@@ -273,7 +263,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
     defer lc.End();
     const chunk = self.Chunks.getAndAddRef(io, Pos);
     if (chunk == null) {
-        const chunkencoding = try self.getBlocks(io, Pos);
+        const chunkencoding = try self.getBlocks(io, allocator, Pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, &self.chunk_pool, &self.chunk_count, &self.chunk_pool_mutex);
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
@@ -282,7 +272,6 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
             self.destroyChunkPtr(io, chunkptr);
             return err;
         };
-        //chptr is in hashmap past this point
         if (existing) |d| {
             chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
@@ -290,13 +279,13 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
             return d;
         }
         if (structures) {
-            try onLoad(self, chunkptr, Pos);
+            try onLoad(self, io, allocator, chunkptr, Pos);
             chunkptr.genstate.store(.StructuresGenerated, .seq_cst);
         }
         return chunkptr;
     } else {
         if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
-            try onLoad(self, chunk.?, Pos);
+            try onLoad(self, io, allocator, chunk.?, Pos);
             chunk.?.genstate.store(.StructuresGenerated, .seq_cst);
         }
         return chunk.?;
@@ -361,18 +350,14 @@ pub fn chunkUnloaderThread(self: *@This(), io: std.Io, options: *Options, option
     while (true) {
         const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
         defer unloadChunks.End();
-        //  const st = std.time.nanoTimestamp();
         options_lock.lockSharedUncancelable(io);
         const max_grid_timeout_ms = options.max_grid_timeout_ms;
         const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
         const block_grid_capacity = options.block_grid_capacity;
         const chunk_capacity = options.chunk_capacity;
-        const intervel_ns = options.unloader_frequency_ms * std.time.ns_per_ms;
-        _ = intervel_ns;
         options_lock.unlockShared(io);
         self.unloadTimeout(io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
-        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {}; //TODO
-        //std.Thread.sleep(intervel_ns -| @as(u64, @intCast(std.time.nanoTimestamp() - st)));
+        io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 }
 
@@ -387,27 +372,28 @@ pub const Reader = struct {
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
             self.clear(io);
-            self.lastChunkReadCache = .{ .Pos = chunkPos, .chunk = try self.world.loadChunk(io, allocator, chunkPos, false) };
+            self.lastChunkReadCache = .{
+                .Pos = chunkPos,
+                .chunk = try self.world.loadChunk(io, allocator, chunkPos, false),
+            };
             self.lastChunkReadCache.?.chunk.lockShared(io);
         }
-        const blockEncoding = self.lastChunkReadCache.?.chunk.blocks;
-        return switch (blockEncoding) {
-            .blocks => self.lastChunkReadCache.?.chunk.blocks.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
-            .oneBlock => self.lastChunkReadCache.?.chunk.blocks.oneBlock,
+        return switch (self.lastChunkReadCache.?.chunk.blocks) {
+            .blocks => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+            .oneBlock => |b| b,
         };
     }
 
     /// Returns a block at the given position. Better for fewer block reads.
-    pub inline fn getBlockUncached(self: *@This(), io: std.Io, blockpos: BlockPos, level: i32) !Block {
+    pub inline fn getBlockUncached(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-        const chunk = try self.world.loadChunk(io, chunkPos, false);
+        const chunk = try self.world.loadChunk(io, allocator, chunkPos, false);
         chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
-        const blockEncoding = chunk.blocks;
-        return switch (blockEncoding) {
-            .blocks => chunk.blocks.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
-            .oneBlock => chunk.blocks.oneBlock,
+        return switch (chunk.blocks) {
+            .blocks => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+            .oneBlock => |b| b,
         };
     }
 
@@ -490,11 +476,11 @@ pub const Editor = struct {
         }
         it.index = 0;
         while (it.next()) |pos| {
-            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(pos.key_ptr.*, onEdit.onEditFnArgs);
+            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(io, allocator, pos.key_ptr.*, onEdit.onEditFnArgs);
         }
         var rit = neghborsToRemesh.iterator();
         while (rit.next()) |pos| {
-            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(pos.key_ptr.*, onEdit.onEditFnArgs);
+            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(io, allocator, pos.key_ptr.*, onEdit.onEditFnArgs);
         }
         if (self.propagateChanges) try propagationEditor.flush(io, allocator);
     }
@@ -507,10 +493,9 @@ pub const Editor = struct {
             self.lastChunkCache.?.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
             return;
         }
-
         const chunk = (try self.editBuffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.null))))).value_ptr;
         self.lastChunkCache = .{ .Pos = chunkPos, .blocks = chunk };
-        chunk[(chunkBlockPos[0])][(chunkBlockPos[1])][(chunkBlockPos[2])] = block;
+        chunk[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
@@ -545,9 +530,7 @@ pub const Editor = struct {
         var isoneblock: bool = false;
         chunk.lockShared(io);
         switch (chunk.blocks) {
-            .blocks => |blocks| {
-                simplified_blocks = simplifyBlocksAvg(blocks);
-            },
+            .blocks => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
             .oneBlock => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
                 isoneblock = true;
@@ -566,7 +549,11 @@ pub const Editor = struct {
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {
-                    const world_pos = @Vector(3, i64){ block_pos[0] + @as(i64, @intCast(x)), block_pos[1] + @as(i64, @intCast(y)), block_pos[2] + @as(i64, @intCast(z)) };
+                    const world_pos = @Vector(3, i64){
+                        block_pos[0] + @as(i64, @intCast(x)),
+                        block_pos[1] + @as(i64, @intCast(y)),
+                        block_pos[2] + @as(i64, @intCast(z)),
+                    };
                     const current_block = parent.blocks.blocks[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z];
                     const correct_block = simplified_blocks[x][y][z];
                     if (current_block == correct_block) continue;
@@ -588,7 +575,6 @@ pub const Editor = struct {
     fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
         var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var unique_blocks: [scale_factor][scale_factor][scale_factor]Block = undefined;
-
         for (0..simplified_size) |sx| {
             for (0..simplified_size) |sy| {
                 for (0..simplified_size) |sz| {
@@ -603,7 +589,6 @@ pub const Editor = struct {
                 }
             }
         }
-
         return simplified;
     }
 };
@@ -611,7 +596,6 @@ pub const Editor = struct {
 inline fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
     var best: Block = blocks[0];
     var best_count: f32 = 1;
-
     inline for (0..blocks.len) |i| {
         const block = blocks[i];
         const weight = block.getPropagationWeight();
@@ -619,7 +603,6 @@ inline fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block
         inline for ((i + 1)..8) |j| {
             if (block == blocks[j]) count += weight;
         }
-
         if (count > best_count) {
             best = blocks[i];
             best_count = count;
@@ -648,20 +631,21 @@ pub fn tryUnloadChunk(self: *@This(), io: std.Io, Pos: ChunkPos) !bool {
 
 pub fn unloadChunkNoSave(self: *@This(), io: std.Io, Pos: ChunkPos) void {
     const chunk = self.Chunks.fetchRemove(io, Pos) orelse return;
-    _ = io.swapCancelProtection(.blocked);
-    self.unloadChunkByPtrNoSave(io, chunk) catch unreachable;
-    _ = io.swapCancelProtection(.unblocked);
+    self.unloadChunkByPtrNoSave(io, chunk);
 }
 
 /// Does not remove chunk from hashmap, just frees it.
 pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, Pos: ChunkPos) !void {
     _ = try chunk.waitForRefAmount(io, 1, null);
     try onUnload(self, io, chunk, Pos);
-    try self.unloadChunkByPtrNoSave(io, chunk);
+    self.unloadChunkByPtrNoSave(io, chunk);
 }
 
-pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) error{Canceled}!void {
-    _ = try chunk.waitForRefAmount(io, 1, null);
+pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) void {
+    _ = io.swapCancelProtection(.blocked);
+    _ = chunk.waitForRefAmount(io, 1, null) catch unreachable;
+    _ = io.swapCancelProtection(.unblocked);
+
     chunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
     self.destroyChunkPtr(io, chunk);
 }
@@ -698,7 +682,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     self.Entitys.deinit(io, allocator);
     std.log.info("entitys unloaded", .{});
     for (self.ChunkSources) |source| {
-        if (source) |s| if (s.deinit) |de| de(s, self);
+        if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
     self.Chunks.deinit(io, allocator);
     std.log.info("world closed", .{});
@@ -710,20 +694,14 @@ fn normilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype
 
 test "ChunkPos" {
     const testing = std.testing;
-
     const pos1 = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };
     try testing.expect(std.meta.eql(pos1.parent(), ChunkPos{ .level = 1, .position = .{ 0, 1, 1 } }));
-
     try testing.expectEqual(32, ChunkPos.levelToBlockRatio(0));
     try testing.expectEqual(64, ChunkPos.levelToBlockRatio(1));
-
     const pos2 = ChunkPos{ .level = 5, .position = .{ 32, 32, 32 } };
-
     try std.testing.expectEqual(BlockPos{ 32768, 32768, 32768 }, pos2.toGlobalBlockPos());
-
     const pos3 = ChunkPos.fromGlobalBlockPos(.{ 32, 64, 32 }, -5);
     try testing.expect(std.meta.eql(pos3, ChunkPos{ .level = -5, .position = .{ 32, 64, 32 } }));
-
     const pos4 = ChunkPos{ .level = 0, .position = .{ 1, 1, 1 } };
     const pos5 = pos4.toLevel(-5);
     try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));

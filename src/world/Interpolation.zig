@@ -5,8 +5,8 @@ const print = std.debug.print;
 // 3D Monotone Cubic Interpolator for 4x4x4 grid
 pub const NaturalCubicInterpolator3D = struct {
     // Precomputed cubic coefficients for all directions
-    coeffs_x_vectorized: [4]@Vector(16, f32), // X-direction coefficients for each (y,z)
-    coeffs_y_vectorized: [4]@Vector(4, f32), // Y-direction coefficients for each (x,z)
+    coeffs_x_vectorized: [4][16]f32, // X-direction coefficients for each (y,z)
+    coeffs_y_vectorized: [4][4]f32, // Y-direction coefficients for each (x,z)
     coeffs_z_vectorized: [4]f32, // Z-direction coefficients for each (x,y)
 
     //transposed vectorized grid data

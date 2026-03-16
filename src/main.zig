@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
             try game.player.physics.update(&game.world, io, allocator);
             try game.renderer.drawChunks(io, game.player.physics.pos.load(.seq_cst));
             if (update_finished.load(.seq_cst)) {
-                update = io.async(World.updateEntitys, .{ &game.world, io, &update_finished, allocator });
+                update = io.async(World.updateEntitys, .{ &game.world, io, allocator, &update_finished });
             }
             try game.unloadChunkMeshes(io);
         }
@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
         if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(io, allocator);
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
 
         _ = try ui_window.end(.{});
         dw.End();

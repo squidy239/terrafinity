@@ -75,8 +75,9 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     try self.database.put(keybytes, buf_writer.buffered(), .{});
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, world: *World, blocks: *Chunk.BlockEncoding, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
     const self: *@This() = @ptrCast(@alignCast(source.data));
+    _ = allocator;
     var key = ChunkKey{ .x = Pos.position[0], .y = Pos.position[1], .z = Pos.position[2], .level = Pos.level };
     if (builtin.target.cpu.arch.endian() == .big) std.mem.byteSwapAllFields(ChunkKey, &key);
     const keybytes = std.mem.asBytes(&key);
@@ -96,8 +97,10 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, world: *World, blocks: *
     return true;
 }
 
-fn deinitSource(source: World.ChunkSource, world: *World) void {
+fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
     _ = world;
+    _ = allocator;
+    _ = io;
     const self: *@This() = @ptrCast(@alignCast(source.data));
     self.deinit();
 }

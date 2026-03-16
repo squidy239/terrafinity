@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     var exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = false,
+        .use_llvm = true,
     });
 
     // Link libraries
