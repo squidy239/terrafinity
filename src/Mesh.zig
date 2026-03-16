@@ -30,18 +30,23 @@ pub const Face = packed struct(u64) {
 
 //TODO make neighbor faces like blockencoding to handle empty chunks better
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block, writer: *std.Io.Writer) !void {
+pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
+    if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
-    const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
-    var ExtendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
-    GenerateExtendedChunk(&ExtendedBlocks, mainblocks, neighbor_faces);
-    ecp.End();
-    if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
-    try meshSimple(&ExtendedBlocks, writer);
+    var all_invisible: bool = true;
+    for(neighbor_faces)|face|{
+        all_invisible |= (face == .oneBlock and !face.oneBlock.isVisible());
+    }
+    all_invisible |= mainblocks == .oneBlock and !mainblocks.oneBlock.isVisible();
+    try meshSimple(mainblocks, neighbor_faces, writer);
 }
 
-fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, writer: *std.Io.Writer) !void {
+fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
+    const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
+    var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
+    GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
+    ecp.End();
     const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
     for (1..ChunkSize + 1) |x| {
         for (1..ChunkSize + 1) |y| {
@@ -59,7 +64,6 @@ fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 
                 const block_transparent = block.isTransparent();
                 inline for (0..6) |i| {
                     if (neighboring_blocks[i].isTransparent() and (!block_transparent or block != neighboring_blocks[i])) {
-                        @branchHint(.unlikely); //face is unlikely
                         const face = Face{
                             .BlockType = @intFromEnum(block),
                             .isGreedy = false,
@@ -80,8 +84,36 @@ fn meshSimple(extendedBlocks: *const [ChunkSize + 2][ChunkSize + 2][ChunkSize + 
     loop.End();
 }
 
+inline fn extendedto1D(x: usize, y: usize, z: usize) usize {
+    return (z * (ChunkSize + 2) * (ChunkSize + 2)) + (y * (ChunkSize + 2)) + x;
+}
+test "MeshBenchmark" {
+    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    for (0..ChunkSize) |x| {
+        for (0..ChunkSize) |y| {
+            for (0..ChunkSize) |z| {
+                blocks[x][y][z] = switch (y) {
+                    0...16 => .stone,
+                    17 => .grass,
+                    else => .air,
+                };
+            }
+        }
+    }
+    var buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.Discarding.init(&buf);
+    const test_amount = 100000;
+    const st = std.time.nanoTimestamp();
+    for (0..test_amount) |_| {
+        try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .oneBlock = .air }), &writer.writer);
+    }
+    const et = std.time.nanoTimestamp();
+
+    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et - st)) / test_amount) / std.time.ns_per_us});
+}
+
 ///x+,x-,y+,y-,z+,z-
-fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6][ChunkSize][ChunkSize]Block) void {
+fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding) void {
     const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
     defer gec.End();
 
@@ -110,42 +142,60 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
     // Face 4: -Z face (z=0)
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
-            blocksToPut[x + 1][y + 1][0] = neighbor_faces[5][x][y];
+            blocksToPut[x + 1][y + 1][0] = switch (neighbor_faces[5]) {
+                .blocks => |b| b[x][y],
+                .oneBlock => |b| b,
+            };
         }
     }
 
     // Face 5: +Z face (z=ChunkSize+1)
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
-            blocksToPut[x + 1][y + 1][ChunkSize + 1] = neighbor_faces[4][x][y];
+            blocksToPut[x + 1][y + 1][ChunkSize + 1] = switch (neighbor_faces[4]) {
+                .blocks => |b| b[x][y],
+                .oneBlock => |b| b,
+            };
         }
     }
 
     // Face 0: -X face (x=0)
     for (0..ChunkSize) |y| {
         for (0..ChunkSize) |z| {
-            blocksToPut[0][y + 1][z + 1] = neighbor_faces[1][y][z];
+            blocksToPut[0][y + 1][z + 1] = switch (neighbor_faces[1]) {
+                .blocks => |b| b[y][z],
+                .oneBlock => |b| b,
+            };
         }
     }
 
     // Face 1: +X face (x=ChunkSize+1)
     for (0..ChunkSize) |y| {
         for (0..ChunkSize) |z| {
-            blocksToPut[ChunkSize + 1][y + 1][z + 1] = neighbor_faces[0][y][z];
+            blocksToPut[ChunkSize + 1][y + 1][z + 1] = switch (neighbor_faces[0]) {
+                .blocks => |b| b[y][z],
+                .oneBlock => |b| b,
+            };
         }
     }
 
     // Face 2: -Y face (y=0)
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |z| {
-            blocksToPut[x + 1][0][z + 1] = neighbor_faces[3][x][z];
+            blocksToPut[x + 1][0][z + 1] = switch (neighbor_faces[3]) {
+                .blocks => |b| b[x][z],
+                .oneBlock => |b| b,
+            };
         }
     }
 
     // Face 3: +Y face (y=ChunkSize+1)
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |z| {
-            blocksToPut[x + 1][ChunkSize + 1][z + 1] = neighbor_faces[2][x][z];
+            blocksToPut[x + 1][ChunkSize + 1][z + 1] = switch (neighbor_faces[2]) {
+                .blocks => |b| b[x][z],
+                .oneBlock => |b| b,
+            };
         }
     }
 }

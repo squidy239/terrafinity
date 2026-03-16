@@ -357,7 +357,7 @@ pub fn addChunkToRender(self: *@This(), Pos: World.ChunkPos, genStructures: bool
     defer GenMeshAndAdd.End();
     const chunk = try self.world.loadChunk(Pos, genStructures);
     defer chunk.release();
-    const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
+    const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
         (try self.world.loadChunk(Pos.add(.{ 1, 0, 0 }), false)).extractFace(.xMinus, true),
         (try self.world.loadChunk(Pos.add(.{ -1, 0, 0 }), false)).extractFace(.xPlus, true),
         (try self.world.loadChunk(Pos.add(.{ 0, 1, 0 }), false)).extractFace(.yMinus, true),
