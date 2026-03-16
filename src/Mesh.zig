@@ -51,15 +51,20 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
     for (1..ChunkSize + 1) |x| {
         for (1..ChunkSize + 1) |y| {
             for (1..ChunkSize + 1) |z| {
-                const block = extendedBlocks[x][y][z];
-                if (!block.isVisible()) continue;
+                const index = extendedto1D(x, y, z);
+                const block = flat_extended_blocks[index];
+                if (!block.isVisible()) {
+                    @branchHint(.unpredictable);
+                    continue;
+                }
+
                 const neighboring_blocks = [6]Block{
-                    extendedBlocks[x + 1][y][z],
-                    extendedBlocks[x - 1][y][z],
-                    extendedBlocks[x][y + 1][z],
-                    extendedBlocks[x][y - 1][z],
-                    extendedBlocks[x][y][z + 1],
-                    extendedBlocks[x][y][z - 1],
+                    flat_extended_blocks[index + comptime ((ChunkSize + 2) * (ChunkSize + 2))],
+                    flat_extended_blocks[index - comptime ((ChunkSize + 2) * (ChunkSize + 2))],
+                    flat_extended_blocks[index + comptime (ChunkSize + 2)],
+                    flat_extended_blocks[index - comptime (ChunkSize + 2)],
+                    flat_extended_blocks[index + 1],
+                    flat_extended_blocks[index - 1],
                 };
                 const block_transparent = block.isTransparent();
                 inline for (0..6) |i| {
