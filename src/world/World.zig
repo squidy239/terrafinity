@@ -545,8 +545,8 @@ pub const Editor = struct {
         parent.lockShared(io);
         defer parent.unlockShared(io);
         if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
-        _ = try parent.ToBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
-        _ = try parent.toBlocks(&self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
+        _ = try parent.toBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
+        _ = try parent.toBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {

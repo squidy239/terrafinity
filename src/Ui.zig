@@ -104,7 +104,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     self.config_lock.lockUncancelable(io);
     const firstconfig = self.config.*;
-    dvui.structUI(@src(), "Settings", self.config, 32, Config.structui_options, .{});
+    dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 
     const config_changed = !std.meta.eql(firstconfig, self.config.*);
     self.config_lock.unlock(io);

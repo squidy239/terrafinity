@@ -31,13 +31,17 @@ loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoConte
 
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
 selected_inventory_col: std.atomic.Value(u32) = .init(0),
-// Threads
-loaderThread: ?std.Thread,
-unloaderThread: ?std.Thread,
+
+select: std.Io.Select(SelectUnion),
+select_buffer: [65536]SelectUnion = undefined,
 
 options: *Options,
 options_lock: *std.Io.RwLock,
 running: std.atomic.Value(bool),
+
+const SelectUnion = union(enum){
+    addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
+};
 
 pub const Options = struct {
     mouse_sensitivity: f32 = 0.5,
@@ -151,6 +155,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .game_arena = .init(allocator),
         .options = game_options,
         .options_lock = game_options_lock,
+        .select = .init(io, &game.select_buffer),
         .running = .init(true),
         .allocator = undefined,
         .opengl_renderer = undefined,
@@ -160,8 +165,6 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
-        .loaderThread = null,
-        .unloaderThread = null,
     };
     try game.opengl_renderer.init(io, allocator, window);
     game.renderer = game.opengl_renderer.interface;
@@ -396,7 +399,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
         while (it.next(io)) |entry| {
             const Pos = entry.key_ptr.*;
             const innerRadius: @Vector(2, u32) = try self.getInnerGenRadius(io, renderdistance, Pos.level);
-            const keep = Loader.keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
+            const keep = keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
             if (keep) continue;
             tounload.appendBounded(Pos) catch break;
         }
@@ -407,10 +410,10 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     }
 }
 
-pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStructures: bool) !void {
-    try self.loaded_or_meshed.put(io, self.allocator, Pos, {});
+pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: World.ChunkPos, genStructures: bool) !void {
+    try self.loaded_or_meshed.put(io, allocator, Pos, {});
     errdefer _ = self.loaded_or_meshed.remove(io, Pos);
-    try self.pool.spawn(addChunkToRenderTask, .{ self, Pos, genStructures }, .Medium);
+    self.select.async(.addChunkToRender, addChunkToRender, .{ self,io, allocator, Pos, genStructures });
 }
 
 fn addChunkToRenderTask(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStructures: bool) void {
@@ -434,15 +437,137 @@ pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkP
     const game: *@This() = @ptrCast(@alignCast(args));
     const lowest_level = game.options.lowest_level;
     const highest_level = game.options.highest_level;
-    const inside_range = Loader.keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
+    const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
     if (!inside_range) return;
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
+
+pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+    if (lowest_level) |l| {
+        if (Pos.level < l) return false;
+    }
+    if (highest_level) |h| {
+        if (Pos.level > h) return false;
+    }
+
+    const playerChunkPos = @floor(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level))));
+    const center: @Vector(3, f64) = @floatFromInt(Pos.position);
+
+    if (innerChunkRange) |icr| {
+        const inner: @Vector(3, f64) = .{ @floatFromInt(icr[0]), @floatFromInt(icr[1]), @floatFromInt(icr[0]) };
+        const insideInner =
+            @reduce(.And, playerChunkPos > center - inner) and
+            @reduce(.And, playerChunkPos < center + inner);
+        if (insideInner) return false;
+    }
+
+    if (outerChunkRange) |ocr| {
+        const outer: @Vector(3, f64) = .{ @floatFromInt(ocr[0]), @floatFromInt(ocr[1]), @floatFromInt(ocr[0]) };
+        const outsideOuter =
+            @reduce(.Or, playerChunkPos < center - outer) or
+            @reduce(.Or, playerChunkPos > center + outer);
+        if (outsideOuter) return false;
+    }
+    return true;
+}
+
+///Loads all chunks in gendistance and unloads all chunks out of loadistance
+pub fn loadChunks(game: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
+        const playerPos = game.player.physics.getPos();
+        const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
+        const genDistance = game.getGenDistance();
+        const levels = game.getLevels();
+        var level = levels[0];
+        var amount_loaded: u64 = 0;
+        while (level < levels[1]) : (level += 1) {
+            amount_loaded += loadChunksSpiral(game,io, allocator, playerPos, genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
+        }
+        addChunkstoLoad.End();
+}
+
+///loads chunks from top to bottom and in a spiral on a y level
+fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !u64 {
+    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
+    var amount_loaded: u64 = 0;
+    var amount_tested: u64 = 0;
+
+    var xz: [2]i32 = .{ 0, 0 };
+    var c: usize = 0;
+
+    const distance = dist;
+    while (true) {
+        if (amount_tested >= 4 * distance[0] * distance[0]) {
+            break;
+        }
+
+        const m = Move(xz, &c);
+
+        var cc: i32 = 0;
+        while (Line(&xz, &cc, m)) {
+            amount_tested += 1;
+            std.debug.assert(cc <= 2 * @max(distance[0], distance[0]));
+            var y: i32 = -@as(i32, @intCast(distance[1]));
+            while (y < distance[1]) {
+                defer y += 1;
+                const Pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
+
+                const in_range = keepLoaded(null, null, playerPos, Pos, innerdistance, distance);
+                if (!in_range)
+                    continue;
+
+                const loaded = game.loaded_or_meshed.contains(Pos);
+
+                if (!loaded) {
+                    amount_loaded += 1;
+                    try game.addChunkToRenderAsync(io, allocator, Pos, true);
+                }
+            }
+        }
+    }
+    return amount_loaded;
+}
+
+fn Move(xzin: [2]i32, c: *usize) [2]i32 {
+    const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
+    const mov: i32 = @intFromFloat(@ceil(movf + 0.01));
+    var xz = xzin;
+    switch (@mod(c.*, 4)) {
+        0 => xz[1] += mov,
+        1 => xz[0] += mov,
+        2 => xz[1] -= mov,
+        3 => xz[0] -= mov,
+        else => unreachable,
+    }
+    c.* += 1;
+    return xz;
+}
+
+fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
+    defer c.* += 1;
+    if (c.* == 0) return true;
+    if (xz[0] == end[0] and xz[1] == end[1]) return false;
+    std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
+    if (xz[0] == end[0]) {
+        if (xz[1] < end[1]) {
+            xz[1] += 1;
+        } else {
+            xz[1] -= 1;
+        }
+    } else {
+        if (xz[0] < end[0]) {
+            xz[0] += 1;
+        } else {
+            xz[0] -= 1;
+        }
+    }
+    if (xz[0] == end[0] and xz[1] == end[1]) return false;
+    return true;
+}
+
+
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
-    if (self.loaderThread) |thread| thread.join();
-    if (self.unloaderThread) |thread| thread.join();
 
     std.log.info("stopped threads", .{});
 
@@ -455,7 +580,7 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
 }
 
 pub fn startThreads(self: *@This(), io: std.Io) !void {
-    self.loaderThread = try std.Thread.spawn(.{}, Loader.ChunkLoaderThread, .{ self, io, 100 * std.time.ns_per_ms });
-    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
+    _ = io;
+//    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
     self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }
