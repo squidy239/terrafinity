@@ -31,7 +31,7 @@ pub const DefaultGenerator = struct {
 
     fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        self.genChunk(io, allocator, Pos, blocks, world);
+        try self.genChunk(io, allocator, Pos, blocks, world);
         return true;
     }
 
@@ -94,18 +94,18 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(Pos.level);
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
-            blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
-            blocks.merge(io, .{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try blocks.merge(io, .{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position)))));
             var rand = rng.random();
@@ -119,8 +119,8 @@ pub const DefaultGenerator = struct {
         generateCavesInterpolate(&blockgrid, Pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            blocks.merge(io, .{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
-        } else blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try blocks.merge(io, .{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+        } else try blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
@@ -296,8 +296,6 @@ pub const DefaultGenerator = struct {
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) !void {
         const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
         defer genstructures.End();
-        chunk.addAndLockShared(io);
-        defer chunk.releaseAndUnlockShared(io);
         var editorBuffer: [100_000]u8 = undefined;
         var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
             .buffer = &editorBuffer,
@@ -307,6 +305,10 @@ pub const DefaultGenerator = struct {
         const tempAllocator = bfa.get();
         var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false };
         defer _ = worldEditor.flush(io, allocator) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
+
+        chunk.addAndLockShared(io);
+        defer chunk.releaseAndUnlockShared(io);
+
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
         if (chunk.blocks != .blocks) return;
         if (!self.params.genStructures) return;

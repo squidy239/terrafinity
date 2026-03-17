@@ -32,6 +32,12 @@ loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoConte
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
 selected_inventory_col: std.atomic.Value(u32) = .init(0),
 
+last_chunk_load: std.Io.Timestamp = .zero,
+chunk_load_is_running: std.atomic.Value(bool) = .init(false),
+
+last_chunk_unload: std.Io.Timestamp = .zero,
+chunk_unload_is_running: std.atomic.Value(bool) = .init(false),
+
 select: std.Io.Select(SelectUnion),
 select_buffer: [65536]SelectUnion = undefined,
 
@@ -39,8 +45,10 @@ options: *Options,
 options_lock: *std.Io.RwLock,
 running: std.atomic.Value(bool),
 
-const SelectUnion = union(enum){
+const SelectUnion = union(enum) {
     addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
+    loadChunks: @typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?,
+    unloadChunks: @typeInfo(@TypeOf(World.unloadTimeout)).@"fn".return_type.?,
 };
 
 pub const Options = struct {
@@ -58,8 +66,9 @@ pub const Options = struct {
 
     chunk_capacity: u64 = 262144,
     block_grid_capacity: u64 = 8196,
-    /// How often the unloader thread will try to unload chunks.
+
     unloader_frequency_ms: u64 = 1000,
+    loader_frequency_ms: u64 = 250,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -253,6 +262,65 @@ pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
 }
 
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Vector(2, u32)) !void {
+    var entitys_future = io.concurrent(World.updateEntitys, .{ &self.world, io, allocator }) catch io.async(World.updateEntitys, .{ &self.world, io, allocator });
+    defer entitys_future.cancel(io);
+    try updateLoadAndUnload(self, io, allocator);
+    try self.renderer.setViewport(size);
+    try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
+    try self.player.physics.update(&self.world, io, allocator);
+    try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
+
+    var unload_meshes = io.async(@This().unloadChunkMeshes, .{ self, io });
+    defer unload_meshes.cancel(io);
+    entitys_future.await(io);
+    unload_meshes.await(io);
+}
+
+pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    self.options_lock.lockSharedUncancelable(io);
+    const loader_frequency_ms = self.options.loader_frequency_ms;
+    const unloader_frequency_ms = self.options.unloader_frequency_ms;
+    const max_grid_timeout_ms = self.options.max_grid_timeout_ms;
+    const max_chunk_timeout_ms = self.options.max_chunk_timeout_ms;
+    const block_grid_capacity = self.options.block_grid_capacity;
+    const chunk_capacity = self.options.chunk_capacity;
+    self.options_lock.unlockShared(io);
+
+    if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
+        self.last_chunk_load = .now(io, .awake);
+        self.chunk_load_is_running.store(true, .seq_cst);
+        self.select.concurrent(.loadChunks, @This().loadChunks, .{ self, io, allocator }) catch self.select.async(.loadChunks, @This().loadChunks, .{ self, io, allocator });
+    }
+
+    if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
+        self.last_chunk_load = .now(io, .awake);
+        self.chunk_unload_is_running.store(true, .seq_cst);
+        self.select.concurrent(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity }) catch self.select.async(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+    }
+}
+
+fn unloadWrapper(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
+    defer self.chunk_unload_is_running.store(false, .seq_cst);
+    try self.world.unloadTimeout(io, max_grid_ms, max_grids, max_chunk_ms, max_chunks);
+}
+
+pub fn handleSelectFutures(self: *@This()) !            try self.select.concurrent(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+void {
+    var select_completion_buffer: [1024]SelectUnion = undefined;
+    while (true) {
+        const completed = try self.select.awaitMany(&select_completion_buffer, 0);
+        if (completed == 0) break;
+        for (select_completion_buffer[0..completed]) |completed_union| {
+            switch (completed_union) {
+                .addChunkToRender => |f| try f,
+                .loadChunks => |f| try f,
+                .unloadChunks => |f| try f,
+            }
+        }
+    }
+}
+
 pub fn getLevels(self: *@This(), io: std.Io) ![2]i32 {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
@@ -274,7 +342,7 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32)
 
     _ = self.player.viewDirection.fetchAdd(-@Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 }, .seq_cst);
     _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Max, -90 + smallf32, .seq_cst);
-    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Max, 90 - smallf32, .seq_cst);
+    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Min, 90 - smallf32, .seq_cst);
     self.opengl_renderer.updateCameraDirection(self.player.viewDirection.load(.seq_cst));
 }
 
@@ -379,7 +447,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     try self.opengl_renderer.render_buffer.put(io, Pos, written);
 }
 
-pub fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
+pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
@@ -413,7 +481,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
 pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: World.ChunkPos, genStructures: bool) !void {
     try self.loaded_or_meshed.put(io, allocator, Pos, {});
     errdefer _ = self.loaded_or_meshed.remove(io, Pos);
-    self.select.async(.addChunkToRender, addChunkToRender, .{ self,io, allocator, Pos, genStructures });
+    self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, Pos, genStructures });
 }
 
 fn addChunkToRenderTask(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStructures: bool) void {
@@ -441,7 +509,6 @@ pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkP
     if (!inside_range) return;
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
-
 
 pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), Pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
     if (lowest_level) |l| {
@@ -473,17 +540,18 @@ pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3,
 }
 
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
-pub fn loadChunks(game: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
-        const playerPos = game.player.physics.getPos();
-        const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
-        const genDistance = game.getGenDistance();
-        const levels = game.getLevels();
-        var level = levels[0];
-        var amount_loaded: u64 = 0;
-        while (level < levels[1]) : (level += 1) {
-            amount_loaded += loadChunksSpiral(game,io, allocator, playerPos, genDistance, game.getInnerGenRadius(genDistance, level), level) catch unreachable;
-        }
-        addChunkstoLoad.End();
+pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    defer self.chunk_load_is_running.store(false, .seq_cst);
+    const playerPos = self.player.physics.pos.load(.seq_cst);
+    const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
+    const genDistance = try self.getGenDistance(io);
+    const levels = try self.getLevels(io);
+    var level = levels[0];
+    var amount_loaded: u64 = 0;
+    while (level < levels[1]) : (level += 1) {
+        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos, genDistance, try self.getInnerGenRadius(io, genDistance, level), level);
+    }
+    addChunkstoLoad.End();
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
@@ -516,7 +584,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
                 if (!in_range)
                     continue;
 
-                const loaded = game.loaded_or_meshed.contains(Pos);
+                const loaded = game.loaded_or_meshed.contains(io, Pos);
 
                 if (!loaded) {
                     amount_loaded += 1;
@@ -565,7 +633,6 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     return true;
 }
 
-
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
 
@@ -581,6 +648,6 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
 
 pub fn startThreads(self: *@This(), io: std.Io) !void {
     _ = io;
-//    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
+    //    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
     self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }

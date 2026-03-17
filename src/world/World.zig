@@ -236,10 +236,9 @@ pub fn getGenState(self: *@This(), io: std.Io, Pos: ChunkPos) ?Chunk.Genstate {
     return chunk.genstate.load(.seq_cst);
 }
 
-pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator, update_finished: *std.atomic.Value(bool)) void {
+pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
     defer TickEntitiesTask.End();
-    defer update_finished.store(true, .seq_cst);
     var it = self.Entitys.iterator();
     defer it.deinit(io);
     while (it.next(io)) |entry| {
@@ -346,21 +345,6 @@ fn memCurve(max_ms: u64, fraction: f32) u64 {
 
 const Options = @import("../Game.zig").Options;
 
-pub fn chunkUnloaderThread(self: *@This(), io: std.Io, options: *Options, options_lock: *std.Io.RwLock) void {
-    while (true) {
-        const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 223);
-        defer unloadChunks.End();
-        options_lock.lockSharedUncancelable(io);
-        const max_grid_timeout_ms = options.max_grid_timeout_ms;
-        const max_chunk_timeout_ms = options.max_chunk_timeout_ms;
-        const block_grid_capacity = options.block_grid_capacity;
-        const chunk_capacity = options.chunk_capacity;
-        options_lock.unlockShared(io);
-        self.unloadTimeout(io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity) catch |err| std.debug.panic("err:{any}\n", .{err});
-        io.sleep(.fromMilliseconds(10), .awake) catch {};
-    }
-}
-
 pub const Reader = struct {
     world: *World,
     lastChunkReadCache: ?struct { Pos: ChunkPos, chunk: *Chunk } = null,
@@ -438,7 +422,7 @@ pub const Editor = struct {
                     sides[side] = chunk.extractFace(io, @enumFromInt(side), false);
                 }
             }
-            chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, true);
+            try chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, true);
 
             if (self.propagateChanges) {
                 var coords: ChunkPos = diffChunk.key_ptr.*;

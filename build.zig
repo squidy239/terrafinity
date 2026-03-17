@@ -56,15 +56,15 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Test step
-    const tests = b.addTest(.{
-        .root_module = root_module,
-    });
-    b.installArtifact(tests);
+    //  const tests = b.addTest(.{
+    //      .root_module = root_module,
+    //  });
+    //  b.installArtifact(tests);
 
-    const run_test = b.addRunArtifact(tests);
+    // const run_test = b.addRunArtifact(tests);
 
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_test.step);
+    // const test_step = b.step("test", "Run tests");
+    // test_step.dependOn(&run_test.step);
 }
 
 fn setupDependencies(

@@ -111,8 +111,6 @@ pub fn main(init: std.process.Init) !void {
     defer if (ui.menu_state.ingame) game.deinit(io, window);
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.initEmpty();
-    var update_finished: std.atomic.Value(bool) = .init(true);
-    var update: std.Io.Future(void) = undefined;
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &ui_window);
@@ -127,16 +125,9 @@ pub fn main(init: std.process.Init) !void {
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
             try game.handleButtonActions(io, action_set, dt);
             try game.handleScroll(io, scroll);
-
             const size = try window.getSizeInPixels();
-            try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
-            try game.renderer.clear(game.player.physics.pos.load(.seq_cst));
-            try game.player.physics.update(&game.world, io, allocator);
-            try game.renderer.drawChunks(io, game.player.physics.pos.load(.seq_cst));
-            if (update_finished.load(.seq_cst)) {
-                update = io.async(World.updateEntitys, .{ &game.world, io, allocator, &update_finished });
-            }
-            try game.unloadChunkMeshes(io);
+
+            try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
         try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());

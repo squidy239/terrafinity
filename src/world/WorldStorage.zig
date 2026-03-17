@@ -83,6 +83,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     const keybytes = std.mem.asBytes(&key);
     const value = self.database.get(keybytes, .{}) catch return error.Unrecoverable;
     if (value == null) return false;
+    defer rocksdb.free(value.?);
 
     var buf_reader = std.Io.Reader.fixed(value.?);
     const encoding: std.meta.Tag(Chunk.BlockEncoding) = @enumFromInt(buf_reader.takeInt(EncodingTagType, .little) catch unreachable);
@@ -91,9 +92,8 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
             try blocks.toBlocks(io, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
             buf_reader.readSliceEndian(Block, @as([]Block, @ptrCast(blocks.blocks)), .little) catch unreachable;
         },
-        .oneBlock => blocks.merge(io, .{ .oneBlock = @enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable) }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex),
+        .oneBlock => try blocks.merge(io, .{ .oneBlock = @enumFromInt(buf_reader.takeInt(BlockTagType, .little) catch unreachable) }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex),
     }
-    rocksdb.free(value.?);
     return true;
 }
 

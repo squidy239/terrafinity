@@ -103,13 +103,13 @@ test "MeshBenchmark" {
     var buf: [256]u8 = undefined;
     var writer = std.Io.Writer.Discarding.init(&buf);
     const test_amount = 100000;
-    const st = std.time.nanoTimestamp();
+    const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
         try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .oneBlock = .air }), &writer.writer);
     }
-    const et = std.time.nanoTimestamp();
+    const et = std.Io.Timestamp.now(std.testing.io, .awake);
 
-    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et - st)) / test_amount) / std.time.ns_per_us});
+    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et.durationTo(st).toMicroseconds())) / test_amount)});
 }
 
 ///x+,x-,y+,y-,z+,z-
