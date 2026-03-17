@@ -429,10 +429,10 @@ pub const Editor = struct {
         const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
         var propagationEditor: @This() = .{ .propagateChanges = false, .world = self.world, .tempallocator = self.tempallocator };
         while (it.next()) |diffChunk| {
-            const encoding: Chunk.BlockEncoding = if (Chunk.IsOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
+            const encoding: Chunk.BlockEncoding = if (Chunk.isOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
             const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
             defer chunk.release(io);
-            var sides: [6][ChunkSize][ChunkSize]Block = undefined;
+            var sides: [6]Chunk.ChunkFaceEncoding = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
                     sides[side] = chunk.extractFace(io, @enumFromInt(side), false);
@@ -451,7 +451,7 @@ pub const Editor = struct {
                     i += 1;
                 }
             }
-            var sides2: [6][ChunkSize][ChunkSize]Block = undefined;
+            var sides2: [6]Chunk.ChunkFaceEncoding = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
                     sides2[side] = chunk.extractFace(io, @enumFromInt(side), false);
@@ -546,6 +546,7 @@ pub const Editor = struct {
         defer parent.unlockShared(io);
         if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
         _ = try parent.ToBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
+        _ = try parent.toBlocks(&self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {

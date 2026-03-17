@@ -113,11 +113,11 @@ pub const DefaultGenerator = struct {
             const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
             generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
-            const oneblock = Chunk.IsOneBlock(&blockgrid);
+            const oneblock = Chunk.isOneBlock(&blockgrid);
             if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         }
         generateCavesInterpolate(&blockgrid, Pos, heights, @floatCast(chunkscale), self.params);
-        const oneblock = Chunk.IsOneBlock(&blockgrid);
+        const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
             blocks.merge(io, .{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         } else blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);

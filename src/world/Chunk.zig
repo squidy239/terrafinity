@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Block = @import("Block.zig").Block;
 const ztracy = @import("ztracy");
-
+const builtin = @import("builtin");
 pub const ChunkSize = 32;
 blocks: BlockEncoding,
 lock: std.Io.RwLock,
@@ -47,10 +47,10 @@ pub const BlockEncoding = union(enum(u8)) {
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
-                const pred = flatArray.* == @as(@Vector(ChunkSize * ChunkSize * ChunkSize, tag), @splat(@intFromEnum(Block.null)));
+                const pred = flatMergeArray.* == @as(@Vector(ChunkSize * ChunkSize * ChunkSize, tag), @splat(@intFromEnum(Block.null)));
                 flatArray.* = @select(tag, pred, flatArray.*, flatMergeArray.*);
 
-                if (IsOneBlock(self.blocks)) |block| {
+                if (isOneBlock(self.blocks)) |block| {
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
                     pool_mutex.lockUncancelable(io);
@@ -88,6 +88,11 @@ pub const BlockEncoding = union(enum(u8)) {
     }
 };
 
+pub const ChunkFaceEncoding = union(enum(u8)) {
+    blocks: [ChunkSize][ChunkSize]Block,
+    oneBlock: Block,
+};
+
 pub const Genstate = enum(u8) {
     TerrainGenerated,
     StructuresGenerated,
@@ -118,13 +123,13 @@ pub fn from(blockEncoding: BlockEncoding, io: std.Io, chunk_pool: anytype, pool_
     return chunk;
 }
 
-/// Checks if the block array is all the same block.
-pub fn IsOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
+///checks if the block array is all the same block
+pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
     const firstBlockVec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(blockArray[0][0][0]));
-    var isOneBlock: @Vector(ChunkSize, bool) = comptime @splat(true);
+    var oneblock: @Vector(ChunkSize, bool) = comptime @splat(true);
     const linearBlockArray: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
-    for (linearBlockArray) |blocks| isOneBlock &= (blocks == firstBlockVec);
-    return if (@reduce(.And, isOneBlock)) blockArray[0][0][0] else null;
+    for (linearBlockArray) |blocks| oneblock &= (blocks == firstBlockVec);
+    return if (@reduce(.And, oneblock)) blockArray[0][0][0] else null;
 }
 
 /// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
@@ -136,7 +141,7 @@ pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool
     self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
-pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) [ChunkSize][ChunkSize]Block {
+pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) ChunkFaceEncoding {
     self.addAndLockShared(io);
     defer {
         if (removeRef) self.release(io);
@@ -145,28 +150,27 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMin
     var cube: *const [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     switch (self.blocks) {
         .blocks => cube = self.blocks.blocks,
-        .oneBlock => {
-            return @splat(@splat(self.blocks.oneBlock));
-        },
+        .oneBlock => |block| return .{ .oneBlock = block },
     }
     var result: [ChunkSize][ChunkSize]Block = undefined;
-    for (&result, 0..) |*row, i| {
+    @setEvalBranchQuota(10000);
+    inline for (&result, 0..) |*row, i| {
         inline for (row, 0..) |*item, j| {
             item.* = switch (comptime face) {
-                .xPlus => cube[ChunkSize - 1][i][j],
-                .xMinus => cube[0][i][j],
-                .yPlus => cube[i][ChunkSize - 1][j],
-                .yMinus => cube[i][0][j],
-                .zPlus => cube[i][j][ChunkSize - 1],
-                .zMinus => cube[i][j][0],
+                .xPlus => cube[ChunkSize - 1][i][comptime j],
+                .xMinus => cube[0][comptime i][comptime j],
+                .yPlus => cube[comptime i][ChunkSize - 1][comptime j],
+                .yMinus => cube[comptime i][0][comptime j],
+                .zPlus => cube[comptime i][comptime j][ChunkSize - 1],
+                .zMinus => cube[comptime i][comptime j][0],
             };
         }
     }
-    return result;
+    return .{ .blocks = result };
 }
 
 /// Returns true if the chunk was converted to blocks, false if it was already blocks.
-pub fn ToBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
+pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
     self.add_ref(io);
     defer self.release(io);
     if (lock) self.lockExclusive(io);
@@ -267,11 +271,11 @@ test "IsOneBlock" {
     const testing = std.testing;
     var one_block_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     one_block_chunk[0][0][0] = .stone;
-    try testing.expect(IsOneBlock(&one_block_chunk) == null);
+    try testing.expect(isOneBlock(&one_block_chunk) == null);
 
     var all_stone_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
-    try testing.expect(IsOneBlock(&all_stone_chunk) != null);
-    try testing.expect(IsOneBlock(&all_stone_chunk).? == .stone);
+    try testing.expect(isOneBlock(&all_stone_chunk) != null);
+    try testing.expect(isOneBlock(&all_stone_chunk).? == .stone);
 }
 
 test "ToBlocks" {

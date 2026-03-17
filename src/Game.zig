@@ -348,7 +348,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     defer GenMeshAndAdd.End();
     const chunk = try self.world.loadChunk(io, allocator, Pos, genStructures);
     defer chunk.release(io);
-    const neighbor_faces = [6][ChunkSize][ChunkSize]Block{
+    const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
         (try self.world.loadChunk(io, allocator, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
         (try self.world.loadChunk(io, allocator, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
         (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
