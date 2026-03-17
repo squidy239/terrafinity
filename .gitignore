@@ -4,3 +4,4 @@ zig-out
 worlds
 Config.zon
 heaptrack.*
+zig-pkg
