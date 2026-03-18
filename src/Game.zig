@@ -305,8 +305,7 @@ fn unloadWrapper(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, m
     try self.world.unloadTimeout(io, max_grid_ms, max_grids, max_chunk_ms, max_chunks);
 }
 
-pub fn handleSelectFutures(self: *@This()) !            try self.select.concurrent(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
-void {
+pub fn handleSelectFutures(self: *@This()) !void {
     var select_completion_buffer: [1024]SelectUnion = undefined;
     while (true) {
         const completed = try self.select.awaitMany(&select_completion_buffer, 0);
