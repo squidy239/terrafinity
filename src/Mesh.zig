@@ -39,6 +39,7 @@ pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chu
         all_invisible |= (face == .oneBlock and !face.oneBlock.isVisible());
     }
     all_invisible |= mainblocks == .oneBlock and !mainblocks.oneBlock.isVisible();
+    if(!all_invisible)return;
     try meshSimple(mainblocks, neighbor_faces, writer);
 }
 
@@ -84,9 +85,9 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
     loop.End();
 }
 
-inline fn extendedto1D(x: usize, y: usize, z: usize) usize {
-    return (z * (ChunkSize + 2) * (ChunkSize + 2)) + (y * (ChunkSize + 2)) + x;
-}
+//fn meshV2(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
+    
+//}
 test "MeshBenchmark" {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {

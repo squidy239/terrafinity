@@ -34,9 +34,11 @@ selected_inventory_col: std.atomic.Value(u32) = .init(0),
 
 last_chunk_load: std.Io.Timestamp = .zero,
 chunk_load_is_running: std.atomic.Value(bool) = .init(false),
+load_future: ?std.Io.Future(@typeInfo(@TypeOf(@This().loadChunks)).@"fn".return_type.?) = null,
 
 last_chunk_unload: std.Io.Timestamp = .zero,
 chunk_unload_is_running: std.atomic.Value(bool) = .init(false),
+unload_future: ?std.Io.Future(@typeInfo(@TypeOf(@This().unloadWrapper)).@"fn".return_type.?) = null,
 
 select: std.Io.Select(SelectUnion),
 select_buffer: [65536]SelectUnion = undefined,
@@ -47,8 +49,6 @@ running: std.atomic.Value(bool),
 
 const SelectUnion = union(enum) {
     addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
-    loadChunks: @typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?,
-    unloadChunks: @typeInfo(@TypeOf(World.unloadTimeout)).@"fn".return_type.?,
 };
 
 pub const Options = struct {
@@ -270,7 +270,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
     try self.player.physics.update(&self.world, io, allocator);
     try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
-
+    try self.handleSelectFutures();
     var unload_meshes = io.async(@This().unloadChunkMeshes, .{ self, io });
     defer unload_meshes.cancel(io);
     entitys_future.await(io);
@@ -286,17 +286,21 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
     const block_grid_capacity = self.options.block_grid_capacity;
     const chunk_capacity = self.options.chunk_capacity;
     self.options_lock.unlockShared(io);
-
+    
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
-        self.last_chunk_load = .now(io, .awake);
+        if(self.load_future)|*f|try f.await(io);
+        
         self.chunk_load_is_running.store(true, .seq_cst);
-        self.select.concurrent(.loadChunks, @This().loadChunks, .{ self, io, allocator }) catch self.select.async(.loadChunks, @This().loadChunks, .{ self, io, allocator });
+        self.last_chunk_load = .now(io, .awake);
+        self.load_future = io.async(@This().loadChunks, .{ self, io, allocator });
     }
 
     if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
-        self.last_chunk_load = .now(io, .awake);
+        if(self.unload_future)|*f|try f.await(io);
+        
         self.chunk_unload_is_running.store(true, .seq_cst);
-        self.select.concurrent(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity }) catch self.select.async(.unloadChunks, unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+        self.last_chunk_unload = .now(io, .awake);
+        self.unload_future = io.async( unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
     }
 }
 
@@ -313,8 +317,6 @@ pub fn handleSelectFutures(self: *@This()) !void {
         for (select_completion_buffer[0..completed]) |completed_union| {
             switch (completed_union) {
                 .addChunkToRender => |f| try f,
-                .loadChunks => |f| try f,
-                .unloadChunks => |f| try f,
             }
         }
     }

@@ -9,7 +9,6 @@ lock: std.Io.RwLock = .init,
 genstate: std.atomic.Value(Genstate),
 ref_count: std.atomic.Value(u32),
 
-///time is in us
 last_access: std.atomic.Value(i128),
 
 ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
