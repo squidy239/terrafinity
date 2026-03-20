@@ -35,10 +35,12 @@ pub const DefaultGenerator = struct {
         return true;
     }
 
-    fn genStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void {
+    fn genStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
         self.generateStructures(io, allocator, world, chunk, Pos) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.Unrecoverable,
         };
     }
 
@@ -304,9 +306,8 @@ pub const DefaultGenerator = struct {
         };
         const tempAllocator = bfa.get();
         var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false };
-        defer _ = worldEditor.flush(io, allocator) catch |err| std.debug.panic("failed to flush WorldEditor: {any}\n", .{err});
-
-        chunk.addAndLockShared(io);
+        defer worldEditor.clear();
+        try chunk.addAndLockShared(io);
         defer chunk.releaseAndUnlockShared(io);
 
         if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
@@ -341,6 +342,8 @@ pub const DefaultGenerator = struct {
                 }
             }
         }
+        
+        try worldEditor.flush(io, allocator);
     }
 
     fn placeTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, real_pos: @Vector(3, f32), conf: TreeConfig, seed: u64, level: i32) !void {

@@ -219,6 +219,8 @@ pub const Explosive = struct {
         self.pos.store(pos, .seq_cst);
 
         var worldReader = World.Reader{ .world = world };
+        defer worldReader.clear(io);
+        
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
         if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
             g.End();
@@ -227,7 +229,7 @@ pub const Explosive = struct {
                 .tempallocator = allocator,
             };
             const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(pos), 8);
-            worldEditor.placeSamplerShape(.grass, sphere, World.standard_level) catch |err| std.debug.panic("failed to WorldEditor: {any}\n", .{err});
+            try worldEditor.placeSamplerShape(.grass, sphere, World.standard_level);
             worldEditor.flush(io, allocator) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.OutOfMemory,

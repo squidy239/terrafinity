@@ -32,7 +32,7 @@ pub const BlockEncoding = union(enum(u8)) {
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            pool_mutex.lockUncancelable(io);
+                            try pool_mutex.lock(io);
                             memory_pool.destroy(@alignCast(self.blocks));
                             pool_count.* -= 1;
                             pool_mutex.unlock(io);
@@ -69,7 +69,7 @@ pub const BlockEncoding = union(enum(u8)) {
         const a = ztracy.ZoneNC(@src(), "alloc", 54334);
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         while (true) {
-            pool_mutex.lockUncancelable(io);
+            try pool_mutex.lock(io);
             mem = memory_pool.create(undefined) catch {
                 pool_mutex.unlock(io);
                 try io.sleep(.fromMicroseconds(100), .awake);
@@ -84,6 +84,10 @@ pub const BlockEncoding = union(enum(u8)) {
         const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
         @memset(flatblocks, self.oneBlock);
         self.* = .{ .blocks = mem };
+    }
+    
+    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block)BlockEncoding{
+        return if (isOneBlock(blocks)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = blocks };
     }
 
     test "merge" {
@@ -148,13 +152,13 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !void {
     self.add_ref(io);
     defer self.release(io);
-    if (lock) self.lockExclusive(io);
+    if (lock) try self.lockExclusive(io);
     defer if (lock) self.unlockExclusive(io);
     try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
-pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) ChunkFaceEncoding {
-    self.addAndLockShared(io);
+pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) !ChunkFaceEncoding {
+    try self.addAndLockShared(io);
     defer {
         if (removeRef) self.release(io);
         self.releaseAndUnlockShared(io);
@@ -196,7 +200,9 @@ pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u
 /// The chunk must only have 1 ref before calling — use WaitForRefAmount.
 pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) void {
     std.debug.assert(self.ref_count.load(.seq_cst) == 1);
-    self.lockExclusive(io);
+    _ = io.swapCancelProtection(.blocked);
+    self.lockExclusive(io) catch unreachable;
+    _ = io.swapCancelProtection(.unblocked);
     defer self.unlockExclusive(io);
     switch (self.blocks) {
         .blocks => {
@@ -240,8 +246,8 @@ pub fn release(self: *@This(), io: std.Io) void {
     self.touch(io);
 }
 
-pub fn lockExclusive(self: *@This(), io: std.Io) void {
-    self.lock.lockUncancelable(io);
+pub fn lockExclusive(self: *@This(), io: std.Io) !void {
+    try self.lock.lock(io);
     self.touchModify(io);
 }
 
@@ -250,8 +256,8 @@ pub fn unlockExclusive(self: *@This(), io: std.Io) void {
     self.touchModify(io);
 }
 
-pub fn lockShared(self: *@This(), io: std.Io) void {
-    self.lock.lockSharedUncancelable(io);
+pub fn lockShared(self: *@This(), io: std.Io) !void {
+    try self.lock.lockShared(io);
     self.touch(io);
 }
 
@@ -260,14 +266,14 @@ pub fn unlockShared(self: *@This(), io: std.Io) void {
     self.touch(io);
 }
 
-pub fn addAndLockShared(self: *@This(), io: std.Io) void {
+pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
+    try self.lockShared(io);
     _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.lockShared(io);
 }
 
-pub fn addAndLock(self: *@This(), io: std.Io) void {
+pub fn addAndLock(self: *@This(), io: std.Io) !void {
+    try self.lockExclusive(io);
     _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.lockExclusive(io);
 }
 
 pub fn releaseAndUnlock(self: *@This(), io: std.Io) void {

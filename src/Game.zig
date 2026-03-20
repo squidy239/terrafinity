@@ -264,7 +264,7 @@ pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
 
 pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Vector(2, u32)) !void {
     var entitys_future = io.concurrent(World.updateEntitys, .{ &self.world, io, allocator }) catch io.async(World.updateEntitys, .{ &self.world, io, allocator });
-    defer entitys_future.cancel(io);
+    defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
     try self.renderer.setViewport(size);
     try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
@@ -273,7 +273,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     try self.handleSelectFutures();
     var unload_meshes = io.async(@This().unloadChunkMeshes, .{ self, io });
     defer unload_meshes.cancel(io);
-    entitys_future.await(io);
+    try entitys_future.await(io);
     unload_meshes.await(io);
 }
 
@@ -421,16 +421,16 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     const chunk = try self.world.loadChunk(io, allocator, Pos, genStructures);
     defer chunk.release(io);
     const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
-        (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
+        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
     };
     const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
     const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-    chunk.lockShared(io);
+    try chunk.lockShared(io);
     defer chunk.unlockShared(io);
     lock.End();
     exbl.End();

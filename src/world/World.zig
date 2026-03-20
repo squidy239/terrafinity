@@ -149,7 +149,7 @@ pub const ChunkSource = struct {
     /// All chunk sources will be tried.
     /// onEditFn must be called if chunks are modified, on any modified chunks, once all modifications are complete.
     /// This function is responsible for locking and adding refs to the chunk.
-    onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Unrecoverable }!void,
+    onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, Pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
     /// Called for every UnloadChunk call (many times per chunk). All chunk sources will be tried.
     /// Does not have to be thread safe or lock the chunk since it is only called when the chunk has 1 ref.
@@ -175,7 +175,7 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: Chun
     return error.AllSourcesFailed;
 }
 
-fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, Pos: ChunkPos) error{ Unrecoverable, OutOfMemory }!void {
+fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, Pos: ChunkPos) !void {
     for (self.ChunkSources) |source| {
         if (source) |s| {
             if (s.onLoad) |onLoadFn| {
@@ -236,7 +236,7 @@ pub fn getGenState(self: *@This(), io: std.Io, Pos: ChunkPos) ?Chunk.Genstate {
     return chunk.genstate.load(.seq_cst);
 }
 
-pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
+pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
     defer TickEntitiesTask.End();
     var it = self.Entitys.iterator();
@@ -247,10 +247,7 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) v
         defer it.unpause(io);
         const entity = self.Entitys.getAndAddRef(io, uuid);
         if (entity) |en| {
-            en.update(io, allocator, self, uuid) catch |err| switch (err) {
-                error.Canceled => continue,
-                else => @panic("err"),
-            };
+            try en.update(io, allocator, self, uuid);
         }
     }
 }
@@ -360,7 +357,7 @@ pub const Reader = struct {
                 .Pos = chunkPos,
                 .chunk = try self.world.loadChunk(io, allocator, chunkPos, false),
             };
-            self.lastChunkReadCache.?.chunk.lockShared(io);
+            try self.lastChunkReadCache.?.chunk.lockShared(io);
         }
         return switch (self.lastChunkReadCache.?.chunk.blocks) {
             .blocks => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
@@ -403,23 +400,23 @@ pub const Editor = struct {
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         const flushh = ztracy.ZoneNC(@src(), "flush", 3563456);
         defer flushh.End();
-        self.lastChunkCache = null;
+        defer self.clear();
         self.editBuffer.lockPointers();
-        defer self.editBuffer.clearAndFree(self.tempallocator);
         defer self.editBuffer.unlockPointers();
         var it = self.editBuffer.iterator();
         var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
         defer neghborsToRemesh.deinit();
         const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
         var propagationEditor: @This() = .{ .propagateChanges = false, .world = self.world, .tempallocator = self.tempallocator };
+        defer propagationEditor.clear();
         while (it.next()) |diffChunk| {
-            const encoding: Chunk.BlockEncoding = if (Chunk.isOneBlock(diffChunk.value_ptr)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = diffChunk.value_ptr };
+            const encoding: Chunk.BlockEncoding = .fromBlocks(diffChunk.value_ptr);
             const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
             defer chunk.release(io);
             var sides: [6]Chunk.ChunkFaceEncoding = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
-                    sides[side] = chunk.extractFace(io, @enumFromInt(side), false);
+                    sides[side] = try chunk.extractFace(io, @enumFromInt(side), false);
                 }
             }
             try chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, true);
@@ -438,7 +435,7 @@ pub const Editor = struct {
             var sides2: [6]Chunk.ChunkFaceEncoding = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
-                    sides2[side] = chunk.extractFace(io, @enumFromInt(side), false);
+                    sides2[side] = try chunk.extractFace(io, @enumFromInt(side), false);
                 }
             }
             if (callIfNeighborFacesChanged) {
@@ -467,6 +464,11 @@ pub const Editor = struct {
             if (self.world.onEdit) |onEdit| try onEdit.onEditFn(io, allocator, pos.key_ptr.*, onEdit.onEditFnArgs);
         }
         if (self.propagateChanges) try propagationEditor.flush(io, allocator);
+    }
+    
+    pub fn clear(self: *@This())void{
+        self.lastChunkCache = null;
+        self.editBuffer.clearAndFree(self.tempallocator);
     }
 
     pub inline fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
@@ -512,7 +514,7 @@ pub const Editor = struct {
         const parent_pos = Pos.parent();
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var isoneblock: bool = false;
-        chunk.lockShared(io);
+        try chunk.lockShared(io);
         switch (chunk.blocks) {
             .blocks => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
             .oneBlock => |block| {
@@ -526,7 +528,7 @@ pub const Editor = struct {
         const parent = try self.world.loadChunk(io, allocator, parent_pos, false);
         defer parent.release(io);
         var changed_parent = false;
-        parent.lockShared(io);
+        try parent.lockShared(io);
         defer parent.unlockShared(io);
         if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
         _ = try parent.toBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
