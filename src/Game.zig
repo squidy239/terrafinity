@@ -650,3 +650,7 @@ pub fn startThreads(self: *@This(), io: std.Io) !void {
     //    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
     self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

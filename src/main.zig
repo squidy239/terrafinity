@@ -254,3 +254,7 @@ fn sdlErr(
         std.log.err("******* [Unknown Error!] *******\n", .{});
     }
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

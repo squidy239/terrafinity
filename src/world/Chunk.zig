@@ -86,6 +86,20 @@ pub const BlockEncoding = union(enum(u8)) {
         @memset(flatblocks, self.oneBlock);
         self.* = .{ .blocks = mem };
     }
+
+    test "merge" {
+        try std.testing.fuzz(std.testing.io, testOne, .{});
+    }
+
+    fn testOne(io: std.Io, smith: *std.testing.Smith) !void {
+        const pool: std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block) = try .initCapacity(std.testing.allocator, 1);
+        defer pool.deinit(std.testing.allocator);
+        var b1 = smith.value(BlockEncoding);
+        const b2 = smith.value(BlockEncoding);
+        var pc: u64 = 0;
+        var pm: std.Io.Mutex = .init;
+        try b1.merge(io, b2, pool, &pc, &pm);
+    }
 };
 
 pub const ChunkFaceEncoding = union(enum(u8)) {
@@ -330,4 +344,9 @@ test "Merge" {
             try testing.expect(blocks[1][1][1] == .air);
         },
     }
+}
+
+
+test {
+    std.testing.refAllDecls(@This());
 }
