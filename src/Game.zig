@@ -228,7 +228,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
             .elements = .{
                 .mover = .{
                     .collisions = false,
-                    .boundingBox = .init(.{ -0.5, -2, -0.5 }, .{ 0.5, 2, 0.5 }),
+                    .boundingBox = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
                     .enabled = true,
                     .zeroVelocity = true,
                 },
@@ -403,15 +403,15 @@ pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_seconds: f32) !void {
     _ = io;
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.vec.cross(self.opengl_renderer.cameraFront, Renderer.OpenGl.cameraUp);
-    const cross: ?@Vector(3, f64) = if (std.meta.eql(c, @Vector(3, f64){ 0, 0, 0 })) null else zm.vec.normalize(c);
+    const c = zm.Vec3f.crossRH(.{ .data = self.opengl_renderer.cameraFront }, .{ .data =  Renderer.OpenGl.cameraUp});
+    const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
     if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * self.opengl_renderer.cameraFront, .seq_cst);
     if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * self.opengl_renderer.cameraFront, .seq_cst);
     if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
     if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
-    if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?, .seq_cst);
-    if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?, .seq_cst);
+    if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
+    if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?.data, .seq_cst);
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.

@@ -172,7 +172,7 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    _ = zm.vec.normalize(self.cameraFront);
+    _ = zm.Vec3f.norm(.{ .data = self.cameraFront});
 }
 
 fn CompileShaders(self: *@This()) !void {
@@ -268,14 +268,14 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
+    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 }}, std.math.degreesToRadians(180));
 
-    const view = zm.Mat4f.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
+    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 }},.{ .data = self.cameraFront}, .{ .data = @This().cameraUp});
     const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
     const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
-    const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
+    const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
@@ -358,10 +358,10 @@ fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
     const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
     return .{
         .data = .{
-            f / aspectWbyH, 0.0, 0.0,   0.0,
-            0.0,            f,   0.0,   0.0,
-            0.0,            0.0, 0.0,   -1.0,
-            0.0,            0.0, zNear, 0.0,
+            .{f / aspectWbyH, 0.0, 0.0,   0.0,},
+            .{0.0,            f,   0.0,   0.0,},
+            .{0.0,            0.0, 0.0,   -1.0,},
+            .{0.0,            0.0, zNear, 0.0,},
         },
     };
 }

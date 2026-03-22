@@ -187,7 +187,7 @@ pub const Player = struct {
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
     pos: AtomicVector(3, f64),
-    dir: AtomicVector(3, f64),
+    dir: AtomicVector(3, f32),
     timestamp: std.atomic.Value(i128),
     lock: std.Io.RwLock = .init,
 
@@ -203,7 +203,7 @@ pub const Explosive = struct {
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
         const prev_ns = self.timestamp.load(.seq_cst);
         self.timestamp.store(now_ns, .seq_cst);
-        const dt = @as(f64, @floatFromInt(now_ns - prev_ns)) * 1e-9;
+        const dt = @as(f32, @floatFromInt(now_ns - prev_ns)) * 1e-9;
 
         var dir = self.dir.load(.seq_cst);
         var pos = self.pos.load(.seq_cst);
@@ -211,7 +211,7 @@ pub const Explosive = struct {
         //dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
         //dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
         //dir[2] += (std.crypto.random.float(f64) - 0.5) * dt;
-        if (!std.meta.eql(dir, @Vector(3, f64){ 0, 0, 0 })) dir = zm.vec.normalize(dir);
+        if (!std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 })) dir = zm.Vec3f.norm(.{ .data = dir}).data;
         dir *= @splat(10 * dt);
         pos += dir;
 

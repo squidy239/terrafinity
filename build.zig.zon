@@ -13,15 +13,15 @@
 
     .dependencies = .{
         .zm = .{
-            .url = "git+https://github.com/griush/zm#b5d70485dfc78baa9251a06a844d860fd00e9bcf",
-            .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
+            .url = "git+https://codeberg.org/grius/zm#21b71aef4e28b91994e67b6ce002411776f4ea7e",
+            .hash = "zm-0.5.1-cLX-WY_hAACaH6l57yntgfwAVbRcjdgTa0-9vHuKiMm5",
         },
         .ztracy = .{
             .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
             .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
+            .url = "git+https://github.com/castholm/zigglgen.git#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
             .hash = "zigglgen-0.5.0-zigglr_CLwBs1aABtYVtxNPo1SB8AzgKMVouoqULqkDQ",
         },
         .obj = .{
@@ -37,8 +37,8 @@
             .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
         },
         .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3#6acec40c284da6b64f986774636ec4dc2b3cab62",
-            .hash = "sdl3-0.1.9-NmT1Q5OEJwApdDcKAYsOGh1V38CbmVohoMSJvE4mXscR",
+            .url = "git+https://codeberg.org/LDT9510/zig-sdl3#34357ae71c5207133618a02cda251cfb5e12eb4b",
+            .hash = "sdl3-0.1.9-NmT1Q1uFJwDhoBeP0k5-W6K9mo9h-x4yc9LebgZ3W6ET",
         },
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#17ce34643a54c7f1375fa28feb3a40d82cff57ca",

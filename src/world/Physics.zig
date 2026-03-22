@@ -49,7 +49,7 @@ pub const simpleMover = struct {
 pub const Mover = struct {
     collisions: bool,
     zeroVelocity: bool,
-    boundingBox: zm.AABB,
+    boundingBox: zm.AABB(3, f64),
     enabled: bool,
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
@@ -84,7 +84,7 @@ pub const Mover = struct {
         var bestMagnitude: f64 = 0.0;
         var found: bool = false;
         const size = self.boundingBox.size();
-        const checkDistance: i16 = @intFromFloat(@ceil(@max(size[0], size[1], size[2]) / 2));
+        const checkDistance: i16 = @intFromFloat(@ceil(@max(size.data[0], size.data[1], size.data[2]) / 2));
         var x: i16 = -@as(i16, checkDistance);
         while (x <= checkDistance) : (x += 1) {
             var y: i16 = -@as(i16, checkDistance);
@@ -97,11 +97,11 @@ pub const Mover = struct {
                     const block = try reader.getBlock(io, allocator, @intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
-                    const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });
+                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }}, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 }});
 
                     var selfAABB = self.boundingBox;
-                    selfAABB.min += pos;
-                    selfAABB.max += pos;
+                    selfAABB.min = selfAABB.min.add(.{ .data = pos });
+                    selfAABB.max = selfAABB.max.add(.{ .data = pos });
 
                     const mtv = getAABBpenetration(blockAABB, selfAABB); // single-axis MTV or zero
 
@@ -123,31 +123,31 @@ pub const Mover = struct {
     }
 
     // Return signed per-axis intersection vector (zero if no overlap)
-    fn getAABBintersect(a: zm.AABB, b: zm.AABB) @Vector(3, f64) {
-        if (a.max[0] <= b.min[0] or a.min[0] >= b.max[0] or
-            a.max[1] <= b.min[1] or a.min[1] >= b.max[1] or
-            a.max[2] <= b.min[2] or a.min[2] >= b.max[2])
+    fn getAABBintersect(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
+        if (a.max.data[0] <= b.min.data[0] or a.min.data[0] >= b.max.data[0] or
+            a.max.data[1] <= b.min.data[1] or a.min.data[1] >= b.max.data[1] or
+            a.max.data[2] <= b.min.data[2] or a.min.data[2] >= b.max.data[2])
         {
             return @Vector(3, f64){ 0.0, 0.0, 0.0 };
         }
 
-        const ox = @min(a.max[0], b.max[0]) - @max(a.min[0], b.min[0]);
-        const oy = @min(a.max[1], b.max[1]) - @max(a.min[1], b.min[1]);
-        const oz = @min(a.max[2], b.max[2]) - @max(a.min[2], b.min[2]);
+        const ox = @min(a.max.data[0], b.max.data[0]) - @max(a.min.data[0], b.min.data[0]);
+        const oy = @min(a.max.data[1], b.max.data[1]) - @max(a.min.data[1], b.min.data[1]);
+        const oz = @min(a.max.data[2], b.max.data[2]) - @max(a.min.data[2], b.min.data[2]);
 
         // Use centers to derive direction so this MTV is the vector you should ADD to `a` to separate it.
-        const ca = (a.min + a.max) * @Vector(3, f64){ 0.5, 0.5, 0.5 };
-        const cb = (b.min + b.max) * @Vector(3, f64){ 0.5, 0.5, 0.5 };
-
-        const sx = if (ca[0] < cb[0]) -ox else ox;
-        const sy = if (ca[1] < cb[1]) -oy else oy;
-        const sz = if (ca[2] < cb[2]) -oz else oz;
+        const ca = (a.min.add(a.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
+        const cb = (b.min.add(b.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
+        
+        const sx = if (ca.data[0] < cb.data[0]) -ox else ox;
+        const sy = if (ca.data[1] < cb.data[1]) -oy else oy;
+        const sz = if (ca.data[2] < cb.data[2]) -oz else oz;
 
         return @Vector(3, f64){ sx, sy, sz };
     }
 
     // Choose the smallest absolute axis to form the minimum translation vector.
-    fn getAABBpenetration(a: zm.AABB, b: zm.AABB) @Vector(3, f64) {
+    fn getAABBpenetration(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
         const i = getAABBintersect(a, b);
         const ax = @abs(i[0]);
         const ay = @abs(i[1]);
@@ -195,9 +195,9 @@ pub const Resistance = struct {
 test "AABB intersection" {
     const testing = std.testing;
 
-    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB.init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
-    const aabb3 = zm.AABB.init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
+    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB(3, f64).init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
+    const aabb3 = zm.AABB(3, f64).init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
 
     const intersect12 = Mover.getAABBintersect(aabb1, aabb2);
     try testing.expect(intersect12[0] != 0 and intersect12[1] != 0 and intersect12[2] != 0);
@@ -209,8 +209,8 @@ test "AABB intersection" {
 test "AABB penetration" {
     const testing = std.testing;
 
-    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB.init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
+    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB(3, f64).init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
 
     const penetration = Mover.getAABBpenetration(aabb1, aabb2);
     try testing.expect(penetration[0] == 0 and penetration[1] != 0 and penetration[2] == 0);
