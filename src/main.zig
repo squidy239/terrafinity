@@ -26,7 +26,11 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = init.gpa;
     const io = init.io;
-    _ = try sdl.setMemoryFunctionsByAllocator(allocator);
+
+    defer {
+        std.log.debug("SDL arena finished with {d} bytes\n", .{init.arena.queryCapacity()});
+    }
+    _ = try sdl.setMemoryFunctionsByAllocator(init.arena.allocator());
 
     var config_lock: std.Io.RwLock = .init;
 
