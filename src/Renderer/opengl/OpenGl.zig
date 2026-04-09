@@ -81,7 +81,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
-    for (0..cpu_count + 1) |_| {
+    for (0..cpu_count + 100) |_| {
         try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
     }
     try self.draw_context.makeCurrent(self.window);
@@ -172,7 +172,7 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    _ = zm.Vec3f.norm(.{ .data = self.cameraFront});
+    _ = zm.Vec3f.norm(.{ .data = self.cameraFront });
 }
 
 fn CompileShaders(self: *@This()) !void {
@@ -268,9 +268,9 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 }}, std.math.degreesToRadians(180));
+    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, std.math.degreesToRadians(180));
 
-    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 }},.{ .data = self.cameraFront}, .{ .data = @This().cameraUp});
+    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
     const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
     const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
@@ -358,10 +358,30 @@ fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
     const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
     return .{
         .data = .{
-            .{f / aspectWbyH, 0.0, 0.0,   0.0,},
-            .{0.0,            f,   0.0,   0.0,},
-            .{0.0,            0.0, 0.0,   -1.0,},
-            .{0.0,            0.0, zNear, 0.0,},
+            .{
+                f / aspectWbyH,
+                0.0,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                f,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                0.0,
+                0.0,
+                -1.0,
+            },
+            .{
+                0.0,
+                0.0,
+                zNear,
+                0.0,
+            },
         },
     };
 }

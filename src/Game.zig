@@ -286,21 +286,21 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
     const block_grid_capacity = self.options.block_grid_capacity;
     const chunk_capacity = self.options.chunk_capacity;
     self.options_lock.unlockShared(io);
-    
+
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
-        if(self.load_future)|*f|try f.await(io);
-        
+        if (self.load_future) |*f| try f.await(io);
+
         self.chunk_load_is_running.store(true, .seq_cst);
         self.last_chunk_load = .now(io, .awake);
         self.load_future = try io.concurrent(@This().loadChunks, .{ self, io, allocator });
     }
 
     if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
-        if(self.unload_future)|*f|try f.await(io);
-        
+        if (self.unload_future) |*f| try f.await(io);
+
         self.chunk_unload_is_running.store(true, .seq_cst);
         self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = try io.concurrent( unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+        self.unload_future = try io.concurrent(unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
     }
 }
 
@@ -403,7 +403,7 @@ pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_seconds: f32) !void {
     _ = io;
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.Vec3f.crossRH(.{ .data = self.opengl_renderer.cameraFront }, .{ .data =  Renderer.OpenGl.cameraUp});
+    const c = zm.Vec3f.crossRH(.{ .data = self.opengl_renderer.cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
     if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * self.opengl_renderer.cameraFront, .seq_cst);
@@ -639,7 +639,7 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     if (self.load_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
     if (self.unload_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
     self.select.cancelDiscard();
-    
+
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);
     self.world.deinit(io, self.allocator);

@@ -342,7 +342,7 @@ pub const DefaultGenerator = struct {
                 }
             }
         }
-        
+
         try worldEditor.flush(io, allocator);
     }
 

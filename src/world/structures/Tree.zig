@@ -154,7 +154,7 @@ fn getRand(i: *usize) f32 {
     return v;
 }
 
-const rand_table = makeTable(10000);
+const rand_table = makeTable(1000);
 
 fn makeTable(len: usize) [len]f32 {
     @setEvalBranchQuota(1000000000);

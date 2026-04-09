@@ -465,8 +465,8 @@ pub const Editor = struct {
         }
         if (self.propagateChanges) try propagationEditor.flush(io, allocator);
     }
-    
-    pub fn clear(self: *@This())void{
+
+    pub fn clear(self: *@This()) void {
         self.lastChunkCache = null;
         self.editBuffer.clearAndFree(self.tempallocator);
     }

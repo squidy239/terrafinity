@@ -25,7 +25,11 @@ pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     const allocator = init.gpa;
-    const io = init.io;
+    var ev: std.Io.Evented = undefined;
+    try ev.init(allocator, .{ .backing_allocator_needs_mutex = false, .thread_limit = 16});
+    defer ev.deinit();
+
+    const io = ev.io();
 
     defer {
         std.log.debug("SDL arena finished with {d} bytes\n", .{init.arena.queryCapacity()});

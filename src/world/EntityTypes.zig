@@ -211,7 +211,7 @@ pub const Explosive = struct {
         //dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
         //dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
         //dir[2] += (std.crypto.random.float(f64) - 0.5) * dt;
-        if (!std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 })) dir = zm.Vec3f.norm(.{ .data = dir}).data;
+        if (!std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 })) dir = zm.Vec3f.norm(.{ .data = dir }).data;
         dir *= @splat(10 * dt);
         pos += dir;
 
@@ -220,7 +220,7 @@ pub const Explosive = struct {
 
         var worldReader = World.Reader{ .world = world };
         defer worldReader.clear(io);
-        
+
         const g = ztracy.ZoneNC(@src(), "getblock", 56565);
         if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
             g.End();

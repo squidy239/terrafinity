@@ -27,7 +27,7 @@ pub const BlockEncoding = union(enum(u8)) {
             .oneBlock => {
                 switch (self.*) {
                     .oneBlock => {
-                        if (mergeBlocks.oneBlock != .null){
+                        if (mergeBlocks.oneBlock != .null) {
                             if (blocks_lock) |lock| try lock.lock(io);
                             self.* = mergeBlocks;
                             if (blocks_lock) |lock| lock.unlock(io);
@@ -35,8 +35,8 @@ pub const BlockEncoding = union(enum(u8)) {
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            if (blocks_lock) |lock| try lock.lock(io); 
-                            const block_grid = self.blocks;   
+                            if (blocks_lock) |lock| try lock.lock(io);
+                            const block_grid = self.blocks;
                             self.* = .{ .oneBlock = mergeBlocks.oneBlock };
                             if (blocks_lock) |lock| lock.unlock(io);
 
@@ -49,27 +49,29 @@ pub const BlockEncoding = union(enum(u8)) {
                 }
             },
             .blocks => {
+                if (blocks_lock) |lock| try lock.lock(io);
+                errdefer if (blocks_lock) |lock| lock.unlock(io);
                 try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
-                const pred = flatMergeArray.* == @as(@Vector(ChunkSize * ChunkSize * ChunkSize, tag), @splat(@intFromEnum(Block.null)));
-                flatArray.* = @select(tag, pred, flatArray.*, flatMergeArray.*);
 
+                selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
                 if (isOneBlock(self.blocks)) |block| {
+                    @branchHint(.unlikely);
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
-                    
-                    if (blocks_lock) |lock| try lock.lock(io);
+
                     const block_grid = self.blocks;
                     self.* = .{ .oneBlock = block };
                     if (blocks_lock) |lock| lock.unlock(io);
-                    
+
                     pool_mutex.lockUncancelable(io);
                     memory_pool.destroy(@alignCast(block_grid));
                     pool_count.* -= 1;
                     pool_mutex.unlock(io);
                 }
+                if (blocks_lock) |lock| lock.unlock(io);
             },
         }
     }
@@ -97,8 +99,8 @@ pub const BlockEncoding = union(enum(u8)) {
         @memset(flatblocks, self.oneBlock);
         self.* = .{ .blocks = mem };
     }
-    
-    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block)BlockEncoding{
+
+    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) BlockEncoding {
         return if (isOneBlock(blocks)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = blocks };
     }
 
@@ -161,7 +163,7 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 }
 
 /// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
-pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex,) !void {
+pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
     self.add_ref(io);
     defer self.release(io);
     try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex, &self.lock);
@@ -225,7 +227,6 @@ pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, 
     }
 }
 
-//TODO better timeout with Io
 pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
     if (self.ref_count.load(.seq_cst) == amount) return true;
     const st = std.Io.Timestamp.now(io, .awake);
@@ -235,6 +236,32 @@ pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroT
         try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     return true;
+}
+
+fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
+    if (comptime std.simd.suggestVectorLength(T)) |vlen| {
+        const VT = @Vector(vlen, T);
+        var i: usize = 0;
+        while (i + vlen <= len) : (i += vlen) {
+            const a: VT = flatArray.*[i..][0..vlen].*;
+            const b: VT = flatMergeArray[i..][0..vlen].*;
+            const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
+            const result = @select(T, pred, a, b);
+            flatArray.*[i..][0..vlen].* = result;
+        }
+        // handle remainder scalarly
+        while (i < len) : (i += 1) {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    } else {
+        for (0..len) |i| {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    }
 }
 
 pub fn touch(self: *@This(), io: std.Io) void {
@@ -360,7 +387,6 @@ test "Merge" {
         },
     }
 }
-
 
 test {
     std.testing.refAllDecls(@This());

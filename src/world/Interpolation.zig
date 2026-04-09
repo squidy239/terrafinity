@@ -122,7 +122,7 @@ pub const NaturalCubicInterpolator3D = struct {
         return a * values[i] + localT * values[i + 1] + ((a * a * a - a) * m[i] + (localT * localT * localT - localT) * m[i + 1]) * h2_6;
     }
 
-    pub inline fn splineEvalComptimeT(Type: type, values: [4]Type, m: [4]Type, comptime t: Type) Type {
+    pub fn splineEvalComptimeT(Type: type, values: [4]Type, m: [4]Type, comptime t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
         const i: usize = comptime @intFromFloat(@min(@floor(t / one_third), 2));
         const localT: Type = comptime t * 3.0 - @as(Type, @floatFromInt(i));

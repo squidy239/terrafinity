@@ -97,7 +97,7 @@ pub const Mover = struct {
                     const block = try reader.getBlock(io, allocator, @intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
-                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }}, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 }});
+                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
 
                     var selfAABB = self.boundingBox;
                     selfAABB.min = selfAABB.min.add(.{ .data = pos });
@@ -138,7 +138,7 @@ pub const Mover = struct {
         // Use centers to derive direction so this MTV is the vector you should ADD to `a` to separate it.
         const ca = (a.min.add(a.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
         const cb = (b.min.add(b.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
-        
+
         const sx = if (ca.data[0] < cb.data[0]) -ox else ox;
         const sy = if (ca.data[1] < cb.data[1]) -oy else oy;
         const sz = if (ca.data[2] < cb.data[2]) -oz else oz;

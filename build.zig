@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
+        .use_lld = false,
     });
 
     // Link libraries
@@ -79,18 +80,21 @@ fn setupDependencies(
         .enable_ztracy = tracy_options.enable_ztracy,
         .enable_fibers = tracy_options.enable_fibers,
         .on_demand = tracy_options.on_demand,
-        .optimize = optimize,
+        .optimize = .Debug,
     });
     root_module.addImport("ztracy", ztracy.module("root"));
 
     // RocksDB (requires: sudo apt-get install librocksdb-dev)
-    const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false });
+    const dep_rocksdb = b.dependency("rocksdb", .{
+        .link_vendor = false,
+        .optimize = .Debug,
+    });
     root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
 
     // SDL3
     const sdl3 = b.dependency("sdl3", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = .Debug,
     });
     root_module.addImport("sdl3", sdl3.module("sdl3"));
 
@@ -123,9 +127,10 @@ fn setupDependencies(
 
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
-        .optimize = optimize,
-        .backend = .sdl3,
+        .optimize = .Debug,
         .freetype = false,
+        .@"tree-sitter" = false,
+        .backend = .sdl3,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
     root_module.addImport("sdl3-backend", dvui_dep.module("sdl3"));
