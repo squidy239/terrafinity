@@ -292,7 +292,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
         
         self.chunk_load_is_running.store(true, .seq_cst);
         self.last_chunk_load = .now(io, .awake);
-        self.load_future = io.async(@This().loadChunks, .{ self, io, allocator });
+        self.load_future = try io.concurrent(@This().loadChunks, .{ self, io, allocator });
     }
 
     if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
@@ -300,7 +300,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
         
         self.chunk_unload_is_running.store(true, .seq_cst);
         self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = io.async( unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+        self.unload_future = try io.concurrent( unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
     }
 }
 
@@ -636,9 +636,10 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
-
-    std.log.info("stopped threads", .{});
-
+    if (self.load_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    if (self.unload_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    self.select.cancelDiscard();
+    
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);
     self.world.deinit(io, self.allocator);

@@ -8,7 +8,6 @@ pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const Entity = @import("world/Entity.zig");
-pub const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
@@ -80,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
 
-    var singlepress = Key.Singlepress.initEmpty();
+    var singlepress = Key.Singlepress.empty;
     //TODO load keymap from file
     try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
@@ -110,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
 
     defer if (ui.menu_state.ingame) game.deinit(io, window);
     var frame_time: std.Io.Timestamp = .now(io, .awake);
-    var action_set = Key.ActionSet.initEmpty();
+    var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
         const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &ui_window);

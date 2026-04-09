@@ -90,7 +90,7 @@ fn setupDependencies(
     // SDL3
     const sdl3 = b.dependency("sdl3", .{
         .target = target,
-        .optimize = .Debug, //TODO make this optimize once it stops erroring in release
+        .optimize = optimize,
     });
     root_module.addImport("sdl3", sdl3.module("sdl3"));
 
@@ -123,7 +123,7 @@ fn setupDependencies(
 
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
-        .optimize = .Debug, //TODO make this optimize once it stops erroring in release
+        .optimize = optimize,
         .backend = .sdl3,
         .freetype = false,
     });

@@ -419,7 +419,7 @@ pub const Editor = struct {
                     sides[side] = try chunk.extractFace(io, @enumFromInt(side), false);
                 }
             }
-            try chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, true);
+            try chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex);
 
             if (self.propagateChanges) {
                 var coords: ChunkPos = diffChunk.key_ptr.*;
