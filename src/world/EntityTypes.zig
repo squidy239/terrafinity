@@ -30,7 +30,7 @@ pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
     defer entities.close();
     for (&EntityMeshes, 0..) |*mesh, i| {
         const entity: Entity.Type = @enumFromInt(i);
-        std.debug.print("reading: {s}\n", .{@tagName(entity)});
+        std.log.debug("reading: {s}\n", .{@tagName(entity)});
         const fileContents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
             std.log.err("failed to read: {s}\n", .{@tagName(entity)});
             continue;
@@ -40,7 +40,6 @@ pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
         defer parsedObj.deinit(allocator);
         mesh.* = try GlLoadEntity(parsedObj, &EntityMeshesLen[i], allocator);
     }
-    std.debug.print("done reading\n", .{});
 }
 
 pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {

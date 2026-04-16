@@ -313,7 +313,6 @@ pub fn handleSelectFutures(self: *@This()) !void {
     var select_completion_buffer: [1024]SelectUnion = undefined;
     while (true) {
         const completed = try self.select.awaitMany(&select_completion_buffer, 0);
-        std.debug.print("c: {d}\n", .{completed});
         if (completed == 0) break;
         for (select_completion_buffer[0..completed]) |completed_union| {
             switch (completed_union) {
@@ -636,13 +635,9 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
-    std.debug.print("1\n", .{});
-    if (self.load_future) |*future| future.cancel(io) {};
-    std.debug.print("A\n", .{});
-    if (self.unload_future) |*future| future.cancel(io) {};
-    std.debug.print("B\n", .{});
+    if (self.load_future) |*future| future.cancel(io) catch {};
+    if (self.unload_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
-    std.debug.print("C\n", .{});
 
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);

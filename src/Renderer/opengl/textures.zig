@@ -23,7 +23,7 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
         }
         allocator.free(textureArray);
     }
-    std.debug.print("texture resolution: {any}\n", .{resolution});
+    std.log.info("texture resolution: {any}\n", .{resolution});
     var it = std.Io.Dir.iterate(textures_path);
     var i: usize = 0;
     while (try it.next(io)) |image| {
@@ -42,7 +42,7 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
                         loadedImg.deinit(allocator);
                         continue;
                     }
-                    std.debug.print("loaded texture: {any}\n", .{blockType.?});
+                    std.log.debug("loaded texture: {any}\n", .{blockType.?});
                     const index = @intFromEnum(blockType.?);
                     std.debug.assert(index < textureArray.len);
                     textureArray[index] = loadedImg;
