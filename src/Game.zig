@@ -429,20 +429,19 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
         try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
         try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
     };
-    const exbl = ztracy.ZoneNC(@src(), "extractBlocks", 3222);
-    const lock = ztracy.ZoneNC(@src(), "lock", 2222111);
-    try chunk.lockShared(io);
-    defer chunk.unlockShared(io);
-    lock.End();
-    exbl.End();
+
     var sfa = std.heap.stackFallback(65536, self.allocator);
     var alloc_writer: std.Io.Writer.Allocating = .init(sfa.get());
     defer alloc_writer.deinit();
-    try Mesh.fromChunks(
-        chunk.blocks,
-        &neighbor_faces,
-        &alloc_writer.writer,
-    );
+    {
+        try chunk.lockShared(io);
+        defer chunk.unlockShared(io);
+        try Mesh.fromChunks(
+            chunk.blocks,
+            &neighbor_faces,
+            &alloc_writer.writer,
+        );
+    }
     const written = alloc_writer.written();
     if (written.len == 0) return;
     try self.opengl_renderer.ensureContext();
@@ -504,10 +503,10 @@ fn addChunkToRenderTask(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStru
 
 pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    const lowest_level = game.options.lowest_level;
-    const highest_level = game.options.highest_level;
-    const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
-    if (!inside_range) return;
+    //const lowest_level = game.options.lowest_level;
+    //const highest_level = game.options.highest_level;
+    //const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
+    //if (!inside_range) return;
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
@@ -577,6 +576,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             amount_tested += 1;
             std.debug.assert(cc <= 2 * @max(distance[0], distance[0]));
             var y: i32 = -@as(i32, @intCast(distance[1]));
+            try io.checkCancel();
             while (y < distance[1]) {
                 defer y += 1;
                 const Pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
@@ -637,9 +637,9 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
     std.debug.print("1\n", .{});
-    if (self.load_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    if (self.load_future) |*future| future.cancel(io) {};
     std.debug.print("A\n", .{});
-    if (self.unload_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    if (self.unload_future) |*future| future.cancel(io) {};
     std.debug.print("B\n", .{});
     self.select.cancelDiscard();
     std.debug.print("C\n", .{});

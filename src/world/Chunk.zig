@@ -18,10 +18,11 @@ pub const BlockEncoding = union(enum(u8)) {
     blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 
-    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, blocks_lock: ?*std.Io.RwLock) !void {
+    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, blocks_locks: ?*std.Io.RwLock) !void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
-
+        _ = blocks_locks;
+        const blocks_lock = null;
         if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .null)) return;
         switch (mergeBlocks) {
             .oneBlock => {
@@ -49,9 +50,13 @@ pub const BlockEncoding = union(enum(u8)) {
                 }
             },
             .blocks => {
-                if (blocks_lock) |lock| try lock.lock(io);
+                while (true) {
+                    try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
+                    if (blocks_lock) |lock| try lock.lock(io);
+                    if(self.* == .blocks) break;
+                    if (blocks_lock) |lock| lock.unlock(io);
+                }
                 errdefer if (blocks_lock) |lock| lock.unlock(io);
-                try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
