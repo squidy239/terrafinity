@@ -2,14 +2,10 @@
     .name = .terrafinity,
 
     .fingerprint = 0xbba999c8eb48706e,
-    // This is a [Semantic Version](https://semver.org/).
-    // In a future version of Zig it will be used for package deduplication.
+
     .version = "0.7.0",
 
-    // This field is optional.
-    // This is currently advisory only; Zig does not yet do anything
-    // with this value.
-    .minimum_zig_version = "0.16.0-dev.2860+9c5460316",
+    .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
         .zm = .{
@@ -29,8 +25,8 @@
             .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
         },
         .zigimg = .{
-            .url = "git+https://github.com/GasInfinity-Forks/zigimg.git#e4f63ba341e470b2f39fa59c84cf0e0b496526ef",
-            .hash = "zigimg-0.1.0-8_eo2qSYFwA7fGbaAxMmZj4NtIBqnjVV1ydlBlwq3vqK",
+            .url = "git+https://github.com/GasInfinity-Forks/zigimg.git#c474a50ce9ec79ae726ee3f86fe08d530ff91e78",
+            .hash = "zigimg-0.1.0-8_eo2gCZFwA239CedNPHzAkZMxkUxQpLBq3UrataPX1x",
         },
         .rocksdb = .{
             .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
@@ -41,8 +37,8 @@
             .hash = "sdl3-0.1.9-NmT1Q1uFJwDhoBeP0k5-W6K9mo9h-x4yc9LebgZ3W6ET",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#17ce34643a54c7f1375fa28feb3a40d82cff57ca",
-            .hash = "dvui-0.4.0-dev-AQFJmS1j2wD9K9kqG0Xevlhzsk8MR9FBopByaR5KfROF",
+            .url = "git+https://github.com/david-vanderson/dvui#cbc1771d173a3efb8981965f26b93fc3de2fe4e3",
+            .hash = "dvui-0.5.0-dev-AQFJmf9u2wCpkLdoEvAHrxUuMDzVKS-AcB48RitJZke3",
         },
     },
 

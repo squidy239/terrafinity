@@ -313,6 +313,7 @@ pub fn handleSelectFutures(self: *@This()) !void {
     var select_completion_buffer: [1024]SelectUnion = undefined;
     while (true) {
         const completed = try self.select.awaitMany(&select_completion_buffer, 0);
+        std.debug.print("c: {d}\n", .{completed});
         if (completed == 0) break;
         for (select_completion_buffer[0..completed]) |completed_union| {
             switch (completed_union) {
@@ -481,7 +482,6 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
 
 pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: World.ChunkPos, genStructures: bool) !void {
     try self.loaded_or_meshed.put(io, allocator, Pos, {});
-    errdefer _ = self.loaded_or_meshed.remove(io, Pos);
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, Pos, genStructures });
 }
 
@@ -636,9 +636,13 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 
 pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
+    std.debug.print("1\n", .{});
     if (self.load_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    std.debug.print("A\n", .{});
     if (self.unload_future) |*future| future.cancel(io) catch |err| std.log.err("err on deinit: {any}\n", .{err});
+    std.debug.print("B\n", .{});
     self.select.cancelDiscard();
+    std.debug.print("C\n", .{});
 
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);

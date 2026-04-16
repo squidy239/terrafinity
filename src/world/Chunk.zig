@@ -70,8 +70,7 @@ pub const BlockEncoding = union(enum(u8)) {
                     memory_pool.destroy(@alignCast(block_grid));
                     pool_count.* -= 1;
                     pool_mutex.unlock(io);
-                }
-                if (blocks_lock) |lock| lock.unlock(io);
+                } else if (blocks_lock) |lock| lock.unlock(io);
             },
         }
     }
@@ -304,13 +303,15 @@ pub fn unlockShared(self: *@This(), io: std.Io) void {
 }
 
 pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
-    try self.lockShared(io);
     _ = self.ref_count.fetchAdd(1, .seq_cst);
+    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
+    try self.lockShared(io);
 }
 
 pub fn addAndLock(self: *@This(), io: std.Io) !void {
-    try self.lockExclusive(io);
     _ = self.ref_count.fetchAdd(1, .seq_cst);
+    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
+    try self.lockExclusive(io);
 }
 
 pub fn releaseAndUnlock(self: *@This(), io: std.Io) void {

@@ -131,6 +131,7 @@ fn setupDependencies(
         .freetype = false,
         .@"tree-sitter" = false,
         .backend = .sdl3,
+        .@"log-error-trace" = false,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
     root_module.addImport("sdl3-backend", dvui_dep.module("sdl3"));
