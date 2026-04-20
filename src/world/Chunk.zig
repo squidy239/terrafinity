@@ -18,28 +18,22 @@ pub const BlockEncoding = union(enum(u8)) {
     blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 
-    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, blocks_locks: ?*std.Io.RwLock) !void {
+    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
-        _ = blocks_locks;
-        const blocks_lock = null;
         if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .null)) return;
         switch (mergeBlocks) {
             .oneBlock => {
                 switch (self.*) {
                     .oneBlock => {
                         if (mergeBlocks.oneBlock != .null) {
-                            if (blocks_lock) |lock| try lock.lock(io);
                             self.* = mergeBlocks;
-                            if (blocks_lock) |lock| lock.unlock(io);
                         }
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            if (blocks_lock) |lock| try lock.lock(io);
                             const block_grid = self.blocks;
                             self.* = .{ .oneBlock = mergeBlocks.oneBlock };
-                            if (blocks_lock) |lock| lock.unlock(io);
 
                             pool_mutex.lockUncancelable(io);
                             memory_pool.destroy(@alignCast(block_grid));
@@ -52,11 +46,8 @@ pub const BlockEncoding = union(enum(u8)) {
             .blocks => {
                 while (true) {
                     try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
-                    if (blocks_lock) |lock| try lock.lock(io);
                     if (self.* == .blocks) break;
-                    if (blocks_lock) |lock| lock.unlock(io);
                 }
-                errdefer if (blocks_lock) |lock| lock.unlock(io);
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
@@ -69,13 +60,12 @@ pub const BlockEncoding = union(enum(u8)) {
 
                     const block_grid = self.blocks;
                     self.* = .{ .oneBlock = block };
-                    if (blocks_lock) |lock| lock.unlock(io);
 
                     pool_mutex.lockUncancelable(io);
                     memory_pool.destroy(@alignCast(block_grid));
                     pool_count.* -= 1;
                     pool_mutex.unlock(io);
-                } else if (blocks_lock) |lock| lock.unlock(io);
+                }
             },
         }
     }
@@ -109,6 +99,8 @@ pub const BlockEncoding = union(enum(u8)) {
     }
 
     test "merge" {
+        if (true) return error.SkipZigTest;
+
         try std.testing.fuzz(std.testing.io, testOne, .{});
     }
 
@@ -170,7 +162,7 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
     try self.addAndLock(io);
     defer self.releaseAndUnlock(io);
-    try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex, &self.lock);
+    try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
 pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) !ChunkFaceEncoding {

@@ -57,15 +57,17 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Test step
-    //  const tests = b.addTest(.{
-    //      .root_module = root_module,
-    //  });
-    //  b.installArtifact(tests);
+     const tests = b.addTest(.{
+        .root_module = root_module,
+        .use_llvm = true,
+        .use_lld = false,
+    });
+    b.installArtifact(tests);
 
-    // const run_test = b.addRunArtifact(tests);
+    const run_test = b.addRunArtifact(tests);
 
-    // const test_step = b.step("test", "Run tests");
-    // test_step.dependOn(&run_test.step);
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_test.step);
 }
 
 fn setupDependencies(
@@ -80,7 +82,7 @@ fn setupDependencies(
         .enable_ztracy = tracy_options.enable_ztracy,
         .enable_fibers = tracy_options.enable_fibers,
         .on_demand = tracy_options.on_demand,
-        .optimize = .Debug,
+        .optimize = optimize,
     });
     root_module.addImport("ztracy", ztracy.module("root"));
 
@@ -128,7 +130,7 @@ fn setupDependencies(
 
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
-        .optimize = .Debug,
+        .optimize = optimize,
         .freetype = false,
         .@"tree-sitter" = false,
         .backend = .sdl3,

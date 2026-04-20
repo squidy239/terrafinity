@@ -101,13 +101,13 @@ pub const DefaultGenerator = struct {
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
         if (Pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, Pos.level).position[1]) {
-            try blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex, null);
+            try blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (Pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, Pos.level).position[1]) {
-            try blocks.merge(io, .{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex, null);
+            try blocks.merge(io, .{ .oneBlock = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position)))));
             var rand = rng.random();
@@ -116,13 +116,13 @@ pub const DefaultGenerator = struct {
             generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
             const oneblock = Chunk.isOneBlock(&blockgrid);
-            if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex, null);
+            if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .oneBlock = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         }
         generateCavesInterpolate(&blockgrid, Pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            try blocks.merge(io, .{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex, null);
-        } else try blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex, null);
+            try blocks.merge(io, .{ .oneBlock = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+        } else try blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, Pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
