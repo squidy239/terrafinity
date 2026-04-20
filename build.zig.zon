@@ -29,8 +29,8 @@
             .hash = "zigimg-0.1.0-8_eo2gCZFwA239CedNPHzAkZMxkUxQpLBq3UrataPX1x",
         },
         .rocksdb = .{
-            .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
-            .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
+            .url = "git+https://github.com/squidy239/rocksdb-zig#ee06fdd2c983f03654917b7ae75526c716748713",
+            .hash = "rocksdb-9.7.4-z_CUTqzoAACZ0z0UZy0zNqiCOAp32K1VpE_unvLvLMl_",
         },
         .sdl3 = .{
             .url = "git+https://codeberg.org/LDT9510/zig-sdl3#34357ae71c5207133618a02cda251cfb5e12eb4b",

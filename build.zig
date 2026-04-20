@@ -86,15 +86,16 @@ fn setupDependencies(
 
     // RocksDB (requires: sudo apt-get install librocksdb-dev)
     const dep_rocksdb = b.dependency("rocksdb", .{
-        .link_vendor = false,
-        .optimize = .Debug,
+        .enable_zstd = true,
+        .enable_lz4 = true,
+        .optimize = optimize,
     });
-    root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
+    root_module.addImport("rocksdb", dep_rocksdb.module("bindings"));
 
     // SDL3
     const sdl3 = b.dependency("sdl3", .{
         .target = target,
-        .optimize = .Debug,
+        .optimize = optimize,
     });
     root_module.addImport("sdl3", sdl3.module("sdl3"));
 

@@ -53,7 +53,7 @@ pub const BlockEncoding = union(enum(u8)) {
                 while (true) {
                     try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
                     if (blocks_lock) |lock| try lock.lock(io);
-                    if(self.* == .blocks) break;
+                    if (self.* == .blocks) break;
                     if (blocks_lock) |lock| lock.unlock(io);
                 }
                 errdefer if (blocks_lock) |lock| lock.unlock(io);

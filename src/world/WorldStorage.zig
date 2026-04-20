@@ -9,9 +9,9 @@ const ztracy = @import("ztracy");
 const builtin = @import("builtin");
 
 isinit: bool,
-config: Config,
-database: rocksdb.Database(.Multiple),
-options: *rocksdb.c.rocksdb_options_t,
+database: rocksdb.database.DB,
+options: rocksdb.DBOptions,
+column_families: []const rocksdb.ColumnFamily,
 
 pub fn getSource(self: *@This()) World.ChunkSource {
     return .{
@@ -25,19 +25,19 @@ pub fn getSource(self: *@This()) World.ChunkSource {
 }
 
 ////opens the database, creates it if it doesnt exist
-pub fn init(path: [:0]const u8, config: Config, allocator: std.mem.Allocator) !@This() {
-    const cpu_count = try std.Thread.getCpuCount();
+pub fn init(path: []const u8, config: rocksdb.DBOptions, allocator: std.mem.Allocator) !@This() {
     var storage: @This() = undefined;
     storage.isinit = true;
-    storage.config = config;
+    storage.options = config;
+    var err_str: ?rocksdb.Data = null;
+    defer if (err_str) |s| {
+        std.log.err("{s}", .{s.data});
+        s.deinit();
+    };
+    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, config, null, false, &err_str);
+    errdefer storage.database.deinit();
+    errdefer allocator.free(storage.column_families);
 
-    storage.options = rocksdb.c.rocksdb_options_create() orelse return error.OutOfMemory;
-
-    rocksdb.c.rocksdb_options_set_create_if_missing(storage.options, 1);
-    rocksdb.c.rocksdb_options_increase_parallelism(storage.options, @intCast(cpu_count));
-    rocksdb.c.rocksdb_options_set_compression(storage.options, @intFromEnum(config.compression));
-
-    storage.database = try .openRaw(allocator, path, storage.options);
     return storage;
 }
 
@@ -72,7 +72,12 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     chunk.lock.unlockShared(io);
     if (builtin.target.cpu.arch.endian() == .big) std.mem.byteSwapAllFields(ChunkKey, &key);
     const keybytes = std.mem.asBytes(&key);
-    try self.database.put(keybytes, buf_writer.buffered(), .{});
+    var err_str: ?rocksdb.Data = null;
+    defer if (err_str) |s| {
+        std.log.err("{s}", .{s.data});
+        s.deinit();
+    };
+    try self.database.put(self.column_families[0].handle, keybytes, buf_writer.buffered(), &err_str);
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
@@ -81,11 +86,12 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     var key = ChunkKey{ .x = Pos.position[0], .y = Pos.position[1], .z = Pos.position[2], .level = Pos.level };
     if (builtin.target.cpu.arch.endian() == .big) std.mem.byteSwapAllFields(ChunkKey, &key);
     const keybytes = std.mem.asBytes(&key);
-    const value = self.database.get(keybytes, .{}) catch return error.Unrecoverable;
-    if (value == null) return false;
-    defer rocksdb.free(value.?);
+    var err_str: ?rocksdb.Data = null;
+    defer if (err_str) |s| s.deinit();
+    const value = (self.database.get(self.column_families[0].handle, keybytes, &err_str) catch return error.Unrecoverable) orelse return false;
+    defer value.deinit();
 
-    var buf_reader = std.Io.Reader.fixed(value.?);
+    var buf_reader = std.Io.Reader.fixed(value.data);
     const encoding: std.meta.Tag(Chunk.BlockEncoding) = @enumFromInt(buf_reader.takeInt(EncodingTagType, .little) catch unreachable);
     switch (encoding) {
         .blocks => {
@@ -99,28 +105,14 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
 fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
     _ = world;
-    _ = allocator;
     _ = io;
     const self: *@This() = @ptrCast(@alignCast(source.data));
-    self.deinit();
+    self.deinit(allocator);
 }
 
-pub fn deinit(self: *@This()) void {
+pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     std.debug.assert(self.isinit);
     self.isinit = false;
     self.database.deinit();
-    rocksdb.c.rocksdb_options_destroy(self.options);
+    allocator.free(self.column_families);
 }
-
-pub const Config = struct {
-    compression: enum(i32) {
-        none = rocksdb.c.rocksdb_no_compression,
-        snappy = rocksdb.c.rocksdb_snappy_compression,
-        bz2 = rocksdb.c.rocksdb_bz2_compression,
-        zlib = rocksdb.c.rocksdb_zlib_compression,
-        lz4 = rocksdb.c.rocksdb_lz4_compression,
-        lz4hc = rocksdb.c.rocksdb_lz4hc_compression,
-        xpress = rocksdb.c.rocksdb_xpress_compression,
-        zstd = rocksdb.c.rocksdb_zstd_compression,
-    } = .lz4,
-};
