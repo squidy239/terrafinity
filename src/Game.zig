@@ -104,8 +104,10 @@ pub const WorldOptions = struct {
     world_config: World.WorldConfig,
 
     pub fn fromWorldFolder(folder: []const u8, io: std.Io, allocator: std.mem.Allocator) !WorldOptions {
-        var world_folder = try std.Io.Dir.cwd().openDir(io, folder, .{});
+        var world_folder = try std.Io.Dir.cwd().createDirPathOpen(io, folder, .{});
         defer world_folder.close(io);
+        
+        try world_folder.setTimestamps(io, ".", .{.access_timestamp = .now});
 
         const worldConfigFile = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
         defer worldConfigFile.close(io);
@@ -180,11 +182,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
     game.allocator = allocator;
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
-    std.Io.Dir.cwd().createDirPath(io, folder) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
+    
     var world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
         else => return err,

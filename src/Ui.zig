@@ -186,6 +186,11 @@ pub fn sidebar(self: *@This()) bool {
     return false;
 }
 
+const FolderData = struct {
+    access_time: std.Io.Timestamp,
+    name: []const u8,
+};
+
 pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .hide,
@@ -218,10 +223,28 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
     var worlds_folder = try std.Io.Dir.cwd().openDir(io, worlds_path, .{ .iterate = true });
     defer worlds_folder.close(io);
+
+    var list: std.ArrayList(FolderData) = .empty;
+
+    defer {
+        for (list.items) |data| {
+            allocator.free(data.name);
+        }
+        list.deinit(allocator);
+    }
+
     var it = worlds_folder.iterate();
-    var i: usize = 0;
-    while (try it.next(io)) |item| : (i += 1) {
+    while (try it.next(io)) |item| {
         if (item.kind != .directory) continue;
+        const stat = try std.Io.Dir.statFile(worlds_folder, io, item.name, .{});
+        const data = FolderData{ .access_time = stat.ctime, .name = try allocator.dupe(u8, item.name) };
+        errdefer allocator.free(data.name);
+        try list.append(allocator, data);
+    }
+
+    std.sort.pdq(FolderData, list.items, {}, lessThanFn);
+
+    for (list.items, 0..) |item, i| {
         const game = menuCard(@src(), .{}, .{ .id_extra = i, .expand = .vertical });
         defer game.deinit();
 
@@ -239,6 +262,10 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         }
     }
     return false;
+}
+
+fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
+    return a.access_time.nanoseconds > b.access_time.nanoseconds;
 }
 
 fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {

@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Test step
-     const tests = b.addTest(.{
+    const tests = b.addTest(.{
         .root_module = root_module,
         .use_llvm = true,
         .use_lld = false,

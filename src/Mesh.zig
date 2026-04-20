@@ -28,7 +28,6 @@ pub const Face = packed struct(u64) {
     _: u12,
 };
 
-//TODO make neighbor faces like blockencoding to handle empty chunks better
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
     if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");

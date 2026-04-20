@@ -24,7 +24,8 @@ const config_path = "Config.zon";
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
-    const allocator = init.gpa;
+    var tracy_allocator = ztracy.TracyAllocator.init(init.gpa);
+    const allocator = tracy_allocator.allocator();
     const io = init.io;
 
     defer {
