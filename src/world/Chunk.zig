@@ -168,8 +168,8 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 
 /// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
 pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-    self.add_ref(io);
-    defer self.release(io);
+    try self.addAndLock(io);
+    defer self.releaseAndUnlock(io);
     try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex, &self.lock);
 }
 
