@@ -2,51 +2,43 @@
     .name = .terrafinity,
 
     .fingerprint = 0xbba999c8eb48706e,
-    // This is a [Semantic Version](https://semver.org/).
-    // In a future version of Zig it will be used for package deduplication.
-    .version = "0.6.0",
 
-    // This field is optional.
-    // This is currently advisory only; Zig does not yet do anything
-    // with this value.
-    .minimum_zig_version = "0.15.1",
+    .version = "0.7.0",
+
+    .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
         .zm = .{
-            .url = "git+https://github.com/griush/zm#b5d70485dfc78baa9251a06a844d860fd00e9bcf",
-            .hash = "zm-0.4.0-cLX-WdndAACqPRGqhCAsd65iTajgaVVwrXhoLUQFKTOt",
+            .url = "git+https://codeberg.org/grius/zm#21b71aef4e28b91994e67b6ce002411776f4ea7e",
+            .hash = "zm-0.5.1-cLX-WY_hAACaH6l57yntgfwAVbRcjdgTa0-9vHuKiMm5",
         },
         .ztracy = .{
             .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
             .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
+            .url = "git+https://github.com/castholm/zigglgen.git#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
             .hash = "zigglgen-0.5.0-zigglr_CLwBs1aABtYVtxNPo1SB8AzgKMVouoqULqkDQ",
         },
         .obj = .{
-            .url = "git+https://github.com/chip2n/zig-obj.git#47410383c81d24454e370ffadc0980af7abea522",
-            .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
+            .url = "git+https://github.com/chip2n/zig-obj.git#6070356009e761a4aef82256f1f431037ae97426",
+            .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
         .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg.git#9714df09f76891323c7fdbbbf23a17b79024fffb",
-            .hash = "zigimg-0.1.0-8_eo2j4mFwCU7tWnqvkYtzqe-OPRn_bxEql_IJhW85LT",
-        },
-        .ConcurrentQueue = .{
-            .url = "git+https://codeberg.org/glowsquid/ConcurrentQueue.git#5a0b47c99f3e3ff4ee179028b43f1a0ee4498ffa",
-            .hash = "ConcurrentQueue-0.0.0-ucuqzoBCAAD7OexFDSJ3nulxQ9AjBcA1xStwAZWSWAlE",
+            .url = "git+https://github.com/zigimg/zigimg#c7e81a13bff1cf4c5b7f085a8360f9d551143d40",
+            .hash = "zigimg-0.1.0-8_eo2uScFwCnpzB1Y2n_jf3euDfMEeCLxJE_E5_W5BNe",
         },
         .rocksdb = .{
-            .url = "https://github.com/jiacai2050/zig-rocksdb/archive/41abee374d84d4d4fce4088ea0f7888856c85312.tar.gz",
-            .hash = "rocksdb-0.2.0-6iKb4KOQAAAmlxe_B_vNeprzycktfswdK0NInMO5awDk",
+            .url = "git+https://github.com/squidy239/rocksdb-zig#ee06fdd2c983f03654917b7ae75526c716748713",
+            .hash = "rocksdb-9.7.4-z_CUTqzoAACZ0z0UZy0zNqiCOAp32K1VpE_unvLvLMl_",
         },
         .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3#92b83602cdfa59262e73c023df906c78eef73455",
-            .hash = "sdl3-0.1.7-NmT1Q_YHJwA7QnAm7_SIfh1UZpQUqWKCZwM2u_TAHF-w",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3#40c2e4b579aa556db37a502c936426aa1c8b5c95",
+            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#0ca4d5c7a7915ee53a7f69c7facb8b48b7807f40",
-            .hash = "dvui-0.4.0-dev-AQFJmc3h2gBHoPtLm2KO1NEWuqV-kPm1cusWeY6OkHKf",
+            .url = "git+https://github.com/david-vanderson/dvui#49e8443c038cc5a82dbf57305322132c0a61d4b6",
+            .hash = "dvui-0.5.0-dev-AQFJmTgB3QCriBRzSQGPpw44zDiTaQ8hNnrxsrSxSQti",
         },
     },
 

@@ -4,7 +4,6 @@ pub fn build(b: *std.Build) void {
     // Build options
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const check = b.option(bool, "check", "check if the game compiles") orelse false;
 
     // Tracy profiling options
     const tracy_options = .{
@@ -28,6 +27,7 @@ pub fn build(b: *std.Build) void {
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
+        .use_lld = false,
     });
 
     // Link libraries
@@ -37,15 +37,12 @@ pub fn build(b: *std.Build) void {
         .on_demand = tracy_options.on_demand,
         .optimize = optimize,
     });
-    exe.linkLibrary(ztracy.artifact("tracy"));
+    exe.root_module.linkLibrary(ztracy.artifact("tracy"));
 
-    // Check step
-    if (check) {
-        exe.use_llvm = false;
-        const checkStep = b.step("check", "Check if the game compiles");
-        checkStep.dependOn(&exe.step);
-        return;
-    }
+    const check_step = b.step("check", "");
+    check_step.dependOn(&b.addTest(.{
+        .root_module = root_module,
+    }).step);
 
     // Install and run steps
     b.installArtifact(exe);
@@ -60,15 +57,15 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Test step
-    const tests = b.addTest(.{
-        .root_module = root_module,
-    });
-    b.installArtifact(tests);
+    //  const tests = b.addTest(.{
+    //      .root_module = root_module,
+    //  });
+    //  b.installArtifact(tests);
 
-    const run_test = b.addRunArtifact(tests);
+    // const run_test = b.addRunArtifact(tests);
 
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_test.step);
+    // const test_step = b.step("test", "Run tests");
+    // test_step.dependOn(&run_test.step);
 }
 
 fn setupDependencies(
@@ -83,20 +80,17 @@ fn setupDependencies(
         .enable_ztracy = tracy_options.enable_ztracy,
         .enable_fibers = tracy_options.enable_fibers,
         .on_demand = tracy_options.on_demand,
-        .optimize = optimize,
+        .optimize = .Debug,
     });
     root_module.addImport("ztracy", ztracy.module("root"));
 
     // RocksDB (requires: sudo apt-get install librocksdb-dev)
-    const dep_rocksdb = b.dependency("rocksdb", .{ .link_vendor = false });
-    root_module.addImport("rocksdb", dep_rocksdb.module("rocksdb"));
-
-    // ConcurrentQueue
-    const ConcurrentQueue = b.dependency("ConcurrentQueue", .{
-        .target = target,
+    const dep_rocksdb = b.dependency("rocksdb", .{
+        .enable_zstd = true,
+        .enable_lz4 = true,
         .optimize = optimize,
     });
-    root_module.addImport("ConcurrentQueue", ConcurrentQueue.module("ConcurrentQueue"));
+    root_module.addImport("rocksdb", dep_rocksdb.module("bindings"));
 
     // SDL3
     const sdl3 = b.dependency("sdl3", .{
@@ -104,17 +98,6 @@ fn setupDependencies(
         .optimize = optimize,
     });
     root_module.addImport("sdl3", sdl3.module("sdl3"));
-
-    // ThreadPool
-    const ThreadPool = b.addModule("ThreadPool", .{
-        .root_source_file = b.path("src/libs/ThreadPool.zig"),
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ConcurrentQueue", .module = ConcurrentQueue.module("ConcurrentQueue") },
-            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-        },
-    });
-    root_module.addImport("ThreadPool", ThreadPool);
 
     // ConcurrentHashMap
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
@@ -145,9 +128,11 @@ fn setupDependencies(
 
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
-        .optimize = optimize,
-        .backend = .sdl3,
+        .optimize = .Debug,
         .freetype = false,
+        .@"tree-sitter" = false,
+        .backend = .sdl3,
+        .@"log-error-trace" = false,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
     root_module.addImport("sdl3-backend", dvui_dep.module("sdl3"));

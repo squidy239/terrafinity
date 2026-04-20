@@ -7,10 +7,7 @@ pub const Cache = @import("Cache").Cache;
 pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-pub const ConcurrentQueue = @import("ConcurrentQueue");
 pub const Entity = @import("world/Entity.zig");
-pub const ThreadPool = @import("ThreadPool");
-pub const Loader = @import("Loader.zig");
 const sdl = @import("sdl3");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
@@ -21,26 +18,26 @@ const dvui = @import("dvui");
 const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
-const TrackingAllocator = @import("libs/TrackingAllocator.zig");
 
 const config_path = "Config.zon";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
-    var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    const backing_allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
-    var tracking_allocator = TrackingAllocator.init(backing_allocator, std.math.maxInt(usize));
-    const allocator = tracking_allocator.get_allocator();
-    defer if (debug_allocator.deinit() == .leak) std.log.err("mem leaked", .{});
-    _ = try sdl.setMemoryFunctionsByAllocator(allocator);
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var config_lock: std.Thread.RwLock = .{};
+    defer {
+        std.log.debug("SDL arena finished with {d} bytes\n", .{init.arena.queryCapacity()});
+    }
+    _ = try sdl.setMemoryFunctionsByAllocator(init.arena.allocator());
 
-    var config: Config = try .load(allocator, config_path);
+    var config_lock: std.Io.RwLock = .init;
+
+    var config: Config = try .load(allocator, io, config_path);
     defer config.deinit(allocator);
 
-    try config.save(config_path, &config_lock); //save the config to format it or create it if it dident exist
+    try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
 
     sdl.errors.error_callback = &sdlErr;
     sdl.log.setLogOutputFunction(anyopaque, sdlLog, null);
@@ -77,7 +74,7 @@ pub fn main() !void {
 
     try sdl_renderer.setDrawBlendMode(.blend);
 
-    var backend = SDLBackend.init(@ptrCast(window.value), @ptrCast(sdl_renderer.value));
+    var backend = SDLBackend.init(io, @ptrCast(window.value), @ptrCast(sdl_renderer.value));
     defer backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(), .{});
@@ -86,20 +83,20 @@ pub fn main() !void {
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
 
-    var singlepress = Key.Singlepress.initEmpty();
+    var singlepress = Key.Singlepress.empty;
     //TODO load keymap from file
-    try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
-    try keymap.setActionKey(.{ .key = .left_gui }, .escape_menu);
+    try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
+    try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
 
     singlepress.insert(.escape_menu);
 
-    try keymap.setActionKey(.{ .key = .w }, .forward);
-    try keymap.setActionKey(.{ .key = .s }, .backward);
-    try keymap.setActionKey(.{ .key = .a }, .left);
-    try keymap.setActionKey(.{ .key = .d }, .right);
-    try keymap.setActionKey(.{ .key = .space }, .up);
-    try keymap.setActionKey(.{ .key = .left_shift }, .down);
-    try keymap.setActionKey(.{ .key = .f }, .use_item_primary);
+    try keymap.setActionKey(io, .{ .key = .w }, .forward);
+    try keymap.setActionKey(io, .{ .key = .s }, .backward);
+    try keymap.setActionKey(io, .{ .key = .a }, .left);
+    try keymap.setActionKey(io, .{ .key = .d }, .right);
+    try keymap.setActionKey(io, .{ .key = .space }, .up);
+    try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
+    try keymap.setActionKey(io, .{ .key = .f }, .use_item_primary);
 
     var game: Game = undefined;
 
@@ -114,43 +111,35 @@ pub fn main() !void {
     };
     try Ui.loadFonts(&ui_window);
 
-    defer if (ui.menu_state.ingame) game.deinit(window);
-    var frame_time: std.time.Timer = try .start();
-    var action_set = Key.ActionSet.initEmpty();
-    var update_finished: std.atomic.Value(bool) = .init(true);
+    defer if (ui.menu_state.ingame) game.deinit(io, window);
+    var frame_time: std.Io.Timestamp = .now(io, .awake);
+    var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
         try sdl.mouse.setWindowRelativeMode(window, ui.menu_state.playingGame());
-        const scroll = try handleEvents(&keymap, singlepress, &action_set, &running, &backend, &ui_window);
+        const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &ui_window);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
-        const dt = frame_time.lap();
+        const dt = frame_time.untilNow(io, .awake);
+        frame_time = .now(io, .awake);
         const ms = sdl.mouse.getRelativeState();
         if (ui.menu_state.ingame) {
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity());
-            try game.handleButtonActions(action_set, dt);
-            game.handleScroll(scroll);
-
+            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
+            try game.handleButtonActions(io, action_set, dt);
+            try game.handleScroll(io, scroll);
             const size = try window.getSizeInPixels();
-            try game.renderer.setViewport(.{ @intCast(size[0]), @intCast(size[1]) });
-            try game.renderer.clear(game.player.physics.getPos());
-            try game.player.physics.update(&game.world, allocator);
-            try game.renderer.drawChunks(game.player.physics.getPos());
-            if (update_finished.load(.seq_cst)) {
-                update_finished.store(false, .seq_cst);
-                try game.pool.spawn(World.updateEntitys, .{ &game.world, &update_finished, allocator }, .VeryHigh);
-            }
-            game.unloadChunkMeshes();
+
+            try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
-        try ui_window.begin(std.time.nanoTimestamp());
+        try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
         var menuchanged: bool = false;
 
-        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu();
-        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(allocator);
-        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu();
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(allocator);
+        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
+        if (ui.menu_state.main and !menuchanged) menuchanged = try ui.mainPage(io, allocator);
+        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
+        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
 
         _ = try ui_window.end(.{});
         dw.End();
@@ -162,11 +151,10 @@ pub fn main() !void {
         try sdl.video.gl.swapWindow(window);
         sw.End();
         ztracy.FrameMark();
-        std.debug.print("    using {d} bytes    \r", .{tracking_allocator.getUsedMemory()});
     }
 }
 
-fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
+fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *SDLBackend, win: *dvui.Window) !f32 {
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
@@ -178,11 +166,11 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
         switch (event) {
             .key_up => |key| {
                 //TODO modifiers
-                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
+                const action = key_map.getAction(io, Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.remove(action);
             },
             .key_down => |key| {
-                const action = key_map.getAction(Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
+                const action = key_map.getAction(io, Key.Key{ .key = key.key.?, .modifier = null }) orelse continue;
                 action_set.insert(action);
             },
             .quit, .window_close_requested => {
@@ -199,8 +187,7 @@ fn handleEvents(key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Ke
 }
 
 test {
-    @setEvalBranchQuota(10000);
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }
 
 ///must be locked by the caller
@@ -208,30 +195,30 @@ pub const Config = struct {
     game_config: Game.Options = .{},
     worlds_path: []const u8 = "worlds",
 
-    pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const configFile: ?std.fs.File = std.fs.cwd().openFile(path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
+    pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
+        const configFile: ?std.Io.File = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
             error.FileNotFound => {
                 std.log.info("Config file not found, creating default config file", .{});
                 break :sw null;
             },
             else => return err,
         };
-        defer if (configFile) |file| file.close();
+        defer if (configFile) |file| file.close(io);
         var config: Config = undefined;
-        config = if (configFile) |file| try utils.loadZON(Config, file, allocator, allocator) else .{};
+        config = if (configFile) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
 
         if (configFile == null) config.worlds_path = try allocator.dupe(u8, config.worlds_path); //world path must be owned by the allocator so it dosent free invalid memory
         return config;
     }
 
-    pub fn save(self: *const Config, path: []const u8, config_lock: ?*std.Thread.RwLock) !void {
-        const configFile = try std.fs.cwd().createFile(path, .{ .lock = .exclusive });
-        defer configFile.close();
+    pub fn save(self: *const Config, io: std.Io, path: []const u8, config_lock: ?*std.Io.RwLock) !void {
+        const configFile = try std.Io.Dir.cwd().createFile(io, path, .{ .lock = .exclusive });
+        defer configFile.close(io);
         var buffer: [512]u8 = undefined;
-        var filewriter = configFile.writer(&buffer);
+        var filewriter = configFile.writer(io, &buffer);
         {
-            if (config_lock) |lock| lock.lockShared();
-            defer if (config_lock) |lock| lock.unlockShared();
+            if (config_lock) |lock| lock.lockSharedUncancelable(io);
+            defer if (config_lock) |lock| lock.unlockShared(io);
             try std.zon.stringify.serialize(self, .{}, &filewriter.interface);
         }
         try filewriter.end();
@@ -246,7 +233,7 @@ pub const Config = struct {
 
 fn sdlLog(
     user_data: ?*anyopaque,
-    category: ?sdl.log.Category,
+    category: sdl.log.Category,
     priority: ?sdl.log.Priority,
     message: [:0]const u8,
 ) void {
@@ -269,4 +256,8 @@ fn sdlErr(
     } else {
         std.log.err("******* [Unknown Error!] *******\n", .{});
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

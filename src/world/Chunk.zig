@@ -5,12 +5,11 @@ const ztracy = @import("ztracy");
 const builtin = @import("builtin");
 pub const ChunkSize = 32;
 blocks: BlockEncoding,
-lock: std.Thread.RwLock,
+lock: std.Io.RwLock = .init,
 genstate: std.atomic.Value(Genstate),
 ref_count: std.atomic.Value(u32),
 
-///time is in us
-last_access: std.atomic.Value(i64),
+last_access: std.atomic.Value(i128),
 
 ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
 modified: std.atomic.Value(bool) = .init(false),
@@ -19,66 +18,84 @@ pub const BlockEncoding = union(enum(u8)) {
     blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
     oneBlock: Block,
 
-    pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
+    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, blocks_locks: ?*std.Io.RwLock) !void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
-
+        _ = blocks_locks;
+        const blocks_lock = null;
         if (mergeBlocks == .oneBlock and (mergeBlocks.oneBlock == .null)) return;
         switch (mergeBlocks) {
             .oneBlock => {
                 switch (self.*) {
                     .oneBlock => {
-                        if (mergeBlocks.oneBlock != .null)
+                        if (mergeBlocks.oneBlock != .null) {
+                            if (blocks_lock) |lock| try lock.lock(io);
                             self.* = mergeBlocks;
+                            if (blocks_lock) |lock| lock.unlock(io);
+                        }
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            pool_mutex.lock();
-                            memory_pool.destroy(@alignCast(self.blocks));
-                            pool_count.* -= 1;
-                            pool_mutex.unlock();
+                            if (blocks_lock) |lock| try lock.lock(io);
+                            const block_grid = self.blocks;
                             self.* = .{ .oneBlock = mergeBlocks.oneBlock };
+                            if (blocks_lock) |lock| lock.unlock(io);
+
+                            pool_mutex.lockUncancelable(io);
+                            memory_pool.destroy(@alignCast(block_grid));
+                            pool_count.* -= 1;
+                            pool_mutex.unlock(io);
                         }
                     },
                 }
             },
             .blocks => {
-                self.toBlocks(memory_pool, pool_count, pool_mutex);
+                while (true) {
+                    try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
+                    if (blocks_lock) |lock| try lock.lock(io);
+                    if (self.* == .blocks) break;
+                    if (blocks_lock) |lock| lock.unlock(io);
+                }
+                errdefer if (blocks_lock) |lock| lock.unlock(io);
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
-                const pred = flatMergeArray.* == @as(@Vector(ChunkSize * ChunkSize * ChunkSize, tag), @splat(@intFromEnum(Block.null)));
-                flatArray.* = @select(tag, pred, flatArray.*, flatMergeArray.*);
-       
+
+                selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
                 if (isOneBlock(self.blocks)) |block| {
+                    @branchHint(.unlikely);
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
-                    pool_mutex.lock();
-                    memory_pool.destroy(@alignCast(self.blocks)); //if it was created in the pool it has the alignment of the pool
-                    pool_count.* -= 1;
-                    pool_mutex.unlock();
+
+                    const block_grid = self.blocks;
                     self.* = .{ .oneBlock = block };
-                }
+                    if (blocks_lock) |lock| lock.unlock(io);
+
+                    pool_mutex.lockUncancelable(io);
+                    memory_pool.destroy(@alignCast(block_grid));
+                    pool_count.* -= 1;
+                    pool_mutex.unlock(io);
+                } else if (blocks_lock) |lock| lock.unlock(io);
             },
         }
     }
 
-    pub fn toBlocks(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
+    pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
         if (self.* == .blocks) return;
         const t = ztracy.ZoneNC(@src(), "toBlocks", 10);
         defer t.End();
         const a = ztracy.ZoneNC(@src(), "alloc", 54334);
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         while (true) {
-            pool_mutex.lock();
-            mem = memory_pool.create() catch {
-                pool_mutex.unlock();
+            try pool_mutex.lock(io);
+            mem = memory_pool.create(undefined) catch {
+                pool_mutex.unlock(io);
+                try io.sleep(.fromMicroseconds(100), .awake);
                 std.log.err("Failed to allocate memory for chunk blocks, retrying...", .{});
-                std.Thread.yield() catch {};
                 continue;
             };
             pool_count.* += 1;
-            pool_mutex.unlock();
+            pool_mutex.unlock(io);
             break;
         }
         a.End();
@@ -86,6 +103,29 @@ pub const BlockEncoding = union(enum(u8)) {
         @memset(flatblocks, self.oneBlock);
         self.* = .{ .blocks = mem };
     }
+
+    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) BlockEncoding {
+        return if (isOneBlock(blocks)) |oneBlock| .{ .oneBlock = oneBlock } else .{ .blocks = blocks };
+    }
+
+    test "merge" {
+        try std.testing.fuzz(std.testing.io, testOne, .{});
+    }
+
+    fn testOne(io: std.Io, smith: *std.testing.Smith) !void {
+        const pool: std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block) = try .initCapacity(std.testing.allocator, 1);
+        defer pool.deinit(std.testing.allocator);
+        var b1 = smith.value(BlockEncoding);
+        const b2 = smith.value(BlockEncoding);
+        var pc: u64 = 0;
+        var pm: std.Io.Mutex = .init;
+        try b1.merge(io, b2, pool, &pc, &pm);
+    }
+};
+
+pub const ChunkFaceEncoding = union(enum(u8)) {
+    blocks: [ChunkSize][ChunkSize]Block,
+    oneBlock: Block,
 };
 
 pub const ChunkFaceEncoding = union(enum(u8)) {
@@ -98,25 +138,24 @@ pub const Genstate = enum(u8) {
     StructuresGenerated,
 };
 
-///Returns a chunk made from a given blockencoding. The blocks and returned chunk are allocated by the allocator.
-pub fn from(blockEncoding: BlockEncoding, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) *@This() {
+/// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
+pub fn from(blockEncoding: BlockEncoding, io: std.Io, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !*@This() {
     var chunk: *@This() = undefined;
     while (true) {
-        pool_mutex.lock();
-        chunk = chunk_pool.create() catch {
-            pool_mutex.unlock();
+        try pool_mutex.lock(io);
+        chunk = chunk_pool.create(undefined) catch {
+            pool_mutex.unlock(io);
             std.log.err("Failed to allocate memory for chunk, retrying...", .{});
-            std.Thread.yield() catch {};
+            try io.sleep(.fromMicroseconds(1), .awake);
             continue;
         };
         pool_count.* += 1;
-        pool_mutex.unlock();
+        pool_mutex.unlock(io);
         break;
     }
     chunk.* = .{
         .blocks = blockEncoding,
-        .lock = .{},
-        .last_access = .init(std.time.microTimestamp()),
+        .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
         .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
         .ref_count = std.atomic.Value(u32).init(1),
     };
@@ -132,20 +171,18 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
     return if (@reduce(.And, oneblock)) blockArray[0][0][0] else null;
 }
 
-///merges the chunk with the mergeBlocks, copies all non null mergeBlocks to blocks
-pub fn merge(self: *@This(), mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex, comptime lock: bool) void {
-    self.add_ref();
-    defer self.release();
-    if (lock) self.lockExclusive();
-    defer if (lock) self.unlockExclusive();
-    self.blocks.merge(mergeBlocks, memory_pool, pool_count, pool_mutex);
+/// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
+pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
+    self.add_ref(io);
+    defer self.release(io);
+    try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex, &self.lock);
 }
 
-pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) ChunkFaceEncoding {
-    self.addAndLockShared();
+pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) !ChunkFaceEncoding {
+    try self.addAndLockShared(io);
     defer {
-        if (removeRef) self.release();
-        self.releaseAndUnlockShared();
+        if (removeRef) self.release(io);
+        self.releaseAndUnlockShared(io);
     }
     var cube: *const [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     switch (self.blocks) {
@@ -155,7 +192,7 @@ pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, y
     var result: [ChunkSize][ChunkSize]Block = undefined;
     @setEvalBranchQuota(10000);
     inline for (&result, 0..) |*row, i| {
-        inline for (row, 0..) |*item,j| {
+        inline for (row, 0..) |*item, j| {
             item.* = switch (comptime face) {
                 .xPlus => cube[ChunkSize - 1][i][comptime j],
                 .xMinus => cube[0][comptime i][comptime j],
@@ -168,99 +205,132 @@ pub fn extractFace(self: *@This(), comptime face: enum { xPlus, xMinus, yPlus, y
     }
     return .{ .blocks = result };
 }
-///returns true if the chunk was converted to blocks, false if it was already blocks
-pub fn toBlocks(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex, comptime lock: bool) !bool {
-    self.add_ref();
-    defer self.release();
-    if (lock) self.lockExclusive();
-    defer if (lock) self.unlockExclusive();
+
+/// Returns true if the chunk was converted to blocks, false if it was already blocks.
+pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
+    self.add_ref(io);
+    defer self.release(io);
+    if (lock) self.lockExclusive(io);
+    defer if (lock) self.unlockExclusive(io);
     if (self.blocks != .oneBlock) return false;
-    self.blocks.toBlocks(memory_pool, pool_count, pool_mutex);
+    try self.blocks.toBlocks(io, memory_pool, pool_count, pool_mutex);
     return true;
 }
 
-///frees the chunk's blocks, does not free the chunk itself
-///the chunk must only be 1 ref before calling, use WaitForRefAmount
-///locks the chunk
-pub fn free(self: *@This(), memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Thread.Mutex) void {
+/// Frees the chunk's blocks, does not free the chunk itself.
+/// The chunk must only have 1 ref before calling — use WaitForRefAmount.
+pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) void {
     std.debug.assert(self.ref_count.load(.seq_cst) == 1);
-    self.lockExclusive();
+    _ = io.swapCancelProtection(.blocked);
+    self.lockExclusive(io) catch unreachable;
+    _ = io.swapCancelProtection(.unblocked);
+    defer self.unlockExclusive(io);
     switch (self.blocks) {
         .blocks => {
-            pool_mutex.lock();
+            pool_mutex.lockUncancelable(io);
             memory_pool.destroy(@alignCast(self.blocks.blocks));
             pool_count.* -= 1;
-            pool_mutex.unlock();
+            pool_mutex.unlock(io);
         },
         .oneBlock => {},
     }
 }
 
-pub fn WaitForRefAmount(self: *const @This(), amount: u32, maxMicroTime: ?u64) bool {
+pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
     if (self.ref_count.load(.seq_cst) == amount) return true;
-    const st = std.time.microTimestamp();
+    const st = std.Io.Timestamp.now(io, .awake);
     while (self.ref_count.load(.seq_cst) != amount) {
-        if (maxMicroTime != null and (std.time.microTimestamp() - st) > maxMicroTime.?) return false;
-        std.Thread.yield() catch |err| std.debug.print("yield err:{any}\n", .{err});
+        @branchHint(.unlikely);
+        if (maxMicroTime != null and st.untilNow(io, .awake).toMicroseconds() > maxMicroTime.?) return false;
+        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     return true;
 }
 
-pub fn touch(self: *@This()) void {
-    self.last_access.store(std.time.microTimestamp(), .unordered);
+fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
+    if (comptime std.simd.suggestVectorLength(T)) |vlen| {
+        const VT = @Vector(vlen, T);
+        var i: usize = 0;
+        while (i + vlen <= len) : (i += vlen) {
+            const a: VT = flatArray.*[i..][0..vlen].*;
+            const b: VT = flatMergeArray[i..][0..vlen].*;
+            const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
+            const result = @select(T, pred, a, b);
+            flatArray.*[i..][0..vlen].* = result;
+        }
+        // handle remainder scalarly
+        while (i < len) : (i += 1) {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    } else {
+        for (0..len) |i| {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    }
 }
 
-pub fn touchModify(self: *@This()) void {
-    self.touch();
+pub fn touch(self: *@This(), io: std.Io) void {
+    self.last_access.store(std.Io.Timestamp.now(io, .awake).toNanoseconds(), .unordered);
+}
+
+pub fn touchModify(self: *@This(), io: std.Io) void {
+    self.touch(io);
     self.modified.store(true, .seq_cst);
 }
 
-pub fn add_ref(self: *@This()) void {
+pub fn add_ref(self: *@This(), io: std.Io) void {
     _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.touch();
+    self.touch(io);
 }
 
-pub fn release(self: *@This()) void {
+pub fn release(self: *@This(), io: std.Io) void {
     _ = self.ref_count.fetchSub(1, .seq_cst);
-    self.touch();
+    self.touch(io);
 }
 
-pub fn lockExclusive(self: *@This()) void {
-    self.lock.lock();
-    self.touchModify();
+pub fn lockExclusive(self: *@This(), io: std.Io) !void {
+    try self.lock.lock(io);
+    self.touchModify(io);
 }
 
-pub fn unlockExclusive(self: *@This()) void {
-    self.lock.unlock();
-    self.touchModify();
+pub fn unlockExclusive(self: *@This(), io: std.Io) void {
+    self.lock.unlock(io);
+    self.touchModify(io);
 }
 
-pub fn lockShared(self: *@This()) void {
-    self.lock.lockShared();
-    self.touch();
+pub fn lockShared(self: *@This(), io: std.Io) !void {
+    try self.lock.lockShared(io);
+    self.touch(io);
 }
 
-pub fn unlockShared(self: *@This()) void {
-    self.lock.unlockShared();
-    self.touch();
+pub fn unlockShared(self: *@This(), io: std.Io) void {
+    self.lock.unlockShared(io);
+    self.touch(io);
 }
 
-pub fn addAndLockShared(self: *@This()) void {
+pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
     _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.lockShared();
-}
-pub fn addAndlock(self: *@This()) void {
-    _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.lockExclusive();
+    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
+    try self.lockShared(io);
 }
 
-pub fn releaseAndUnlock(self: *@This()) void {
-    self.unlockExclusive();
+pub fn addAndLock(self: *@This(), io: std.Io) !void {
+    _ = self.ref_count.fetchAdd(1, .seq_cst);
+    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
+    try self.lockExclusive(io);
+}
+
+pub fn releaseAndUnlock(self: *@This(), io: std.Io) void {
+    self.unlockExclusive(io);
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
-pub fn releaseAndUnlockShared(self: *@This()) void {
-    self.unlockShared();
+pub fn releaseAndUnlockShared(self: *@This(), io: std.Io) void {
+    self.unlockShared(io);
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
@@ -278,12 +348,13 @@ test "IsOneBlock" {
 test "ToBlocks" {
     if (true) return error.SkipZigTest;
     const testing = std.testing;
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var chunk = try from(.{ .oneBlock = .stone }, allocator);
+    var chunk = try from(.{ .oneBlock = .stone }, io, allocator);
     defer allocator.destroy(chunk);
-    defer chunk.free(allocator);
+    defer chunk.free(io, allocator);
 
-    const converted = try chunk.ToBlocks(allocator, true);
+    const converted = try chunk.ToBlocks(io, allocator, true);
     try testing.expect(converted);
 
     switch (chunk.blocks) {
@@ -298,6 +369,7 @@ test "ToBlocks" {
 test "Merge" {
     if (true) return error.SkipZigTest;
     const testing = std.testing;
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var blocks1: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
@@ -307,13 +379,13 @@ test "Merge" {
     blocks2[0][0][1] = .grass;
 
     const chunk1_encoding = try BlockEncoding.fromBlocks(&blocks1, allocator);
-    var chunk1 = try from(chunk1_encoding, allocator);
+    var chunk1 = try from(chunk1_encoding, io, allocator);
     defer allocator.destroy(chunk1);
-    defer chunk1.free(allocator);
+    defer chunk1.free(io, allocator);
 
     const chunk2_encoding = try BlockEncoding.fromBlocks(&blocks2, allocator);
 
-    try chunk1.merge(chunk2_encoding, allocator, true);
+    chunk1.merge(io, chunk2_encoding, allocator, true);
 
     allocator.destroy(chunk2_encoding.blocks);
 
@@ -325,4 +397,8 @@ test "Merge" {
             try testing.expect(blocks[1][1][1] == .air);
         },
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

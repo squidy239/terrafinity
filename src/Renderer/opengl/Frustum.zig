@@ -41,7 +41,7 @@ pub const Frustum = struct {
         // Normalize planes
         for (0..6) |i| {
             const n = @Vector(3, f32){ planes[i][0], planes[i][1], planes[i][2] };
-            const len = @sqrt(zm.vec.dot(n, n));
+            const len = @sqrt(zm.Vec3f.dot(.{ .data = n }, .{ .data = n }));
             planes[i] /= @splat(len);
         }
 
@@ -56,21 +56,21 @@ pub const Frustum = struct {
 
             // Test all 8 corners of the box against this plane
             // Corner 1: min.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.min[0], box.min[1], box.min[2], 1.0 } }) < 0.0);
             // Corner 2: max.x, min.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.min[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.max[0], box.min[1], box.min[2], 1.0 } }) < 0.0);
             // Corner 3: min.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.min[0], box.max[1], box.min[2], 1.0 } }) < 0.0);
             // Corner 4: max.x, max.y, min.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.max[1], box.min[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.max[0], box.max[1], box.min[2], 1.0 } }) < 0.0);
             // Corner 5: min.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.min[0], box.min[1], box.max[2], 1.0 } }) < 0.0);
             // Corner 6: max.x, min.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.min[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.max[0], box.min[1], box.max[2], 1.0 } }) < 0.0);
             // Corner 7: min.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.min[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.min[0], box.max[1], box.max[2], 1.0 } }) < 0.0);
             // Corner 8: max.x, max.y, max.z
-            out += @intFromBool(zm.vec.dot(plane, @Vector(4, f32){ box.max[0], box.max[1], box.max[2], 1.0 }) < 0.0);
+            out += @intFromBool(zm.Vec4f.dot(.{ .data = plane }, .{ .data = @Vector(4, f32){ box.max[0], box.max[1], box.max[2], 1.0 } }) < 0.0);
 
             // If all 8 corners are outside this plane, the box is completely outside the frustum
             if (out == 8) return false;

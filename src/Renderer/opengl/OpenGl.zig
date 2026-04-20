@@ -34,13 +34,13 @@ render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 window: sdl.video.Window,
-gen_context_lock: std.Thread.Mutex = .{},
+gen_context_lock: std.Io.Mutex = .init,
 contexts: std.ArrayList(sdl.video.gl.Context),
 context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
 draw_context: sdl.video.gl.Context,
 
-pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Window) !void {
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sdl.video.Window) !void {
     const cpu_count = try std.Thread.getCpuCount();
     self.* = @This(){
         .allocator = allocator,
@@ -48,7 +48,7 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
         .indecies = undefined,
         .shaderprogram = undefined,
         .proc_table = undefined,
-        .render_buffer = .{ .allocator = allocator, .map = .init(allocator) },
+        .render_buffer = .{ .allocator = allocator, .map = .init() },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
@@ -74,14 +74,14 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     gl.makeProcTableCurrent(&self.proc_table);
 
     //preallocate vram to prevent costly buffer resizes
-    try self.render_buffer.buffer.ensureCapacity(128_000_000);
-    try self.render_buffer.ssbo.ensureCapacity(8_000_000);
-    try self.render_buffer.indirect_buffer.ensureCapacity(8_000_000);
+    try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
+    try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
+    try self.render_buffer.indirect_buffer.ensureCapacity(io, 8_000_000);
 
-    self.blockAtlasTextureId = try Textures.loadTextureArray(try std.fs.cwd().openDir("packs/default/Blocks/", .{ .iterate = true }), allocator);
+    self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
-    for (0..cpu_count + 1) |_| {
+    for (0..cpu_count + 100) |_| {
         try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
     }
     try self.draw_context.makeCurrent(self.window);
@@ -118,10 +118,10 @@ pub fn init(self: *@This(), allocator: std.mem.Allocator, window: sdl.video.Wind
     try glError();
 }
 
-pub fn deinit(self: *@This()) void {
+pub fn deinit(self: *@This(), io: std.Io) void {
     self.draw_context.makeCurrent(self.window) catch unreachable;
     gl.Finish();
-    self.render_buffer.deinit();
+    self.render_buffer.deinit(io, self.allocator);
     self.context_index.store(0, .seq_cst);
     for (0..self.contexts.items.len) |i| {
         self.contexts.items[i].deinit() catch unreachable;
@@ -164,16 +164,15 @@ pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideo
     _ = try self.load_queue.append(mesh);
 }
 
-pub fn remove(self: *@This(), Pos: ChunkPos) void {
-    const ids = self.renderlist.fetchremove(Pos) orelse return;
-    ids.free();
+pub fn remove(self: *@This(), io: std.Io, Pos: ChunkPos) void {
+    self.render_buffer.remove(io, Pos);
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    _ = zm.vec.normalize(self.cameraFront);
+    _ = zm.Vec3f.norm(.{ .data = self.cameraFront });
 }
 
 fn CompileShaders(self: *@This()) !void {
@@ -260,7 +259,7 @@ fn LoadFacebuffer(self: *@This()) void {
 }
 var last_viewport: [2]f32 = undefined;
 
-fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
+fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
     self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
@@ -269,25 +268,26 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const sunrot = zm.Mat4f.rotation(@Vector(3, f32){ 1.0, 0.0, 0.0 }, std.math.degreesToRadians(180));
+    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, std.math.degreesToRadians(180));
 
-    const view = zm.Mat4f.lookAt(@Vector(3, f32){ 0, 0, 0 }, self.cameraFront, @This().cameraUp);
+    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
     const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
     const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
-    const projview = @as(@Vector(16, f32), @floatCast(projection.multiply(view).data));
+    const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Uniform1f(self.uniforms.fogDensity, 0);
     gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
     gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    const millitimestamp = std.time.milliTimestamp();
+    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
     glError() catch return error.DrawFailed;
 
     const draw_info = self.render_buffer.rebuild(
+        io,
         @sizeOf(Mesh.Face),
         cullChunkFn,
         .{ .frustrum = frustrum, .playerPos = playerPos },
@@ -297,12 +297,12 @@ fn drawChunks(self: *@This(), playerPos: @Vector(3, f64), skyColor: @Vector(4, f
     ) catch return error.DrawFailed;
 
     if (draw_info.drawn == 0) return;
-    self.render_buffer.buffer.resize_lock.lockShared();
-    defer self.render_buffer.buffer.resize_lock.unlockShared();
-    self.render_buffer.ssbo.resize_lock.lockShared();
-    defer self.render_buffer.ssbo.resize_lock.unlockShared();
-    self.render_buffer.indirect_buffer.resize_lock.lockShared();
-    defer self.render_buffer.indirect_buffer.resize_lock.unlockShared();
+    self.render_buffer.buffer.resize_lock.lockSharedUncancelable(io);
+    defer self.render_buffer.buffer.resize_lock.unlockShared(io);
+    self.render_buffer.ssbo.resize_lock.lockSharedUncancelable(io);
+    defer self.render_buffer.ssbo.resize_lock.unlockShared(io);
+    self.render_buffer.indirect_buffer.resize_lock.lockSharedUncancelable(io);
+    defer self.render_buffer.indirect_buffer.resize_lock.unlockShared(io);
     gl.Finish();
     gl.BindVertexArray(self.vao);
     glError() catch return error.DrawFailed;
@@ -349,19 +349,39 @@ fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3,
     return !frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
-fn drawChunksFn(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+fn drawChunksFn(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *@This() = @ptrCast(@alignCast(userdata));
-    (self.drawChunks(viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
+    (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
     const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
     return .{
         .data = .{
-            f / aspectWbyH, 0.0, 0.0,   0.0,
-            0.0,            f,   0.0,   0.0,
-            0.0,            0.0, 0.0,   -1.0,
-            0.0,            0.0, zNear, 0.0,
+            .{
+                f / aspectWbyH,
+                0.0,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                f,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                0.0,
+                0.0,
+                -1.0,
+            },
+            .{
+                0.0,
+                0.0,
+                zNear,
+                0.0,
+            },
         },
     };
 }
@@ -435,17 +455,17 @@ const GpuBuffer = struct {
     mapping: ?[]u8 = null,
     growth_factor: f32 = 2,
     ///shared is for starting writes and reading variables, exclusive is for resizing
-    resize_lock: std.Thread.RwLock = .{},
+    resize_lock: std.Io.RwLock = .init,
 
-    pub fn ensureCapacity(self: *GpuBuffer, length: usize) !void {
+    pub fn ensureCapacity(self: *GpuBuffer, io: std.Io, length: usize) !void {
         {
-            self.resize_lock.lockShared();
-            defer self.resize_lock.unlockShared();
+            self.resize_lock.lockSharedUncancelable(io);
+            defer self.resize_lock.unlockShared(io);
             if (self.mapping != null and length <= self.mapping.?.len) return;
         }
 
-        self.resize_lock.lock();
-        defer self.resize_lock.unlock();
+        self.resize_lock.lockUncancelable(io);
+        defer self.resize_lock.unlock(io);
         if (self.mapping != null and length <= self.mapping.?.len) return;
         const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
         const new_size = @max(scaled_size, length);
@@ -461,7 +481,7 @@ const GpuBuffer = struct {
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             gl.Finish(); //RACE CONDITION this only syncs the current thread
-            std.Thread.sleep(100 * std.time.ns_per_ms); //very very bad "temporary" fix
+            try io.sleep(.fromMilliseconds(100), .awake); //very very bad "temporary" fix
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
             if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;
@@ -477,38 +497,38 @@ const GpuBuffer = struct {
         gl.Finish();
     }
 
-    pub fn writeSegment(self: *GpuBuffer, offset: usize, data: []const u8) !void {
+    pub fn writeSegment(self: *GpuBuffer, io: std.Io, offset: usize, data: []const u8) !void {
         const e = ztracy.ZoneN(@src(), "writeSegment");
         defer e.End();
         std.debug.assert(data.len > 0);
-        try self.ensureCapacity(offset + data.len);
-        self.resize_lock.lockShared();
-        defer self.resize_lock.unlockShared();
+        try self.ensureCapacity(io, offset + data.len);
+        self.resize_lock.lockSharedUncancelable(io);
+        defer self.resize_lock.unlockShared(io);
         std.debug.assert(self.mapping.?.len >= data.len);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
-        try self.flushRange(offset, data.len);
+        try self.flushRange(io, offset, data.len);
     }
 
-    pub fn writeSegmentNoFlush(self: *GpuBuffer, offset: usize, data: []const u8) !void {
+    pub fn writeSegmentNoFlush(self: *GpuBuffer, io: std.Io, offset: usize, data: []const u8) !void {
         std.debug.assert(data.len > 0);
-        try self.ensureCapacity(offset + data.len);
-        self.resize_lock.lockShared();
+        try self.ensureCapacity(io, offset + data.len);
+        self.resize_lock.lockSharedUncancelable(io);
         std.debug.assert(self.mapping.?.len >= data.len);
-        defer self.resize_lock.unlockShared();
+        defer self.resize_lock.unlockShared(io);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
     }
 
-    pub fn flushRange(self: *GpuBuffer, offset: usize, length: usize) !void {
-        self.resize_lock.lockShared();
-        defer self.resize_lock.unlockShared();
+    pub fn flushRange(self: *GpuBuffer, io: std.Io, offset: usize, length: usize) !void {
+        self.resize_lock.lockSharedUncancelable(io);
+        defer self.resize_lock.unlockShared(io);
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
         try glError();
         gl.Flush();
     }
 
-    pub fn free(self: *GpuBuffer) void {
-        self.resize_lock.lock();
-        defer self.resize_lock.unlock();
+    pub fn free(self: *GpuBuffer, io: std.Io) void {
+        self.resize_lock.lockUncancelable(io);
+        defer self.resize_lock.unlock(io);
         if (self.buffer) |buffer| {
             _ = gl.UnmapNamedBuffer(buffer);
             gl.DeleteBuffers(1, @ptrCast(&buffer));
@@ -533,7 +553,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         free_list: std.DoublyLinkedList = .{},
 
         map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
-        lock: std.Thread.Mutex = .{},
+        lock: std.Io.Mutex = .init,
 
         const Space = struct {
             node: std.DoublyLinkedList.Node,
@@ -542,23 +562,23 @@ fn MultiRenderBuffer(comptime K: type) type {
             length: usize,
         };
 
-        pub fn put(self: *@This(), key: K, value: []const u8) !void {
+        pub fn put(self: *@This(), io: std.Io, key: K, value: []const u8) !void {
             const z = ztracy.Zone(@src());
             defer z.End();
             var start: usize = undefined;
             {
                 const l = ztracy.ZoneN(@src(), "lock");
-                self.lock.lock();
-                defer self.lock.unlock();
+                self.lock.lockUncancelable(io);
+                defer self.lock.unlock(io);
                 l.End();
                 const space = try self.add(value.len);
                 std.debug.assert(space.freelist_node == null);
                 std.debug.assert(space.length == value.len);
                 start = space.start;
-                const existing = try self.map.fetchPut(key, space);
+                const existing = try self.map.fetchPut(io, self.allocator, key, space);
                 if (existing) |e| self.removeSpace(e);
             }
-            try self.buffer.writeSegment(start, value);
+            try self.buffer.writeSegment(io, start, value);
         }
 
         fn add(self: *@This(), length: usize) !*Space {
@@ -611,10 +631,10 @@ fn MultiRenderBuffer(comptime K: type) type {
             return space_ptr;
         }
 
-        pub fn remove(self: *@This(), key: K) void {
-            self.lock.lock();
-            defer self.lock.unlock();
-            const entry = self.map.fetchremove(key) orelse {
+        pub fn remove(self: *@This(), io: std.Io, key: K) void {
+            self.lock.lockUncancelable(io);
+            defer self.lock.unlock(io);
+            const entry = self.map.fetchRemove(io, key) orelse {
                 return;
             };
             const space = entry;
@@ -653,6 +673,7 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         pub fn rebuild(
             self: *@This(),
+            io: std.Io,
             element_size: usize,
             culler: ?fn (userdata: anytype, key: K) bool,
             cull_userdata: anytype,
@@ -669,18 +690,18 @@ fn MultiRenderBuffer(comptime K: type) type {
 
             a.End();
             var drawn: usize = 0;
-            const total = self.map.count();
+            const total = self.map.count(io);
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
                 const ac = ztracy.ZoneN(@src(), "mapCommands");
                 try glError();
                 ac.End();
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
-                self.lock.lock();
-                defer self.lock.unlock();
+                self.lock.lockUncancelable(io);
+                defer self.lock.unlock(io);
                 var it = self.map.iterator();
-                defer it.deinit();
-                while (it.next()) |entry| {
+                defer it.deinit(io);
+                while (it.next(io)) |entry| {
                     const start = entry.value_ptr.*.start;
                     const length = entry.value_ptr.*.length;
                     const free = entry.value_ptr.*.freelist_node != null;
@@ -706,24 +727,24 @@ fn MultiRenderBuffer(comptime K: type) type {
                     const itemdata = get_itemdata(item_userdata, key);
                     const wr = ztracy.ZoneN(@src(), "write");
                     defer wr.End();
-                    try self.indirect_buffer.writeSegmentNoFlush(drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
-                    try self.ssbo.writeSegmentNoFlush(drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
+                    try self.indirect_buffer.writeSegmentNoFlush(io, drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
+                    try self.ssbo.writeSegmentNoFlush(io, drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
                 }
                 loop.End();
             }
             if (drawn > 0) {
-                try self.ssbo.flushRange(0, drawn * @sizeOf(ItemData));
-                try self.indirect_buffer.flushRange(0, drawn * @sizeOf(DrawElementsIndirectCommand));
+                try self.ssbo.flushRange(io, 0, drawn * @sizeOf(ItemData));
+                try self.indirect_buffer.flushRange(io, 0, drawn * @sizeOf(DrawElementsIndirectCommand));
                 gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
                 gl.Flush();
             }
             return .{ .faces = face_count, .drawn = drawn, .total = total }; //total may not be totaly accurate
         }
 
-        pub fn deinit(self: *@This()) void {
+        pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
             std.debug.assert(self.lock.tryLock());
-            self.buffer.free();
+            self.buffer.free(io);
 
             var node = self.linked_list.first;
             while (node) |n| {
@@ -731,10 +752,14 @@ fn MultiRenderBuffer(comptime K: type) type {
                 node = n.next;
                 self.allocator.destroy(space);
             }
-            self.map.deinit();
+            self.map.deinit(io, allocator);
 
-            self.ssbo.free();
-            self.indirect_buffer.free();
+            self.ssbo.free(io);
+            self.indirect_buffer.free(io);
         }
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

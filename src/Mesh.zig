@@ -35,10 +35,11 @@ pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chu
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
     var all_invisible: bool = true;
-    for(neighbor_faces)|face|{
+    for (neighbor_faces) |face| {
         all_invisible |= (face == .oneBlock and !face.oneBlock.isVisible());
     }
     all_invisible |= mainblocks == .oneBlock and !mainblocks.oneBlock.isVisible();
+    if (!all_invisible) return;
     try meshSimple(mainblocks, neighbor_faces, writer);
 }
 
@@ -84,9 +85,9 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
     loop.End();
 }
 
-inline fn extendedto1D(x: usize, y: usize, z: usize) usize {
-    return (z * (ChunkSize + 2) * (ChunkSize + 2)) + (y * (ChunkSize + 2)) + x;
-}
+//fn meshV2(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
+
+//}
 test "MeshBenchmark" {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {
@@ -103,13 +104,13 @@ test "MeshBenchmark" {
     var buf: [256]u8 = undefined;
     var writer = std.Io.Writer.Discarding.init(&buf);
     const test_amount = 100000;
-    const st = std.time.nanoTimestamp();
+    const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
         try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .oneBlock = .air }), &writer.writer);
     }
-    const et = std.time.nanoTimestamp();
+    const et = std.Io.Timestamp.now(std.testing.io, .awake);
 
-    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et - st)) / test_amount) / std.time.ns_per_us});
+    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et.durationTo(st).toMicroseconds())) / test_amount)});
 }
 
 ///x+,x-,y+,y-,z+,z-

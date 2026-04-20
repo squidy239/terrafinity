@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Inventory = struct {
-    lock: std.Thread.RwLock = .{},
+    lock: std.Io.RwLock = .init,
     width: u32,
     height: u32,
     items: []?Item,
@@ -27,9 +27,9 @@ pub const Inventory = struct {
 
     /// Sets an item at the given position in the inventory.
     /// Returns the old item if it was not null.
-    pub fn set(self: *Inventory, row: u32, col: u32, item: Item) ?Item {
-        self.lock.lock();
-        defer self.lock.unlock();
+    pub fn set(self: *Inventory, io: std.Io, row: u32, col: u32, item: Item) ?Item {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
         std.debug.assert(row < self.height and col < self.width);
         const index = (row * self.width) + col;
         defer self.items[index] = item;

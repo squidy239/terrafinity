@@ -4,120 +4,87 @@ const zm = @import("zm");
 
 const Block = @import("Block.zig").Block;
 const World = @import("World.zig");
+const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 
 ///gets a Physics interface, all functions are thread-safe
 pub fn getInterface(physicsElements: anytype) type {
     return struct {
         elements: physicsElements,
-        updateTimer: std.time.Timer,
-        updateTimerLock: std.Thread.RwLock = .{},
-        pos: @Vector(3, f64),
-        posLock: std.Thread.RwLock = .{},
-        velocity: @Vector(3, f64),
-        velocityLock: std.Thread.RwLock = .{},
+        last_update: std.Io.Timestamp,
+        last_update_lock: std.Io.RwLock = .init,
+        pos: AtomicVector(3, f64),
+        velocity: AtomicVector(3, f64),
 
-        pub fn getPos(self: *@This()) @Vector(3, f64) {
-            self.posLock.lockShared();
-            defer self.posLock.unlockShared();
-            return self.pos;
+        pub fn lapUpdateTimer(self: *@This(), io: std.Io) std.Io.Duration {
+            self.last_update_lock.lockUncancelable(io);
+            const ola = self.last_update;
+            self.last_update = .now(io, .awake);
+            self.last_update_lock.unlock(io);
+            return ola.durationTo(self.last_update);
         }
 
-        pub fn lapUpdateTimer(self: *@This()) u64 {
-            self.updateTimerLock.lock();
-            defer self.updateTimerLock.unlock();
-            return self.updateTimer.lap();
-        }
-
-        pub fn fetchAddPos(self: *@This(), offset: @Vector(3, f64)) @Vector(3, f64) {
-            self.posLock.lock();
-            defer self.posLock.unlock();
-            self.pos += offset;
-            return self.pos;
-        }
-
-        pub fn getVelocity(self: *@This()) @Vector(3, f64) {
-            self.velocityLock.lockShared();
-            defer self.velocityLock.unlockShared();
-            return self.velocity;
-        }
-
-        pub fn setVelocity(self: *@This(), velocity: @Vector(3, f64)) void {
-            self.velocityLock.lock();
-            defer self.velocityLock.unlock();
-            self.velocity = velocity;
-        }
-
-        pub fn fetchAddVelocity(self: *@This(), offset: @Vector(3, f64)) @Vector(3, f64) {
-            self.velocityLock.lock();
-            defer self.velocityLock.unlock();
-            self.velocity += offset;
-            return self.velocity;
-        }
-
-        pub fn update(self: *@This(), world: *World, allocator: std.mem.Allocator) !void {
+        pub fn update(self: *@This(), world: *World, io: std.Io, allocator: std.mem.Allocator) !void {
             //deltaT is seconds
-            const deltaT: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer())) / std.time.ns_per_s;
+            const deltaT: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
 
             inline for (std.meta.fields(@TypeOf(self.elements))) |field| {
                 const fieldData = &@field(&self.elements, field.name);
-                try fieldData.update(self, deltaT, world, allocator);
+                try fieldData.update(io, self, deltaT, world, allocator);
             }
         }
     };
 }
 
 pub const simpleMover = struct {
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = self;
         _ = world;
+        _ = io;
         _ = allocator;
-        const posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.fetchAddPos(posOffset);
+        const posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
+        _ = physics.pos.fetchAdd(posOffset, .seq_cst);
     }
 };
 
 pub const Mover = struct {
     collisions: bool,
     zeroVelocity: bool,
-    boundingBox: zm.AABB,
+    boundingBox: zm.AABB(3, f64),
     enabled: bool,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
-        defer if (self.zeroVelocity) physics.setVelocity(.{ 0, 0, 0 });
-        _ = allocator;
-        var posOffset = physics.getVelocity() * @as(@Vector(3, f64), @splat(deltaT));
+        defer if (self.zeroVelocity) physics.velocity.store(.{ 0, 0, 0 }, .seq_cst);
+        var posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
         if (!self.collisions) {
-            _ = physics.fetchAddPos(posOffset);
+            _ = physics.pos.fetchAdd(posOffset, .seq_cst);
             return;
         }
         const maxMove: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
-        defer reader.clear();
+        defer reader.clear(io);
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
-            var newPos = physics.fetchAddPos(move);
-            while (try self.collision(newPos, &reader)) |mtv| {
-                newPos = physics.fetchAddPos(-mtv);
-                physics.velocityLock.lock();
-                if (mtv[0] != 0.0) physics.velocity[0] = 0.0;
-                if (mtv[1] != 0.0) physics.velocity[1] = 0.0;
-                if (mtv[2] != 0.0) physics.velocity[2] = 0.0;
-                physics.velocityLock.unlock();
+            var newPos = physics.pos.fetchAdd(move, .seq_cst);
+            while (try self.collision(io, allocator, newPos, &reader)) |mtv| {
+                newPos = physics.pos.fetchAdd(-mtv, .seq_cst);
+                if (mtv[0] != 0.0) @atomicStore(f64, &physics.velocity.vector[0], 0.0, .seq_cst);
+                if (mtv[1] != 0.0) @atomicStore(f64, &physics.velocity.vector[1], 0.0, .seq_cst);
+                if (mtv[2] != 0.0) @atomicStore(f64, &physics.velocity.vector[2], 0.0, .seq_cst);
             }
         }
     }
 
-    pub fn collision(self: *const @This(), pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
-        defer reader.clear();
+    pub fn collision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
+        defer reader.clear(io);
 
         const base = @floor(pos); // floor entity pos once
         var bestMtv: @Vector(3, f64) = @splat(0.0);
         var bestMagnitude: f64 = 0.0;
         var found: bool = false;
         const size = self.boundingBox.size();
-        const checkDistance: i16 = @intFromFloat(@ceil(@max(size[0], size[1], size[2]) / 2));
+        const checkDistance: i16 = @intFromFloat(@ceil(@max(size.data[0], size.data[1], size.data[2]) / 2));
         var x: i16 = -@as(i16, checkDistance);
         while (x <= checkDistance) : (x += 1) {
             var y: i16 = -@as(i16, checkDistance);
@@ -127,14 +94,14 @@ pub const Mover = struct {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.getBlock(@intFromFloat(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io, allocator, @intFromFloat(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
-                    const blockAABB = zm.AABB.init(blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 }, blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 });
+                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
 
                     var selfAABB = self.boundingBox;
-                    selfAABB.min += pos;
-                    selfAABB.max += pos;
+                    selfAABB.min = selfAABB.min.add(.{ .data = pos });
+                    selfAABB.max = selfAABB.max.add(.{ .data = pos });
 
                     const mtv = getAABBpenetration(blockAABB, selfAABB); // single-axis MTV or zero
 
@@ -156,31 +123,31 @@ pub const Mover = struct {
     }
 
     // Return signed per-axis intersection vector (zero if no overlap)
-    fn getAABBintersect(a: zm.AABB, b: zm.AABB) @Vector(3, f64) {
-        if (a.max[0] <= b.min[0] or a.min[0] >= b.max[0] or
-            a.max[1] <= b.min[1] or a.min[1] >= b.max[1] or
-            a.max[2] <= b.min[2] or a.min[2] >= b.max[2])
+    fn getAABBintersect(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
+        if (a.max.data[0] <= b.min.data[0] or a.min.data[0] >= b.max.data[0] or
+            a.max.data[1] <= b.min.data[1] or a.min.data[1] >= b.max.data[1] or
+            a.max.data[2] <= b.min.data[2] or a.min.data[2] >= b.max.data[2])
         {
             return @Vector(3, f64){ 0.0, 0.0, 0.0 };
         }
 
-        const ox = @min(a.max[0], b.max[0]) - @max(a.min[0], b.min[0]);
-        const oy = @min(a.max[1], b.max[1]) - @max(a.min[1], b.min[1]);
-        const oz = @min(a.max[2], b.max[2]) - @max(a.min[2], b.min[2]);
+        const ox = @min(a.max.data[0], b.max.data[0]) - @max(a.min.data[0], b.min.data[0]);
+        const oy = @min(a.max.data[1], b.max.data[1]) - @max(a.min.data[1], b.min.data[1]);
+        const oz = @min(a.max.data[2], b.max.data[2]) - @max(a.min.data[2], b.min.data[2]);
 
         // Use centers to derive direction so this MTV is the vector you should ADD to `a` to separate it.
-        const ca = (a.min + a.max) * @Vector(3, f64){ 0.5, 0.5, 0.5 };
-        const cb = (b.min + b.max) * @Vector(3, f64){ 0.5, 0.5, 0.5 };
+        const ca = (a.min.add(a.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
+        const cb = (b.min.add(b.max)).mul(.{ .data = .{ 0.5, 0.5, 0.5 } });
 
-        const sx = if (ca[0] < cb[0]) -ox else ox;
-        const sy = if (ca[1] < cb[1]) -oy else oy;
-        const sz = if (ca[2] < cb[2]) -oz else oz;
+        const sx = if (ca.data[0] < cb.data[0]) -ox else ox;
+        const sy = if (ca.data[1] < cb.data[1]) -oy else oy;
+        const sz = if (ca.data[2] < cb.data[2]) -oz else oz;
 
         return @Vector(3, f64){ sx, sy, sz };
     }
 
     // Choose the smallest absolute axis to form the minimum translation vector.
-    fn getAABBpenetration(a: zm.AABB, b: zm.AABB) @Vector(3, f64) {
+    fn getAABBpenetration(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
         const i = getAABBintersect(a, b);
         const ax = @abs(i[0]);
         const ay = @abs(i[1]);
@@ -200,12 +167,13 @@ pub const Gravity = struct {
     ///the strength of the gravity in blocks per second squared
     strength: f64 = 9.8,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
         _ = world;
         _ = allocator;
+        _ = io;
         const velOffset = @as(@Vector(3, f64), @splat(self.strength)) * self.up * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.fetchAddVelocity(-velOffset);
+        _ = physics.velocity.fetchAdd(-velOffset, .seq_cst);
     }
 };
 
@@ -214,23 +182,22 @@ pub const Resistance = struct {
     ///after one second the velocity will be this fraction of the original velocity
     fraction_per_second: f64 = 0.1,
 
-    pub fn update(self: *@This(), physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled) return;
         _ = world;
         _ = allocator;
         _ = deltaT;
-        physics.velocityLock.lock();
-        //physics.velocity *= @as(@Vector(3, f64), @splat( self.fraction_per_second));
-        physics.velocityLock.unlock();
+        _ = physics;
+        _ = io;
     }
 };
 
 test "AABB intersection" {
     const testing = std.testing;
 
-    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB.init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
-    const aabb3 = zm.AABB.init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
+    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB(3, f64).init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
+    const aabb3 = zm.AABB(3, f64).init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
 
     const intersect12 = Mover.getAABBintersect(aabb1, aabb2);
     try testing.expect(intersect12[0] != 0 and intersect12[1] != 0 and intersect12[2] != 0);
@@ -242,8 +209,8 @@ test "AABB intersection" {
 test "AABB penetration" {
     const testing = std.testing;
 
-    const aabb1 = zm.AABB.init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB.init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
+    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
+    const aabb2 = zm.AABB(3, f64).init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
 
     const penetration = Mover.getAABBpenetration(aabb1, aabb2);
     try testing.expect(penetration[0] == 0 and penetration[1] != 0 and penetration[2] == 0);
@@ -254,14 +221,14 @@ test "Gravity" {
     const physics_interface = getInterface(struct { gravity: Gravity });
     var physics_object = physics_interface{
         .elements = .{ .gravity = .{} },
-        .updateTimer = try std.time.Timer.start(),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 0, 0, 0 },
+        .last_update = .now(testing.io, .awake),
+        .pos = .{ .vector = .{ 0, 0, 0 } },
+        .velocity = .{ .vector = .{ 0, 0, 0 } },
     };
-    _ = physics_object.lapUpdateTimer();
-    std.Thread.sleep(std.time.ns_per_ms * 10);
-    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.getVelocity()[1] < 0);
+    _ = physics_object.lapUpdateTimer(testing.io);
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.velocity.load(.seq_cst)[1] < 0);
 }
 
 test "simpleMover" {
@@ -269,12 +236,12 @@ test "simpleMover" {
     const physics_interface = getInterface(struct { mover: simpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
-        .updateTimer = try std.time.Timer.start(),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 1, 0, 0 },
+        .last_update = .now(testing.io, .awake),
+        .pos = .{ .vector = .{ 0, 0, 0 } },
+        .velocity = .{ .vector = .{ 0, 0, 0 } },
     };
-    _ = physics_object.lapUpdateTimer();
-    std.Thread.sleep(std.time.ns_per_ms * 10);
-    try physics_object.update(undefined, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.getPos()[0] > 0);
+    _ = physics_object.lapUpdateTimer(testing.io);
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
+    try testing.expect(physics_object.pos.load(.seq_cst)[0] > 0);
 }
