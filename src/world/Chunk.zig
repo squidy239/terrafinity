@@ -128,11 +128,6 @@ pub const ChunkFaceEncoding = union(enum(u8)) {
     oneBlock: Block,
 };
 
-pub const ChunkFaceEncoding = union(enum(u8)) {
-    blocks: [ChunkSize][ChunkSize]Block,
-    oneBlock: Block,
-};
-
 pub const Genstate = enum(u8) {
     TerrainGenerated,
     StructuresGenerated,
