@@ -21,24 +21,24 @@
             .hash = "zigglgen-0.5.0-zigglr_CLwBs1aABtYVtxNPo1SB8AzgKMVouoqULqkDQ",
         },
         .obj = .{
-            .url = "git+https://github.com/chip2n/zig-obj.git#47410383c81d24454e370ffadc0980af7abea522",
-            .hash = "obj-3.0.2-v8OfitvLAADxUf6oMHCiWxjJILklY-IMKXlwX-Pv8rKu",
+            .url = "git+https://github.com/chip2n/zig-obj.git#6070356009e761a4aef82256f1f431037ae97426",
+            .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
         .zigimg = .{
-            .url = "git+https://github.com/GasInfinity-Forks/zigimg.git#c474a50ce9ec79ae726ee3f86fe08d530ff91e78",
-            .hash = "zigimg-0.1.0-8_eo2gCZFwA239CedNPHzAkZMxkUxQpLBq3UrataPX1x",
+            .url = "git+https://github.com/zigimg/zigimg#c7e81a13bff1cf4c5b7f085a8360f9d551143d40",
+            .hash = "zigimg-0.1.0-8_eo2uScFwCnpzB1Y2n_jf3euDfMEeCLxJE_E5_W5BNe",
         },
         .rocksdb = .{
             .url = "git+https://github.com/squidy239/rocksdb-zig#ee06fdd2c983f03654917b7ae75526c716748713",
             .hash = "rocksdb-9.7.4-z_CUTqzoAACZ0z0UZy0zNqiCOAp32K1VpE_unvLvLMl_",
         },
         .sdl3 = .{
-            .url = "git+https://codeberg.org/LDT9510/zig-sdl3#34357ae71c5207133618a02cda251cfb5e12eb4b",
-            .hash = "sdl3-0.1.9-NmT1Q1uFJwDhoBeP0k5-W6K9mo9h-x4yc9LebgZ3W6ET",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3#40c2e4b579aa556db37a502c936426aa1c8b5c95",
+            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#cbc1771d173a3efb8981965f26b93fc3de2fe4e3",
-            .hash = "dvui-0.5.0-dev-AQFJmf9u2wCpkLdoEvAHrxUuMDzVKS-AcB48RitJZke3",
+            .url = "git+https://github.com/david-vanderson/dvui#49e8443c038cc5a82dbf57305322132c0a61d4b6",
+            .hash = "dvui-0.5.0-dev-AQFJmTgB3QCriBRzSQGPpw44zDiTaQ8hNnrxsrSxSQti",
         },
     },
 
