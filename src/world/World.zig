@@ -348,7 +348,7 @@ pub const Reader = struct {
 
     /// Returns a block at the given position. clear() must be called after a series of calls to unlock the cached chunk.
     /// Better for many block reads.
-    pub inline fn getBlock(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
+    pub fn getBlock(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         if (self.lastChunkReadCache == null or !std.meta.eql(self.lastChunkReadCache.?.Pos, chunkPos)) {
@@ -366,7 +366,7 @@ pub const Reader = struct {
     }
 
     /// Returns a block at the given position. Better for fewer block reads.
-    pub inline fn getBlockUncached(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
+    pub fn getBlockUncached(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         const chunk = try self.world.loadChunk(io, allocator, chunkPos, false);
@@ -583,7 +583,7 @@ pub const Editor = struct {
     }
 };
 
-inline fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
+fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
     var best: Block = blocks[0];
     var best_count: f32 = 1;
     inline for (0..blocks.len) |i| {

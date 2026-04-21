@@ -114,7 +114,7 @@ pub const NaturalCubicInterpolator3D = struct {
 
     const h2_6 = 1.0 / 6.0;
     /// Evaluate a 1D natural cubic spline segment
-    pub inline fn splineEval(Type: type, values: [4]Type, m: [4]Type, t: Type) Type {
+    pub fn splineEval(Type: type, values: [4]Type, m: [4]Type, t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
         const i: usize = @intFromFloat(@min(@floor(t / one_third), 2));
         const localT: Type = t * 3.0 - @as(Type, @floatFromInt(i));
@@ -142,7 +142,7 @@ pub const NaturalCubicInterpolator3D = struct {
         return result;
     }
 
-    pub inline fn splineEvalSimd(comptime T: type, comptime len: usize, values: [4]@Vector(len, T), m: [4][len]T, t: T) @Vector(len, T) {
+    pub fn splineEvalSimd(comptime T: type, comptime len: usize, values: [4]@Vector(len, T), m: [4][len]T, t: T) @Vector(len, T) {
         const i: usize = @intFromFloat(@min(@floor(t * 3), 2));
         const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = @splat(localT);
@@ -151,7 +151,7 @@ pub const NaturalCubicInterpolator3D = struct {
         return a_v * values[i] + localT_v * values[i + 1] + ((a_v * a_v * a_v - a_v) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
     }
 
-    pub inline fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: [4][len]T, m: [4][len]T, comptime t: T) @Vector(len, T) {
+    pub fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: [4][len]T, m: [4][len]T, comptime t: T) @Vector(len, T) {
         const i: usize = comptime @intFromFloat(@min(@floor(t * 3), 2));
         const localT: T = comptime t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = comptime @splat(localT);

@@ -27,7 +27,7 @@ pub fn Cone(comptime T: type) type {
             return cone;
         }
 
-        pub inline fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
             const v = P - self.position;
             const t = utils.dot(v, self.axis);
 
@@ -75,7 +75,7 @@ pub fn Sphere(comptime T: type) type {
             return sphere;
         }
 
-        pub inline fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
+        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
             const diff = P - self.position;
             const dist2 = utils.dot(diff, diff);
             return dist2 <= self.radiusSquared;

@@ -137,7 +137,7 @@ pub const Tree = struct {
         return sample;
     }
 
-    inline fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
+    fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
         const scaled = @Vector(3, f64){
             if (range[0] != 0) p[0] / range[0] else 0.0,
             if (range[1] != 0) p[1] / range[1] else 0.0,
