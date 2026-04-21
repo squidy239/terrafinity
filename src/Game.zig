@@ -9,7 +9,6 @@ const ztracy = @import("ztracy");
 
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
-const Loader = @import("Loader.zig");
 const Mesh = @import("Mesh.zig");
 pub const Renderer = @import("Renderer.zig");
 const Chunk = @import("world/Chunk.zig");
@@ -486,10 +485,10 @@ pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allo
 
 pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    //const lowest_level = game.options.lowest_level;
-    //const highest_level = game.options.highest_level;
-    //const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
-    //if (!inside_range) return;
+    const lowest_level = game.options.lowest_level;
+    const highest_level = game.options.highest_level;
+    const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
+    if (!inside_range) game.opengl_renderer.render_buffer.remove(io, chunkPos); //ensure their is not an outdated mesh
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
@@ -501,22 +500,22 @@ pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3,
         if (Pos.level > h) return false;
     }
 
-    const playerChunkPos = @floor(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level))));
-    const center: @Vector(3, f64) = @floatFromInt(Pos.position);
+    const player_chunk_pos = @trunc(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(Pos.level))));
+    const chunk_center: @Vector(3, f64) = Pos.position;
 
     if (innerChunkRange) |icr| {
-        const inner: @Vector(3, f64) = .{ @floatFromInt(icr[0]), @floatFromInt(icr[1]), @floatFromInt(icr[0]) };
+        const inner: @Vector(3, f64) = .{ icr[0], icr[1], icr[0] };
         const insideInner =
-            @reduce(.And, playerChunkPos > center - inner) and
-            @reduce(.And, playerChunkPos < center + inner);
+            @reduce(.And, player_chunk_pos > (chunk_center - inner)) and
+            @reduce(.And, player_chunk_pos < chunk_center + inner);
         if (insideInner) return false;
     }
 
     if (outerChunkRange) |ocr| {
-        const outer: @Vector(3, f64) = .{ @floatFromInt(ocr[0]), @floatFromInt(ocr[1]), @floatFromInt(ocr[0]) };
+        const outer: @Vector(3, f64) = .{ ocr[0], ocr[1], ocr[0] };
         const outsideOuter =
-            @reduce(.Or, playerChunkPos < center - outer) or
-            @reduce(.Or, playerChunkPos > center + outer);
+            @reduce(.Or, player_chunk_pos < chunk_center - outer) or
+            @reduce(.Or, player_chunk_pos > chunk_center + outer);
         if (outsideOuter) return false;
     }
     return true;

@@ -7,7 +7,6 @@ const sdl = @import("sdl3");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
-const keepLoaded = @import("../../Loader.zig").keepLoaded;
 const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
