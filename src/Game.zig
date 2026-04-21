@@ -202,7 +202,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         defer game.allocator.free(storage_path);
         game.world_storage = try .init(storage_path, .{
             .create_if_missing = true,
-            .compression = .zstd,
+            .compression = .snappy,
         }, game.allocator);
     }
 

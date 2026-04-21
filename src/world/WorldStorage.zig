@@ -34,7 +34,9 @@ pub fn init(path: []const u8, config: rocksdb.DBOptions, allocator: std.mem.Allo
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
-    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, config, null, false, &err_str);
+    const column_families: [1]rocksdb.ColumnFamilyDescription = .{.{ .name = "default", .options = .{ .compression = .zstd } }};
+    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, config, &column_families, false, &err_str);
+    
     errdefer storage.database.deinit();
     errdefer allocator.free(storage.column_families);
 
@@ -58,6 +60,8 @@ const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.BlockEncoding)); //get t
 const BlockTagType = std.meta.Tag(Block);
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
+    const save = ztracy.ZoneN(@src(), "saveChunk");
+    defer save.End();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.blocks) {
         .blocks => return,
         .oneBlock => {}, //save chunk if it is just one block
@@ -80,6 +84,9 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, Pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+    const load = ztracy.ZoneN(@src(), "getBlocks");
+    defer load.End();
+
     const self: *@This() = @ptrCast(@alignCast(source.data));
     _ = allocator;
     var key = ChunkKey{ .x = Pos.position[0], .y = Pos.position[1], .z = Pos.position[2], .level = Pos.level };
