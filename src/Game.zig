@@ -106,8 +106,8 @@ pub const WorldOptions = struct {
     pub fn fromWorldFolder(folder: []const u8, io: std.Io, allocator: std.mem.Allocator) !WorldOptions {
         var world_folder = try std.Io.Dir.cwd().createDirPathOpen(io, folder, .{});
         defer world_folder.close(io);
-        
-        try world_folder.setTimestamps(io, ".", .{.access_timestamp = .now});
+
+        try world_folder.setTimestamps(io, ".", .{ .access_timestamp = .now });
 
         const worldConfigFile = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
         defer worldConfigFile.close(io);
@@ -182,7 +182,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
     game.allocator = allocator;
     errdefer game.game_arena.deinit();
     const arena = game.game_arena.allocator();
-    
+
     var world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
         else => return err,
@@ -293,7 +293,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
 
         self.chunk_load_is_running.store(true, .seq_cst);
         self.last_chunk_load = .now(io, .awake);
-        self.load_future = try io.concurrent(@This().loadChunks, .{ self, io, allocator });
+        self.load_future = io.concurrent(@This().loadChunks, .{ self, io, allocator }) catch io.async(@This().loadChunks, .{ self, io, allocator });
     }
 
     if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
@@ -482,23 +482,6 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
 pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: World.ChunkPos, genStructures: bool) !void {
     try self.loaded_or_meshed.put(io, allocator, Pos, {});
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, Pos, genStructures });
-}
-
-fn addChunkToRenderTask(self: *@This(), io: std.Io, Pos: World.ChunkPos, genStructures: bool) void {
-    (self.options_lock.lockSharedUncancelable(io)) catch return;
-    const lowest_level = self.options.lowest_level;
-    const highest_level = self.options.highest_level;
-    self.options_lock.unlockShared(io);
-
-    const gendistance = self.getGenDistance(io) catch return;
-    const inner_radius = self.getInnerGenRadius(io, gendistance, Pos.level) catch return;
-    const inside_range = Loader.keepLoaded(lowest_level, highest_level, self.player.physics.getPos(), Pos, inner_radius, gendistance);
-    const running = self.running.load(.monotonic);
-    if (!inside_range or !running) {
-        _ = self.loaded_or_meshed.remove(io, Pos);
-        return;
-    }
-    self.addChunkToRender(io, Pos, genStructures) catch |err| std.debug.panic("addchunktorenderError:{any}", .{err});
 }
 
 pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {

@@ -86,13 +86,13 @@ fn setupDependencies(
     });
     root_module.addImport("ztracy", ztracy.module("root"));
 
-    // RocksDB (requires: sudo apt-get install librocksdb-dev)
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
         .optimize = optimize,
     });
-    root_module.addImport("rocksdb", dep_rocksdb.module("bindings"));
+    const rocksdb_mod = dep_rocksdb.module("bindings");
+    root_module.addImport("rocksdb", rocksdb_mod);
 
     // SDL3
     const sdl3 = b.dependency("sdl3", .{

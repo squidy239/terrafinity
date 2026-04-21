@@ -291,10 +291,10 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
 pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
     const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
     defer unloadChunks.End();
-    self.block_grid_pool_mutex.lockUncancelable(io);
+    try self.block_grid_pool_mutex.lock(io);
     const grid_count = self.block_grid_count;
     self.block_grid_pool_mutex.unlock(io);
-    self.chunk_pool_mutex.lockUncancelable(io);
+    try self.chunk_pool_mutex.lock(io);
     const chunk_count = self.chunk_count;
     self.chunk_pool_mutex.unlock(io);
     const grid_fraction: f32 = @min(1, @as(f32, @floatFromInt(grid_count)) / @as(f32, @floatFromInt(max_grids)));
@@ -471,7 +471,7 @@ pub const Editor = struct {
         self.editBuffer.clearAndFree(self.tempallocator);
     }
 
-    pub inline fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
+    pub fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
         const chunkPos: ChunkPos = .fromLocalBlockPos(pos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         if (self.lastChunkCache != null and std.meta.eql(self.lastChunkCache.?.Pos, chunkPos)) {
@@ -509,6 +509,7 @@ pub const Editor = struct {
 
     const simplified_size = ChunkSize / scale_factor;
 
+    //TODO improve this code
     /// Returns true if the parent chunk was changed.
     pub fn propagateToParent(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, Pos: ChunkPos) !bool {
         const parent_pos = Pos.parent();
@@ -531,8 +532,7 @@ pub const Editor = struct {
         try parent.lockShared(io);
         defer parent.unlockShared(io);
         if (isoneblock and parent.blocks == .oneBlock and parent.blocks.oneBlock == simplified_blocks[0][0][0]) return false;
-        _ = try parent.toBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
-        _ = try parent.toBlocks(io, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex, false);
+
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {
@@ -541,7 +541,10 @@ pub const Editor = struct {
                         block_pos[1] + @as(i64, @intCast(y)),
                         block_pos[2] + @as(i64, @intCast(z)),
                     };
-                    const current_block = parent.blocks.blocks[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z];
+                    const current_block = switch (parent.blocks) {
+                        .blocks => parent.blocks.blocks[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
+                        .oneBlock => parent.blocks.oneBlock,
+                    };
                     const correct_block = simplified_blocks[x][y][z];
                     if (current_block == correct_block) continue;
                     try self.placeBlock(correct_block, world_pos, parent_pos.level);

@@ -32,22 +32,19 @@ pub const BlockEncoding = union(enum(u8)) {
                     },
                     .blocks => {
                         if (mergeBlocks.oneBlock != .null) {
-                            const block_grid = self.blocks;
-                            self.* = .{ .oneBlock = mergeBlocks.oneBlock };
-
-                            pool_mutex.lockUncancelable(io);
-                            memory_pool.destroy(@alignCast(block_grid));
+                            //safe because caller holds the lock
+                            try pool_mutex.lock(io);
+                            memory_pool.destroy(@alignCast(self.blocks));
                             pool_count.* -= 1;
                             pool_mutex.unlock(io);
+
+                            self.* = .{ .oneBlock = mergeBlocks.oneBlock };
                         }
                     },
                 }
             },
             .blocks => {
-                while (true) {
-                    try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
-                    if (self.* == .blocks) break;
-                }
+                try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
                 const tag = @typeInfo(Block).@"enum".tag_type;
                 const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
@@ -58,13 +55,12 @@ pub const BlockEncoding = union(enum(u8)) {
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
 
-                    const block_grid = self.blocks;
-                    self.* = .{ .oneBlock = block };
-
-                    pool_mutex.lockUncancelable(io);
-                    memory_pool.destroy(@alignCast(block_grid));
+                    try pool_mutex.lock(io);
+                    memory_pool.destroy(@alignCast(self.blocks));
                     pool_count.* -= 1;
                     pool_mutex.unlock(io);
+
+                    self.* = .{ .oneBlock = block };
                 }
             },
         }

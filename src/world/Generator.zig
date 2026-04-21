@@ -307,42 +307,44 @@ pub const DefaultGenerator = struct {
         const tempAllocator = bfa.get();
         var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagateChanges = false };
         defer worldEditor.clear();
-        try chunk.addAndLockShared(io);
-        defer chunk.releaseAndUnlockShared(io);
 
-        if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
-        if (chunk.blocks != .blocks) return;
-        if (!self.params.genStructures) return;
-        const heights = self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
-        const scale: f32 = self.params.terrainScale * (1.0 / ChunkPos.toScale(Pos.level));
+        {
+            try chunk.addAndLockShared(io);
+            defer chunk.releaseAndUnlockShared(io);
 
-        for (heights, 0..) |row, x| {
-            for (row, 0..) |height, z| {
-                if (@divFloor(height, ChunkSize) != Pos.position[1] or height < self.params.SeaLevel) continue;
-                const y: usize = @intCast(@mod(height, ChunkSize));
-                if (!chunk.blocks.blocks[x][y][z].plantsCanGrow()) continue;
+            if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
+            if (chunk.blocks != .blocks) return;
+            if (!self.params.genStructures) return;
+            const heights = self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
+            const scale: f32 = self.params.terrainScale * (1.0 / ChunkPos.toScale(Pos.level));
 
-                const realX: f32 = @as(f32, @floatFromInt((Pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
-                const realZ: f32 = @as(f32, @floatFromInt((Pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
+            for (heights, 0..) |row, x| {
+                for (row, 0..) |height, z| {
+                    if (@divFloor(height, ChunkSize) != Pos.position[1] or height < self.params.SeaLevel) continue;
+                    const y: usize = @intCast(@mod(height, ChunkSize));
+                    if (!chunk.blocks.blocks[x][y][z].plantsCanGrow()) continue;
 
-                const noise = self.params.TreeNoise.genNoise2D(realX, realZ);
+                    const realX: f32 = @as(f32, @floatFromInt((Pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
+                    const realZ: f32 = @as(f32, @floatFromInt((Pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
 
-                for (self.params.trees) |tree_conf| {
-                    if (!tree_conf.enabled) continue;
-                    if (isTree(noise, scale)) {
-                        const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                        if (Pos.level > 2) {
-                            try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight, Pos.level);
-                        } else {
-                            const realY: f32 = @as(f32, @floatFromInt((Pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
-                            const realPos = @Vector(3, f32){ realX, realY, realZ };
-                            try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed.?, Pos.level);
+                    const noise = self.params.TreeNoise.genNoise2D(realX, realZ);
+
+                    for (self.params.trees) |tree_conf| {
+                        if (!tree_conf.enabled) continue;
+                        if (isTree(noise, scale)) {
+                            const centerPos = ((Pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                            if (Pos.level > 2) {
+                                try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight, Pos.level);
+                            } else {
+                                const realY: f32 = @as(f32, @floatFromInt((Pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
+                                const realPos = @Vector(3, f32){ realX, realY, realZ };
+                                try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed.?, Pos.level);
+                            }
                         }
                     }
                 }
             }
         }
-
         try worldEditor.flush(io, allocator);
     }
 
