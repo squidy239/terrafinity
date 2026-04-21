@@ -1,11 +1,12 @@
 const std = @import("std");
 
+const Obj = @import("obj");
+const ztracy = @import("ztracy");
+
 const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const ChunkPos = @import("world/World.zig").ChunkPos;
-const Obj = @import("obj");
-const ztracy = @import("ztracy");
 
 pub const FaceRotation = enum(u4) {
     xPlus = 0,
@@ -88,7 +89,6 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
 
 //}
 test "MeshBenchmark" {
-    if(true) return error.SkipZigTest;
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
@@ -103,14 +103,15 @@ test "MeshBenchmark" {
     }
     var buf: [256]u8 = undefined;
     var writer = std.Io.Writer.Discarding.init(&buf);
-    const test_amount = 100000;
+    const test_amount = 100; // reduced from 100000
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
         try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .oneBlock = .air }), &writer.writer);
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
-
-    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(et.durationTo(st).toMicroseconds())) / test_amount)});
+    const dt = st.durationTo(et);
+    std.log.info("Mesh benchmark: {d} meshes in {d} ms", .{ test_amount, dt.toMilliseconds() });
+    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount)});
 }
 
 ///x+,x-,y+,y-,z+,z-

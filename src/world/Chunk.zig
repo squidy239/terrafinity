@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const ztracy = @import("ztracy");
 
 const Block = @import("Block.zig").Block;
-const ztracy = @import("ztracy");
-const builtin = @import("builtin");
+
 pub const ChunkSize = 32;
 blocks: BlockEncoding,
 lock: std.Io.RwLock = .init,
@@ -199,7 +201,7 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMin
 pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
     self.add_ref(io);
     defer self.release(io);
-    if (lock) self.lockExclusive(io);
+    if (lock) try self.lockExclusive(io);
     defer if (lock) self.unlockExclusive(io);
     if (self.blocks != .oneBlock) return false;
     try self.blocks.toBlocks(io, memory_pool, pool_count, pool_mutex);
@@ -334,16 +336,24 @@ test "IsOneBlock" {
     try testing.expect(isOneBlock(&all_stone_chunk).? == .stone);
 }
 
-test "ToBlocks" {
-    if (true) return error.SkipZigTest;
+test "toBlocks" {
     const testing = std.testing;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var chunk = try from(.{ .oneBlock = .stone }, io, allocator);
-    defer allocator.destroy(chunk);
-    defer chunk.free(io, allocator);
 
-    const converted = try chunk.ToBlocks(io, allocator, true);
+    var chunk_pool = try std.heap.MemoryPool(@This()).initCapacity(allocator, 1);
+    defer chunk_pool.deinit(allocator);
+    var chunk_count: u64 = 0;
+    var chunk_mutex: std.Io.Mutex = .init;
+
+    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
+    defer block_pool.deinit(allocator);
+    var block_count: u64 = 0;
+    var block_mutex: std.Io.Mutex = .init;
+
+    var chunk = try from(.{ .oneBlock = .stone }, io, &chunk_pool, &chunk_count, &chunk_mutex);
+
+    const converted = try chunk.toBlocks(io, &block_pool, &block_count, &block_mutex, true);
     try testing.expect(converted);
 
     switch (chunk.blocks) {
@@ -353,30 +363,39 @@ test "ToBlocks" {
             try testing.expect(blocks[10][20][30] == .stone);
         },
     }
+
+    chunk.free(io, &block_pool, &block_count, &block_mutex);
 }
 
-test "Merge" {
-    if (true) return error.SkipZigTest;
+test "merge_test" { // avoid collision with BlockEncoding.merge or the file merge
     const testing = std.testing;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
-    var blocks1: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var chunk_pool = try std.heap.MemoryPool(@This()).initCapacity(allocator, 1);
+    defer chunk_pool.deinit(allocator);
+    var chunk_count: u64 = 0;
+    var chunk_mutex: std.Io.Mutex = .init;
+
+    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
+    defer block_pool.deinit(allocator);
+    var block_count: u64 = 0;
+    var block_mutex: std.Io.Mutex = .init;
+
+    const blocks1 = try block_pool.create(allocator);
+    @memset(@as(*[ChunkSize * ChunkSize * ChunkSize]Block, @ptrCast(blocks1)), .air);
     blocks1[0][0][0] = .dirt;
+    block_count += 1;
 
     var blocks2: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
     blocks2[0][0][1] = .grass;
 
-    const chunk1_encoding = try BlockEncoding.fromBlocks(&blocks1, allocator);
-    var chunk1 = try from(chunk1_encoding, io, allocator);
-    defer allocator.destroy(chunk1);
-    defer chunk1.free(io, allocator);
+    const chunk1_encoding = BlockEncoding.fromBlocks(blocks1);
+    var chunk1 = try from(chunk1_encoding, io, &chunk_pool, &chunk_count, &chunk_mutex);
 
-    const chunk2_encoding = try BlockEncoding.fromBlocks(&blocks2, allocator);
+    const chunk2_encoding = BlockEncoding.fromBlocks(&blocks2);
 
-    chunk1.merge(io, chunk2_encoding, allocator, true);
-
-    allocator.destroy(chunk2_encoding.blocks);
+    try chunk1.merge(io, chunk2_encoding, &block_pool, &block_count, &block_mutex);
 
     switch (chunk1.blocks) {
         .oneBlock => return error.TestFailed,
@@ -386,6 +405,31 @@ test "Merge" {
             try testing.expect(blocks[1][1][1] == .air);
         },
     }
+
+    chunk1.free(io, &block_pool, &block_count, &block_mutex);
+}
+
+fn testToBlocksAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
+    var chunk_pool = try std.heap.MemoryPool(@This()).initCapacity(allocator, 1);
+    defer chunk_pool.deinit(allocator);
+    var chunk_count: u64 = 0;
+    var chunk_mutex: std.Io.Mutex = .init;
+
+    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
+    defer block_pool.deinit(allocator);
+    var block_count: u64 = 0;
+    var block_mutex: std.Io.Mutex = .init;
+
+    var chunk = try from(.{ .oneBlock = .stone }, io, &chunk_pool, &chunk_count, &chunk_mutex);
+
+    _ = try chunk.toBlocks(io, &block_pool, &block_count, &block_mutex, true);
+
+    chunk.free(io, &block_pool, &block_count, &block_mutex);
+}
+
+test "toBlocks allocation failure" {
+    const io = std.testing.io;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testToBlocksAllocation, .{io});
 }
 
 test {

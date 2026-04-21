@@ -59,6 +59,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
             // Create new node
             const node = try allocator.create(Node);
+            errdefer allocator.destroy(node);
             node.* = .{
                 .key = key,
                 .value = value,

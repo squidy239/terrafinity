@@ -55,3 +55,13 @@ pub const Block = enum(u16) {
         };
     }
 };
+
+test "Block properties" {
+    const testing = std.testing;
+    try testing.expect(Block.air.isTransparent());
+    try testing.expect(!Block.stone.isTransparent());
+    try testing.expect(Block.stone.isSolid());
+    try testing.expect(!Block.air.isSolid());
+    try testing.expect(Block.grass.isVisible());
+    try testing.expect(!Block.air.isVisible());
+}

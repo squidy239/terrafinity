@@ -2,9 +2,9 @@ const std = @import("std");
 
 const zm = @import("zm");
 
+const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 const Block = @import("Block.zig").Block;
 const World = @import("World.zig");
-const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 
 ///gets a Physics interface, all functions are thread-safe
 pub fn getInterface(physicsElements: anytype) type {
@@ -193,12 +193,11 @@ pub const Resistance = struct {
 };
 
 test "AABB intersection" {
-    if (true) return error.SkipZigTest;
     const testing = std.testing;
 
-    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB(3, f64).init(.{ 0.5, 0.5, 0.5 }, .{ 1.5, 1.5, 1.5 });
-    const aabb3 = zm.AABB(3, f64).init(.{ 2, 2, 2 }, .{ 3, 3, 3 });
+    const aabb1 = zm.AABB(3, f64).init(.{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 1, 1, 1 } });
+    const aabb2 = zm.AABB(3, f64).init(.{ .data = .{ 0.5, 0.5, 0.5 } }, .{ .data = .{ 1.5, 1.5, 1.5 } });
+    const aabb3 = zm.AABB(3, f64).init(.{ .data = .{ 2, 2, 2 } }, .{ .data = .{ 3, 3, 3 } });
 
     const intersect12 = Mover.getAABBintersect(aabb1, aabb2);
     try testing.expect(intersect12[0] != 0 and intersect12[1] != 0 and intersect12[2] != 0);
@@ -208,20 +207,16 @@ test "AABB intersection" {
 }
 
 test "AABB penetration" {
-    if (true) return error.SkipZigTest;
-
     const testing = std.testing;
 
-    const aabb1 = zm.AABB(3, f64).init(.{ 0, 0, 0 }, .{ 1, 1, 1 });
-    const aabb2 = zm.AABB(3, f64).init(.{ 0.8, 0.9, 0.7 }, .{ 1.8, 1.9, 1.7 });
+    const aabb1 = zm.AABB(3, f64).init(.{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 1, 1, 1 } });
+    const aabb2 = zm.AABB(3, f64).init(.{ .data = .{ 0.8, 0.9, 0.7 } }, .{ .data = .{ 1.8, 1.9, 1.7 } });
 
     const penetration = Mover.getAABBpenetration(aabb1, aabb2);
     try testing.expect(penetration[0] == 0 and penetration[1] != 0 and penetration[2] == 0);
 }
 
 test "Gravity" {
-    if (true) return error.SkipZigTest;
-
     const testing = std.testing;
     const physics_interface = getInterface(struct { gravity: Gravity });
     var physics_object = physics_interface{
@@ -237,18 +232,16 @@ test "Gravity" {
 }
 
 test "simpleMover" {
-    if (true) return error.SkipZigTest;
-
     const testing = std.testing;
     const physics_interface = getInterface(struct { mover: simpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
         .last_update = .now(testing.io, .awake),
         .pos = .{ .vector = .{ 0, 0, 0 } },
-        .velocity = .{ .vector = .{ 0, 0, 0 } },
+        .velocity = .{ .vector = .{ 0, 10, 0 } },
     };
     _ = physics_object.lapUpdateTimer(testing.io);
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.pos.load(.seq_cst)[0] > 0);
+    try testing.expect(physics_object.pos.load(.seq_cst)[1] > 0);
 }

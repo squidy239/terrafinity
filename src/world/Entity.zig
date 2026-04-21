@@ -1,9 +1,10 @@
 const std = @import("std");
-const Renderer = @import("../Game.zig").Renderer;
-const World = @import("World.zig");
-const ztracy = @import("ztracy");
 
 const EntityTypes = @import("EntityTypes");
+const ztracy = @import("ztracy");
+
+const Renderer = @import("../Game.zig").Renderer;
+const World = @import("World.zig");
 
 const Entity = @This();
 
@@ -67,13 +68,14 @@ pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroT
 
 pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
     const mem = try allocator.create(@TypeOf(tempentity));
+    errdefer allocator.destroy(mem);
     mem.* = tempentity;
 
     const en = Entity{
         .type = @TypeOf(tempentity).Type,
         .ptr = mem,
         .ref_count = .init(1),
-        .vtable = tempentity.getInterface(),
+        .vtable = mem.getInterface(),
     };
 
     const entity = try allocator.create(Entity);
@@ -90,3 +92,32 @@ pub const Type = enum(u32) {
     Cube = 1,
     Explosive = 2,
 };
+
+test "Entity.make allocation failure" {
+    const DummyEntity = struct {
+        pub const Type = Entity.Type.Cube;
+        pos: @Vector(3, f64) = .{ 0, 0, 0 },
+        pub fn getInterface(self: *@This()) Entity.interface {
+            _ = self;
+            return .{
+                .unload = unloadFn,
+            };
+        }
+        fn unloadFn(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+            _ = io; _ = world; _ = uuid; _ = save;
+            allocator.destroy(@as(*@This(), @ptrCast(@alignCast(entity.ptr))));
+            allocator.destroy(entity);
+        }
+    };
+
+    const test_fn = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const dummy = DummyEntity{};
+            const entity = try Entity.make(dummy, allocator);
+            allocator.destroy(@as(*DummyEntity, @ptrCast(@alignCast(entity.ptr))));
+            allocator.destroy(entity);
+        }
+    }.run;
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_fn, .{});
+}

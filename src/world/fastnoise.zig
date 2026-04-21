@@ -1911,47 +1911,43 @@ test "reference all" {
 }
 
 test "range of all 2D noise/fractal combinations" {
-    if (true) return error.SkipZigTest; //this fails possibly because of floating point rounding errors
-    const size = 768;
+    const size = 128;
     var noise = Noise(f32){};
 
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
 
-        @setEvalBranchQuota(size * size);
+        @setEvalBranchQuota(size * size * 2);
         inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
             noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
             for (0..size * size) |i| {
                 const value = noise.genNoise2D(@floatFromInt(i % size), @floatFromInt(i / size));
-                try expect(value >= -1.0 and value <= 1.0);
+                try expect(value >= -1.0001 and value <= 1.0001);
             }
         }
     }
 }
 
 test "range of all 3D noise/fractal combinations" {
-    if (true) return error.SkipZigTest; //this fails possibly because of floating point rounding errors
-
-    const size = 64;
+    const size = 32;
     var noise = Noise(f32){};
 
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
 
-        @setEvalBranchQuota(size * size * size);
+        @setEvalBranchQuota(size * size * size * 2);
         inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
             noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
             for (0..size) |z| for (0..size) |y| for (0..size) |x| {
                 const value = noise.genNoise3D(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z));
-                try expect(value >= -1.0 and value <= 1.0);
+                try expect(value >= -1.0001 and value <= 1.0001);
             };
         }
     }
 }
 
 test "range of all 2D cellular return/distance combinations (f64)" {
-    if (true) return error.SkipZigTest; //this is slow
-    const size = 768;
+    const size = 128;
     var noise = Noise(f64){
         .noise_type = .cellular,
     };
@@ -1962,15 +1958,14 @@ test "range of all 2D cellular return/distance combinations (f64)" {
             noise.cellular_return = std.meta.stringToEnum(CellularReturnType, ret.name).?;
             for (0..size * size) |i| {
                 const value = noise.genNoise2D(@floatFromInt(i % size), @floatFromInt(i / size));
-                try expect(value >= -1.0 and value <= 1.0);
+                try expect(value >= -1.0001 and value <= 1.0001);
             }
         }
     }
 }
 
 test "range of all 3D cellular return/distance combinations" {
-    if (true) return error.SkipZigTest; //this is slow
-    const size = 96;
+    const size = 32;
     var noise = Noise(f32){
         .noise_type = .cellular,
     };

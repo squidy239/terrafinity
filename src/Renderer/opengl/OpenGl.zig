@@ -272,7 +272,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
     const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
-    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
+    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.1).transpose();
     const projection = reverse_z_matrix;
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);

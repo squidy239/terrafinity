@@ -3,15 +3,15 @@ const std = @import("std");
 const Cache = @import("Cache").Cache;
 const ztracy = @import("ztracy");
 
+const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
+const defaults = @import("defaults.zig");
 const Interpolation = @import("Interpolation.zig");
 const World = @import("World.zig");
 const ChunkPos = World.ChunkPos;
-const utils = @import("../libs/utils.zig");
-const defaults = @import("defaults.zig");
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
@@ -111,7 +111,7 @@ pub const DefaultGenerator = struct {
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(Pos.position)))));
             var rand = rng.random();
-            heights = self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
+            heights = try self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
             const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
             generateTerrain(&blockgrid, Pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.End();
@@ -238,12 +238,12 @@ pub const DefaultGenerator = struct {
     var get_requests: std.atomic.Value(usize) = .init(0);
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
-    pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
+    pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, Pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
         const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
         defer gth.End();
         if (self.terrain_height_cache.get(io, .{ .pos = Pos, .level = level })) |cachedHeight| return cachedHeight;
         const generatedHeights = genTerrainHeight(self.params, level, Pos);
-        _ = self.terrain_height_cache.put(io, allocator, .{ .pos = Pos, .level = level }, generatedHeights) catch unreachable;
+        try self.terrain_height_cache.put(io, allocator, .{ .pos = Pos, .level = level }, generatedHeights);
         return generatedHeights;
     }
 
@@ -315,7 +315,7 @@ pub const DefaultGenerator = struct {
             if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
             if (chunk.blocks != .blocks) return;
             if (!self.params.genStructures) return;
-            const heights = self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
+            const heights = try self.getTerrainHeight(io, allocator, [2]i32{ Pos.position[0], Pos.position[2] }, Pos.level);
             const scale: f32 = self.params.terrainScale * (1.0 / ChunkPos.toScale(Pos.level));
 
             for (heights, 0..) |row, x| {

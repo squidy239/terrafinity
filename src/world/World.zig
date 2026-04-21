@@ -4,6 +4,7 @@ const Cache = @import("Cache").Cache;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const ztracy = @import("ztracy");
 
+const Options = @import("../Game.zig").Options;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
@@ -264,6 +265,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: 
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.Chunks.putNoOverrideAddRef(io, allocator, Pos, chunkptr) catch |err| {
+            chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             self.destroyChunkPtr(io, chunkptr);
             return err;
@@ -339,8 +341,6 @@ fn memCurve(max_ms: u64, fraction: f32) u64 {
     const time: u64 = @intFromFloat(@as(f32, @floatFromInt(max_ms)) * (1 - fraction));
     return time;
 }
-
-const Options = @import("../Game.zig").Options;
 
 pub const Reader = struct {
     world: *World,
@@ -699,53 +699,77 @@ test "ChunkPos" {
 
 test "cube benchmark" {
     if (@import("builtin").mode == .Debug) return error.SkipZigTest;
-    if (true) return;
     const allocator = std.heap.smp_allocator;
     const io = std.testing.io;
-    const cpu_count = try std.Thread.getCpuCount();
-    var threadPool: u43 = undefined;
-    try threadPool.init(.{ .allocator = allocator, .n_jobs = cpu_count });
 
-    var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = try .init(allocator, 1024) };
-    generator.params.setSeeds();
+    var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = .init(1024) };
+    generator.params.setSeeds(io);
     var world: World = .{
-        .chunk_pool = try .initPreheated(allocator, 100000),
-        .block_grid_pool = try .initPreheated(allocator, 6000),
-        .thread_pool = &threadPool,
-        .allocator = allocator,
+        .chunk_pool = try .initCapacity(allocator, 100000),
+        .block_grid_pool = try .initCapacity(allocator, 6000),
         .onEdit = null,
         .ChunkSources = .{ generator.getSource(), null, null, null },
-        .running = .init(true),
         .Chunks = .init(),
         .Entitys = .init(),
         .Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
     };
-    defer world.deinit(io);
-    defer threadPool.deinit();
+    defer world.deinit(io, allocator);
 
     var counter: std.atomic.Value(usize) = .init(0);
     var timer: std.time.Timer = try .start();
-    const levels: [2]i32 = .{ 0, 16 };
-    const square = 32;
+    const levels: [2]i32 = .{ 0, 4 };
+    const square = 8;
     var lvl: i32 = levels[0];
     while (lvl < levels[1]) : (lvl += 1) {
         for (0..square) |x| {
             for (0..square) |y| {
                 for (0..square) |z| {
-                    try threadPool.spawn(loadchunktest, .{ &world, io, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter }, .Medium);
+                    _ = try io.concurrent(loadchunktest, .{ &world, io, allocator, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter });
                 }
             }
         }
     }
-    while (counter.load(.seq_cst) != (levels[1] - levels[0]) * square * square * square) {}
+    while (counter.load(.seq_cst) != (levels[1] - levels[0]) * square * square * square) {
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
     std.testing.log_level = .debug;
     std.log.info("loaded at {d} chunks per second\n", .{@as(f32, @floatFromInt(counter.load(.seq_cst))) / (@as(f32, @floatFromInt(timer.read())) / std.time.ns_per_s)});
 }
 
-fn loadchunktest(self: *World, io: std.Io, Pos: ChunkPos, structures: bool, counter: *std.atomic.Value(usize)) void {
-    const ch = self.loadChunk(io, Pos, structures) catch |err| std.debug.panic("err: {any}\n", .{err});
+fn loadchunktest(self: *World, io: std.Io, allocator: std.mem.Allocator, Pos: ChunkPos, structures: bool, counter: *std.atomic.Value(usize)) void {
+    const ch = self.loadChunk(io, allocator, Pos, structures) catch |err| std.debug.panic("err: {any}\n", .{err});
     ch.release(io);
     _ = counter.fetchAdd(1, .seq_cst);
+}
+
+fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
+    var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = .init(10) };
+    generator.params.setSeeds(io);
+
+    var world: World = undefined;
+    world.chunk_pool = try std.heap.MemoryPoolExtra(Chunk, .{ .growable = false }).initCapacity(allocator, 10);
+    world.block_grid_pool = std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }).initCapacity(allocator, 10) catch |err| {
+        world.chunk_pool.deinit(allocator);
+        return err;
+    };
+    world.Chunks = .init();
+    world.Entitys = .init();
+    world.Config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 };
+    world.ChunkSources = .{ generator.getSource(), null, null, null };
+    world.onEdit = null;
+    world.chunk_count = 0;
+    world.chunk_pool_mutex = .init;
+    world.block_grid_count = 0;
+    world.block_grid_pool_mutex = .init;
+
+    defer world.deinit(io, allocator);
+
+    const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, false);
+    chunk.release(io);
+}
+test "loadChunk allocation failure" {
+    const io = std.testing.io;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testLoadChunkAllocation, .{io});
 }
 
 test {
