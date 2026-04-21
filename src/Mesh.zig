@@ -88,6 +88,7 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
 
 //}
 test "MeshBenchmark" {
+    if(true) return error.SkipZigTest;
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {

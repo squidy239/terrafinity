@@ -95,19 +95,25 @@ pub const BlockEncoding = union(enum(u8)) {
     }
 
     test "merge" {
-        if (true) return error.SkipZigTest;
-
         try std.testing.fuzz(std.testing.io, testOne, .{});
     }
 
     fn testOne(io: std.Io, smith: *std.testing.Smith) !void {
-        const pool: std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block) = try .initCapacity(std.testing.allocator, 1);
+        var pool: std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block) = try .initCapacity(std.testing.allocator, 1);
         defer pool.deinit(std.testing.allocator);
-        var b1 = smith.value(BlockEncoding);
-        const b2 = smith.value(BlockEncoding);
-        var pc: u64 = 0;
+        var g1: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var g2: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var b1: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
+            .blocks => blk: { g1 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);break:blk BlockEncoding{ .blocks = &g1 }; },
+            .oneBlock => .{ .oneBlock = smith.value(Block) },
+        };
+        const b2: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
+            .blocks => blk: { g2 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);break:blk BlockEncoding{ .blocks = &g2 }; },
+            .oneBlock => .{ .oneBlock = smith.value(Block) },
+        };
+        var pc: u64 = 2;
         var pm: std.Io.Mutex = .init;
-        try b1.merge(io, b2, pool, &pc, &pm);
+        try b1.merge(io, b2, &pool, &pc, &pm);
     }
 };
 
