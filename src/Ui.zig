@@ -221,7 +221,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     const worlds_path = self.config.worlds_path;
     self.config_lock.unlockShared(io);
 
-    var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, worlds_path, .{ .open_options = .{ .iterate = true }});
+    var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, worlds_path, .{ .open_options = .{ .iterate = true } });
     defer worlds_folder.close(io);
 
     var list: std.ArrayList(FolderData) = .empty;

@@ -106,11 +106,17 @@ pub const BlockEncoding = union(enum(u8)) {
         var g1: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var g2: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var b1: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
-            .blocks => blk: { g1 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);break:blk BlockEncoding{ .blocks = &g1 }; },
+            .blocks => blk: {
+                g1 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
+                break :blk BlockEncoding{ .blocks = &g1 };
+            },
             .oneBlock => .{ .oneBlock = smith.value(Block) },
         };
         const b2: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
-            .blocks => blk: { g2 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);break:blk BlockEncoding{ .blocks = &g2 }; },
+            .blocks => blk: {
+                g2 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
+                break :blk BlockEncoding{ .blocks = &g2 };
+            },
             .oneBlock => .{ .oneBlock = smith.value(Block) },
         };
         var pc: u64 = 2;

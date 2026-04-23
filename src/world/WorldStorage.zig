@@ -36,7 +36,7 @@ pub fn init(path: []const u8, config: rocksdb.DBOptions, allocator: std.mem.Allo
     };
     const column_families: [1]rocksdb.ColumnFamilyDescription = .{.{ .name = "default", .options = .{ .compression = .zstd } }};
     storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, config, &column_families, false, &err_str);
-    
+
     errdefer storage.database.deinit();
     errdefer allocator.free(storage.column_families);
 

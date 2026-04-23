@@ -104,7 +104,10 @@ test "Entity.make allocation failure" {
             };
         }
         fn unloadFn(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
-            _ = io; _ = world; _ = uuid; _ = save;
+            _ = io;
+            _ = world;
+            _ = uuid;
+            _ = save;
             allocator.destroy(@as(*@This(), @ptrCast(@alignCast(entity.ptr))));
             allocator.destroy(entity);
         }
