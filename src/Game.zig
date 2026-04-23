@@ -258,7 +258,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
     game.renderer.updateCameraDirection(game.player.viewDirection.load(.seq_cst));
 }
 
-pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
+pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
@@ -324,14 +324,14 @@ pub fn handleSelectFutures(self: *@This()) !void {
     }
 }
 
-pub fn getLevels(self: *@This(), io: std.Io) ![2]i32 {
+pub fn getLevels(self: *@This(), io: std.Io) struct{i32, i32} {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) !@Vector(2, u32) {
-    if (level <= (try self.getLevels(io))[0]) return @splat(0);
+pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+    if (level <= (self.getLevels(io))[0]) return @splat(0);
     const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
@@ -418,18 +418,22 @@ fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_second
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
-pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, Pos: World.ChunkPos, genStructures: bool) !void {
+pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
     const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
     defer GenMeshAndAdd.End();
-    const chunk = try self.world.loadChunk(io, allocator, Pos, genStructures);
+    
+    // Prevent an old version of the chunk from staying loaded
+    if(!self.keepChunkLoaded(io, chunk_pos)) return self.renderer.removeChunk(io, chunk_pos);
+    
+    const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
     defer chunk.release(io);
     const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
-        try (try self.world.loadChunk(io, allocator, Pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
     };
 
     var sfa = std.heap.stackFallback(65536, self.allocator);
@@ -446,16 +450,25 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     }
     const written = alloc_writer.written();
     if (written.len == 0) return;
-    try self.renderer.addChunk(io, Pos, written);
+    try self.renderer.addChunk(io, chunk_pos, written);
 }
+
+pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
+    const lowest_level, const highest_level = self.getLevels(io);
+    const playerpos = self.player.physics.pos.load(.seq_cst);
+    const gendistance = self.getGenDistance(io);
+    const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
+    const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
+    return inside_range;
+    }
 
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
     const playerpos = self.player.physics.pos.load(.seq_cst);
-    const renderdistance = try self.getGenDistance(io);
-    const levels = try self.getLevels(io);
+    const renderdistance = self.getGenDistance(io);
+    const levels = self.getLevels(io);
 
     const chunkCollector = struct {
         game: *Game,
@@ -467,7 +480,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
 
         pub fn callback(userdata: *anyopaque, Pos: World.ChunkPos) void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
-            const innerRadius: @Vector(2, u32) = ctx.game.getInnerGenRadius(ctx.io, ctx.renderdistance, Pos.level) catch return;
+            const innerRadius: @Vector(2, u32) = ctx.game.getInnerGenRadius(ctx.io, ctx.renderdistance, Pos.level);
             const keep = keepLoaded(ctx.levels[0], ctx.levels[1], ctx.playerpos, Pos, innerRadius, ctx.renderdistance);
             if (keep) return;
             ctx.tounload.appendBounded(Pos) catch {};
@@ -501,10 +514,6 @@ pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allo
 
 pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    const lowest_level = game.options.lowest_level;
-    const highest_level = game.options.highest_level;
-    const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
-    if (!inside_range) game.renderer.removeChunk(io, chunkPos); //ensure their is not an outdated mesh
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
@@ -542,28 +551,32 @@ pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     defer self.chunk_load_is_running.store(false, .seq_cst);
     const playerPos = self.player.physics.pos.load(.seq_cst);
     const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
-    const genDistance = try self.getGenDistance(io);
-    const levels = try self.getLevels(io);
+
+    var levels = self.getLevels(io);
     var level = levels[0];
     var amount_loaded: u64 = 0;
     while (level < levels[1]) : (level += 1) {
-        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos, genDistance, try self.getInnerGenRadius(io, genDistance, level), level);
+        levels = self.getLevels(io);
+        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos,  level);
     }
     addChunkstoLoad.End();
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), dist: @Vector(2, u32), innerdistance: @Vector(2, u32), level: i32) !u64 {
+fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
+    
+    var outer_radius = game.getGenDistance(io);
+    var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
+    
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
     var xz: [2]i32 = .{ 0, 0 };
     var c: usize = 0;
 
-    const distance = dist;
     while (true) {
-        if (amount_tested >= 4 * distance[0] * distance[0]) {
+        if (amount_tested >= 4 * outer_radius[0] * outer_radius[0]) {
             break;
         }
 
@@ -572,14 +585,17 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
         var cc: i32 = 0;
         while (Line(&xz, &cc, m)) {
             amount_tested += 1;
-            std.debug.assert(cc <= 2 * @max(distance[0], distance[0]));
-            var y: i32 = -@as(i32, @intCast(distance[1]));
+
+            var y: i32 = -@as(i32, @intCast(outer_radius[1]));
             try io.checkCancel();
-            while (y < distance[1]) {
+            //update radiuses more frequently incase they are set wayy to high
+            outer_radius = game.getGenDistance(io);
+            inner_radius = game.getInnerGenRadius(io, outer_radius, level);
+            while (y < outer_radius[1]) {
                 defer y += 1;
                 const Pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
 
-                const in_range = keepLoaded(null, null, playerPos, Pos, innerdistance, distance);
+                const in_range = keepLoaded(null, null, playerPos, Pos, inner_radius, outer_radius);
                 if (!in_range)
                     continue;
 
