@@ -229,15 +229,15 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .physics = .{
             .elements = .{
                 .mover = .{
-                    .collisions = false,
+                    .collisions = .init(false),
                     .boundingBox = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
-                    .enabled = true,
-                    .zeroVelocity = true,
+                    .enabled = .init(true),
+                    .zeroVelocity = .init(true),
                 },
                 .gravity = .{
-                    .enabled = false,
+                    .enabled = .init(false),
                 },
-                .resistance = .{ .fraction_per_second = 0.1, .enabled = false },
+                .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
             .pos = .{ .vector = try game.world.getPlayerSpawnPos() },
             .velocity = .{ .vector = @splat(0) },

@@ -17,6 +17,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = true,
+        .sanitize_c = .full,
+        .stack_check = true,
+      //  .stack_protector = true,
     });
 
     // Set up dependencies and imports
@@ -27,7 +31,7 @@ pub fn build(b: *std.Build) void {
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
-        .use_lld = false,
+        .use_lld = true,
     });
 
     // Link libraries

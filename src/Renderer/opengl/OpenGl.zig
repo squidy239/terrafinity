@@ -166,7 +166,7 @@ fn glError() !void {
     }
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected}!void {
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
     self.render_buffer.put(io, Pos, data) catch |err| switch (err) {
@@ -239,7 +239,6 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
         try it.unpause(io);
     }
 }
-
 
 fn CompileShaders(self: *@This()) !void {
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);

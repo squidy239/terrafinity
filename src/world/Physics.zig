@@ -47,16 +47,16 @@ pub const simpleMover = struct {
 };
 
 pub const Mover = struct {
-    collisions: bool,
-    zeroVelocity: bool,
+    collisions: std.atomic.Value(bool),
+    zeroVelocity: std.atomic.Value(bool),
     boundingBox: zm.AABB(3, f64),
-    enabled: bool,
+    enabled: std.atomic.Value(bool),
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
-        if (!self.enabled) return;
-        defer if (self.zeroVelocity) physics.velocity.store(.{ 0, 0, 0 }, .seq_cst);
+        if (!self.enabled.load(.monotonic)) return;
+        defer if (self.zeroVelocity.load(.monotonic)) physics.velocity.store(.{ 0, 0, 0 }, .seq_cst);
         var posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
-        if (!self.collisions) {
+        if (!self.collisions.load(.monotonic)) {
             _ = physics.pos.fetchAdd(posOffset, .seq_cst);
             return;
         }
@@ -162,28 +162,28 @@ pub const Mover = struct {
 };
 
 pub const Gravity = struct {
-    enabled: bool = true,
+    enabled: std.atomic.Value(bool) = .init(true),
     up: @Vector(3, f64) = .{ 0, 1, 0 },
     ///the strength of the gravity in blocks per second squared
-    strength: f64 = 9.8,
+    strength: std.atomic.Value(f64) = .init(9.8),
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
-        if (!self.enabled) return;
+        if (!self.enabled.load(.monotonic)) return;
         _ = world;
         _ = allocator;
         _ = io;
-        const velOffset = @as(@Vector(3, f64), @splat(self.strength)) * self.up * @as(@Vector(3, f64), @splat(deltaT));
+        const velOffset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic))) * self.up * @as(@Vector(3, f64), @splat(deltaT));
         _ = physics.velocity.fetchAdd(-velOffset, .seq_cst);
     }
 };
 
 pub const Resistance = struct {
-    enabled: bool = true,
+    enabled: std.atomic.Value(bool) = .init(true),
     ///after one second the velocity will be this fraction of the original velocity
-    fraction_per_second: f64 = 0.1,
+    fraction_per_second: std.atomic.Value(f64) = .init(0.1),
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
-        if (!self.enabled) return;
+        if (!self.enabled.load(.monotonic)) return;
         _ = world;
         _ = allocator;
         _ = deltaT;

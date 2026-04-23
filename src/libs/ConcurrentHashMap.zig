@@ -122,7 +122,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             bkt_index: usize = 0,
             bkt_iter: ?Bkt.Map.Iterator = null,
             paused: bool = false,
-            
+
             pub fn next(it: *Iterator, io: std.Io) ?Bkt.Map.Entry {
                 while (true) {
                     // If we have an active bucket iterator, use it
@@ -166,7 +166,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
 
             pub fn deinit(it: *Iterator, io: std.Io) void {
                 if (it.bkt_iter != null) {
-                    if(!it.paused) it.map.buckets[it.bkt_index].lock.unlockShared(io);
+                    if (!it.paused) it.map.buckets[it.bkt_index].lock.unlockShared(io);
                 }
                 it.* = undefined;
             }

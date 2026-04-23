@@ -137,28 +137,29 @@ pub const Player = struct {
     }
 
     pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
-        self.gameMode.store(gameMode, .seq_cst);
+        self.gameMode.store(gameMode, .monotonic);
+
         switch (gameMode) {
             .Spectator => {
-                self.physics.elements.mover.enabled = true;
-                self.physics.elements.mover.zeroVelocity = true;
-                self.physics.elements.mover.collisions = false;
-                self.physics.elements.gravity.enabled = false;
-                self.physics.elements.resistance.enabled = false;
+                self.physics.elements.mover.enabled.store(true, .monotonic);
+                self.physics.elements.mover.zeroVelocity.store(true, .monotonic);
+                self.physics.elements.mover.collisions.store(false, .monotonic);
+                self.physics.elements.gravity.enabled.store(false, .monotonic);
+                self.physics.elements.resistance.enabled.store(false, .monotonic);
             },
             .Survival => {
-                self.physics.elements.mover.enabled = true;
-                self.physics.elements.mover.zeroVelocity = false;
-                self.physics.elements.mover.collisions = true;
-                self.physics.elements.gravity.enabled = true;
-                self.physics.elements.resistance.enabled = true;
+                self.physics.elements.mover.enabled.store(true, .monotonic);
+                self.physics.elements.mover.zeroVelocity.store(false, .monotonic);
+                self.physics.elements.mover.collisions.store(true, .monotonic);
+                self.physics.elements.gravity.enabled.store(true, .monotonic);
+                self.physics.elements.resistance.enabled.store(true, .monotonic);
             },
             .Creative => {
-                self.physics.elements.mover.enabled = true;
-                self.physics.elements.mover.zeroVelocity = false;
-                self.physics.elements.mover.collisions = true;
-                self.physics.elements.gravity.enabled = false;
-                self.physics.elements.resistance.enabled = true;
+                self.physics.elements.mover.enabled.store(true, .monotonic);
+                self.physics.elements.mover.zeroVelocity.store(false, .monotonic);
+                self.physics.elements.mover.collisions.store(true, .monotonic);
+                self.physics.elements.gravity.enabled.store(false, .monotonic);
+                self.physics.elements.resistance.enabled.store(true, .monotonic);
             },
         }
     }

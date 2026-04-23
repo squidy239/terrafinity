@@ -4,6 +4,7 @@ const Game = @import("Game.zig");
 const sdl = @import("sdl3");
 const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
+const EntityTypes = @import("world/EntityTypes.zig");
 const utils = @import("libs/utils.zig");
 
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
@@ -99,10 +100,30 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     const menuchanged: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
-    const settings = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
+    const settings = dvui.box(
+        @src(),
+        .{ .dir = .vertical },
+        .{
+            .expand = .both,
+            .background = true,
+            .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 },
+        },
+    );
     defer settings.deinit();
 
-    self.config_lock.lockUncancelable(io);
+    if (self.menu_state.ingame) {
+        var gm: EntityTypes.Player.GameMode = self.game.player.gameMode.load(.monotonic);
+        _ = dvui.dropdownEnum(
+            @src(),
+            EntityTypes.Player.GameMode,
+            .{ .choice = &gm },
+            .{ .null_selectable = false },
+            .{ .gravity_x = 0.5 },
+        );
+        self.game.player.switchGameMode(gm);
+    }
+
+    try self.config_lock.lock(io);
     const firstconfig = self.config.*;
     dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 

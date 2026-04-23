@@ -10,7 +10,7 @@ last_viewport: ?[2]u32 = null,
 
 pub const VTable = struct {
     removeChunk: *const fn (*anyopaque, std.Io, ChunkPos) void,
-    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected}!void,
+    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void,
     drawChunks: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) error{DrawFailed}!void,
     containsChunk: *const fn (*anyopaque, std.Io, ChunkPos) bool,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
