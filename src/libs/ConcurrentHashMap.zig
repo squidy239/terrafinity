@@ -121,7 +121,8 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             map: *Map,
             bkt_index: usize = 0,
             bkt_iter: ?Bkt.Map.Iterator = null,
-
+            paused: bool = false,
+            
             pub fn next(it: *Iterator, io: std.Io) ?Bkt.Map.Entry {
                 while (true) {
                     // If we have an active bucket iterator, use it
@@ -153,19 +154,21 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                 if (it.bkt_index < it.map.buckets.len) {
                     it.map.buckets[it.bkt_index].lock.unlockShared(io);
                 }
+                it.paused = true;
             }
 
-            pub fn unpause(it: *Iterator, io: std.Io) void {
+            pub fn unpause(it: *Iterator, io: std.Io) !void {
                 if (it.bkt_index < it.map.buckets.len) {
-                    it.map.buckets[it.bkt_index].lock.lockSharedUncancelable(io);
+                    try it.map.buckets[it.bkt_index].lock.lockShared(io);
                 }
+                it.paused = false;
             }
 
             pub fn deinit(it: *Iterator, io: std.Io) void {
                 if (it.bkt_iter != null) {
-                    it.map.buckets[it.bkt_index].lock.unlockShared(io);
-                    it.bkt_iter = null;
+                    if(!it.paused) it.map.buckets[it.bkt_index].lock.unlockShared(io);
                 }
+                it.* = undefined;
             }
         };
 

@@ -245,11 +245,11 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !
     while (it.next(io)) |entry| {
         const uuid = entry.key_ptr.*;
         it.pause(io);
-        defer it.unpause(io);
         const entity = self.Entitys.getAndAddRef(io, uuid);
         if (entity) |en| {
             try en.update(io, allocator, self, uuid);
         }
+        try it.unpause(io);
     }
 }
 
@@ -329,10 +329,10 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
         }
         if (tounload.items.len == 0) break;
         it.pause(io);
-        defer it.unpause(io);
         while (tounload.pop()) |Pos| {
             _ = try self.tryUnloadChunk(io, Pos);
         }
+        try it.unpause(io);
     }
     std.log.debug("total chunks loaded: {d}, grids loaded: {d}\n", .{ chunks, grids });
 }

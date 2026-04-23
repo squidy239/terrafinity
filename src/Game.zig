@@ -274,9 +274,9 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
     try self.handleSelectFutures();
     var unload_meshes = io.async(@This().unloadChunkMeshes, .{ self, io });
-    defer unload_meshes.cancel(io);
+    defer unload_meshes.cancel(io) catch {};
     try entitys_future.await(io);
-    unload_meshes.await(io);
+    try unload_meshes.await(io);
 }
 
 pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -446,11 +446,10 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     }
     const written = alloc_writer.written();
     if (written.len == 0) return;
-    try self.renderer.ensureContext();
     try self.renderer.addChunk(io, Pos, written);
 }
 
-pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
+pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
@@ -487,7 +486,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
         .tounload = &tounload,
     };
 
-    self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
+    try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
 
     for (tounload.items) |Pos| {
         self.renderer.removeChunk(io, Pos);

@@ -10,15 +10,14 @@ last_viewport: ?[2]u32 = null,
 
 pub const VTable = struct {
     removeChunk: *const fn (*anyopaque, std.Io, ChunkPos) void,
-    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const u8) error{ OutOfMemory, OutOfVideoMemory }!void,
+    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected}!void,
     drawChunks: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) error{DrawFailed}!void,
     containsChunk: *const fn (*anyopaque, std.Io, ChunkPos) bool,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
     setViewport: *const fn (*anyopaque, @Vector(2, u32)) error{ViewportSetFailed}!void,
     updateCameraDirection: *const fn (*anyopaque, @Vector(3, f32)) void,
-    ensureContext: *const fn (*anyopaque) anyerror!void,
     getCameraFront: *const fn (*anyopaque) @Vector(3, f32),
-    forEachChunk: *const fn (*anyopaque, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) void) void,
+    forEachChunk: *const fn (*anyopaque, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void,
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
@@ -58,14 +57,10 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     return self.vtable.updateCameraDirection(self.userdata, viewDir);
 }
 
-pub fn ensureContext(self: *@This()) !void {
-    return self.vtable.ensureContext(self.userdata);
-}
-
 pub fn getCameraFront(self: *@This()) @Vector(3, f32) {
     return self.vtable.getCameraFront(self.userdata);
 }
 
-pub fn forEachChunk(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) void {
+pub fn forEachChunk(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) !void {
     return self.vtable.forEachChunk(self.userdata, io, userdata, callback);
 }

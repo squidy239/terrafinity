@@ -67,7 +67,6 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
                 .clear = vtableClear,
                 .setViewport = vtableSetViewport,
                 .updateCameraDirection = vtableUpdateCameraDirection,
-                .ensureContext = vtableEnsureContext,
                 .getCameraFront = vtableGetCameraFront,
                 .forEachChunk = vtableForEachChunk,
             },
@@ -122,7 +121,6 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
 }
 
 pub fn deinit(self: *@This(), io: std.Io) void {
-    self.draw_context.makeCurrent(self.window) catch unreachable;
     gl.Finish();
     self.render_buffer.deinit(io, self.allocator);
     self.context_index.store(0, .seq_cst);
@@ -168,8 +166,9 @@ fn glError() !void {
     }
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory }!void {
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    self.ensureContext() catch return error.Unexpected;
     self.render_buffer.put(io, Pos, data) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.OutOfVideoMemory,
@@ -190,13 +189,24 @@ fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos) bool {
     return self.render_buffer.map.contains(io, Pos);
 }
 
+threadlocal var thread_index: ?usize = null;
+
+fn ensureContext(self: *@This()) !void {
+    if (thread_index == null) {
+        thread_index = self.context_index.fetchAdd(1, .seq_cst);
+    }
+    try self.contexts.items[thread_index.?].makeCurrent(self.window);
+    gl.makeProcTableCurrent(&self.proc_table);
+}
+
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
@@ -210,37 +220,24 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 }
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
     glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
 }
 
-fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) void {
+fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    if (!self.render_buffer.lock.tryLock()) return;
+    try self.render_buffer.lock.lock(io);
     defer self.render_buffer.lock.unlock(io);
     var it = self.render_buffer.map.iterator();
     defer it.deinit(io);
     while (it.next(io)) |entry| {
+        it.pause(io);
         callback(callback_userdata, entry.key_ptr.*);
+        try it.unpause(io);
     }
-}
-
-threadlocal var thread_index: ?usize = null;
-
-pub fn ensureContext(self: *@This()) !void {
-    if (thread_index == null) {
-        thread_index = self.context_index.fetchAdd(1, .seq_cst);
-    }
-    try self.contexts.items[thread_index.?].makeCurrent(self.window);
-    gl.makeProcTableCurrent(&self.proc_table);
-}
-
-fn vtableEnsureContext(userdata: *anyopaque) anyerror!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.ensureContext();
 }
 
 
@@ -331,7 +328,6 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
     gl.makeProcTableCurrent(&self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
