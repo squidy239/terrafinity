@@ -88,11 +88,11 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
     }
     try self.draw_context.makeCurrent(self.window);
 
-    try self.CompileShaders();
+    try self.compileShaders();
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
 
-    self.LoadFacebuffer();
+    self.loadFacebuffer();
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
@@ -166,27 +166,27 @@ fn glError() !void {
     }
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
-    self.render_buffer.put(io, Pos, data) catch |err| switch (err) {
+    self.render_buffer.put(io, chunk_pos, data) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.OutOfVideoMemory,
     };
 }
 
-pub fn remove(self: *@This(), io: std.Io, Pos: ChunkPos) void {
-    self.render_buffer.remove(io, Pos);
+pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
+    self.render_buffer.remove(io, chunk_pos);
 }
 
-fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos) void {
+fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.remove(io, Pos);
+    return self.remove(io, chunk_pos);
 }
 
-fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos) bool {
+fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) bool {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.render_buffer.map.contains(io, Pos);
+    return self.render_buffer.map.contains(io, chunk_pos);
 }
 
 threadlocal var thread_index: ?usize = null;
@@ -240,7 +240,7 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
     }
 }
 
-fn CompileShaders(self: *@This()) !void {
+fn compileShaders(self: *@This()) !void {
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
     gl.ShaderSource(vertexshader, 1, @ptrCast(&@embedFile("./vertexshader.vert")), null);
     gl.CompileShader(vertexshader);
@@ -299,7 +299,7 @@ fn CompileShaders(self: *@This()) !void {
     try glError();
 }
 
-fn LoadFacebuffer(self: *@This()) void {
+fn loadFacebuffer(self: *@This()) void {
     const vertices = [_]f32{
         -0.5, -0.5, 0.0, // bottom left corner
         -0.5, 0.5, 0.0, // top left corner

@@ -36,9 +36,9 @@ pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chu
     defer mdc.End();
     var all_invisible: bool = true;
     for (neighbor_faces) |face| {
-        all_invisible |= (face == .oneBlock and !face.oneBlock.isVisible());
+        all_invisible |= (face == .one_block and !face.one_block.isVisible());
     }
-    all_invisible |= mainblocks == .oneBlock and !mainblocks.oneBlock.isVisible();
+    all_invisible |= mainblocks == .one_block and !mainblocks.one_block.isVisible();
     if (!all_invisible) return;
     try meshSimple(mainblocks, neighbor_faces, writer);
 }
@@ -106,7 +106,7 @@ test "MeshBenchmark" {
     const test_amount = 100; // reduced from 100000
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
-        try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .oneBlock = .air }), &writer.writer);
+        try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .one_block = .air }), &writer.writer);
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
@@ -129,7 +129,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
                 }
             }
         },
-        .oneBlock => |block| {
+        .one_block => |block| {
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
                     for (0..ChunkSize) |z| {
@@ -146,7 +146,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |y| {
             blocksToPut[x + 1][y + 1][0] = switch (neighbor_faces[5]) {
                 .blocks => |b| b[x][y],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }
@@ -156,7 +156,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |y| {
             blocksToPut[x + 1][y + 1][ChunkSize + 1] = switch (neighbor_faces[4]) {
                 .blocks => |b| b[x][y],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }
@@ -166,7 +166,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |z| {
             blocksToPut[0][y + 1][z + 1] = switch (neighbor_faces[1]) {
                 .blocks => |b| b[y][z],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }
@@ -176,7 +176,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |z| {
             blocksToPut[ChunkSize + 1][y + 1][z + 1] = switch (neighbor_faces[0]) {
                 .blocks => |b| b[y][z],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }
@@ -186,7 +186,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |z| {
             blocksToPut[x + 1][0][z + 1] = switch (neighbor_faces[3]) {
                 .blocks => |b| b[x][z],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }
@@ -196,7 +196,7 @@ fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize 
         for (0..ChunkSize) |z| {
             blocksToPut[x + 1][ChunkSize + 1][z + 1] = switch (neighbor_faces[2]) {
                 .blocks => |b| b[x][z],
-                .oneBlock => |b| b,
+                .one_block => |b| b,
             };
         }
     }

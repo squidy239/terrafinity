@@ -17,8 +17,8 @@ const EntityMeshBufferIDs = struct {
     ebo: c_uint,
 };
 
-var EntityMeshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
-var EntityMeshesLen: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
+var entity_meshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
+var entity_meshes_len: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
 
 pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
     var cwd = std.Io.Dir.cwd();
@@ -28,7 +28,7 @@ pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
     defer packdir.close();
     var entities = try packdir.createDirPathOpen(io, "Entities", .{});
     defer entities.close();
-    for (&EntityMeshes, 0..) |*mesh, i| {
+    for (&entity_meshes, 0..) |*mesh, i| {
         const entity: Entity.Type = @enumFromInt(i);
         std.log.debug("reading: {s}\n", .{@tagName(entity)});
         const fileContents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
@@ -38,11 +38,11 @@ pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
         defer allocator.free(fileContents);
         var parsedObj = try obj.parseObj(allocator, fileContents);
         defer parsedObj.deinit(allocator);
-        mesh.* = try GlLoadEntity(parsedObj, &EntityMeshesLen[i], allocator);
+        mesh.* = try glLoadEntity(parsedObj, &entity_meshes_len[i], allocator);
     }
 }
 
-pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {
+pub fn glLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {
     if (entity.meshes.len == 0) return null;
     var bufferids: EntityMeshBufferIDs = undefined;
     gl.GenBuffers(1, @ptrCast(&bufferids.vbo));
@@ -68,8 +68,8 @@ pub fn GlLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.m
     return bufferids;
 }
 
-pub fn FreeMeshes() void {
-    for (EntityMeshes) |m| {
+pub fn freeMeshes() void {
+    for (entity_meshes) |m| {
         if (m) |mesh| {
             gl.DeleteBuffers(1, @ptrCast(@constCast(&mesh.vbo)));
             gl.DeleteBuffers(1, @ptrCast(@constCast(&mesh.ebo)));

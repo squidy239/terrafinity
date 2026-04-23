@@ -21,14 +21,14 @@ pub const VTable = struct {
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
-pub fn addChunk(self: *@This(), io: std.Io, Pos: ChunkPos, mesh: []const u8) !void {
-    return self.vtable.addChunk(self.userdata, io, Pos, mesh);
+pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, mesh: []const u8) !void {
+    return self.vtable.addChunk(self.userdata, io, chunk_pos, mesh);
 }
 
 ///removes a chunk mesh from the renderer and frees all associated resources, this function may be called on any thread
-pub fn removeChunk(self: *@This(), io: std.Io, Pos: ChunkPos) void {
-    if (!self.vtable.containsChunk(self.userdata, io, Pos)) return;
-    return self.vtable.removeChunk(self.userdata, io, Pos);
+pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
+    if (!self.vtable.containsChunk(self.userdata, io, chunk_pos)) return;
+    return self.vtable.removeChunk(self.userdata, io, chunk_pos);
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
@@ -37,8 +37,8 @@ pub fn drawChunks(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) error{Dr
 }
 
 ///checks if a chunk mesh is loaded, this function may be called on any thread
-pub fn containsChunk(self: *@This(), io: std.Io, Pos: ChunkPos) bool {
-    return self.vtable.containsChunk(self.userdata, io, Pos);
+pub fn containsChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) bool {
+    return self.vtable.containsChunk(self.userdata, io, chunk_pos);
 }
 
 ///clears the screen and draws any skyboxes, this function should only be called on the main thread

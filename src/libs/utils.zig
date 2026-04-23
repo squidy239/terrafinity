@@ -1,7 +1,7 @@
 const std = @import("std");
 
-pub fn outOfSquareRange(Pos: @Vector(3, i32), range: @Vector(3, i32)) bool {
-    return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(Pos))) > range);
+pub fn outOfSquareRange(chunk_pos: @Vector(3, i32), range: @Vector(3, i32)) bool {
+    return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(chunk_pos))) > range);
 }
 
 pub fn loadZON(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: std.mem.Allocator, allocator: std.mem.Allocator) !T {

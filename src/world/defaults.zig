@@ -3,7 +3,7 @@ const Params = @import("Generator.zig").DefaultGenerator.Params;
 ///setseeds must be called on this before using it
 pub const default_generator = Params{
     .terrainblockRandomness = 0.25,
-    .TerrainNoise = .{
+    .terrain_noise = .{
         .frequency = 0.002,
         .noise_type = .perlin,
         .rotation_type = .none,
@@ -19,7 +19,7 @@ pub const default_generator = Params{
         .domain_warp_type = .simplex,
         .domain_warp_amp = 10,
     },
-    .TreeNoise = .{
+    .tree_noise = .{
         .frequency = 0.08,
         .noise_type = .cellular,
         .rotation_type = .none,
@@ -27,8 +27,8 @@ pub const default_generator = Params{
         .cellular_return = .distance,
         .cellular_jitter_mod = 0.75,
     },
-    .terrainNoiseBalance = 0.9,
-    .LargeTerrainNoise = .{
+    .terrain_noise_balance = 0.9,
+    .large_terrain_noise = .{
         .frequency = 0.0008,
         .noise_type = .perlin,
         .rotation_type = .none,
@@ -44,7 +44,7 @@ pub const default_generator = Params{
         .domain_warp_type = .simplex,
         .domain_warp_amp = 1,
     },
-    .LargeTerrainNoiseWarp = .{
+    .large_terrain_noise_warp = .{
         .frequency = 0.002,
         .noise_type = .simplex,
         .rotation_type = .improve_xy_planes,
@@ -60,7 +60,7 @@ pub const default_generator = Params{
         .domain_warp_type = .simplex,
         .domain_warp_amp = 400,
     },
-    .CaveNoise = .{
+    .cave_noise = .{
         .frequency = 0.08,
         .noise_type = .perlin,
         .rotation_type = .none,
@@ -79,11 +79,11 @@ pub const default_generator = Params{
     .terrainmax = 8196,
     .SeaLevel = 0,
     .Cavesess = -77882.7,
-    .CaveExpansionMax = 8192,
-    .CaveExpansionStart = 0,
+    .cave_expansion_max = 8192,
+    .cave_expansion_start = 0,
     .seed = null,
-    .terrainScale = 1,
-    .genStructures = true,
+    .terrain_scale = 1,
+    .gen_structures = true,
     .trees = &.{
         .{
             .baseRadius = 15,
