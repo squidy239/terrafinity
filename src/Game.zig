@@ -179,15 +179,19 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .player = undefined,
     };
     try game.opengl_renderer.init(io, allocator, window);
+    errdefer game.opengl_renderer.deinit(io);
+    
     game.renderer = game.opengl_renderer.interface;
     game.allocator = allocator;
-    errdefer game.game_arena.deinit();
+
     const arena = game.game_arena.allocator();
+    errdefer game.game_arena.deinit();
 
     var world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
         else => return err,
     };
+    errdefer world_options.deinit(allocator);
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
@@ -203,7 +207,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         defer game.allocator.free(storage_path);
         game.world_storage = try .init(storage_path, .{
             .create_if_missing = true,
-            .compression = .snappy,
+            .compression = .zstd,
         }, game.allocator);
     }
 
