@@ -60,12 +60,16 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
         .interface = .{
             .userdata = @ptrCast(self),
             .vtable = &.{
-                .addChunk = addChunk,
-                .removeChunk = undefined,
-                .drawChunks = drawChunksFn,
-                .containsChunk = undefined,
-                .clear = clear,
-                .setViewport = setViewport,
+                .addChunk = vtableAddChunk,
+                .removeChunk = vtableRemoveChunk,
+                .drawChunks = vtableDrawChunks,
+                .containsChunk = vtableContainsChunk,
+                .clear = vtableClear,
+                .setViewport = vtableSetViewport,
+                .updateCameraDirection = vtableUpdateCameraDirection,
+                .ensureContext = vtableEnsureContext,
+                .getCameraFront = vtableGetCameraFront,
+                .forEachChunk = vtableForEachChunk,
             },
         },
     };
@@ -135,14 +139,21 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     std.log.info("renderer deinit", .{});
 }
 
-threadlocal var thread_index: ?usize = null;
+pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
+    self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    _ = zm.Vec3f.norm(.{ .data = self.cameraFront });
+}
 
-pub fn ensureContext(self: *@This()) !void {
-    if (thread_index == null) {
-        thread_index = self.context_index.fetchAdd(1, .seq_cst);
-    }
-    try self.contexts.items[thread_index.?].makeCurrent(self.window);
-    gl.makeProcTableCurrent(&self.proc_table);
+fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    return self.updateCameraDirection(viewDir);
+}
+
+fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    return self.cameraFront;
 }
 
 fn glError() !void {
@@ -157,22 +168,81 @@ fn glError() !void {
     }
 }
 
-pub fn addChunk(userdata: *anyopaque, mesh: Mesh) error{ OutOfMemory, OutOfVideoMemory }!void {
-    if (true) unreachable;
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    _ = try self.load_queue.append(mesh);
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory }!void {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    self.render_buffer.put(io, Pos, data) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.OutOfVideoMemory,
+    };
 }
 
 pub fn remove(self: *@This(), io: std.Io, Pos: ChunkPos) void {
     self.render_buffer.remove(io, Pos);
 }
 
-pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
-    self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    _ = zm.Vec3f.norm(.{ .data = self.cameraFront });
+fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos) void {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    return self.remove(io, Pos);
 }
+
+fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, Pos: ChunkPos) bool {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    return self.render_buffer.map.contains(io, Pos);
+}
+
+fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
+}
+
+fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
+    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
+    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
+    const c = ztracy.ZoneNC(@src(), "Clear", 32213);
+    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+    gl.ClearDepth(0.0);
+    gl.Clear(gl.DEPTH_BUFFER_BIT);
+    c.End();
+}
+
+fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
+    const self: *@This() = @ptrCast(@alignCast(userdata));
+    self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
+    gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
+    glError() catch return error.ViewportSetFailed;
+    self.viewport_pixels = viewport_pixels;
+}
+
+fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) void {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    if (!self.render_buffer.lock.tryLock()) return;
+    defer self.render_buffer.lock.unlock(io);
+    var it = self.render_buffer.map.iterator();
+    defer it.deinit(io);
+    while (it.next(io)) |entry| {
+        callback(callback_userdata, entry.key_ptr.*);
+    }
+}
+
+threadlocal var thread_index: ?usize = null;
+
+pub fn ensureContext(self: *@This()) !void {
+    if (thread_index == null) {
+        thread_index = self.context_index.fetchAdd(1, .seq_cst);
+    }
+    try self.contexts.items[thread_index.?].makeCurrent(self.window);
+    gl.makeProcTableCurrent(&self.proc_table);
+}
+
+fn vtableEnsureContext(userdata: *anyopaque) anyerror!void {
+    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    return self.ensureContext();
+}
+
 
 fn CompileShaders(self: *@This()) !void {
     const vertexshader = gl.CreateShader(gl.VERTEX_SHADER);
@@ -288,7 +358,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const draw_info = self.render_buffer.rebuild(
         io,
         @sizeOf(Mesh.Face),
-        cullChunkFn,
+        cullChunkPredicate,
         .{ .frustrum = frustrum, .playerPos = playerPos },
         ChunkDrawData,
         getChunkData,
@@ -337,7 +407,7 @@ fn getChunkData(userdata: anytype, chunkpos: ChunkPos) ChunkDrawData {
     };
 }
 
-fn cullChunkFn(userdata: anytype, chunkpos: ChunkPos) bool {
+fn cullChunkPredicate(userdata: anytype, chunkpos: ChunkPos) bool {
     return cullChunk(&userdata.frustrum, chunkpos, userdata.playerPos);
 }
 
@@ -346,11 +416,6 @@ fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3,
     const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
     const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
     return !frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-}
-
-fn drawChunksFn(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
@@ -383,28 +448,6 @@ fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
             },
         },
     };
-}
-
-fn clear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
-    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
-    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
-    const c = ztracy.ZoneNC(@src(), "Clear", 32213);
-    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
-    gl.ClearDepth(0.0);
-    gl.Clear(gl.DEPTH_BUFFER_BIT);
-    c.End();
-}
-
-fn setViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
-    const self: *@This() = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
-    gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
-    glError() catch return error.ViewportSetFailed;
-    self.viewport_pixels = viewport_pixels;
 }
 
 const DrawElementsIndirectCommand = extern struct {

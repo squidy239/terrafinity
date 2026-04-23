@@ -18,6 +18,8 @@ const World = @import("world/World.zig");
 const ChunkSize = World.ChunkSize;
 const Block = World.Block;
 
+const Game = @This();
+
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
@@ -253,7 +255,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         &game.player.inventory_buffer,
     );
     _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
-    game.opengl_renderer.updateCameraDirection(game.player.viewDirection.load(.seq_cst));
+    game.renderer.updateCameraDirection(game.player.viewDirection.load(.seq_cst));
 }
 
 pub fn getGenDistance(self: *@This(), io: std.Io) !@Vector(2, u32) {
@@ -344,7 +346,7 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32)
     _ = self.player.viewDirection.fetchAdd(-@Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 }, .seq_cst);
     _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Max, -90 + smallf32, .seq_cst);
     _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Min, 90 - smallf32, .seq_cst);
-    self.opengl_renderer.updateCameraDirection(self.player.viewDirection.load(.seq_cst));
+    self.renderer.updateCameraDirection(self.player.viewDirection.load(.seq_cst));
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
@@ -402,12 +404,13 @@ pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 
 fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_seconds: f32) !void {
     _ = io;
+    const cameraFront = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.Vec3f.crossRH(.{ .data = self.opengl_renderer.cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
+    const c = zm.Vec3f.crossRH(.{ .data = cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
-    if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * self.opengl_renderer.cameraFront, .seq_cst);
-    if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * self.opengl_renderer.cameraFront, .seq_cst);
+    if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * cameraFront, .seq_cst);
+    if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * cameraFront, .seq_cst);
     if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
     if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
     if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
@@ -443,8 +446,8 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     }
     const written = alloc_writer.written();
     if (written.len == 0) return;
-    try self.opengl_renderer.ensureContext();
-    try self.opengl_renderer.render_buffer.put(io, Pos, written);
+    try self.renderer.ensureContext();
+    try self.renderer.addChunk(io, Pos, written);
 }
 
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
@@ -454,26 +457,40 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) void {
     const playerpos = self.player.physics.pos.load(.seq_cst);
     const renderdistance = try self.getGenDistance(io);
     const levels = try self.getLevels(io);
+
+    const chunkCollector = struct {
+        game: *Game,
+        io: std.Io,
+        playerpos: @Vector(3, f64),
+        renderdistance: @Vector(2, u32),
+        levels: [2]i32,
+        tounload: *std.ArrayList(World.ChunkPos),
+
+        pub fn callback(userdata: *anyopaque, Pos: World.ChunkPos) void {
+            const ctx: *@This() = @ptrCast(@alignCast(userdata));
+            const innerRadius: @Vector(2, u32) = ctx.game.getInnerGenRadius(ctx.io, ctx.renderdistance, Pos.level) catch return;
+            const keep = keepLoaded(ctx.levels[0], ctx.levels[1], ctx.playerpos, Pos, innerRadius, ctx.renderdistance);
+            if (keep) return;
+            ctx.tounload.appendBounded(Pos) catch {};
+        }
+    };
+
     var buffer: [1024]World.ChunkPos = undefined;
     var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
 
-    {
-        if (!self.opengl_renderer.render_buffer.lock.tryLock()) return;
-        defer self.opengl_renderer.render_buffer.lock.unlock(io);
-        var it = self.opengl_renderer.render_buffer.map.iterator();
-        defer it.deinit(io);
-        const loop = ztracy.ZoneNC(@src(), "loopMeshes", 6788676);
-        defer loop.End();
-        while (it.next(io)) |entry| {
-            const Pos = entry.key_ptr.*;
-            const innerRadius: @Vector(2, u32) = try self.getInnerGenRadius(io, renderdistance, Pos.level);
-            const keep = keepLoaded(levels[0], levels[1], playerpos, Pos, innerRadius, renderdistance);
-            if (keep) continue;
-            tounload.appendBounded(Pos) catch break;
-        }
-    }
+    var ctx = chunkCollector{
+        .game = self,
+        .io = io,
+        .playerpos = playerpos,
+        .renderdistance = renderdistance,
+        .levels = levels,
+        .tounload = &tounload,
+    };
+
+    self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
+
     for (tounload.items) |Pos| {
-        self.opengl_renderer.render_buffer.remove(io, Pos);
+        self.renderer.removeChunk(io, Pos);
         _ = self.loaded_or_meshed.remove(io, Pos);
     }
 }
@@ -488,7 +505,7 @@ pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkP
     const lowest_level = game.options.lowest_level;
     const highest_level = game.options.highest_level;
     const inside_range = keepLoaded(lowest_level, highest_level, game.player.physics.pos.load(.seq_cst), chunkPos, game.getInnerGenRadius(io, game.getGenDistance(io) catch return, chunkPos.level) catch return, game.getGenDistance(io) catch return);
-    if (!inside_range) game.opengl_renderer.render_buffer.remove(io, chunkPos); //ensure their is not an outdated mesh
+    if (!inside_range) game.renderer.removeChunk(io, chunkPos); //ensure their is not an outdated mesh
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
