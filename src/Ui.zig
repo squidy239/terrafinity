@@ -281,11 +281,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         }
     }
 
-    self.config_lock.lockSharedUncancelable(io);
-    const worlds_path = self.config.worlds_path;
-    self.config_lock.unlockShared(io);
-
-    var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, worlds_path, .{ .open_options = .{ .iterate = true } });
+    var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{ .open_options = .{ .iterate = true } });
     defer worlds_folder.close(io);
 
     var list: std.ArrayList(FolderData) = .empty;
@@ -317,7 +313,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         text.deinit();
         if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
             std.log.info("Joining game: {s}", .{item.name});
-            const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.config.worlds_path, item.name });
+            const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, item.name });
             defer allocator.free(jpath);
             try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, jpath);
             self.menu_state.ingame = true;

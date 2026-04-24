@@ -19,8 +19,6 @@ const SDLBackend = @import("sdl3-backend");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 
-const config_path = "Config.zon";
-
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
@@ -28,6 +26,10 @@ pub fn main(init: std.process.Init) !void {
     const allocator = tracy_allocator.allocator();
     const io = init.io;
 
+    //TODO make this an argument once std.cli is added
+    const config_path: []const u8 = "Config.zon";
+    const worlds_path: []const u8 = "worlds";
+    
     defer {
         std.log.debug("SDL arena finished with {d} bytes\n", .{init.arena.queryCapacity()});
     }
@@ -108,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
         .game = &game,
         .menu_state = .{ .main = true },
         .config_path = config_path,
-        .worlds_path = config.worlds_path,
+        .worlds_path = worlds_path,
     };
     try Ui.loadFonts(&ui_window);
 
@@ -211,7 +213,6 @@ test {
 ///must be locked by the caller
 pub const Config = struct {
     game_config: Game.Options = .{},
-    worlds_path: []const u8 = "worlds",
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
         const configFile: ?std.Io.File = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
@@ -225,7 +226,6 @@ pub const Config = struct {
         var config: Config = undefined;
         config = if (configFile) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
 
-        if (configFile == null) config.worlds_path = try allocator.dupe(u8, config.worlds_path); //world path must be owned by the allocator so it dosent free invalid memory
         return config;
     }
 
