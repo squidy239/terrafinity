@@ -292,7 +292,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     const fps = self.debug_menu.fps.load(.unordered);
     self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
 
-    var entitys_future = io.concurrent(World.updateEntitys, .{ &self.world, io, allocator }) catch io.async(World.updateEntitys, .{ &self.world, io, allocator });
+    var entitys_future = io.async(World.updateEntitys, .{ &self.world, io, allocator });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
     try self.renderer.setViewport(size);
@@ -300,10 +300,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     try self.player.physics.update(&self.world, io, allocator);
     try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
     try self.handleSelectFutures();
-    var unload_meshes = io.async(@This().unloadChunkMeshes, .{ self, io });
-    defer unload_meshes.cancel(io) catch {};
     try entitys_future.await(io);
-    try unload_meshes.await(io);
 }
 
 pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -321,6 +318,9 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
 
         self.chunk_load_is_running.store(true, .seq_cst);
         self.last_chunk_load = .now(io, .awake);
+        //this requires concurrency incase the Select buffer is full.
+        //it catches becuase that is unlikely and I want it to work in single threaded mode.
+        //TODO find a way to make it safely async
         self.load_future = io.concurrent(@This().loadChunks, .{ self, io, allocator }) catch io.async(@This().loadChunks, .{ self, io, allocator });
     }
 
@@ -330,6 +330,14 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
         self.chunk_unload_is_running.store(true, .seq_cst);
         self.last_chunk_unload = .now(io, .awake);
         self.unload_future = io.async(unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+    }
+
+    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
+        if (self.mesh_unload_future) |*f| try f.await(io);
+
+        self.mesh_unload_is_running.store(true, .seq_cst);
+        self.last_mesh_unload = .now(io, .awake);
+        self.mesh_unload_future = io.async(unloadChunkMeshes, .{ self, io });
     }
 }
 
@@ -671,6 +679,7 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.running.store(false, .monotonic);
     if (self.load_future) |*future| future.cancel(io) catch {};
     if (self.unload_future) |*future| future.cancel(io) catch {};
+    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
 
     self.opengl_renderer.deinit(io);
