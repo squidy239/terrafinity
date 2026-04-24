@@ -178,9 +178,10 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .world = undefined,
         .player = undefined,
     };
+
     try game.opengl_renderer.init(io, allocator, window);
     errdefer game.opengl_renderer.deinit(io);
-    
+
     game.renderer = game.opengl_renderer.interface;
     game.allocator = allocator;
 
@@ -191,7 +192,6 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         error.FileNotFound => WorldOptions.default,
         else => return err,
     };
-    errdefer world_options.deinit(allocator);
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
@@ -222,7 +222,11 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .chunks = .init(),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
-        .onEdit = null,
+        .onEdit = .{
+            .onEditFn = onEditFn,
+            .onEditFnArgs = @ptrCast(game),
+            .callIfNeighborFacesChanged = true,
+        },
     };
     errdefer game.world.deinit(io, allocator);
 
@@ -328,7 +332,7 @@ pub fn handleSelectFutures(self: *@This()) !void {
     }
 }
 
-pub fn getLevels(self: *@This(), io: std.Io) struct{i32, i32} {
+pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.lowest_level, self.options.highest_level };
@@ -425,10 +429,10 @@ fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_second
 pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
     const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
     defer GenMeshAndAdd.End();
-    
+
     // Prevent an old version of the chunk from staying loaded
-    if(!self.keepChunkLoaded(io, chunk_pos)) return self.renderer.removeChunk(io, chunk_pos);
-    
+    if (!self.keepChunkLoaded(io, chunk_pos)) return self.renderer.removeChunk(io, chunk_pos);
+
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
     defer chunk.release(io);
     const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
@@ -464,7 +468,7 @@ pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bo
     const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
     return inside_range;
-    }
+}
 
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
@@ -561,7 +565,7 @@ pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     var amount_loaded: u64 = 0;
     while (level < levels[1]) : (level += 1) {
         levels = self.getLevels(io);
-        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos,  level);
+        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos, level);
     }
     addChunkstoLoad.End();
 }
@@ -569,10 +573,10 @@ pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 ///loads chunks from top to bottom and in a spiral on a y level
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
-    
+
     var outer_radius = game.getGenDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
-    
+
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
@@ -664,12 +668,6 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
 
     self.game_arena.deinit();
     _ = window;
-}
-
-pub fn startThreads(self: *@This(), io: std.Io) !void {
-    _ = io;
-    //    self.unloaderThread = try std.Thread.spawn(.{}, World.chunkUnloaderThread, .{ &self.world, io, self.options, self.options_lock });
-    self.world.onEdit = .{ .onEditFn = onEditFn, .onEditFnArgs = @ptrCast(self), .callIfNeighborFacesChanged = true };
 }
 
 test {

@@ -292,7 +292,6 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
     try gameptr.init(io, allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(io, window);
-    try gameptr.startThreads(io);
     std.log.info("opening game\n", .{});
 }
 

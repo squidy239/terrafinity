@@ -138,14 +138,19 @@ pub fn main(init: std.process.Init) !void {
         var menuchanged: bool = false;
 
         if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
-        if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator)  catch |err| err: {
+        if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
             var error_buffer: [65536]u8 = undefined;
             var error_writer: std.Io.Writer = .fixed(&error_buffer);
             
-            error_writer.print("An error occurred: {any}.", .{err}) catch {};
-                        
-            dvui.dialog(@src(),frame_time, .{ .message = error_writer.buffered()});
-            break: err false;
+            switch (err) {
+                error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                else => error_writer.print("{any}", .{err}) catch unreachable,
+            }
+
+            dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
+            break :err false;
         };
         if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
         if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
