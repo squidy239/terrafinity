@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        //  .sanitize_thread = true,
     });
 
     // Set up dependencies and imports
@@ -27,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
+        .use_lld = true,
     });
 
     // Link libraries
@@ -91,6 +93,7 @@ fn setupDependencies(
         .optimize = optimize,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
+    rocksdb_mod.single_threaded = false;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     // SDL3

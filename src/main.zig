@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
         if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
             var error_buffer: [65536]u8 = undefined;
             var error_writer: std.Io.Writer = .fixed(&error_buffer);
-            
+
             switch (err) {
                 error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
                 error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,

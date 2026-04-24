@@ -242,7 +242,7 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !
     defer TickEntitiesTask.End();
     var it = self.entitys.iterator();
     defer it.deinit(io);
-    while (it.next(io)) |entry| {
+    while (try it.next(io)) |entry| {
         const uuid = entry.key_ptr.*;
         it.pause(io);
         const entity = self.entitys.getAndAddRef(io, uuid);
@@ -306,33 +306,20 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
 
     var chunks: usize = 0;
     var grids: usize = 0;
-    var unload_chunk_buffer: [32784]ChunkPos = undefined;
-    var tounload: std.ArrayList(ChunkPos) = .initBuffer(&unload_chunk_buffer);
     var it = self.chunks.iterator();
     defer it.deinit(io);
-    while (true) {
-        tounload.clearRetainingCapacity();
-        {
-            const currenttime = std.Io.Timestamp.now(io, .awake);
-            while (it.next(io)) |c| {
-                chunks += 1;
-                const chunk = c.value_ptr.*;
-                const lastaccess = chunk.last_access.load(.unordered);
-                const timeout = switch (chunk.blocks) {
-                    .blocks => @min(chunk_timeout, grid_timeout),
-                    .one_block => chunk_timeout,
-                };
-                if (chunk.blocks == .blocks) grids += 1;
-                if (currenttime.nanoseconds - lastaccess < timeout) continue;
-                tounload.appendBounded(c.key_ptr.*) catch break;
-            }
-        }
-        if (tounload.items.len == 0) break;
-        it.pause(io);
-        while (tounload.pop()) |chunk_pos| {
-            _ = try self.tryUnloadChunk(io, chunk_pos);
-        }
-        try it.unpause(io);
+    const currenttime = std.Io.Timestamp.now(io, .awake);
+    while (try it.next(io)) |c| {
+        chunks += 1;
+        const chunk = c.value_ptr.*;
+        const lastaccess = chunk.last_access.load(.unordered);
+        const timeout = switch (chunk.blocks) {
+            .blocks => @min(chunk_timeout, grid_timeout),
+            .one_block => chunk_timeout,
+        };
+        if (chunk.blocks == .blocks) grids += 1;
+        if (currenttime.nanoseconds - lastaccess < timeout) continue;
+        _ = try self.tryUnloadChunkMapBucket(io, c.key_ptr.*, &it.map.buckets[it.bkt_index]);
     }
     std.log.debug("total chunks loaded: {d}, grids loaded: {d}\n", .{ chunks, grids });
 }
@@ -607,15 +594,13 @@ pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
 }
 
 /// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded.
-pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
-    const chunk = self.chunks.getAndAddRef(io, chunk_pos) orelse return false;
-    if (chunk.ref_count.load(.seq_cst) != 2) {
-        chunk.release(io);
+pub fn tryUnloadChunkMapBucket(self: *@This(), io: std.Io, chunk_pos: ChunkPos, bkt: anytype) !bool {
+    const chunk = bkt.hash_map.get(chunk_pos) orelse unreachable;
+    if (chunk.ref_count.load(.seq_cst) != 1) {
         return false;
     }
-    _ = self.chunks.remove(io, chunk_pos);
-    chunk.release(io);
     try self.unloadChunkByPtr(io, chunk, chunk_pos);
+    std.debug.assert(bkt.hash_map.remove(chunk_pos));
     return true;
 }
 
@@ -650,10 +635,12 @@ fn destroyChunkPtr(self: *@This(), io: std.Io, chunk: *Chunk) void {
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
     defer deinitWorld.End();
+    const last_prot = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(last_prot);
     {
         var it = self.chunks.iterator();
         defer it.deinit(io);
-        while (it.next(io)) |c| {
+        while (it.next(io) catch unreachable) |c| {
             self.unloadChunkByPtr(io, c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
         }
     }
@@ -661,7 +648,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     {
         var it = self.entitys.iterator();
         defer it.deinit(io);
-        while (it.next(io)) |c| {
+        while (it.next(io) catch unreachable) |c| {
             c.value_ptr.*.unload(io, self, c.key_ptr.*, allocator, true) catch std.log.err("error unloading entity\n", .{});
         }
     }

@@ -310,7 +310,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
 
         self.chunk_unload_is_running.store(true, .seq_cst);
         self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = try io.concurrent(unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+        self.unload_future = io.async(unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
     }
 }
 
@@ -474,44 +474,37 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
-    const playerpos = self.player.physics.pos.load(.seq_cst);
-    const renderdistance = self.getGenDistance(io);
-    const levels = self.getLevels(io);
 
     const chunkCollector = struct {
         game: *Game,
         io: std.Io,
-        playerpos: @Vector(3, f64),
-        renderdistance: @Vector(2, u32),
-        levels: [2]i32,
-        tounload: *std.ArrayList(World.ChunkPos),
+        chunks: u64 = 0,
+        unloaded: u64 = 0,
 
         pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
-            const innerRadius: @Vector(2, u32) = ctx.game.getInnerGenRadius(ctx.io, ctx.renderdistance, chunk_pos.level);
-            const keep = keepLoaded(ctx.levels[0], ctx.levels[1], ctx.playerpos, chunk_pos, innerRadius, ctx.renderdistance);
+            ctx.chunks += 1;
+            const keep = ctx.game.keepChunkLoaded(ctx.io, chunk_pos);
             if (keep) return;
-            ctx.tounload.appendBounded(chunk_pos) catch {};
+            _ = ctx.game.loaded_or_meshed.remove(ctx.io, chunk_pos);
+            ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
+            ctx.unloaded += 1;
         }
     };
-
-    var buffer: [1024]World.ChunkPos = undefined;
-    var tounload: std.ArrayList(World.ChunkPos) = .initBuffer(&buffer);
-
     var ctx = chunkCollector{
         .game = self,
         .io = io,
-        .playerpos = playerpos,
-        .renderdistance = renderdistance,
-        .levels = levels,
-        .tounload = &tounload,
     };
 
     try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
-
-    for (tounload.items) |chunk_pos| {
-        self.renderer.removeChunk(io, chunk_pos);
-        _ = self.loaded_or_meshed.remove(io, chunk_pos);
+    
+    std.log.debug("{d} meshes, {d} unloaded\n", .{ ctx.chunks, ctx.unloaded });
+    var it = self.loaded_or_meshed.iterator();
+    defer it.deinit(io);
+    while (try it.next(io)) |entry| {
+        if (!self.keepChunkLoaded(io, entry.key_ptr.*)) {
+            std.debug.assert(it.map.removeManualLock(entry.key_ptr.*));
+        }
     }
 }
 

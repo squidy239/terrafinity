@@ -229,11 +229,9 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
 
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    try self.render_buffer.lock.lock(io);
-    defer self.render_buffer.lock.unlock(io);
     var it = self.render_buffer.map.iterator();
     defer it.deinit(io);
-    while (it.next(io)) |entry| {
+    while (try it.next(io)) |entry| {
         it.pause(io);
         callback(callback_userdata, entry.key_ptr.*);
         try it.unpause(io);
@@ -734,11 +732,11 @@ fn MultiRenderBuffer(comptime K: type) type {
                 try glError();
                 ac.End();
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
-                self.lock.lockUncancelable(io);
+                try self.lock.lock(io);
                 defer self.lock.unlock(io);
                 var it = self.map.iterator();
                 defer it.deinit(io);
-                while (it.next(io)) |entry| {
+                while (try it.next(io)) |entry| {
                     const start = entry.value_ptr.*.start;
                     const length = entry.value_ptr.*.length;
                     const free = entry.value_ptr.*.freelist_node != null;
