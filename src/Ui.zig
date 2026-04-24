@@ -22,6 +22,7 @@ worlds_path: []const u8,
 
 menu_state: struct {
     ingame: bool = false,
+    debug_info: bool = true,
     settings: bool = false,
     main: bool = false,
     esc: bool = false,
@@ -85,6 +86,48 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
     }
 
     return false;
+}
+
+pub fn debugInfo(self: *@This(), io: std.Io) !void {
+    var fmt_buffer: [16000]u8 = undefined;
+    const box = dvui.box(@src(), .{}, .{
+        .gravity_x = 0.0,
+        .gravity_y = 0.0,
+    });
+    defer box.deinit();
+    const text = dvui.textLayout(@src(), .{}, .{
+        .gravity_y = 1.0,
+        .padding = .{ .w = 32, .h = 32 },
+        .background = true,
+        .color_fill = .{ .r = 32, .g = 32, .b = 32, .a = 128 },
+        .border = .all(8),
+        .color_border = .green,
+    });
+    defer text.deinit();
+    
+    try self.game.world.chunk_pool_mutex.lock(io);
+    const chunk_count = self.game.world.chunk_count;
+    self.game.world.chunk_pool_mutex.unlock(io);
+    
+    try self.game.world.block_grid_pool_mutex.lock(io);
+    const grid_count = self.game.world.block_grid_count;
+    self.game.world.block_grid_pool_mutex.unlock(io);
+    
+    const str = try std.fmt.bufPrint(
+        &fmt_buffer,
+        \\FPS: {d}
+        \\meshes loaded: {d}
+        \\chunks loaded: {d}
+        \\grids loaded: {d}
+    ,
+        .{
+            @trunc(self.game.debug_menu.fps.load(.unordered)),
+            self.game.debug_menu.meshes.load(.unordered),
+            chunk_count,
+            grid_count,
+        },
+    );
+    text.addText(str, .{ .background = false });
 }
 
 fn sliceToBounded(comptime slice: []const u8, comptime max: usize) [max:0]u8 {

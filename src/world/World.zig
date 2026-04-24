@@ -321,7 +321,6 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
         if (currenttime.nanoseconds - lastaccess < timeout) continue;
         _ = try self.tryUnloadChunkMapBucket(io, c.key_ptr.*, &it.map.buckets[it.bkt_index]);
     }
-    std.log.debug("total chunks loaded: {d}, grids loaded: {d}\n", .{ chunks, grids });
 }
 
 fn memCurve(max_ms: u64, fraction: f32) u64 {

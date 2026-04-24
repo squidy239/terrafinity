@@ -136,25 +136,29 @@ pub fn main(init: std.process.Init) !void {
         const dw = ztracy.ZoneN(@src(), "draw ui");
         try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
         var menuchanged: bool = false;
+        {
+            const ov = dvui.overlay(@src(), .{ .expand = .both });
+            defer ov.deinit();
 
-        if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
-        if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
-            var error_buffer: [65536]u8 = undefined;
-            var error_writer: std.Io.Writer = .fixed(&error_buffer);
+            if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
+            if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
+            if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
+                var error_buffer: [65536]u8 = undefined;
+                var error_writer: std.Io.Writer = .fixed(&error_buffer);
 
-            switch (err) {
-                error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-                error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-                else => error_writer.print("{any}", .{err}) catch unreachable,
-            }
+                switch (err) {
+                    error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                    error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                    error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                    else => error_writer.print("{any}", .{err}) catch unreachable,
+                }
 
-            dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
-            break :err false;
-        };
-        if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-        if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
-
+                dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
+                break :err false;
+            };
+            if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
+            if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
+        }
         _ = try ui_window.end(.{});
         dw.End();
         try backend.setCursor(ui_window.cursorRequested());

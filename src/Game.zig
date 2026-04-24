@@ -48,6 +48,13 @@ options: *Options,
 options_lock: *std.Io.RwLock,
 running: std.atomic.Value(bool),
 
+last_frametime: std.Io.Timestamp,
+
+debug_menu: struct {
+    fps: std.atomic.Value(f32) = .init(0),
+    meshes: std.atomic.Value(u64) = .init(0),
+} = .{},
+
 const SelectUnion = union(enum) {
     addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
 };
@@ -164,6 +171,7 @@ const gl = @import("gl");
 
 pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Io.RwLock, folder: []const u8, window: sdl.video.Window) !void {
     game.* = .{
+        .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
         .options = game_options,
         .options_lock = game_options_lock,
@@ -273,6 +281,13 @@ pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
 }
 
 pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Vector(2, u32)) !void {
+    const now: std.Io.Timestamp = .now(io, .awake);
+    const frame_time = self.last_frametime.durationTo(now);
+    self.last_frametime = now;
+    const current_fps: f32 = std.time.ns_per_s / @as(f32, @floatFromInt(frame_time.nanoseconds));
+    const fps = self.debug_menu.fps.load(.unordered);
+    self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
+
     var entitys_future = io.concurrent(World.updateEntitys, .{ &self.world, io, allocator }) catch io.async(World.updateEntitys, .{ &self.world, io, allocator });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
@@ -474,7 +489,6 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
 
-
     const chunkCollector = struct {
         game: *Game,
         io: std.Io,
@@ -497,8 +511,8 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     };
 
     try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
-    
-    std.log.debug("{d} meshes, {d} unloaded\n", .{ ctx.chunks, ctx.unloaded });
+    self.debug_menu.meshes.store(ctx.chunks, .unordered);
+
     var it = self.loaded_or_meshed.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
