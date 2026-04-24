@@ -39,6 +39,8 @@ context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
 draw_context: sdl.video.gl.Context,
 
+threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterator = null;
+
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sdl.video.Window) !void {
     const cpu_count = try std.Thread.getCpuCount();
     self.* = @This(){
@@ -175,8 +177,16 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: [
     };
 }
 
+///safe to call in forEachChunk
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    self.render_buffer.remove(io, chunk_pos);
+    if (current_chunk_iterator) |it| {
+        if (it.bkt_iter) |_| {
+            const entry = it.map.buckets[it.bkt_index].hash_map.fetchRemove(chunk_pos) orelse unreachable; // must be in the map since it was in the iterator
+            self.render_buffer.lock.lockUncancelable(io);
+            defer self.render_buffer.lock.unlock(io);
+            self.render_buffer.removeSpace(entry.value);
+        }
+    } else self.render_buffer.remove(io, chunk_pos);
 }
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
@@ -230,11 +240,11 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     var it = self.render_buffer.map.iterator();
+    current_chunk_iterator = &it;
+    defer current_chunk_iterator = null;
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
-        it.pause(io);
         callback(callback_userdata, entry.key_ptr.*);
-        try it.unpause(io);
     }
 }
 
@@ -575,6 +585,7 @@ const GpuBuffer = struct {
 
 fn MultiRenderBuffer(comptime K: type) type {
     return struct {
+        pub const Map = ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32);
         allocator: std.mem.Allocator,
 
         ssbo: GpuBuffer = .{},
@@ -587,7 +598,7 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         free_list: std.DoublyLinkedList = .{},
 
-        map: ConcurrentHashMap(K, *Space, std.hash_map.AutoContext(K), 80, 32),
+        map: Map,
         lock: std.Io.Mutex = .init,
 
         const Space = struct {
@@ -667,12 +678,11 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         pub fn remove(self: *@This(), io: std.Io, key: K) void {
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
-            const entry = self.map.fetchRemove(io, key) orelse {
+            const space = self.map.fetchRemove(io, key) orelse {
                 return;
             };
-            const space = entry;
+            self.lock.lockUncancelable(io);
+            defer self.lock.unlock(io);
             self.removeSpace(space);
         }
 

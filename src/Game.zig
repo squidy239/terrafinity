@@ -35,11 +35,15 @@ selected_inventory_col: std.atomic.Value(u32) = .init(0),
 
 last_chunk_load: std.Io.Timestamp = .zero,
 chunk_load_is_running: std.atomic.Value(bool) = .init(false),
-load_future: ?std.Io.Future(@typeInfo(@TypeOf(@This().loadChunks)).@"fn".return_type.?) = null,
+load_future: ?std.Io.Future(@typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?) = null,
 
 last_chunk_unload: std.Io.Timestamp = .zero,
 chunk_unload_is_running: std.atomic.Value(bool) = .init(false),
-unload_future: ?std.Io.Future(@typeInfo(@TypeOf(@This().unloadWrapper)).@"fn".return_type.?) = null,
+unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadWrapper)).@"fn".return_type.?) = null,
+
+last_mesh_unload: std.Io.Timestamp = .zero,
+mesh_unload_is_running: std.atomic.Value(bool) = .init(false),
+mesh_unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadChunkMeshes)).@"fn".return_type.?) = null,
 
 select: std.Io.Select(SelectUnion),
 select_buffer: [65536]SelectUnion = undefined,

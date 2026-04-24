@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
     const worlds_path: []const u8 = "worlds";
-    
+
     defer {
         std.log.debug("SDL arena finished with {d} bytes\n", .{init.arena.queryCapacity()});
     }

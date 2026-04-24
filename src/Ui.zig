@@ -104,15 +104,15 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         .color_border = .green,
     });
     defer text.deinit();
-    
+
     try self.game.world.chunk_pool_mutex.lock(io);
     const chunk_count = self.game.world.chunk_count;
     self.game.world.chunk_pool_mutex.unlock(io);
-    
+
     try self.game.world.block_grid_pool_mutex.lock(io);
     const grid_count = self.game.world.block_grid_count;
     self.game.world.block_grid_pool_mutex.unlock(io);
-    
+
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
