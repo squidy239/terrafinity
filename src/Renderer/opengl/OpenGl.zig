@@ -101,13 +101,12 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
     try glError();
-
-    self.loadFacebuffer();
-    try glError();
-
+    
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
     try glError();
+
+    try self.loadFacebuffer();
 
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
@@ -166,8 +165,6 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 
 fn glError() !void {
-    const err = gl.GetError();
-    if(err != 0)std.debug.print("{any}\n", .{err});
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
         gl.INVALID_ENUM => unreachable,
@@ -318,7 +315,7 @@ fn compileShaders(self: *@This()) !void {
     try glError();
 }
 
-fn loadFacebuffer(self: *@This()) void {
+fn loadFacebuffer(self: *@This()) !void {
     const vertices = [_]f32{
         -0.5, -0.5, 0.0, // bottom left corner
         -0.5, 0.5, 0.0, // top left corner
@@ -332,23 +329,17 @@ fn loadFacebuffer(self: *@This()) void {
     };
 
     gl.GenBuffers(1, @ptrCast(&self.indecies));
-    glError() catch unreachable;
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    glError() catch unreachable;
 
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
-    glError() catch unreachable;
 
     gl.GenBuffers(1, @ptrCast(&self.facebuffer));
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
-    glError() catch unreachable;
 
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
-    glError() catch unreachable;
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
-    glError() catch unreachable;
     gl.EnableVertexAttribArray(0);
-    glError() catch unreachable;
+    try glError();
 
 }
 var last_viewport: [2]f32 = undefined;
