@@ -5,7 +5,7 @@ const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
-const wio = @import("wio").wio;
+const wio = @import("wio");
 
 const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
@@ -41,7 +41,7 @@ draw_context: wio.GlContext,
 
 threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterator = null;
 
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !void {
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
     const cpu_count = try std.Thread.getCpuCount();
     self.* = @This(){
         .allocator = allocator,
@@ -54,7 +54,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try window.glCreateContext(.{ .major_version = 4, .minor_version = 5 }),
+        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -77,6 +77,10 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
 
+    gl.Enable(gl.DEBUG_OUTPUT);
+    gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
+    gl.DebugMessageCallback(glCallback, null);
+
     self.window.glMakeContextCurrent(&self.draw_context);
     gl.makeProcTableCurrent(&self.proc_table);
 
@@ -88,8 +92,8 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO threadlocal
-    for (0..cpu_count + 32) |_| {
-        try self.contexts.append(allocator, try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .share_context = &self.draw_context }));
+    for (0..cpu_count + 1) |_| {
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = share_context }));
     }
     try glError();
 
@@ -814,6 +818,20 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.indirect_buffer.free(io);
         }
     };
+}
+
+fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, userParam: ?*const anyopaque) callconv(.c) void {
+    _ = source;
+    _ = kind;
+    _ = id;
+    _ = userParam;
+    switch (severity) {
+        gl.DEBUG_SEVERITY_NOTIFICATION => return,
+        gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{s}", .{message[0..@intCast(length)]}),
+        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{s}", .{message[0..@intCast(length)]}),
+        gl.DEBUG_SEVERITY_LOW => std.log.info("{s}", .{message[0..@intCast(length)]}),
+        else => unreachable,
+    }
 }
 
 test {

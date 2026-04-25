@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
-const wio = @import("wio").wio;
+const wio = @import("wio");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
@@ -173,7 +173,17 @@ pub const WorldOptions = struct {
 
 const gl = @import("gl");
 
-pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Io.RwLock, folder: []const u8, window: *wio.Window) !void {
+pub fn init(
+    game: *@This(),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    game_options: *Options,
+    game_options_lock: *std.Io.RwLock,
+    folder: []const u8,
+    window: *wio.Window,
+    gl_options: wio.GlOptions,
+    share_context: *wio.GlContext,
+) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
@@ -191,7 +201,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .player = undefined,
     };
 
-    try game.opengl_renderer.init(io, allocator, window);
+    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context);
     errdefer game.opengl_renderer.deinit(io);
 
     game.renderer = game.opengl_renderer.interface;

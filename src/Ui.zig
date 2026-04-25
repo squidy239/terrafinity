@@ -1,7 +1,7 @@
 const dvui = @import("dvui");
 const std = @import("std");
 const Game = @import("Game.zig");
-const wio = @import("wio").wio;
+const wio = @import("wio");
 const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
@@ -14,6 +14,8 @@ const pixel_font = sliceToBounded("Press Start 2P", 50);
 const Ui = @This();
 
 window: *wio.Window,
+ui_context: *wio.GlContext,
+gloptions: wio.GlOptions,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -202,7 +204,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(io, game_path);
-            try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, game_path);
+            try self.openGame(io, allocator, game_path);
             self.menu_state.ingame = true;
             self.menu_state.newgame = false;
             return true;
@@ -315,7 +317,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, item.name });
             defer allocator.free(jpath);
-            try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, jpath);
+            try self.openGame(io, allocator, jpath);
             self.menu_state.ingame = true;
             self.menu_state.main = false;
             return true;
@@ -328,9 +330,9 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
     return a.access_time.nanoseconds > b.access_time.nanoseconds;
 }
 
-fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: *wio.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
-    try gameptr.init(io, allocator, game_config, options_lock, folder, window);
-    errdefer gameptr.deinit(io, window);
+fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context);
+    errdefer self.game.deinit(io, self.window);
     std.log.info("opening game\n", .{});
 }
 

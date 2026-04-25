@@ -122,7 +122,16 @@ fn setupDependencies(
         .optimize = optimize,
     }).module("obj");
     root_module.addImport("obj", obj_mod);
-    
+
+    const wio = b.dependency("wio", .{
+        .target = target,
+        .optimize = optimize,
+        .enable_opengl = true,
+        .win32_manifest = false, // must match dvui
+    });
+
+    root_module.addImport("wio", wio.module("wio"));
+
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
@@ -133,7 +142,6 @@ fn setupDependencies(
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_wio"));
     const wio_module = dvui_dep.module("wio");
-    root_module.addImport("wio", wio_module);
     root_module.addImport("wio-backend", wio_module);
     // OpenGL bindings
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{

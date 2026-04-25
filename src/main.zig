@@ -17,7 +17,8 @@ const dvui = @import("dvui");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
 const wio_backend = @import("wio-backend");
-const wio = @import("wio").wio;
+const wio = @import("wio");
+const gl = @import("gl");
 
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
@@ -40,10 +41,18 @@ pub fn main(init: std.process.Init) !void {
     try wio.init(allocator, io, .{});
     defer wio.deinit();
 
-    var window = try wio.createWindow(.{ .title = "terrafinity" });
+    const gloptions: wio.GlOptions = .{
+        .major_version = 4,
+        .minor_version = 5,
+        .profile = .core,
+        .forward_compatible = true,
+        .debug = true,
+    };
+
+    var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });
     defer window.destroy();
 
-    var ui_context = try window.glCreateContext(.{ .major_version = 3, .minor_version = 3});
+    var ui_context = try window.glCreateContext(.{ .options = gloptions });
     defer ui_context.destroy();
 
     window.glMakeContextCurrent(&ui_context);
@@ -51,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
 
-    var render_backend = try dvui.render_backend.init(allocator, wio.glGetProcAddress, "330");
+    var render_backend = try dvui.render_backend.init(allocator, wio.glGetProcAddress, "450");
     defer render_backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(&render_backend), .{});
@@ -85,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
         .menu_state = .{ .main = true },
         .config_path = config_path,
         .worlds_path = worlds_path,
+        .ui_context = &ui_context,
+        .gloptions = gloptions,
     };
 
     defer if (ui.menu_state.ingame) game.deinit(io);
@@ -99,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
         frame_time = .now(io, .awake);
         const ms: [3]u32 = .{ 0, 0, 0 };
         if (ui.menu_state.ingame) {
+            window.glMakeContextCurrent(&game.opengl_renderer.draw_context);
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
@@ -108,37 +120,39 @@ pub fn main(init: std.process.Init) !void {
             const size = @Vector(2, usize){ 640, 480 };
 
             try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
+            window.glMakeContextCurrent(&ui_context);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
-        try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-        var menuchanged: bool = false;
         {
-            const ov = dvui.overlay(@src(), .{ .expand = .both });
-            defer ov.deinit();
+            try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+            var menuchanged: bool = false;
+            {
+                const ov = dvui.overlay(@src(), .{ .expand = .both });
+                defer ov.deinit();
 
-            if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
-            if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
-            if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
-                var error_buffer: [65536]u8 = undefined;
-                var error_writer: std.Io.Writer = .fixed(&error_buffer);
+                if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
+                if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
+                if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
+                    var error_buffer: [65536]u8 = undefined;
+                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
 
-                switch (err) {
-                    error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-                    error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                    error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-                    else => error_writer.print("{any}", .{err}) catch unreachable,
-                }
+                    switch (err) {
+                        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                        else => error_writer.print("{any}", .{err}) catch unreachable,
+                    }
 
-                dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
-                break :err false;
-            };
-            if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-            if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
+                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
+                    break :err false;
+                };
+                if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
+                if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
+            }
+            _ = try ui_window.end(.{});
+            dw.End();
         }
-        _ = try ui_window.end(.{});
-        dw.End();
-        const sf = ztracy.ZoneN(@src(), "sdl flush");
-        sf.End();
+
         const sw = ztracy.ZoneN(@src(), "swap");
         window.glSwapBuffers();
         sw.End();
@@ -192,7 +206,7 @@ pub const Config = struct {
 fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *wio_backend, win: *wio.Window, ui_window: *dvui.Window) !f32 {
     ui_backend.setTextInputRect(ui_window.textInputRequested());
     ui_backend.setCursor(ui_window.cursorRequested());
-    
+
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
