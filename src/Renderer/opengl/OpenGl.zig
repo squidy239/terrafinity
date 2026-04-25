@@ -43,6 +43,7 @@ threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterat
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
     const cpu_count = try std.Thread.getCpuCount();
+    defer window.glMakeContextCurrent(share_context);
     self.* = @This(){
         .allocator = allocator,
         .facebuffer = undefined,
@@ -54,7 +55,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context }),
+        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = null }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -77,12 +78,12 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
 
+    self.window.glMakeContextCurrent(&self.draw_context);
+    gl.makeProcTableCurrent(&self.proc_table);
+    
     gl.Enable(gl.DEBUG_OUTPUT);
     gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
     gl.DebugMessageCallback(glCallback, null);
-
-    self.window.glMakeContextCurrent(&self.draw_context);
-    gl.makeProcTableCurrent(&self.proc_table);
 
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
@@ -92,8 +93,12 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO threadlocal
-    for (0..cpu_count + 1) |_| {
-        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = share_context }));
+    for (0..cpu_count + 1) |i| {
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = &self.draw_context }));
+        self.window.glMakeContextCurrent(&self.contexts.items[i]);
+        gl.Enable(gl.DEBUG_OUTPUT);
+        gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
+        gl.DebugMessageCallback(glCallback, null);
     }
     try glError();
 
@@ -169,6 +174,7 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 
 fn glError() !void {
+    if(true)return;
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
         gl.INVALID_ENUM => unreachable,
@@ -825,6 +831,7 @@ fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"
     _ = kind;
     _ = id;
     _ = userParam;
+    comptime std.debug.assert(builtin.mode == .Debug);
     switch (severity) {
         gl.DEBUG_SEVERITY_NOTIFICATION => return,
         gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{s}", .{message[0..@intCast(length)]}),

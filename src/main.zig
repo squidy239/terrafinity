@@ -46,7 +46,8 @@ pub fn main(init: std.process.Init) !void {
         .minor_version = 5,
         .profile = .core,
         .forward_compatible = true,
-        .debug = true,
+        .debug = builtin.mode == .Debug,
+        .samples = 4,
     };
 
     var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });
@@ -117,19 +118,20 @@ pub fn main(init: std.process.Init) !void {
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
             try game.handleScroll(io, scroll);
             try game.handleButtonActions(io, action_set, dt);
-            const size = @Vector(2, usize){ 640, 480 };
+            const size = @Vector(2, usize){ 2560, 1440 };
 
             try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
             window.glMakeContextCurrent(&ui_context);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
-        {
+        {   
+            window.glMakeContextCurrent(&ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
             var menuchanged: bool = false;
             {
                 const ov = dvui.overlay(@src(), .{ .expand = .both });
                 defer ov.deinit();
-
+           
                 if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
                 if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
                 if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
