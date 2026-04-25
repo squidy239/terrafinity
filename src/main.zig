@@ -29,25 +29,23 @@ pub fn main(init: std.process.Init) !void {
     const config_path: []const u8 = "Config.zon";
     const worlds_path: []const u8 = "worlds";
 
-
     var config_lock: std.Io.RwLock = .init;
 
     var config: Config = try .load(allocator, io, config_path);
     defer config.deinit(allocator);
 
     try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
-    
+
     try wio.init(allocator, io, .{});
     defer wio.deinit();
-    
 
     var window = try wio.createWindow(.{ .title = "terrafinity" });
     defer window.destroy();
-    
-    //var ui_context = try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .forward_compatible = true});
-    //defer ui_context.destroy();
-    //window.glMakeContextCurrent(&ui_context);
 
+    var ui_context = try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .forward_compatible = true });
+    defer ui_context.destroy();
+    
+    window.glMakeContextCurrent(&ui_context);
 
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
@@ -87,14 +85,14 @@ pub fn main(init: std.process.Init) !void {
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         const dt = frame_time.untilNow(io, .awake);
         frame_time = .now(io, .awake);
-        const ms: [3]u32 = .{ 0, 0 , 0};
+        const ms: [3]u32 = .{ 0, 0, 0 };
         if (ui.menu_state.ingame) {
             const ig = ztracy.ZoneN(@src(), "ingame");
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
             try game.handleButtonActions(io, action_set, dt);
-                const size = @Vector(2, usize){640, 480};
+            const size = @Vector(2, usize){ 640, 480 };
 
             try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
         }

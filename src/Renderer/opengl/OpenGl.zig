@@ -82,12 +82,12 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
-   try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
+    try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
     try self.render_buffer.indirect_buffer.ensureCapacity(io, 8_000_000);
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
-    //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
+    //+1 for main thread, TODO threadlocal
     for (0..cpu_count + 32) |_| {
         try self.contexts.append(allocator, try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .share_context = &self.draw_context}));
     }
@@ -101,7 +101,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
     try glError();
-    
+
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
     try glError();
@@ -340,7 +340,6 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     try glError();
-
 }
 var last_viewport: [2]f32 = undefined;
 

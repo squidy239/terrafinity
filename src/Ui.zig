@@ -62,7 +62,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
 
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
     std.debug.assert(self.menu_state.ingame);
-    const size = @Vector(2, usize){640, 480};
+    const size = @Vector(2, usize){ 640, 480 };
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
