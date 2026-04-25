@@ -36,10 +36,6 @@
             .url = "git+https://github.com/david-vanderson/dvui#e2336b8e853f2a853872f2aa89344dbb527a79aa",
             .hash = "dvui-0.5.0-dev-AQFJmecF3wBhD5CownKexdeioFZWJeLMRluZX_y4GyZx",
         },
-        .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#6232edf5b1f5bf6487c407ceabcb98253981f7c0",
-            .hash = "wio-0.0.0-8xHrr9EWBwARvbrmWC-qBeRJFUzXirtJdW7S7wIwyYfb",
-        },
     },
 
     .paths = .{

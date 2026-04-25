@@ -1,7 +1,7 @@
 const dvui = @import("dvui");
 const std = @import("std");
 const Game = @import("Game.zig");
-const wio = @import("wio");
+const wio = @import("wio").wio;
 const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
@@ -21,7 +21,7 @@ config_path: []const u8,
 worlds_path: []const u8,
 
 menu_state: struct {
-    ingame: bool = true,
+    ingame: bool = false,
     debug_info: bool = true,
     settings: bool = false,
     main: bool = false,

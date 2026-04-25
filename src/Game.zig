@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
-const wio = @import("wio");
+const wio = @import("wio").wio;
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const wio = @import("wio");
+const wio = @import("wio").wio;
 
 pub const Action = enum {
     forward,

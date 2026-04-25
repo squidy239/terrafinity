@@ -8,7 +8,6 @@ pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const Entity = @import("world/Entity.zig");
-const wio = @import("wio");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
 pub const ztracy = @import("ztracy");
@@ -17,6 +16,8 @@ const Game = @import("Game.zig");
 const dvui = @import("dvui");
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
+const wio_backend = @import("wio-backend");
+const wio = @import("wio").wio;
 
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
@@ -42,10 +43,19 @@ pub fn main(init: std.process.Init) !void {
     var window = try wio.createWindow(.{ .title = "terrafinity" });
     defer window.destroy();
 
-    var ui_context = try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .forward_compatible = true });
+    var ui_context = try window.glCreateContext(.{ .major_version = 3, .minor_version = 3});
     defer ui_context.destroy();
-    
+
     window.glMakeContextCurrent(&ui_context);
+
+    var backend = try wio_backend.init(.{ .io = io, .window = window });
+    defer backend.deinit();
+
+    var render_backend = try dvui.render_backend.init(allocator, wio.glGetProcAddress, "330");
+    defer render_backend.deinit();
+
+    var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(&render_backend), .{});
+    defer ui_window.deinit();
 
     var keymap = Key.Map.init(allocator);
     defer keymap.map.deinit();
@@ -66,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .f }, .use_item_primary);
 
     var game: Game = undefined;
-    try game.init(io, allocator, &config.game_config, &config_lock, worlds_path, &window);
+
     var ui: Ui = .{
         .window = &window,
         .config = &config,
@@ -81,6 +91,8 @@ pub fn main(init: std.process.Init) !void {
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
+        wio.update();
+        const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window);
         window.setMode(if (ui.menu_state.playingGame()) .fullscreen else .normal);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         const dt = frame_time.untilNow(io, .awake);
@@ -91,12 +103,39 @@ pub fn main(init: std.process.Init) !void {
             defer ig.End();
             const mouse_moved = (ms[1] != 0 or ms[2] != 0);
             if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
+            try game.handleScroll(io, scroll);
             try game.handleButtonActions(io, action_set, dt);
             const size = @Vector(2, usize){ 640, 480 };
 
             try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
+        try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+        var menuchanged: bool = false;
+        {
+            const ov = dvui.overlay(@src(), .{ .expand = .both });
+            defer ov.deinit();
+
+            if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
+            if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
+            if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
+                var error_buffer: [65536]u8 = undefined;
+                var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                switch (err) {
+                    error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                    error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                    error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                    else => error_writer.print("{any}", .{err}) catch unreachable,
+                }
+
+                dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
+                break :err false;
+            };
+            if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
+            if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
+        }
+        _ = try ui_window.end(.{});
         dw.End();
         const sf = ztracy.ZoneN(@src(), "sdl flush");
         sf.End();
@@ -150,16 +189,35 @@ pub const Config = struct {
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
-fn sdlErr(
-    err: ?[]const u8,
-) void {
-    if (err) |val| {
-        std.log.err("******* [Error! {s}] *******\n", .{val});
-    } else {
-        std.log.err("******* [Unknown Error!] *******\n", .{});
+fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *wio_backend, win: *wio.Window, ui_window: *dvui.Window) !f32 {
+    ui_backend.setTextInputRect(ui_window.textInputRequested());
+    ui_backend.setCursor(ui_window.cursorRequested());
+    
+    //set all single press buttons like escape to false
+    var it = action_set.iterator();
+    while (it.next()) |action| {
+        if (singlepress.contains(action)) action_set.remove(action);
     }
-}
-
-test {
-    std.testing.refAllDecls(@This());
+    var scroll: f32 = 0;
+    while (win.getEvent()) |event| {
+        _ = try ui_backend.addEvent(ui_window, event);
+        switch (event) {
+            .button_press => |key| {
+                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                action_set.remove(action);
+            },
+            .button_release => |key| {
+                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                action_set.insert(action);
+            },
+            .close => {
+                running.store(false, .unordered);
+            },
+            .mouse => |wheel| {
+                scroll = wheel.y;
+            },
+            else => std.log.debug("ignoring event: {any}", .{event}),
+        }
+    }
+    return scroll;
 }

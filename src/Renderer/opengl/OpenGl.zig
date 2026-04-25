@@ -5,7 +5,7 @@ const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
-const wio = @import("wio");
+const wio = @import("wio").wio;
 
 const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
@@ -89,7 +89,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     //+1 for main thread, TODO threadlocal
     for (0..cpu_count + 32) |_| {
-        try self.contexts.append(allocator, try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .share_context = &self.draw_context}));
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .share_context = &self.draw_context }));
     }
     try glError();
 
