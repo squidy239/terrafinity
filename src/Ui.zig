@@ -1,7 +1,7 @@
 const dvui = @import("dvui");
 const std = @import("std");
 const Game = @import("Game.zig");
-const sdl = @import("sdl3");
+const wio = @import("wio");
 const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
@@ -13,7 +13,7 @@ const pixel_font = sliceToBounded("Press Start 2P", 50);
 
 const Ui = @This();
 
-window: sdl.video.Window,
+window: *wio.Window,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -21,7 +21,7 @@ config_path: []const u8,
 worlds_path: []const u8,
 
 menu_state: struct {
-    ingame: bool = false,
+    ingame: bool = true,
     debug_info: bool = true,
     settings: bool = false,
     main: bool = false,
@@ -62,7 +62,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
 
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
     std.debug.assert(self.menu_state.ingame);
-    const size = try self.window.getSizeInPixels();
+    const size = @Vector(2, usize){640, 480};
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
@@ -80,7 +80,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
-        self.game.deinit(io, self.window);
+        self.game.deinit(io);
         self.game.* = undefined;
         return true;
     }
@@ -328,7 +328,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
     return a.access_time.nanoseconds > b.access_time.nanoseconds;
 }
 
-fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
+fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: *wio.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
     try gameptr.init(io, allocator, game_config, options_lock, folder, window);
     errdefer gameptr.deinit(io, window);
     std.log.info("opening game\n", .{});

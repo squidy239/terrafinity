@@ -32,13 +32,13 @@
             .url = "git+https://github.com/squidy239/rocksdb-zig#ee06fdd2c983f03654917b7ae75526c716748713",
             .hash = "rocksdb-9.7.4-z_CUTqzoAACZ0z0UZy0zNqiCOAp32K1VpE_unvLvLMl_",
         },
-        .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3#40c2e4b579aa556db37a502c936426aa1c8b5c95",
-            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
-        },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#49e8443c038cc5a82dbf57305322132c0a61d4b6",
-            .hash = "dvui-0.5.0-dev-AQFJmTgB3QCriBRzSQGPpw44zDiTaQ8hNnrxsrSxSQti",
+            .url = "git+https://github.com/david-vanderson/dvui#e2336b8e853f2a853872f2aa89344dbb527a79aa",
+            .hash = "dvui-0.5.0-dev-AQFJmecF3wBhD5CownKexdeioFZWJeLMRluZX_y4GyZx",
+        },
+        .wio = .{
+            .url = "git+https://github.com/ypsvlq/wio#6232edf5b1f5bf6487c407ceabcb98253981f7c0",
+            .hash = "wio-0.0.0-8xHrr9EWBwARvbrmWC-qBeRJFUzXirtJdW7S7wIwyYfb",
         },
     },
 

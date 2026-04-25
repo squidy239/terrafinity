@@ -710,7 +710,7 @@ test "cube benchmark" {
         for (0..square) |x| {
             for (0..square) |y| {
                 for (0..square) |z| {
-                    _ = try io.concurrent(loadchunktest, .{ &world, io, allocator, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter });
+                    _ = io.async(loadchunktest, .{ &world, io, allocator, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter });
                 }
             }
         }

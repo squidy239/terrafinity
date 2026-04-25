@@ -3,9 +3,9 @@ const std = @import("std");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
-const sdl = @import("sdl3");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
+const wio = @import("wio");
 
 const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
@@ -32,16 +32,16 @@ cameraFront: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
-window: sdl.video.Window,
+window: *wio.Window,
 gen_context_lock: std.Io.Mutex = .init,
-contexts: std.ArrayList(sdl.video.gl.Context),
+contexts: std.ArrayList(wio.GlContext),
 context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
-draw_context: sdl.video.gl.Context,
+draw_context: wio.GlContext,
 
 threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterator = null;
 
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sdl.video.Window) !void {
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !void {
     const cpu_count = try std.Thread.getCpuCount();
     self.* = @This(){
         .allocator = allocator,
@@ -54,7 +54,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try sdl.video.gl.Context.init(window),
+        .draw_context = try window.glCreateContext(.{ .major_version = 4, .minor_version = 5 }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -74,27 +74,36 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
             },
         },
     };
-    if (!gl.ProcTable.init(&self.proc_table, sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
+    if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
+    gl.makeProcTableCurrent(&self.proc_table);
+
+    self.window.glMakeContextCurrent(&self.draw_context);
     gl.makeProcTableCurrent(&self.proc_table);
 
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
-    try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
+   try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
     try self.render_buffer.indirect_buffer.ensureCapacity(io, 8_000_000);
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
     //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
-    for (0..cpu_count + 100) |_| {
-        try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
+    for (0..cpu_count + 32) |_| {
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .major_version = 4, .minor_version = 5, .share_context = &self.draw_context}));
     }
-    try self.draw_context.makeCurrent(self.window);
+    try glError();
+
+    self.window.glMakeContextCurrent(&self.draw_context);
+    try glError();
 
     try self.compileShaders();
+    try glError();
 
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
+    try glError();
 
     self.loadFacebuffer();
+    try glError();
 
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
@@ -127,7 +136,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.render_buffer.deinit(io, self.allocator);
     self.context_index.store(0, .seq_cst);
     for (0..self.contexts.items.len) |i| {
-        self.contexts.items[i].deinit() catch unreachable;
+        self.contexts.items[i].destroy();
     }
     self.contexts.deinit(self.allocator);
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
@@ -157,6 +166,8 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 
 fn glError() !void {
+    const err = gl.GetError();
+    if(err != 0)std.debug.print("{any}\n", .{err});
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
         gl.INVALID_ENUM => unreachable,
@@ -205,19 +216,19 @@ fn ensureContext(self: *@This()) !void {
     if (thread_index == null) {
         thread_index = self.context_index.fetchAdd(1, .seq_cst);
     }
-    try self.contexts.items[thread_index.?].makeCurrent(self.window);
+    self.window.glMakeContextCurrent(&self.contexts.items[thread_index.?]);
     gl.makeProcTableCurrent(&self.proc_table);
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
+    self.window.glMakeContextCurrent(&self.draw_context);
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
+    self.window.glMakeContextCurrent(&self.draw_context);
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
@@ -231,7 +242,7 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
+    self.window.glMakeContextCurrent(&self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
     glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
@@ -321,14 +332,24 @@ fn loadFacebuffer(self: *@This()) void {
     };
 
     gl.GenBuffers(1, @ptrCast(&self.indecies));
+    glError() catch unreachable;
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    glError() catch unreachable;
+
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
+    glError() catch unreachable;
 
     gl.GenBuffers(1, @ptrCast(&self.facebuffer));
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+    glError() catch unreachable;
+
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
+    glError() catch unreachable;
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
+    glError() catch unreachable;
     gl.EnableVertexAttribArray(0);
+    glError() catch unreachable;
+
 }
 var last_viewport: [2]f32 = undefined;
 

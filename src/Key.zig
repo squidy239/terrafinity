@@ -1,5 +1,5 @@
 const std = @import("std");
-const sdl = @import("sdl3");
+const wio = @import("wio");
 
 pub const Action = enum {
     forward,
@@ -28,12 +28,10 @@ pub const Action = enum {
 pub const ActionSet = std.enums.EnumSet(Action);
 pub const Singlepress = std.enums.EnumSet(Action);
 
-const Keys = sdl.keycode.Keycode;
-const Modifier = sdl.keycode.KeyModifier;
+const Keys = wio.Button;
 
 pub const Key = struct {
     key: Keys,
-    modifier: ?Modifier = null,
 };
 
 pub const Map = struct {

@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
-const sdl = @import("sdl3");
+const wio = @import("wio");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
@@ -173,7 +173,7 @@ pub const WorldOptions = struct {
 
 const gl = @import("gl");
 
-pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Io.RwLock, folder: []const u8, window: sdl.video.Window) !void {
+pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Io.RwLock, folder: []const u8, window: *wio.Window) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
@@ -675,7 +675,7 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     return true;
 }
 
-pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
+pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .monotonic);
     if (self.load_future) |*future| future.cancel(io) catch {};
     if (self.unload_future) |*future| future.cancel(io) catch {};
@@ -687,7 +687,6 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.world.deinit(io, self.allocator);
 
     self.game_arena.deinit();
-    _ = window;
 }
 
 test {

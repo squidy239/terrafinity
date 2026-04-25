@@ -96,13 +96,6 @@ fn setupDependencies(
     rocksdb_mod.single_threaded = false;
     root_module.addImport("rocksdb", rocksdb_mod);
 
-    // SDL3
-    const sdl3 = b.dependency("sdl3", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    root_module.addImport("sdl3", sdl3.module("sdl3"));
-
     // ConcurrentHashMap
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
         .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
@@ -129,7 +122,14 @@ fn setupDependencies(
         .optimize = optimize,
     }).module("obj");
     root_module.addImport("obj", obj_mod);
-
+    
+    const wio_dep = b.dependency("wio", .{
+        .target = target,
+        .optimize = optimize,
+        .enable_opengl = true,
+    });
+    root_module.addImport("wio", wio_dep.module("wio"));
+    
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
