@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     var tracy_allocator = ztracy.TracyAllocator.init(init.gpa);
-    const allocator = tracy_allocator.allocator();
+    const gpa = tracy_allocator.allocator();
     const io = init.io;
 
     //TODO make this an argument once std.cli is added
@@ -33,12 +33,12 @@ pub fn main(init: std.process.Init) !void {
 
     var config_lock: std.Io.RwLock = .init;
 
-    var config: Config = try .load(allocator, io, config_path);
-    defer config.deinit(allocator);
+    var config: Config = try .load(gpa, io, config_path);
+    defer config.deinit(gpa);
 
     try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
 
-    try wio.init(allocator, io, .{});
+    try wio.init(gpa, io, .{});
     defer wio.deinit();
 
     const gloptions: wio.GlOptions = .{
@@ -63,13 +63,13 @@ pub fn main(init: std.process.Init) !void {
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
 
-    var render_backend = try dvui.render_backend.init(allocator, wio.glGetProcAddress, "450");
+    var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
     defer render_backend.deinit();
 
-    var ui_window = try dvui.Window.init(@src(), allocator, backend.backend(&render_backend), .{});
+    var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
     defer ui_window.deinit();
 
-    var keymap = Key.Map.init(allocator);
+    var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();
 
     var singlepress = Key.Singlepress.empty;
@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
         if (ui.menu_state.ingame) {
             window.glMakeContextCurrent(&game.opengl_renderer.draw_context);
 
-            try game.frame(io, allocator);
+            try game.frame(io, gpa);
             window.glMakeContextCurrent(&ui_context);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
 
                 if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
                 if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
-                if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
+                if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, gpa) catch |err| err: {
                     var error_buffer: [65536]u8 = undefined;
                     var error_writer: std.Io.Writer = .fixed(&error_buffer);
 
@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
                     break :err false;
                 };
                 if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-                if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, allocator);
+                if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, gpa);
             }
             _ = try ui_window.end(.{});
             dw.End();
