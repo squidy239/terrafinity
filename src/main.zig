@@ -52,7 +52,9 @@ pub fn main(init: std.process.Init) !void {
 
     var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });
     defer window.destroy();
-
+    
+    window.setMode(.maximized);
+    
     var ui_context = try window.glCreateContext(.{ .options = gloptions });
     defer ui_context.destroy();
 
@@ -196,6 +198,7 @@ pub const Config = struct {
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
+var window_size: wio.Size = .{ .height = 480, .width = 640 };
 fn handleEvents(
     io: std.Io,
     key_map: *Key.Map,
@@ -238,10 +241,11 @@ fn handleEvents(
                 if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(mouse, ui.game.getMouseSensitivity(io));
             },
             .size_physical => |size| {
-                if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{size.width, size.height});
+                window_size = size;
             },
             else => std.log.debug("ignoring event: {any}", .{event}),
         }
     }
+    if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{window_size.width, window_size.height});
     if (ui.menu_state.ingame) try ui.game.handleButtonActions(io, action_set, dt);
 }

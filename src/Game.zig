@@ -509,6 +509,7 @@ pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bo
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
+    defer self.mesh_unload_is_running.store(false, .seq_cst);
 
     const chunkCollector = struct {
         game: *Game,
