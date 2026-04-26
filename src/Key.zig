@@ -40,7 +40,7 @@ pub const Map = struct {
 
     pub fn init(allocator: std.mem.Allocator) Map {
         return .{
-            .map = std.AutoHashMap(Key, Action).init(allocator),
+            .map = .init(allocator),
         };
     }
 

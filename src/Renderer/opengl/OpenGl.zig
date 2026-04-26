@@ -822,7 +822,7 @@ fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"
     _ = kind;
     _ = id;
     _ = userParam;
-    comptime std.debug.assert(builtin.mode == .Debug);
+    //comptime std.debug.assert(builtin.mode == .Debug);
     switch (severity) {
         gl.DEBUG_SEVERITY_NOTIFICATION => return,
         gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{s}", .{message[0..@intCast(length)]}),

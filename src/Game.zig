@@ -399,7 +399,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.unlockShared(io);
     switch (self.player.gameMode.load(.seq_cst)) {
         .Creative, .Spectator => {
-            const fsl = self.player.fly_speed_linear.fetchAdd(scroll * scroll_sensitivity, .seq_cst);
+            const fsl = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
             _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fsl)), .seq_cst);
         },
         .Survival => {},
