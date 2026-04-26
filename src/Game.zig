@@ -697,6 +697,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.world.deinit(io, self.allocator);
 
     self.game_arena.deinit();
+    self.* = undefined;
 }
 
 test {

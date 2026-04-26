@@ -38,12 +38,14 @@ contexts: std.ArrayList(wio.GlContext),
 context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
 draw_context: wio.GlContext,
+gl_options: wio.GlOptions,
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context);
     self.* = @This(){
         .allocator = allocator,
+        .gl_options = gl_options,
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
@@ -53,7 +55,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = null }),
+        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -101,26 +103,16 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     try glError();
 
     self.window.glMakeContextCurrent(&self.draw_context);
-    try glError();
-
     try self.compileShaders();
-    try glError();
-
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
-    try glError();
-
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
-    try glError();
-
     try self.loadFacebuffer();
 
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     gl.BindVertexArray(0);
-
-    try glError();
 
     gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
 
@@ -141,10 +133,13 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     gl.Finish();
     self.render_buffer.deinit(io, self.allocator);
     self.context_index.store(0, .seq_cst);
+    self.gen_context_lock.lockUncancelable(io);
     for (0..self.contexts.items.len) |i| {
         self.contexts.items[i].destroy();
     }
+    self.gen_context_lock.unlock(io);
     self.contexts.deinit(self.allocator);
+    self.draw_context.destroy();
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
@@ -172,7 +167,6 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 
 fn glError() !void {
-    if (true) return;
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
         gl.INVALID_ENUM => unreachable,
@@ -193,7 +187,6 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: [
     };
 }
 
-///safe to call in forEachChunk
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
     self.render_buffer.remove(io, chunk_pos);
 }

@@ -83,7 +83,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
         self.game.deinit(io);
-        self.game.* = undefined;
+        self.window.glMakeContextCurrent(self.ui_context);
         return true;
     }
 
