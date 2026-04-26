@@ -39,8 +39,6 @@ context_index: std.atomic.Value(usize) = .init(0),
 proc_table: gl.ProcTable,
 draw_context: wio.GlContext,
 
-threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterator = null;
-
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context);
@@ -197,14 +195,7 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: [
 
 ///safe to call in forEachChunk
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    if (current_chunk_iterator) |it| {
-        if (it.bkt_iter) |_| {
-            const entry = it.map.buckets[it.bkt_index].hash_map.fetchRemove(chunk_pos) orelse unreachable; // must be in the map since it was in the iterator
-            self.render_buffer.lock.lockUncancelable(io);
-            defer self.render_buffer.lock.unlock(io);
-            self.render_buffer.removeSpace(entry.value);
-        }
-    } else self.render_buffer.remove(io, chunk_pos);
+    self.render_buffer.remove(io, chunk_pos);
 }
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
@@ -258,11 +249,11 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     var it = self.render_buffer.map.iterator();
-    current_chunk_iterator = &it;
-    defer current_chunk_iterator = null;
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
+        it.pause(io);
         callback(callback_userdata, entry.key_ptr.*);
+        try it.unpause(io);
     }
 }
 
