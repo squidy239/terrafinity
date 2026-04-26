@@ -294,7 +294,7 @@ pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
 }
 
-pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Vector(2, u32)) !void {
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const now: std.Io.Timestamp = .now(io, .awake);
     const frame_time = self.last_frametime.durationTo(now);
     self.last_frametime = now;
@@ -305,7 +305,6 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     var entitys_future = io.async(World.updateEntitys, .{ &self.world, io, allocator });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
-    try self.renderer.setViewport(size);
     try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
     try self.player.physics.update(&self.world, io, allocator);
     try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
@@ -381,9 +380,9 @@ pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
-pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32) void {
+pub fn handleMouseMotion(self: *@This(), mouse_motion: wio.RelativePosition, sensitivity: f32) void {
     var viewDirDiff: @Vector(2, f32) = @splat(0);
-    viewDirDiff += @Vector(2, f32){ mouse_motion[1], mouse_motion[0] };
+    viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     viewDirDiff *= @splat(sensitivity);
 
     const smallf32 = 0.00001;
@@ -413,7 +412,7 @@ pub fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
-pub fn handleButtonActions(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time: std.Io.Duration) !void {
+pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
@@ -424,7 +423,7 @@ pub fn handleButtonActions(self: *@This(), io: std.Io, actions: Key.ActionSet, d
     try self.itemAction(io, actions);
 }
 
-fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
+fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     if (actions.contains(.hotbar_key_0)) self.selected_inventory_col.store(0, .seq_cst);
     if (actions.contains(.hotbar_key_1)) self.selected_inventory_col.store(1, .seq_cst);
     if (actions.contains(.hotbar_key_2)) self.selected_inventory_col.store(2, .seq_cst);
@@ -439,7 +438,7 @@ fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
 }
 
-pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
+pub fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     if (actions.contains(.use_item_primary)) try self.world.spawnEntity(io, self.allocator, null, EntityTypes.Explosive{
         .pos = .{ .vector = self.player.physics.pos.load(.seq_cst) },
         .dir = .{ .vector = @splat(0) },
@@ -447,7 +446,7 @@ pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     }, false);
 }
 
-fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_seconds: f32) !void {
+fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
     _ = io;
     const cameraFront = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);

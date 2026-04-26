@@ -80,7 +80,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     self.window.glMakeContextCurrent(&self.draw_context);
     gl.makeProcTableCurrent(&self.proc_table);
-    
+
     gl.Enable(gl.DEBUG_OUTPUT);
     gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
     gl.DebugMessageCallback(glCallback, null);
@@ -174,7 +174,7 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 
 fn glError() !void {
-    if(true)return;
+    if (true) return;
     switch (gl.GetError()) {
         gl.NO_ERROR => return,
         gl.INVALID_ENUM => unreachable,

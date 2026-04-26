@@ -104,34 +104,25 @@ pub fn main(init: std.process.Init) !void {
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
         wio.update();
-        const scroll = try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window);
-        window.setMode(if (ui.menu_state.playingGame()) .fullscreen else .normal);
+        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        window.setCursorMode(if (ui.menu_state.playingGame()) .relative else .normal);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
-        const dt = frame_time.untilNow(io, .awake);
         frame_time = .now(io, .awake);
-        const ms: [3]u32 = .{ 0, 0, 0 };
         if (ui.menu_state.ingame) {
             window.glMakeContextCurrent(&game.opengl_renderer.draw_context);
-            const ig = ztracy.ZoneN(@src(), "ingame");
-            defer ig.End();
-            const mouse_moved = (ms[1] != 0 or ms[2] != 0);
-            if (ui.menu_state.playingGame() and mouse_moved) game.handleMouseMotion(.{ ms[1], ms[2] }, game.getMouseSensitivity(io));
-            try game.handleScroll(io, scroll);
-            try game.handleButtonActions(io, action_set, dt);
-            const size = @Vector(2, usize){ 2560, 1440 };
 
-            try game.frame(io, allocator, @intCast(@as(@Vector(2, usize), size)));
+            try game.frame(io, allocator);
             window.glMakeContextCurrent(&ui_context);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
-        {   
+        {
             window.glMakeContextCurrent(&ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
             var menuchanged: bool = false;
             {
                 const ov = dvui.overlay(@src(), .{ .expand = .both });
                 defer ov.deinit();
-           
+
                 if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
                 if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
                 if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, allocator) catch |err| err: {
@@ -205,7 +196,18 @@ pub const Config = struct {
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
-fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, action_set: *Key.ActionSet, running: *std.atomic.Value(bool), ui_backend: *wio_backend, win: *wio.Window, ui_window: *dvui.Window) !f32 {
+fn handleEvents(
+    io: std.Io,
+    key_map: *Key.Map,
+    singlepress: Key.Singlepress,
+    action_set: *Key.ActionSet,
+    running: *std.atomic.Value(bool),
+    ui_backend: *wio_backend,
+    win: *wio.Window,
+    ui_window: *dvui.Window,
+    ui: *Ui,
+    dt: std.Io.Duration,
+) !void {
     ui_backend.setTextInputRect(ui_window.textInputRequested());
     ui_backend.setCursor(ui_window.cursorRequested());
 
@@ -214,7 +216,6 @@ fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, act
     while (it.next()) |action| {
         if (singlepress.contains(action)) action_set.remove(action);
     }
-    var scroll: f32 = 0;
     while (win.getEvent()) |event| {
         _ = try ui_backend.addEvent(ui_window, event);
         switch (event) {
@@ -229,11 +230,18 @@ fn handleEvents(io: std.Io, key_map: *Key.Map, singlepress: Key.Singlepress, act
             .close => {
                 running.store(false, .unordered);
             },
-            .mouse => |wheel| {
-                scroll = wheel.y;
+            .scroll_vertical => |scroll| {
+                if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
+            },
+            .mouse_relative => |mouse| {
+                const mouse_moved = (mouse.x != 0 or mouse.y != 0);
+                if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(mouse, ui.game.getMouseSensitivity(io));
+            },
+            .size_physical => |size| {
+                if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{size.width, size.height});
             },
             else => std.log.debug("ignoring event: {any}", .{event}),
         }
     }
-    return scroll;
+    if (ui.menu_state.ingame) try ui.game.handleButtonActions(io, action_set, dt);
 }
