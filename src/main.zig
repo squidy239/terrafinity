@@ -58,8 +58,13 @@ pub fn main(init: std.process.Init) !void {
 
     var ui_context = try window.glCreateContext(.{ .options = gloptions });
     defer ui_context.destroy();
-
     window.glMakeContextCurrent(ui_context);
+
+    var proc_table: gl.ProcTable = undefined;
+    if (!gl.ProcTable.init(&proc_table, wio.glGetProcAddress))
+        return error.FailedToInitProcTable;
+    gl.makeProcTableCurrent(&proc_table);
+    setCallback();
 
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
@@ -93,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
     var game: Game = undefined;
 
     var ui: Ui = .{
+        .proc_table = &proc_table,
         .window = &window,
         .config = &config,
         .config_lock = &config_lock,
@@ -248,9 +254,31 @@ fn handleEvents(
             .size_physical => |size| {
                 window_size = size;
             },
-            else => std.log.debug("ignoring event: {any}", .{event}),
+            else => {},
         }
     }
     if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
     if (ui.menu_state.ingame) try ui.game.handleButtonActions(io, action_set, dt);
+}
+
+pub fn setCallback() void {
+    switch (builtin.mode) {
+        .Debug, .ReleaseSafe => {},
+        .ReleaseFast, .ReleaseSmall => return,
+    }
+    gl.Enable(gl.DEBUG_OUTPUT);
+    gl.DebugMessageCallback(glCallback, null);
+}
+
+fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, userParam: ?*const anyopaque) callconv(.c) void {
+    _ = kind;
+    _ = id;
+    _ = userParam;
+    switch (severity) {
+        gl.DEBUG_SEVERITY_NOTIFICATION => return,
+        gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{d}: {s}", .{source, message[0..@intCast(length)]}),
+        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{d}: {s}", .{source, message[0..@intCast(length)]}),
+        gl.DEBUG_SEVERITY_LOW => std.log.info("{d}: {s}", .{source, message[0..@intCast(length)]}),
+        else => unreachable,
+    }
 }

@@ -11,12 +11,11 @@ const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
 const ChunkSize = World.ChunkSize;
-const Entity = World.Entity;
 const ChunkPos = World.ChunkPos;
-const EntityTypes = World.EntityTypes;
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
 const builtin = @import("builtin");
+const setCallback = @import("../../main.zig").setCallback;
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 const OpenGlRenderer = @This();
@@ -36,11 +35,11 @@ window: *wio.Window,
 gen_context_lock: std.Io.Mutex = .init,
 contexts: std.ArrayList(wio.GlContext),
 context_index: std.atomic.Value(usize) = .init(0),
-proc_table: gl.ProcTable,
+proc_table: *const gl.ProcTable,
 draw_context: wio.GlContext,
 gl_options: wio.GlOptions,
 
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context.*);
     self.* = @This(){
@@ -49,7 +48,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
-        .proc_table = undefined,
+        .proc_table = proc_table,
         .render_buffer = .{ .allocator = allocator, .map = .init() },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
@@ -76,12 +75,8 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         },
     };
     self.window.glMakeContextCurrent(self.draw_context);
-    if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
-    gl.makeProcTableCurrent(&self.proc_table);
-
-    gl.Enable(gl.DEBUG_OUTPUT);
-    gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
-    gl.DebugMessageCallback(glCallback, null);
+    gl.makeProcTableCurrent(self.proc_table);
+    setCallback();
 
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
@@ -94,9 +89,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     for (0..cpu_count + 1) |i| {
         try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = self.draw_context }));
         self.window.glMakeContextCurrent(self.contexts.items[i]);
-        gl.Enable(gl.DEBUG_OUTPUT);
-        gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
-        gl.DebugMessageCallback(glCallback, null);
+        setCallback();
     }
 
     self.window.glMakeContextCurrent(self.draw_context);
@@ -193,19 +186,19 @@ fn ensureContext(self: *@This()) !void {
         thread_index = self.context_index.fetchAdd(1, .seq_cst);
     }
     self.window.glMakeContextCurrent(self.contexts.items[thread_index.?]);
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
@@ -220,7 +213,7 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
     self.viewport_pixels = viewport_pixels;
@@ -325,7 +318,7 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -781,21 +774,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             self.indirect_buffer.free(io);
         }
     };
-}
-
-fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, userParam: ?*const anyopaque) callconv(.c) void {
-    _ = source;
-    _ = kind;
-    _ = id;
-    _ = userParam;
-    //comptime std.debug.assert(builtin.mode == .Debug);
-    switch (severity) {
-        gl.DEBUG_SEVERITY_NOTIFICATION => return,
-        gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{s}", .{message[0..@intCast(length)]}),
-        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{s}", .{message[0..@intCast(length)]}),
-        gl.DEBUG_SEVERITY_LOW => std.log.info("{s}", .{message[0..@intCast(length)]}),
-        else => unreachable,
-    }
 }
 
 test {

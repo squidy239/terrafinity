@@ -6,13 +6,14 @@ const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
 const utils = @import("libs/utils.zig");
-
+const gl = @import("gl");
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 
 const Ui = @This();
 
+proc_table: *const gl.ProcTable,
 window: *wio.Window,
 ui_context: *wio.GlContext,
 gloptions: wio.GlOptions,
@@ -332,7 +333,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context);
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context, self.proc_table);
     std.log.info("opening game\n", .{});
 }
 

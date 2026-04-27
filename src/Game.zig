@@ -183,6 +183,7 @@ pub fn init(
     window: *wio.Window,
     gl_options: wio.GlOptions,
     share_context: *wio.GlContext,
+    proc_table: *const gl.ProcTable,
 ) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
@@ -201,7 +202,7 @@ pub fn init(
         .player = undefined,
     };
 
-    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context);
+    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table);
     errdefer game.opengl_renderer.deinit(io);
 
     game.renderer = game.opengl_renderer.interface;
