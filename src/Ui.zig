@@ -332,7 +332,6 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
     try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context);
-    errdefer self.game.deinit(io, self.window);
     std.log.info("opening game\n", .{});
 }
 

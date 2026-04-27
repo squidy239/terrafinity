@@ -75,10 +75,8 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
             },
         },
     };
-    if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
-    gl.makeProcTableCurrent(&self.proc_table);
-
     self.window.glMakeContextCurrent(&self.draw_context);
+    if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
 
     gl.Enable(gl.DEBUG_OUTPUT);

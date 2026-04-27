@@ -62,13 +62,15 @@ pub fn main(init: std.process.Init) !void {
 
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
-
+    
     var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
     defer render_backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
     defer ui_window.deinit();
-
+    
+    try Ui.loadFonts(&ui_window);
+    
     var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();
 
@@ -105,9 +107,9 @@ pub fn main(init: std.process.Init) !void {
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
+        window.setCursorMode(if (ui.menu_state.playingGame()) .relative else .normal);
         wio.update();
         try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake));
-        window.setCursorMode(if (ui.menu_state.playingGame()) .relative else .normal);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
@@ -138,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
                         else => error_writer.print("{any}", .{err}) catch unreachable,
                     }
 
-                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                Their was a problem opening the world                " });
+                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
                     break :err false;
                 };
                 if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
