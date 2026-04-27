@@ -111,7 +111,7 @@ test "MeshBenchmark" {
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
     std.log.info("Mesh benchmark: {d} meshes in {d} ms", .{ test_amount, dt.toMilliseconds() });
-    std.debug.print("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount)});
+    std.log.info("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount)});
 }
 
 ///x+,x-,y+,y-,z+,z-

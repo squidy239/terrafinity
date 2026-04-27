@@ -1,71 +1,55 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // Build options
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Tracy profiling options
     const tracy_options = .{
         .enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false,
         .enable_fibers = b.option(bool, "enable_fibers", "Enable Tracy fiber support") orelse false,
         .on_demand = b.option(bool, "on_demand", "Build tracy with TRACY_ON_DEMAND") orelse true,
     };
 
-    // Create root module
-    const root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Set up dependencies and imports
-    setupDependencies(b, root_module, target, optimize, tracy_options);
-
-    // Create executable
-    var exe = b.addExecutable(.{
-        .name = "terrafinity",
-        .root_module = root_module,
-        .use_llvm = true,
-    });
-
-    // Link libraries
     const ztracy = b.dependency("ztracy", .{
         .enable_ztracy = tracy_options.enable_ztracy,
         .enable_fibers = tracy_options.enable_fibers,
         .on_demand = tracy_options.on_demand,
         .optimize = optimize,
     });
-    exe.root_module.linkLibrary(ztracy.artifact("tracy"));
 
-    const check_step = b.step("check", "");
-    check_step.dependOn(&b.addTest(.{
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    setupDependencies(b, root_module, target, optimize, ztracy);
+
+    const exe = b.addExecutable(.{
+        .name = "terrafinity",
         .root_module = root_module,
-    }).step);
-
-    // Install and run steps
+        .use_llvm = true,
+    });
+    exe.root_module.linkLibrary(ztracy.artifact("tracy"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Test step
+    const check_step = b.step("check", "");
+    check_step.dependOn(&b.addTest(.{ .root_module = root_module }).step);
+
     const tests = b.addTest(.{
         .root_module = root_module,
         .use_llvm = true,
     });
-    b.installArtifact(tests);
-
-    const run_test = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_test.step);
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 fn setupDependencies(
@@ -73,15 +57,8 @@ fn setupDependencies(
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    tracy_options: anytype,
+    ztracy: *std.Build.Dependency,
 ) void {
-    // Tracy profiling
-    const ztracy = b.dependency("ztracy", .{
-        .enable_ztracy = tracy_options.enable_ztracy,
-        .enable_fibers = tracy_options.enable_fibers,
-        .on_demand = tracy_options.on_demand,
-        .optimize = optimize,
-    });
     root_module.addImport("ztracy", ztracy.module("root"));
 
     const dep_rocksdb = b.dependency("rocksdb", .{
@@ -93,7 +70,6 @@ fn setupDependencies(
     rocksdb_mod.single_threaded = false;
     root_module.addImport("rocksdb", rocksdb_mod);
 
-    // ConcurrentHashMap
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
         .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
         .optimize = optimize,
@@ -103,7 +79,6 @@ fn setupDependencies(
     });
     root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
-    // Cache
     const Cache = b.addModule("Cache", .{
         .root_source_file = b.path("src/libs/Cache.zig"),
         .optimize = optimize,
@@ -113,7 +88,6 @@ fn setupDependencies(
     });
     root_module.addImport("Cache", Cache);
 
-    // OBJ parser
     const obj_mod = b.dependency("obj", .{
         .target = target,
         .optimize = optimize,
@@ -124,9 +98,8 @@ fn setupDependencies(
         .target = target,
         .optimize = optimize,
         .enable_opengl = true,
-        .win32_manifest = false, // must match dvui
+        .win32_manifest = false,
     });
-
     root_module.addImport("wio", wio.module("wio"));
 
     const dvui_dep = b.dependency("dvui", .{
@@ -137,9 +110,8 @@ fn setupDependencies(
         .backend = .wio,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_wio"));
-    const wio_module = dvui_dep.module("wio");
-    root_module.addImport("wio-backend", wio_module);
-    // OpenGL bindings
+    root_module.addImport("wio-backend", dvui_dep.module("wio"));
+
     const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
         .api = .gl,
         .version = .@"4.5",
@@ -147,14 +119,12 @@ fn setupDependencies(
     });
     root_module.addImport("gl", gl_bindings);
 
-    // Image library
     const zigimg_dependency = b.dependency("zigimg", .{
         .target = target,
         .optimize = optimize,
     });
     root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
 
-    // Math library
     const zm = b.dependency("zm", .{
         .target = target,
         .optimize = optimize,
