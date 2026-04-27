@@ -107,19 +107,17 @@ pub fn main(init: std.process.Init) !void {
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
-        window.setCursorMode(if (ui.menu_state.playingGame()) .relative else .normal);
         wio.update();
         try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake));
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
-            window.glMakeContextCurrent(game.opengl_renderer.draw_context);
-
             try game.frame(io, gpa);
             window.glMakeContextCurrent(ui_context);
         }
-        const dw = ztracy.ZoneN(@src(), "draw ui");
         {
+            const dw = ztracy.ZoneN(@src(), "draw ui");
+            defer dw.End();
             window.glMakeContextCurrent(ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
             var menuchanged: bool = false;
@@ -147,7 +145,6 @@ pub fn main(init: std.process.Init) !void {
                 if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, gpa);
             }
             _ = try ui_window.end(.{});
-            dw.End();
         }
 
         const sw = ztracy.ZoneN(@src(), "swap");
@@ -214,7 +211,12 @@ fn handleEvents(
     dt: std.Io.Duration,
 ) !void {
     ui_backend.setTextInputRect(ui_window.textInputRequested());
-    ui_backend.setCursor(ui_window.cursorRequested());
+    if (ui.menu_state.playingGame()) {
+        win.setCursorMode(.relative);
+    } else {
+        win.setCursorMode(.normal);
+        ui_backend.setCursor(ui_window.cursorRequested());
+    }
 
     //set all single press buttons like escape to false
     var it = action_set.iterator();

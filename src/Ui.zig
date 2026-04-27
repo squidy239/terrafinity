@@ -29,9 +29,10 @@ menu_state: struct {
     main: bool = false,
     esc: bool = false,
     newgame: bool = false,
-
+    
+    /// Returns true if the player is ingame without a menu open
     pub fn playingGame(self: @This()) bool {
-        return std.meta.eql(self, @This(){ .ingame = true });
+        return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
     }
 
     pub fn handleEsc(self: *@This()) void {
