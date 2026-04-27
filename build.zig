@@ -27,7 +27,6 @@ pub fn build(b: *std.Build) void {
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
-        .use_lld = true,
     });
 
     // Link libraries
@@ -60,7 +59,6 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .root_module = root_module,
         .use_llvm = true,
-        .use_lld = false,
     });
     b.installArtifact(tests);
 
@@ -137,7 +135,6 @@ fn setupDependencies(
         .freetype = false,
         .@"tree-sitter" = false,
         .backend = .wio,
-        .@"log-error-trace" = false,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_wio"));
     const wio_module = dvui_dep.module("wio");

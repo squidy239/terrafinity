@@ -37,8 +37,8 @@
             .hash = "dvui-0.5.0-dev-AQFJmecF3wBhD5CownKexdeioFZWJeLMRluZX_y4GyZx",
         },
         .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#0ba4bf33a8c29c82a091094271b0dd501a6a769f",
-            .hash = "wio-0.0.0-8xHrr-geBwAaZ-XjLiDJ0-ACOzMgD1cl7VCQpOq2gzNF",
+            .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
+            .hash = "wio-0.0.0-8xHrrx8eBwBliteTXuvS4JKUbdquuaJabO7wMk5FZalf",
         },
     },
 

@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     var ui_context = try window.glCreateContext(.{ .options = gloptions });
     defer ui_context.destroy();
 
-    window.glMakeContextCurrent(&ui_context);
+    window.glMakeContextCurrent(ui_context);
 
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
@@ -113,14 +113,14 @@ pub fn main(init: std.process.Init) !void {
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
-            window.glMakeContextCurrent(&game.opengl_renderer.draw_context);
+            window.glMakeContextCurrent(game.opengl_renderer.draw_context);
 
             try game.frame(io, gpa);
-            window.glMakeContextCurrent(&ui_context);
+            window.glMakeContextCurrent(ui_context);
         }
         const dw = ztracy.ZoneN(@src(), "draw ui");
         {
-            window.glMakeContextCurrent(&ui_context);
+            window.glMakeContextCurrent(ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
             var menuchanged: bool = false;
             {

@@ -42,7 +42,7 @@ gl_options: wio.GlOptions,
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext) !void {
     const cpu_count = try std.Thread.getCpuCount();
-    defer window.glMakeContextCurrent(share_context);
+    defer window.glMakeContextCurrent(share_context.*);
     self.* = @This(){
         .allocator = allocator,
         .gl_options = gl_options,
@@ -55,7 +55,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context }),
+        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context.* }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -75,7 +75,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
             },
         },
     };
-    self.window.glMakeContextCurrent(&self.draw_context);
+    self.window.glMakeContextCurrent(self.draw_context);
     if (!gl.ProcTable.init(&self.proc_table, wio.glGetProcAddress)) return error.InitFailed;
     gl.makeProcTableCurrent(&self.proc_table);
 
@@ -92,15 +92,15 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     //+1 for main thread, TODO threadlocal
     for (0..cpu_count + 1) |i| {
-        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = &self.draw_context }));
-        self.window.glMakeContextCurrent(&self.contexts.items[i]);
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = self.draw_context }));
+        self.window.glMakeContextCurrent(self.contexts.items[i]);
         gl.Enable(gl.DEBUG_OUTPUT);
         gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
         gl.DebugMessageCallback(glCallback, null);
     }
     try glError();
 
-    self.window.glMakeContextCurrent(&self.draw_context);
+    self.window.glMakeContextCurrent(self.draw_context);
     try self.compileShaders();
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
@@ -205,21 +205,21 @@ fn ensureContext(self: *@This()) !void {
     if (thread_index == null) {
         thread_index = self.context_index.fetchAdd(1, .seq_cst);
     }
-    self.window.glMakeContextCurrent(&self.contexts.items[thread_index.?]);
+    self.window.glMakeContextCurrent(self.contexts.items[thread_index.?]);
     gl.makeProcTableCurrent(&self.proc_table);
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(&self.proc_table);
-    self.window.glMakeContextCurrent(&self.draw_context);
+    self.window.glMakeContextCurrent(self.draw_context);
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(&self.proc_table);
-    self.window.glMakeContextCurrent(&self.draw_context);
+    self.window.glMakeContextCurrent(self.draw_context);
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
@@ -234,7 +234,7 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(&self.proc_table);
-    self.window.glMakeContextCurrent(&self.draw_context);
+    self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
     glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
