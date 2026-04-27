@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
     var tracy_allocator = ztracy.TracyAllocator.init(init.gpa);
+
     const gpa = tracy_allocator.allocator();
     const io = init.io;
 
@@ -62,15 +63,15 @@ pub fn main(init: std.process.Init) !void {
 
     var backend = try wio_backend.init(.{ .io = io, .window = window });
     defer backend.deinit();
-    
+
     var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
     defer render_backend.deinit();
 
     var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
     defer ui_window.deinit();
-    
+
     try Ui.loadFonts(&ui_window);
-    
+
     var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();
 

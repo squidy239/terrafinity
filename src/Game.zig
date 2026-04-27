@@ -387,10 +387,12 @@ pub fn handleMouseMotion(self: *@This(), mouse_motion: wio.RelativePosition, sen
 
     const smallf32 = 0.00001;
 
-    _ = self.player.viewDirection.fetchAdd(-@Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 }, .seq_cst);
-    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Max, -90 + smallf32, .seq_cst);
-    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Min, 90 - smallf32, .seq_cst);
-    self.renderer.updateCameraDirection(self.player.viewDirection.load(.seq_cst));
+    var currentViewDir = self.player.viewDirection.load(.seq_cst);
+    currentViewDir -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
+    currentViewDir[0] = std.math.clamp(currentViewDir[0], -90 + smallf32, 90 - smallf32);
+    self.player.viewDirection.store(currentViewDir, .seq_cst);
+
+    self.renderer.updateCameraDirection(currentViewDir);
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {

@@ -98,7 +98,6 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         gl.Enable(gl.DEBUG_OUTPUT_SYNCHRONOUS);
         gl.DebugMessageCallback(glCallback, null);
     }
-    try glError();
 
     self.window.glMakeContextCurrent(self.draw_context);
     try self.compileShaders();
@@ -123,13 +122,19 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     gl.ClipControl(gl.LOWER_LEFT, gl.ZERO_TO_ONE);
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-    try glError();
 }
 
 pub fn deinit(self: *@This(), io: std.Io) void {
     gl.Finish();
+    self.window.glMakeContextCurrent(self.draw_context);
     self.render_buffer.deinit(io, self.allocator);
+    gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
+    gl.DeleteBuffers(1, @ptrCast(&self.indecies));
+    gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
+
+    gl.DeleteProgram(self.shaderprogram);
+    gl.DeleteProgram(self.entityshaderprogram);
+
     self.context_index.store(0, .seq_cst);
     self.gen_context_lock.lockUncancelable(io);
     for (0..self.contexts.items.len) |i| {
@@ -138,12 +143,6 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.gen_context_lock.unlock(io);
     self.contexts.deinit(self.allocator);
     self.draw_context.destroy();
-    gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
-    gl.DeleteBuffers(1, @ptrCast(&self.indecies));
-    gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
-
-    gl.DeleteProgram(self.shaderprogram);
-    gl.DeleteProgram(self.entityshaderprogram);
     std.log.info("renderer deinit", .{});
 }
 
@@ -162,18 +161,6 @@ fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) v
 fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     return self.cameraFront;
-}
-
-fn glError() !void {
-    switch (gl.GetError()) {
-        gl.NO_ERROR => return,
-        gl.INVALID_ENUM => unreachable,
-        gl.INVALID_VALUE => unreachable,
-        gl.INVALID_OPERATION => unreachable,
-        gl.INVALID_FRAMEBUFFER_OPERATION => unreachable,
-        gl.OUT_OF_MEMORY => return error.OutOfMemory,
-        else => unreachable,
-    }
 }
 
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
@@ -236,7 +223,6 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
     gl.makeProcTableCurrent(&self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
-    glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
 }
 
@@ -307,7 +293,6 @@ fn compileShaders(self: *@This()) !void {
     gl.DeleteShader(entityvertexshader);
     gl.DeleteShader(entityfragshader);
     self.entityshaderprogram = entityshaderprogram;
-    try glError();
 }
 
 fn loadFacebuffer(self: *@This()) !void {
@@ -334,7 +319,6 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
-    try glError();
 }
 var last_viewport: [2]f32 = undefined;
 
@@ -362,7 +346,6 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
-    glError() catch return error.DrawFailed;
 
     const draw_info = self.render_buffer.rebuild(
         io,
@@ -383,21 +366,15 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     defer self.render_buffer.indirect_buffer.resize_lock.unlockShared(io);
     gl.Finish();
     gl.BindVertexArray(self.vao);
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
-    glError() catch return error.DrawFailed;
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
-    glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
-    glError() catch return error.DrawFailed;
     const ff = ztracy.ZoneN(@src(), "finish");
     gl.Finish(); //TODO better syncronization
     ff.End();
@@ -525,10 +502,8 @@ const GpuBuffer = struct {
         defer e.End();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
-        try glError();
         errdefer gl.DeleteBuffers(1, @ptrCast(&new_buffer));
         gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT | gl.CLIENT_STORAGE_BIT);
-        try glError();
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             gl.Finish(); //RACE CONDITION this only syncs the current thread
@@ -542,7 +517,6 @@ const GpuBuffer = struct {
         var new_mapping: []u8 = undefined;
         new_mapping.len = new_size;
         new_mapping.ptr = @ptrCast(gl.MapNamedBufferRange(new_buffer, 0, @intCast(new_size), gl.MAP_WRITE_BIT | gl.MAP_FLUSH_EXPLICIT_BIT | gl.MAP_PERSISTENT_BIT) orelse return error.OutOfMemory);
-        try glError();
         self.buffer = new_buffer;
         self.mapping = new_mapping;
         gl.Finish();
@@ -573,7 +547,6 @@ const GpuBuffer = struct {
         self.resize_lock.lockSharedUncancelable(io);
         defer self.resize_lock.unlockShared(io);
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
-        try glError();
         gl.Flush();
     }
 
@@ -745,7 +718,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
                 const ac = ztracy.ZoneN(@src(), "mapCommands");
-                try glError();
                 ac.End();
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
                 try self.lock.lock(io);

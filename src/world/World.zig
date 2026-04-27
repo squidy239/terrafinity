@@ -202,7 +202,11 @@ pub fn unloadEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, en
 }
 
 pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
-    const UUID = uuid orelse World.prng.random().int(u128);
+    const UUID = uuid orelse blk: {
+        var random_uuid: u128 = undefined;
+        io.random(std.mem.asBytes(&random_uuid));
+        break :blk random_uuid;
+    };
     if (self.entitys.contains(io, UUID)) return error.EntityAlreadyExists;
     const allocated_entity = try Entity.make(entity, allocator);
     errdefer allocated_entity.unload(io, self, UUID, allocator, false) catch unreachable;
