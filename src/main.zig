@@ -50,9 +50,6 @@ pub fn main(init: std.process.Init) !void {
         .debug = builtin.mode == .Debug,
         .samples = 4,
         .alpha_bits = 0,
-        .red_bits = 10,
-        .green_bits = 10,
-        .blue_bits = 10,
     };
 
     var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });

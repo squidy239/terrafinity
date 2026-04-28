@@ -17,9 +17,9 @@ pub fn getInterface(physicsElements: anytype) type {
 
         pub fn lapUpdateTimer(self: *@This(), io: std.Io) std.Io.Duration {
             self.last_update_lock.lockUncancelable(io);
+            defer self.last_update_lock.unlock(io);
             const ola = self.last_update;
             self.last_update = .now(io, .awake);
-            self.last_update_lock.unlock(io);
             return ola.durationTo(self.last_update);
         }
 
