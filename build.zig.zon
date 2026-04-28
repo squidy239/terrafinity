@@ -29,16 +29,16 @@
             .hash = "zigimg-0.1.0-8_eo2uScFwCnpzB1Y2n_jf3euDfMEeCLxJE_E5_W5BNe",
         },
         .rocksdb = .{
-            .url = "git+https://github.com/squidy239/rocksdb-zig#ee06fdd2c983f03654917b7ae75526c716748713",
-            .hash = "rocksdb-9.7.4-z_CUTqzoAACZ0z0UZy0zNqiCOAp32K1VpE_unvLvLMl_",
-        },
-        .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3#40c2e4b579aa556db37a502c936426aa1c8b5c95",
-            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
+            .url = "git+https://github.com/squidy239/rocksdb-zig#472118a835a885b739e40c2b1ec44c4844873caf",
+            .hash = "rocksdb-9.7.4-z_CUTiLrAAB9oK1rsqqhTkYEbhu7hjmSvrZqUGRsgW1H",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#49e8443c038cc5a82dbf57305322132c0a61d4b6",
-            .hash = "dvui-0.5.0-dev-AQFJmTgB3QCriBRzSQGPpw44zDiTaQ8hNnrxsrSxSQti",
+            .url = "git+https://github.com/squidy239/dvui?ref=update-wio#c90fa675035484eee0f510f8d2bc06fa359dd986",
+            .hash = "dvui-0.5.0-dev-AQFJmTQH3wBuJcL3fFby6uU55WyLu-75kbZrImLaA-Yc",
+        },
+        .wio = .{
+            .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
+            .hash = "wio-0.0.0-8xHrrx8eBwBliteTXuvS4JKUbdquuaJabO7wMk5FZalf",
         },
     },
 

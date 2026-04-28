@@ -112,6 +112,7 @@ pub const Tree = struct {
         return NormilizeInRange(@Vector(3, T), vec, @splat(0), @splat(1), @splat(rangeBase), @splat(rangeTop));
     }
     pub fn NormilizeInRange(comptime T: type, num: T, oldLowerBound: T, oldUpperBound: T, newLowerBound: T, newUpperBound: T) T {
+        if (std.meta.eql(oldUpperBound, oldLowerBound)) return newLowerBound;
         return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
     }
 

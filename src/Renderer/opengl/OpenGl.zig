@@ -3,20 +3,19 @@ const std = @import("std");
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
-const sdl = @import("sdl3");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
+const wio = @import("wio");
 
 const Mesh = @import("../../Mesh.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
 const ChunkSize = World.ChunkSize;
-const Entity = World.Entity;
 const ChunkPos = World.ChunkPos;
-const EntityTypes = World.EntityTypes;
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
 const builtin = @import("builtin");
+const setCallback = @import("../../main.zig").setCallback;
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 const OpenGlRenderer = @This();
@@ -32,29 +31,30 @@ cameraFront: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(ChunkPos),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
-window: sdl.video.Window,
+window: *wio.Window,
 gen_context_lock: std.Io.Mutex = .init,
-contexts: std.ArrayList(sdl.video.gl.Context),
+contexts: std.ArrayList(wio.GlContext),
 context_index: std.atomic.Value(usize) = .init(0),
-proc_table: gl.ProcTable,
-draw_context: sdl.video.gl.Context,
+proc_table: *const gl.ProcTable,
+draw_context: wio.GlContext,
+gl_options: wio.GlOptions,
 
-threadlocal var current_chunk_iterator: ?*MultiRenderBuffer(ChunkPos).Map.Iterator = null;
-
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sdl.video.Window) !void {
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable) !void {
     const cpu_count = try std.Thread.getCpuCount();
+    defer window.glMakeContextCurrent(share_context.*);
     self.* = @This(){
         .allocator = allocator,
+        .gl_options = gl_options,
         .facebuffer = undefined,
         .indecies = undefined,
         .shaderprogram = undefined,
-        .proc_table = undefined,
+        .proc_table = proc_table,
         .render_buffer = .{ .allocator = allocator, .map = .init() },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
         .window = window,
-        .draw_context = try sdl.video.gl.Context.init(window),
+        .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context.* }),
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
@@ -74,8 +74,9 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
             },
         },
     };
-    if (!gl.ProcTable.init(&self.proc_table, sdl.c.SDL_GL_GetProcAddress)) return error.InitFailed;
-    gl.makeProcTableCurrent(&self.proc_table);
+    self.window.glMakeContextCurrent(self.draw_context);
+    gl.makeProcTableCurrent(self.proc_table);
+    setCallback();
 
     //preallocate vram to prevent costly buffer resizes
     try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
@@ -84,28 +85,24 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
-    //+1 for main thread, TODO maybe make the pool only have cpu_count-1 threads
-    for (0..cpu_count + 100) |_| {
-        try self.contexts.append(allocator, try sdl.video.gl.Context.init(window));
+    //+1 for main thread, TODO threadlocal
+    for (0..cpu_count + 1) |i| {
+        try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = self.draw_context }));
+        self.window.glMakeContextCurrent(self.contexts.items[i]);
+        setCallback();
     }
-    try self.draw_context.makeCurrent(self.window);
 
+    self.window.glMakeContextCurrent(self.draw_context);
     try self.compileShaders();
-
     self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
-
-    self.loadFacebuffer();
-
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
-    try glError();
+    try self.loadFacebuffer();
 
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
     gl.BindVertexArray(0);
-
-    try glError();
 
     gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
 
@@ -118,24 +115,28 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: sd
     gl.ClipControl(gl.LOWER_LEFT, gl.ZERO_TO_ONE);
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-    try glError();
 }
 
 pub fn deinit(self: *@This(), io: std.Io) void {
     gl.Finish();
+    self.window.glMakeContextCurrent(self.draw_context);
     self.render_buffer.deinit(io, self.allocator);
-    self.context_index.store(0, .seq_cst);
-    for (0..self.contexts.items.len) |i| {
-        self.contexts.items[i].deinit() catch unreachable;
-    }
-    self.contexts.deinit(self.allocator);
+    gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
 
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
+
+    self.context_index.store(0, .seq_cst);
+    self.gen_context_lock.lockUncancelable(io);
+    for (0..self.contexts.items.len) |i| {
+        self.contexts.items[i].destroy();
+    }
+    self.gen_context_lock.unlock(io);
+    self.contexts.deinit(self.allocator);
+    self.draw_context.destroy();
     std.log.info("renderer deinit", .{});
 }
 
@@ -156,18 +157,6 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     return self.cameraFront;
 }
 
-fn glError() !void {
-    switch (gl.GetError()) {
-        gl.NO_ERROR => return,
-        gl.INVALID_ENUM => unreachable,
-        gl.INVALID_VALUE => unreachable,
-        gl.INVALID_OPERATION => unreachable,
-        gl.INVALID_FRAMEBUFFER_OPERATION => unreachable,
-        gl.OUT_OF_MEMORY => return error.OutOfMemory,
-        else => unreachable,
-    }
-}
-
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
@@ -177,16 +166,8 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: [
     };
 }
 
-///safe to call in forEachChunk
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    if (current_chunk_iterator) |it| {
-        if (it.bkt_iter) |_| {
-            const entry = it.map.buckets[it.bkt_index].hash_map.fetchRemove(chunk_pos) orelse unreachable; // must be in the map since it was in the iterator
-            self.render_buffer.lock.lockUncancelable(io);
-            defer self.render_buffer.lock.unlock(io);
-            self.render_buffer.removeSpace(entry.value);
-        }
-    } else self.render_buffer.remove(io, chunk_pos);
+    self.render_buffer.remove(io, chunk_pos);
 }
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
@@ -205,19 +186,21 @@ fn ensureContext(self: *@This()) !void {
     if (thread_index == null) {
         thread_index = self.context_index.fetchAdd(1, .seq_cst);
     }
-    try self.contexts.items[thread_index.?].makeCurrent(self.window);
-    gl.makeProcTableCurrent(&self.proc_table);
+    self.window.glMakeContextCurrent(self.contexts.items[thread_index.?]);
+    gl.makeProcTableCurrent(self.proc_table);
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
+    gl.makeProcTableCurrent(self.proc_table);
+    self.window.glMakeContextCurrent(self.draw_context);
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.DrawFailed;
+    gl.makeProcTableCurrent(self.proc_table);
+    self.window.glMakeContextCurrent(self.draw_context);
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
@@ -231,20 +214,20 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    self.draw_context.makeCurrent(self.window) catch return error.ViewportSetFailed;
+    gl.makeProcTableCurrent(self.proc_table);
+    self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
-    glError() catch return error.ViewportSetFailed;
     self.viewport_pixels = viewport_pixels;
 }
 
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     var it = self.render_buffer.map.iterator();
-    current_chunk_iterator = &it;
-    defer current_chunk_iterator = null;
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
+        it.pause(io);
         callback(callback_userdata, entry.key_ptr.*);
+        try it.unpause(io);
     }
 }
 
@@ -304,10 +287,9 @@ fn compileShaders(self: *@This()) !void {
     gl.DeleteShader(entityvertexshader);
     gl.DeleteShader(entityfragshader);
     self.entityshaderprogram = entityshaderprogram;
-    try glError();
 }
 
-fn loadFacebuffer(self: *@This()) void {
+fn loadFacebuffer(self: *@This()) !void {
     const vertices = [_]f32{
         -0.5, -0.5, 0.0, // bottom left corner
         -0.5, 0.5, 0.0, // top left corner
@@ -322,10 +304,12 @@ fn loadFacebuffer(self: *@This()) void {
 
     gl.GenBuffers(1, @ptrCast(&self.indecies));
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
 
     gl.GenBuffers(1, @ptrCast(&self.facebuffer));
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
@@ -335,7 +319,7 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
     defer c.End();
-    gl.makeProcTableCurrent(&self.proc_table);
+    gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
@@ -356,7 +340,6 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
-    glError() catch return error.DrawFailed;
 
     const draw_info = self.render_buffer.rebuild(
         io,
@@ -377,21 +360,15 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     defer self.render_buffer.indirect_buffer.resize_lock.unlockShared(io);
     gl.Finish();
     gl.BindVertexArray(self.vao);
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
-    glError() catch return error.DrawFailed;
     gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(1);
     gl.VertexAttribDivisor(1, 1);
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
-    glError() catch return error.DrawFailed;
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
-    glError() catch return error.DrawFailed;
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
-    glError() catch return error.DrawFailed;
     const ff = ztracy.ZoneN(@src(), "finish");
     gl.Finish(); //TODO better syncronization
     ff.End();
@@ -519,10 +496,8 @@ const GpuBuffer = struct {
         defer e.End();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
-        try glError();
         errdefer gl.DeleteBuffers(1, @ptrCast(&new_buffer));
         gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT | gl.CLIENT_STORAGE_BIT);
-        try glError();
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
             gl.Finish(); //RACE CONDITION this only syncs the current thread
@@ -536,7 +511,6 @@ const GpuBuffer = struct {
         var new_mapping: []u8 = undefined;
         new_mapping.len = new_size;
         new_mapping.ptr = @ptrCast(gl.MapNamedBufferRange(new_buffer, 0, @intCast(new_size), gl.MAP_WRITE_BIT | gl.MAP_FLUSH_EXPLICIT_BIT | gl.MAP_PERSISTENT_BIT) orelse return error.OutOfMemory);
-        try glError();
         self.buffer = new_buffer;
         self.mapping = new_mapping;
         gl.Finish();
@@ -567,7 +541,6 @@ const GpuBuffer = struct {
         self.resize_lock.lockSharedUncancelable(io);
         defer self.resize_lock.unlockShared(io);
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
-        try glError();
         gl.Flush();
     }
 
@@ -739,7 +712,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
                 const ac = ztracy.ZoneN(@src(), "mapCommands");
-                try glError();
                 ac.End();
                 const loop = ztracy.ZoneNC(@src(), "loop", 32213);
                 try self.lock.lock(io);

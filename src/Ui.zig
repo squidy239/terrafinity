@@ -1,19 +1,22 @@
 const dvui = @import("dvui");
 const std = @import("std");
 const Game = @import("Game.zig");
-const sdl = @import("sdl3");
+const wio = @import("wio");
 const Config = @import("main.zig").Config;
 const World = @import("world/World.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
 const utils = @import("libs/utils.zig");
-
+const gl = @import("gl");
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 
 const Ui = @This();
 
-window: sdl.video.Window,
+proc_table: *const gl.ProcTable,
+window: *wio.Window,
+ui_context: *wio.GlContext,
+gloptions: wio.GlOptions,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -28,8 +31,9 @@ menu_state: struct {
     esc: bool = false,
     newgame: bool = false,
 
+    /// Returns true if the player is ingame without a menu open
     pub fn playingGame(self: @This()) bool {
-        return std.meta.eql(self, @This(){ .ingame = true });
+        return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
     }
 
     pub fn handleEsc(self: *@This()) void {
@@ -62,7 +66,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
 
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
     std.debug.assert(self.menu_state.ingame);
-    const size = try self.window.getSizeInPixels();
+    const size = @Vector(2, usize){ 640, 480 };
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
@@ -80,8 +84,8 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
-        self.game.deinit(io, self.window);
-        self.game.* = undefined;
+        self.game.deinit(io);
+        self.window.glMakeContextCurrent(self.ui_context.*);
         return true;
     }
 
@@ -202,7 +206,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(io, game_path);
-            try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, game_path);
+            try self.openGame(io, allocator, game_path);
             self.menu_state.ingame = true;
             self.menu_state.newgame = false;
             return true;
@@ -315,7 +319,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, item.name });
             defer allocator.free(jpath);
-            try openGame(io, allocator, self.game, self.window, &self.config.game_config, self.config_lock, jpath);
+            try self.openGame(io, allocator, jpath);
             self.menu_state.ingame = true;
             self.menu_state.main = false;
             return true;
@@ -328,9 +332,8 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
     return a.access_time.nanoseconds > b.access_time.nanoseconds;
 }
 
-fn openGame(io: std.Io, allocator: std.mem.Allocator, gameptr: *Game, window: sdl.video.Window, game_config: *Game.Options, options_lock: *std.Io.RwLock, folder: []const u8) !void {
-    try gameptr.init(io, allocator, game_config, options_lock, folder, window);
-    errdefer gameptr.deinit(io, window);
+fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context, self.proc_table);
     std.log.info("opening game\n", .{});
 }
 

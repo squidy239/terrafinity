@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
-const sdl = @import("sdl3");
+const wio = @import("wio");
 const zm = @import("zm");
 const ztracy = @import("ztracy");
 
@@ -173,7 +173,18 @@ pub const WorldOptions = struct {
 
 const gl = @import("gl");
 
-pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_options: *Options, game_options_lock: *std.Io.RwLock, folder: []const u8, window: sdl.video.Window) !void {
+pub fn init(
+    game: *@This(),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    game_options: *Options,
+    game_options_lock: *std.Io.RwLock,
+    folder: []const u8,
+    window: *wio.Window,
+    gl_options: wio.GlOptions,
+    share_context: *wio.GlContext,
+    proc_table: *const gl.ProcTable,
+) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
@@ -191,7 +202,7 @@ pub fn init(game: *@This(), io: std.Io, allocator: std.mem.Allocator, game_optio
         .player = undefined,
     };
 
-    try game.opengl_renderer.init(io, allocator, window);
+    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table);
     errdefer game.opengl_renderer.deinit(io);
 
     game.renderer = game.opengl_renderer.interface;
@@ -284,7 +295,7 @@ pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
 }
 
-pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Vector(2, u32)) !void {
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const now: std.Io.Timestamp = .now(io, .awake);
     const frame_time = self.last_frametime.durationTo(now);
     self.last_frametime = now;
@@ -295,7 +306,6 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, size: @Ve
     var entitys_future = io.async(World.updateEntitys, .{ &self.world, io, allocator });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
-    try self.renderer.setViewport(size);
     try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
     try self.player.physics.update(&self.world, io, allocator);
     try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
@@ -371,17 +381,19 @@ pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
-pub fn handleMouseMotion(self: *@This(), mouse_motion: [2]f32, sensitivity: f32) void {
+pub fn handleMouseMotion(self: *@This(), mouse_motion: wio.RelativePosition, sensitivity: f32) void {
     var viewDirDiff: @Vector(2, f32) = @splat(0);
-    viewDirDiff += @Vector(2, f32){ mouse_motion[1], mouse_motion[0] };
+    viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     viewDirDiff *= @splat(sensitivity);
 
     const smallf32 = 0.00001;
 
-    _ = self.player.viewDirection.fetchAdd(-@Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 }, .seq_cst);
-    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Max, -90 + smallf32, .seq_cst);
-    _ = @atomicRmw(f32, &self.player.viewDirection.vector[0], .Min, 90 - smallf32, .seq_cst);
-    self.renderer.updateCameraDirection(self.player.viewDirection.load(.seq_cst));
+    var currentViewDir = self.player.viewDirection.load(.seq_cst);
+    currentViewDir -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
+    currentViewDir[0] = std.math.clamp(currentViewDir[0], -90 + smallf32, 90 - smallf32);
+    self.player.viewDirection.store(currentViewDir, .seq_cst);
+
+    self.renderer.updateCameraDirection(currentViewDir);
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
@@ -390,7 +402,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.unlockShared(io);
     switch (self.player.gameMode.load(.seq_cst)) {
         .Creative, .Spectator => {
-            const fsl = self.player.fly_speed_linear.fetchAdd(scroll * scroll_sensitivity, .seq_cst);
+            const fsl = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
             _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fsl)), .seq_cst);
         },
         .Survival => {},
@@ -403,7 +415,7 @@ pub fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
-pub fn handleButtonActions(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time: std.Io.Duration) !void {
+pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
@@ -414,7 +426,7 @@ pub fn handleButtonActions(self: *@This(), io: std.Io, actions: Key.ActionSet, d
     try self.itemAction(io, actions);
 }
 
-fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
+fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     if (actions.contains(.hotbar_key_0)) self.selected_inventory_col.store(0, .seq_cst);
     if (actions.contains(.hotbar_key_1)) self.selected_inventory_col.store(1, .seq_cst);
     if (actions.contains(.hotbar_key_2)) self.selected_inventory_col.store(2, .seq_cst);
@@ -429,7 +441,7 @@ fn setSelectedSlot(self: *@This(), actions: Key.ActionSet) void {
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
 }
 
-pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
+pub fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     if (actions.contains(.use_item_primary)) try self.world.spawnEntity(io, self.allocator, null, EntityTypes.Explosive{
         .pos = .{ .vector = self.player.physics.pos.load(.seq_cst) },
         .dir = .{ .vector = @splat(0) },
@@ -437,7 +449,7 @@ pub fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     }, false);
 }
 
-fn flyMove(self: *@This(), io: std.Io, actions: Key.ActionSet, delta_time_seconds: f32) !void {
+fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
     _ = io;
     const cameraFront = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
@@ -500,6 +512,7 @@ pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bo
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
     defer unload.End();
+    defer self.mesh_unload_is_running.store(false, .seq_cst);
 
     const chunkCollector = struct {
         game: *Game,
@@ -529,7 +542,9 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         if (!self.keepChunkLoaded(io, entry.key_ptr.*)) {
-            std.debug.assert(it.map.removeManualLock(entry.key_ptr.*));
+            it.pause(io);
+            std.debug.assert(self.loaded_or_meshed.remove(io, entry.key_ptr.*));//race
+            try it.unpause(io);
         }
     }
 }
@@ -675,7 +690,7 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     return true;
 }
 
-pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
+pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .monotonic);
     if (self.load_future) |*future| future.cancel(io) catch {};
     if (self.unload_future) |*future| future.cancel(io) catch {};
@@ -687,7 +702,7 @@ pub fn deinit(self: *@This(), io: std.Io, window: sdl.video.Window) void {
     self.world.deinit(io, self.allocator);
 
     self.game_arena.deinit();
-    _ = window;
+    self.* = undefined;
 }
 
 test {

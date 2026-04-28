@@ -84,12 +84,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].remove(io, key);
         }
 
-        pub fn removeManualLock(self: *Self, key: K) bool {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
-            return self.buckets[bucket_index].removeManualLock(key);
-        }
-
         pub fn count(self: *Self, io: std.Io) usize {
             var totalcount: usize = 0;
             for (&self.buckets) |*bucket| {

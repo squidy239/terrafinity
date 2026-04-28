@@ -202,7 +202,11 @@ pub fn unloadEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, en
 }
 
 pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
-    const UUID = uuid orelse World.prng.random().int(u128);
+    const UUID = uuid orelse blk: {
+        var random_uuid: u128 = undefined;
+        io.random(std.mem.asBytes(&random_uuid));
+        break :blk random_uuid;
+    };
     if (self.entitys.contains(io, UUID)) return error.EntityAlreadyExists;
     const allocated_entity = try Entity.make(entity, allocator);
     errdefer allocated_entity.unload(io, self, UUID, allocator, false) catch unreachable;
@@ -319,7 +323,9 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
         };
         if (chunk.blocks == .blocks) grids += 1;
         if (currenttime.nanoseconds - lastaccess < timeout) continue;
-        _ = try self.tryUnloadChunkMapBucket(io, c.key_ptr.*, &it.map.buckets[it.bkt_index]);
+        it.pause(io);
+        _ = try self.tryUnloadChunk(io, c.key_ptr.*);
+        try it.unpause(io);
     }
 }
 
@@ -593,13 +599,13 @@ pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
 }
 
 /// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded.
-pub fn tryUnloadChunkMapBucket(self: *@This(), io: std.Io, chunk_pos: ChunkPos, bkt: anytype) !bool {
-    const chunk = bkt.hash_map.get(chunk_pos) orelse unreachable;
+pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
+    const chunk = self.chunks.get(io, chunk_pos) orelse return false;
     if (chunk.ref_count.load(.seq_cst) != 1) {
         return false;
-    }
+    }//RACE CONDITION TODO FIX
     try self.unloadChunkByPtr(io, chunk, chunk_pos);
-    std.debug.assert(bkt.hash_map.remove(chunk_pos));
+    std.debug.assert(self.chunks.remove(io, chunk_pos));
     return true;
 }
 
@@ -710,7 +716,7 @@ test "cube benchmark" {
         for (0..square) |x| {
             for (0..square) |y| {
                 for (0..square) |z| {
-                    _ = try io.concurrent(loadchunktest, .{ &world, io, allocator, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter });
+                    _ = io.async(loadchunktest, .{ &world, io, allocator, ChunkPos{ .position = .{ @as(i32, @intCast(x)) - square / 2, @as(i32, @intCast(y)) - square / 2, @as(i32, @intCast(z)) - square / 2 }, .level = @intCast(lvl) }, true, &counter });
                 }
             }
         }
