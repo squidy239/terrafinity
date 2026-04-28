@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize,
-        .sanitize_c = if (sanitize) .full else .off,
+        .sanitize_c = if (sanitize) .full else null,
         .stack_protector = sanitize,
         .stack_check = sanitize,
     });
@@ -77,7 +77,7 @@ fn setupDependencies(
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
     rocksdb_mod.sanitize_thread = sanitize;
-    rocksdb_mod.sanitize_c = if (sanitize) .full else .off;
+    rocksdb_mod.sanitize_c = if (sanitize) .full else null;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{

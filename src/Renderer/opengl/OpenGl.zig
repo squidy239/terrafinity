@@ -121,6 +121,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     gl.Finish();
     self.window.glMakeContextCurrent(self.draw_context);
     self.render_buffer.deinit(io, self.allocator);
+    gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
     gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
