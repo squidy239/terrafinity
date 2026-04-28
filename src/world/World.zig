@@ -603,7 +603,7 @@ pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
     const chunk = self.chunks.get(io, chunk_pos) orelse return false;
     if (chunk.ref_count.load(.seq_cst) != 1) {
         return false;
-    }
+    }//RACE CONDITION TODO FIX
     try self.unloadChunkByPtr(io, chunk, chunk_pos);
     std.debug.assert(self.chunks.remove(io, chunk_pos));
     return true;

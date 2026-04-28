@@ -1,5 +1,2 @@
 # tsan_suppressions.txt
 race:libgallium
-race:rocksdb::MemTable::Add
-race:rocksdb::Slice::compare
-race:rocksdb::Arena::AllocateNewBlock

@@ -3,7 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-
+    
+    const sanitize = b.option(bool, "sanitize", "Enable sanitizers") orelse false;
+    
     const tracy_options = .{
         .enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false,
         .enable_fibers = b.option(bool, "enable_fibers", "Enable Tracy fiber support") orelse false,
@@ -21,10 +23,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .sanitize_thread = false,
+        .sanitize_thread = sanitize,
+        .sanitize_c = if (sanitize) .full else .off,
+        .stack_protector = sanitize,
+        .stack_check = sanitize,
     });
 
-    setupDependencies(b, root_module, target, optimize, ztracy);
+    setupDependencies(b, root_module, target, optimize, ztracy, sanitize);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
@@ -59,6 +64,7 @@ fn setupDependencies(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     ztracy: *std.Build.Dependency,
+    sanitize: bool,
 ) void {
     root_module.addImport("ztracy", ztracy.module("root"));
 
@@ -66,9 +72,12 @@ fn setupDependencies(
         .enable_zstd = true,
         .enable_lz4 = true,
         .optimize = optimize,
+        .sanitize_thread = sanitize,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
+    rocksdb_mod.sanitize_thread = sanitize;
+    rocksdb_mod.sanitize_c = if (sanitize) .full else .off;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
