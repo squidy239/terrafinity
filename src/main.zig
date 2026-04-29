@@ -277,9 +277,9 @@ fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"
     _ = userParam;
     switch (severity) {
         gl.DEBUG_SEVERITY_NOTIFICATION => return,
-        gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{d}: {s}", .{source, message[0..@intCast(length)]}),
-        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{d}: {s}", .{source, message[0..@intCast(length)]}),
-        gl.DEBUG_SEVERITY_LOW => std.log.info("{d}: {s}", .{source, message[0..@intCast(length)]}),
+        gl.DEBUG_SEVERITY_HIGH => std.debug.panic("{d}: {s}", .{ source, message[0..@intCast(length)] }),
+        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{d}: {s}", .{ source, message[0..@intCast(length)] }),
+        gl.DEBUG_SEVERITY_LOW => std.log.info("{d}: {s}", .{ source, message[0..@intCast(length)] }),
         else => unreachable,
     }
 }

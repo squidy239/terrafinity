@@ -105,23 +105,23 @@ pub const BlockEncoding = union(enum(u8)) {
         defer pool.deinit(std.testing.allocator);
         var g1: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var g2: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var b1: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
-            .blocks => blk: {
-                g1 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-                break :blk BlockEncoding{ .blocks = &g1 };
-            },
-            .one_block => .{ .one_block = smith.value(Block) },
-        };
-        const b2: BlockEncoding = switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
-            .blocks => blk: {
-                g2 = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-                break :blk BlockEncoding{ .blocks = &g2 };
-            },
-            .one_block => .{ .one_block = smith.value(Block) },
-        };
+        var b1: BlockEncoding = .fuzzerMakeEncoding(&g1, smith);
+        const b2: BlockEncoding = .fuzzerMakeEncoding(&g2, smith);
         var pc: u64 = 2;
         var pm: std.Io.Mutex = .init;
         try b1.merge(io, b2, &pool, &pc, &pm);
+    }
+
+    pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) BlockEncoding {
+        @disableInstrumentation();
+        @setRuntimeSafety(false);
+        return switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
+            .blocks => blk: {
+                grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
+                break :blk BlockEncoding{ .blocks = grid };
+            },
+            .one_block => .{ .one_block = smith.value(Block) },
+        };
     }
 };
 

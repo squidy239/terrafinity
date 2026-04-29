@@ -49,7 +49,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .indecies = undefined,
         .shaderprogram = undefined,
         .proc_table = proc_table,
-        .render_buffer = .{ .allocator = allocator, .map = .init() },
+        .render_buffer = .{ .allocator = allocator, .map = .init },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,

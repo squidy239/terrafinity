@@ -94,16 +94,16 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return totalcount;
         }
 
-        pub fn init() Self {
+        pub const init = blk: {
             var bkts: [bucketamount]Bucket(K, V, Context, maxloadpercentage) = undefined;
             for (0..bucketamount) |i| {
                 bkts[i] = Bucket(K, V, Context, maxloadpercentage).init();
             }
-            return .{
+            break :blk @This(){
                 .ctx = Context{},
                 .buckets = bkts,
             };
-        }
+        };
 
         pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
             for (&self.buckets) |*b| {

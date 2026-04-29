@@ -85,9 +85,6 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
     loop.End();
 }
 
-//fn meshV2(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
-
-//}
 test "MeshBenchmark" {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {
@@ -112,6 +109,18 @@ test "MeshBenchmark" {
     const dt = st.durationTo(et);
     std.log.info("Mesh benchmark: {d} meshes in {d} ms", .{ test_amount, dt.toMilliseconds() });
     std.log.info("completed with an avg time of {d} us per mesh\n", .{(@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount)});
+}
+
+test "FuzzMesh" {
+    try std.testing.fuzz({}, testOne, .{});
+}
+
+fn testOne(_: void, smith: *std.testing.Smith) !void {
+    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    const mainblocks: Chunk.BlockEncoding = .fuzzerMakeEncoding(&blocks, smith);
+    const neighbor_faces: [6]Chunk.ChunkFaceEncoding = smith.value([6]Chunk.ChunkFaceEncoding);
+    var writer = std.Io.Writer.Discarding.init(&.{});
+    try meshSimple(mainblocks, &neighbor_faces, &writer.writer);
 }
 
 ///x+,x-,y+,y-,z+,z-

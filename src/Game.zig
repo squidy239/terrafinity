@@ -196,7 +196,7 @@ pub fn init(
         .opengl_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
-        .loaded_or_meshed = .init(),
+        .loaded_or_meshed = .init,
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
@@ -241,8 +241,6 @@ pub fn init(
     game.world = .{
         .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
         .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
-        .entitys = .init(),
-        .chunks = .init(),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = .{
@@ -543,7 +541,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     while (try it.next(io)) |entry| {
         if (!self.keepChunkLoaded(io, entry.key_ptr.*)) {
             it.pause(io);
-            std.debug.assert(self.loaded_or_meshed.remove(io, entry.key_ptr.*));//race
+            std.debug.assert(self.loaded_or_meshed.remove(io, entry.key_ptr.*)); //race
             try it.unpause(io);
         }
     }
