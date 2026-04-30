@@ -91,13 +91,12 @@ fn meshChunkFaceGrid(grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *co
 }
 
 fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
-    const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
-    const grid: [ChunkSize][ChunkSize][ChunkSize]Block = switch (mainblocks) {
-        .grid => |g| g.*,
-        .one_block => |b| @splat(@splat(@splat(b))),
+    const ms = ztracy.ZoneN(@src(), "meshSimple");
+    defer ms.End();
+    const grid: *const [ChunkSize][ChunkSize][ChunkSize]Block = switch (mainblocks) {
+        .grid => |g| g,
+        .one_block => return,
     };
-    ecp.End();
-    const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
@@ -138,7 +137,6 @@ fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
             }
         }
     }
-    loop.End();
 }
 
 fn meshOne(one: Block, two: Block) enum { none, transparent, @"opaque" } {
