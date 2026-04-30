@@ -7,15 +7,8 @@ const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const ChunkPos = @import("world/World.zig").ChunkPos;
-
-pub const FaceRotation = enum(u4) {
-    xPlus = 0,
-    xMinus = 1,
-    yPlus = 2,
-    yMinus = 3,
-    zPlus = 4,
-    zMinus = 5,
-};
+const Mesh = @This();
+pub const FaceRotation = Chunk.Encoding.FaceRotation;
 
 pub const Face = packed struct(u64) {
     x: u5,
@@ -34,7 +27,10 @@ pub fn fromChunks(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.En
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
     if (shouldSkip(neighbor_faces, mainblocks)) return;
-    try meshSimple(mainblocks, neighbor_faces, opaque_writer);
+    inline for (0..6) |i| {
+        try meshChunkFace(mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_writer, opaque_writer);
+    }
+    try meshSimple(mainblocks, opaque_writer);
 }
 
 fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.Encoding) bool {
@@ -46,39 +42,98 @@ fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.E
     return !all_invisible;
 }
 
-//fn meshFace(blocks: Chunk.Encoding, neighbor_face: *Chunk.Encoding.Face, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {}
+fn meshChunkFace(one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+    const grid_one: [ChunkSize][ChunkSize]Block = switch (one) {
+        .blocks => |grid| grid,
+        .one_block => |block| @splat(@splat(block)),
+    };
+    const grid_two: [ChunkSize][ChunkSize]Block = switch (two) {
+        .blocks => |grid| grid,
+        .one_block => |block| @splat(@splat(block)),
+    };
+    try meshChunkFaceGrid(&grid_one, &grid_two, rotation, opaque_writer, transparent_writer);
+}
 
-fn meshSimple(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer) !void {
+fn meshChunkFaceGrid(grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *const [ChunkSize][ChunkSize]Block, comptime rotation: Chunk.Encoding.FaceRotation, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+    for (grid_one, grid_two, 0..) |row_one, row_two, i| {
+        for (row_one, row_two, 0..) |one, two, j| {
+            const result = meshOne(one, two);
+            if (result == .none) continue;
+            const face: Face = .{
+                .x = @intCast(switch (comptime rotation) {
+                    .xminus => 0,
+                    .xplus => ChunkSize - 1,
+                    .yminus, .yplus => i,
+                    .zminus, .zplus => i,
+                }),
+                .y = @intCast(switch (comptime rotation) {
+                    .xminus, .xplus => i,
+                    .yminus => 0,
+                    .yplus => ChunkSize - 1,
+                    .zminus, .zplus => j,
+                }),
+                .z = @intCast(switch (comptime rotation) {
+                    .xminus, .xplus => j,
+                    .yminus, .yplus => j,
+                    .zminus => 0,
+                    .zplus => ChunkSize - 1,
+                }),
+                .rot = comptime rotation,
+                .isGreedy = false,
+                .height = 1,
+                .width = 1,
+                .BlockType = one,
+            };
+            if (result == .transparent) try transparent_writer.writeAll(std.mem.asBytes(&face));
+            if (result == .@"opaque") try opaque_writer.writeAll(std.mem.asBytes(&face));
+        }
+    }
+}
+
+fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
     const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
-    var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
-    GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
+    const grid: [ChunkSize][ChunkSize][ChunkSize]Block = switch (mainblocks) {
+        .grid => |g| g.*,
+        .one_block => |b| @splat(@splat(@splat(b))),
+    };
     ecp.End();
     const loop = ztracy.ZoneNC(@src(), "loopAllBlocks", 222222);
-    for (1..ChunkSize + 1) |x| {
-        for (1..ChunkSize + 1) |y| {
-            for (1..ChunkSize + 1) |z| {
-                const block = extendedBlocks[x][y][z];
+    for (0..ChunkSize) |x| {
+        for (0..ChunkSize) |y| {
+            for (0..ChunkSize) |z| {
+                const block = grid[x][y][z];
                 if (!block.isVisible()) continue;
-                const neighboring_blocks = [6]Block{
-                    extendedBlocks[x + 1][y][z],
-                    extendedBlocks[x - 1][y][z],
-                    extendedBlocks[x][y + 1][z],
-                    extendedBlocks[x][y - 1][z],
-                    extendedBlocks[x][y][z + 1],
-                    extendedBlocks[x][y][z - 1],
-                };
-                
-                for (0..6) |i| {
-                    const face = meshOne(block, neighboring_blocks[i]);
-                    if (face == .none) continue;
-                    const face_data = Face{
-                        .BlockType = block,
-                        .rot = @enumFromInt(i),
-                        .x = @intCast(x - 1),
-                        .y = @intCast(y - 1),
-                        .z = @intCast(z - 1),
-                    };
-                    try opaque_writer.writeAll(std.mem.asBytes(&face_data));
+
+                inline for (0..6) |i| {
+                    var c: bool = false;
+                    if (i == 0 and x == ChunkSize - 1) c = true;
+                    if (i == 1 and x == 0) c = true;
+                    if (i == 2 and y == ChunkSize - 1) c = true;
+                    if (i == 3 and y == 0) c = true;
+                    if (i == 4 and z == ChunkSize - 1) c = true;
+                    if (i == 5 and z == 0) c = true;
+                    if (!c) {
+                        const neighbor = switch (comptime i) {
+                            0 => grid[x + 1][y][z],
+                            1 => grid[x - 1][y][z],
+                            2 => grid[x][y + 1][z],
+                            3 => grid[x][y - 1][z],
+                            4 => grid[x][y][z + 1],
+                            5 => grid[x][y][z - 1],
+                            else => unreachable,
+                        };
+                        const face = meshOne(block, neighbor);
+                        if (face != .none) {
+                            const face_data = Face{
+                                .BlockType = block,
+                                .rot = @enumFromInt(i),
+                                .x = @intCast(x),
+                                .y = @intCast(y),
+                                .z = @intCast(z),
+                            };
+                            try opaque_writer.writeAll(std.mem.asBytes(&face_data));
+                        }
+                    }
                 }
             }
         }
@@ -126,7 +181,7 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
     const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
     var writer = std.Io.Writer.Discarding.init(&.{});
-    try meshSimple(mainblocks, &neighbor_faces, &writer.writer);
+    try Mesh.fromChunks(mainblocks, &neighbor_faces, &writer.writer);
 }
 
 ///x+,x-,y+,y-,z+,z-

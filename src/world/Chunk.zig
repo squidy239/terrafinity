@@ -96,7 +96,7 @@ pub const Encoding = union(enum) {
         return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
     }
 
-    pub const FaceRotation = enum { xplus, xminus, yplus, yminus, zplus, zminus };
+    pub const FaceRotation = enum(u4) { xplus, xminus, yplus, yminus, zplus, zminus };
 
     pub fn extractFace(self: Encoding, comptime rotation: FaceRotation) Face {
         switch (self) {
