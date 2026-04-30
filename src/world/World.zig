@@ -769,7 +769,7 @@ test "loadChunk allocation failure" {
 }
 
 test "fuzz world" {
-    if (true) return error.SkipZIgTest; //TODO
+    if (true) return error.SkipZigTest; //TODO
     try std.testing.fuzz({}, fuzzChunkLoad, .{});
 }
 

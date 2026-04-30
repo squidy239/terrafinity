@@ -67,23 +67,28 @@ fn meshSimple(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encodi
                     extendedBlocks[x][y][z + 1],
                     extendedBlocks[x][y][z - 1],
                 };
-                const block_transparent = block.isTransparent();
-                inline for (0..6) |i| {
-                    if (neighboring_blocks[i].isTransparent() and (!block_transparent or block != neighboring_blocks[i])) {
-                        const face = Face{
-                            .BlockType = block,
-                            .rot = @enumFromInt(i),
-                            .x = @intCast(x - 1),
-                            .y = @intCast(y - 1),
-                            .z = @intCast(z - 1),
-                        };
-                        try opaque_writer.writeAll(std.mem.asBytes(&face));
-                    }
+                
+                for (0..6) |i| {
+                    const face = meshOne(block, neighboring_blocks[i]);
+                    if (face == .none) continue;
+                    const face_data = Face{
+                        .BlockType = block,
+                        .rot = @enumFromInt(i),
+                        .x = @intCast(x - 1),
+                        .y = @intCast(y - 1),
+                        .z = @intCast(z - 1),
+                    };
+                    try opaque_writer.writeAll(std.mem.asBytes(&face_data));
                 }
             }
         }
     }
     loop.End();
+}
+
+fn meshOne(one: Block, two: Block) enum { none, transparent, @"opaque" } {
+    if (one == two or !one.isVisible() or !two.isTransparent()) return .none;
+    return if (one.isTransparent()) .transparent else .@"opaque";
 }
 
 test "MeshBenchmark" {
