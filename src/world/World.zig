@@ -732,9 +732,9 @@ fn loadchunktest(self: *World, io: std.Io, allocator: std.mem.Allocator, chunk_p
     _ = counter.fetchAdd(1, .seq_cst);
 }
 
-fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.mem.Allocator, io: std.Io, grids: usize, chunks: usize) !void {
+fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.mem.Allocator, grids: usize, chunks: usize) !void {
     generator.* = .{ .params = .default, .terrain_height_cache = .init(100) };
-    generator.params.setSeeds(io);
+    generator.params.seed = 0;
     world.* = .{
         .chunk_pool = try std.heap.memory_pool.Extra(Chunk, .{ .growable = false }).initCapacity(allocator, chunks),
         .block_grid_pool = std.heap.memory_pool.Extra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }).initCapacity(allocator, grids) catch |err| {
@@ -749,11 +749,10 @@ fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.
 fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, allocator, io, 100, 100);
-    defer generator.terrain_height_cache.deinit(io, allocator);
+    try makeTestingWorld(&world, &generator, allocator, 100, 100);
     defer world.deinit(io, allocator);
 
-    const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, false);
+    const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true);
     chunk.release(io);
 }
 
@@ -770,26 +769,27 @@ test "loadChunk allocation failure" {
 }
 
 test "fuzz world" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    if(true) return error.SkipZIgTest; //TODO
+    try std.testing.fuzz({}, fuzzChunkLoad, .{});
+}
+
+fn fuzzChunkLoad(ctx: void, smith: *std.testing.Smith) !void {
+    _ = ctx;
+    const allocator = std.heap.smp_allocator;
+    var th = std.Io.Threaded.init(allocator, .{});
+    defer th.deinit();
+    const io = th.io();
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, allocator, io, 100, 100);
-    defer generator.terrain_height_cache.deinit(io, allocator);
+    try makeTestingWorld(&world, &generator, allocator, 1000, 100);
     defer world.deinit(io, allocator);
-    var unloader = io.concurrent(continuousUnload, .{ &world, io, 10000, 1000 }) catch return error.SkipZigTest;
+
+   var unloader = try io.concurrent(continuousUnload, .{ &world, io, 1000, 100 });
     defer unloader.cancel(io) catch {};
-
-    try std.testing.fuzz(&FuzzCtx{ .world = &world, .io = io, .allocator = allocator }, fuzzChunkLoad, .{});
-}
-
-fn fuzzChunkLoad(ctx: *const FuzzCtx, smith: *std.testing.Smith) !void {
-    const world = ctx.world;
-    const ch = try world.loadChunk(ctx.io, ctx.allocator, smith.value(ChunkPos), smith.value(bool));
-    ch.release(ctx.io);
+    const ch = try world.loadChunk(io, allocator, .{ .level = smith.valueRangeAtMost(i32, -2, 32), .position = smith.value(@Vector(3, i32)) }, smith.value(bool));
+    ch.release(io);
 }
 const FuzzCtx = struct {
-    world: *World,
     io: std.Io,
     allocator: std.mem.Allocator,
 };

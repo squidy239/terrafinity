@@ -102,7 +102,7 @@ pub const Player = struct {
 
         pub fn fromString(str: anytype) @This() {
             var name = @This(){
-                .data = [_]u8{0} ** 64,
+                .data = undefined,
                 .len = str.len,
             };
             std.debug.assert(str.len < name.data.len);
