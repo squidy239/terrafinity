@@ -302,8 +302,8 @@ pub fn add_ref(self: *@This(), io: std.Io) void {
 }
 
 pub fn release(self: *@This(), io: std.Io) void {
-    _ = self.ref_count.fetchSub(1, .seq_cst);
     self.touch(io);
+    _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
 pub fn lockExclusive(self: *@This(), io: std.Io) !void {
@@ -312,8 +312,8 @@ pub fn lockExclusive(self: *@This(), io: std.Io) !void {
 }
 
 pub fn unlockExclusive(self: *@This(), io: std.Io) void {
-    self.lock.unlock(io);
     self.touchModify(io);
+    self.lock.unlock(io);
 }
 
 pub fn lockShared(self: *@This(), io: std.Io) !void {
@@ -322,8 +322,8 @@ pub fn lockShared(self: *@This(), io: std.Io) !void {
 }
 
 pub fn unlockShared(self: *@This(), io: std.Io) void {
-    self.lock.unlockShared(io);
     self.touch(io);
+    self.lock.unlockShared(io);
 }
 
 pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
