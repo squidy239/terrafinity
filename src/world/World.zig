@@ -305,8 +305,8 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
     self.chunk_pool_mutex.unlock(io);
     const grid_fraction: f32 = @min(1, @as(f32, @floatFromInt(grid_count)) / @as(f32, @floatFromInt(max_grids)));
     const chunk_fraction: f32 = @min(1, @as(f32, @floatFromInt(chunk_count)) / @as(f32, @floatFromInt(max_chunks)));
-    const grid_timeout = memCurve(max_grid_ms, grid_fraction);
-    const chunk_timeout = memCurve(max_chunk_ms, chunk_fraction);
+    const grid_timeout = memCurve(max_grid_ms, grid_fraction) * std.time.ns_per_ms;
+    const chunk_timeout = memCurve(max_chunk_ms, chunk_fraction) * std.time.ns_per_ms;
 
     var chunks: usize = 0;
     var grids: usize = 0;
@@ -317,11 +317,16 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
         chunks += 1;
         const chunk = c.value_ptr.*;
         const lastaccess = chunk.last_access.load(.unordered);
-        const timeout = switch (chunk.blocks) {
+
+        try chunk.lock.lockShared(io);
+        const blocks_tag = std.meta.activeTag(chunk.blocks);
+        chunk.lock.unlockShared(io);
+
+        const timeout = switch (blocks_tag) {
             .grid => @min(chunk_timeout, grid_timeout),
             .one_block => chunk_timeout,
         };
-        if (chunk.blocks == .grid) grids += 1;
+        if (blocks_tag == .grid) grids += 1;
         if (currenttime.nanoseconds - lastaccess < timeout) continue;
         it.pause(io);
         _ = try self.tryUnloadChunk(io, c.key_ptr.*);
