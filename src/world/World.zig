@@ -600,12 +600,18 @@ pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
 
 /// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded.
 pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
-    const chunk = self.chunks.get(io, chunk_pos) orelse return false;
+    const bkt = self.chunks.getBucket(chunk_pos);
+    const chunk = bkt.get(io, chunk_pos) orelse return false;
     if (chunk.ref_count.load(.seq_cst) != 1) {
         return false;
-    } //RACE CONDITION TODO FIX
-    try self.unloadChunkByPtr(io, chunk, chunk_pos);
-    std.debug.assert(self.chunks.remove(io, chunk_pos));
+    }
+
+    const newchunk = bkt.fetchRemove(io, chunk_pos);
+    if (newchunk) |ch| {
+        try self.unloadChunkByPtr(io, ch, chunk_pos);
+        return true;
+    }
+
     return true;
 }
 

@@ -70,7 +70,7 @@ uint DecodeSide(uvec2 encodedBlock) {
 uint DecodeBlockType(uvec2 encodedBlock) {
     // BlockType is in the second 32-bit word
     // It comes after isGreedy(1), height(6), width(6) bits
-    return (encodedBlock[1]) & uint(0xFFFFF); // 20-bit mask (0xFFFFF = 2^20 - 1)
+    return (encodedBlock[1]) & uint(65535);
 }
 vec3 rotateVertex(uint side, vec3 coords) {
     coords -= vec3(0.5); // center vertex

@@ -17,6 +17,12 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].get(io, key);
         }
 
+        pub fn getBucket(self: *Self, key: K) *Bkt {
+            const hash_code = self.ctx.hash(key);
+            const bucket_index = @mod(hash_code, bucketamount);
+            return &self.buckets[bucket_index];
+        }
+
         pub fn contains(self: *Self, io: std.Io, key: K) bool {
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
