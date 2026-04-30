@@ -29,7 +29,7 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
         try self.genChunk(io, allocator, chunk_pos, blocks, world);
         return true;
@@ -96,7 +96,7 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.BlockEncoding, world: *World) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
         defer gen.End();
@@ -122,7 +122,7 @@ pub const DefaultGenerator = struct {
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
             try blocks.merge(io, .{ .one_block = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
-        } else try blocks.merge(io, .{ .blocks = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+        } else try blocks.merge(io, .{ .grid = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
@@ -313,7 +313,7 @@ pub const DefaultGenerator = struct {
             defer chunk.releaseAndUnlockShared(io);
 
             if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
-            if (chunk.blocks != .blocks) return;
+            if (chunk.blocks != .grid) return;
             if (!self.params.gen_structures) return;
             const heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const scale: f32 = self.params.terrain_scale * (1.0 / ChunkPos.toScale(chunk_pos.level));
@@ -322,7 +322,7 @@ pub const DefaultGenerator = struct {
                 for (row, 0..) |height, z| {
                     if (@divFloor(height, ChunkSize) != chunk_pos.position[1] or height < self.params.SeaLevel) continue;
                     const y: usize = @intCast(@mod(height, ChunkSize));
-                    if (!chunk.blocks.blocks[x][y][z].plantsCanGrow()) continue;
+                    if (!chunk.blocks.grid[x][y][z].plantsCanGrow()) continue;
 
                     const realX: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
                     const realZ: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;

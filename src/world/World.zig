@@ -144,7 +144,7 @@ pub const ChunkSource = struct {
 
     /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
     /// Returns true if the chunk was generated, false if unsuccessful (next source will be tried).
-    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool,
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool,
 
     /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
     /// All chunk sources will be tried.
@@ -164,8 +164,8 @@ pub const ChunkSource = struct {
 };
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.BlockEncoding {
-    var encoding: Chunk.BlockEncoding = .{ .one_block = .null };
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.Encoding {
+    var encoding: Chunk.Encoding = .{ .one_block = .null };
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
@@ -318,10 +318,10 @@ pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u6
         const chunk = c.value_ptr.*;
         const lastaccess = chunk.last_access.load(.unordered);
         const timeout = switch (chunk.blocks) {
-            .blocks => @min(chunk_timeout, grid_timeout),
+            .grid => @min(chunk_timeout, grid_timeout),
             .one_block => chunk_timeout,
         };
-        if (chunk.blocks == .blocks) grids += 1;
+        if (chunk.blocks == .grid) grids += 1;
         if (currenttime.nanoseconds - lastaccess < timeout) continue;
         it.pause(io);
         _ = try self.tryUnloadChunk(io, c.key_ptr.*);
@@ -352,7 +352,7 @@ pub const Reader = struct {
             try self.lastChunkReadCache.?.chunk.lockShared(io);
         }
         return switch (self.lastChunkReadCache.?.chunk.blocks) {
-            .blocks => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+            .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
             .one_block => |b| b,
         };
     }
@@ -365,7 +365,7 @@ pub const Reader = struct {
         chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
         return switch (chunk.blocks) {
-            .blocks => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
+            .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
             .one_block => |b| b,
         };
     }
@@ -402,10 +402,10 @@ pub const Editor = struct {
         var propagationEditor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
         defer propagationEditor.clear();
         while (it.next()) |diffChunk| {
-            const encoding: Chunk.BlockEncoding = .fromBlocks(diffChunk.value_ptr);
+            const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
             const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
             defer chunk.release(io);
-            var sides: [6]Chunk.ChunkFaceEncoding = undefined;
+            var sides: [6]Chunk.Encoding.Face = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
                     sides[side] = try chunk.extractFace(io, @enumFromInt(side), false);
@@ -424,7 +424,7 @@ pub const Editor = struct {
                     i += 1;
                 }
             }
-            var sides2: [6]Chunk.ChunkFaceEncoding = undefined;
+            var sides2: [6]Chunk.Encoding.Face = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
                     sides2[side] = try chunk.extractFace(io, @enumFromInt(side), false);
@@ -509,7 +509,7 @@ pub const Editor = struct {
         var isoneblock: bool = false;
         try chunk.lockShared(io);
         switch (chunk.blocks) {
-            .blocks => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
+            .grid => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
             .one_block => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
                 isoneblock = true;
@@ -534,7 +534,7 @@ pub const Editor = struct {
                         block_pos[2] + @as(i64, @intCast(z)),
                     };
                     const current_block = switch (parent.blocks) {
-                        .blocks => parent.blocks.blocks[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
+                        .grid => parent.blocks.grid[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
                         .one_block => parent.blocks.one_block,
                     };
                     const correct_block = simplified_blocks[x][y][z];
@@ -769,7 +769,7 @@ test "loadChunk allocation failure" {
 }
 
 test "fuzz world" {
-    if(true) return error.SkipZIgTest; //TODO
+    if (true) return error.SkipZIgTest; //TODO
     try std.testing.fuzz({}, fuzzChunkLoad, .{});
 }
 
@@ -784,7 +784,7 @@ fn fuzzChunkLoad(ctx: void, smith: *std.testing.Smith) !void {
     try makeTestingWorld(&world, &generator, allocator, 1000, 100);
     defer world.deinit(io, allocator);
 
-   var unloader = try io.concurrent(continuousUnload, .{ &world, io, 1000, 100 });
+    var unloader = try io.concurrent(continuousUnload, .{ &world, io, 1000, 100 });
     defer unloader.cancel(io) catch {};
     const ch = try world.loadChunk(io, allocator, .{ .level = smith.valueRangeAtMost(i32, -2, 32), .position = smith.value(@Vector(3, i32)) }, smith.value(bool));
     ch.release(io);

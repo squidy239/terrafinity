@@ -56,21 +56,21 @@ fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk,
     self.saveChunk(io, chunk, chunk_pos) catch return error.Unrecoverable;
 }
 
-const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.BlockEncoding)); //get the type of the tagged unions tag
+const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.Encoding)); //get the type of the tagged unions tag
 const BlockTagType = std.meta.Tag(Block);
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
     const save = ztracy.ZoneN(@src(), "saveChunk");
     defer save.End();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.blocks) {
-        .blocks => return,
+        .grid => return,
         .one_block => {}, //save chunk if it is just one block
     };
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     try chunk.lock.lockShared(io);
     const bytes = switch (chunk.blocks) {
-        .blocks => |blocks| std.mem.asBytes(blocks),
+        .grid => |blocks| std.mem.asBytes(blocks),
         .one_block => |block| std.mem.asBytes(&block),
     };
     var err_str: ?rocksdb.Data = null;
@@ -83,7 +83,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     }
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.BlockEncoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
     const load = ztracy.ZoneN(@src(), "getBlocks");
     defer load.End();
 
@@ -100,14 +100,14 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
     defer value.deinit();
 
-    const encoding_type: std.meta.Tag(Chunk.BlockEncoding) = switch (value.data.len) {
+    const encoding_type: std.meta.Tag(Chunk.Encoding) = switch (value.data.len) {
         @sizeOf(Block) => .one_block,
-        @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block) => .blocks,
+        @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block) => .grid,
         else => unreachable,
     };
 
-    const mergeblocks: Chunk.BlockEncoding = switch (encoding_type) {
-        .blocks => .{ .blocks = @ptrCast(@alignCast(@constCast(value.data))) },
+    const mergeblocks: Chunk.Encoding = switch (encoding_type) {
+        .grid => .{ .grid = @ptrCast(@alignCast(@constCast(value.data))) },
         .one_block => .{ .one_block = std.mem.bytesToValue(Block, value.data) },
     };
 

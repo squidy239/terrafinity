@@ -472,13 +472,13 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
     defer chunk.release(io);
-    const neighbor_faces = [6]Chunk.ChunkFaceEncoding{
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xMinus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xPlus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yMinus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yPlus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zMinus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zPlus, true),
+    const neighbor_faces = [6]Chunk.Encoding.Face{
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xminus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xplus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yminus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yplus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zminus, true),
+        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zplus, true),
     };
 
     var sfa = std.heap.stackFallback(65536, self.allocator);

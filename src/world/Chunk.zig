@@ -6,7 +6,7 @@ const ztracy = @import("ztracy");
 const Block = @import("Block.zig").Block;
 
 pub const ChunkSize = 32;
-blocks: BlockEncoding,
+blocks: Encoding,
 lock: std.Io.RwLock = .init,
 genstate: std.atomic.Value(Genstate),
 ref_count: std.atomic.Value(u32),
@@ -16,11 +16,11 @@ last_access: std.atomic.Value(i128),
 ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
 modified: std.atomic.Value(bool) = .init(false),
 
-pub const BlockEncoding = union(enum(u8)) {
-    blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
+pub const Encoding = union(enum) {
+    grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
     one_block: Block,
 
-    pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
+    pub fn merge(self: *Encoding, io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
         const m = ztracy.ZoneNC(@src(), "merge", 10);
         defer m.End();
         if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
@@ -32,11 +32,11 @@ pub const BlockEncoding = union(enum(u8)) {
                             self.* = mergeBlocks;
                         }
                     },
-                    .blocks => {
+                    .grid => {
                         if (mergeBlocks.one_block != .null) {
                             //safe because caller holds the lock
                             try pool_mutex.lock(io);
-                            memory_pool.destroy(@alignCast(self.blocks));
+                            memory_pool.destroy(@alignCast(self.grid));
                             pool_count.* -= 1;
                             pool_mutex.unlock(io);
 
@@ -45,20 +45,20 @@ pub const BlockEncoding = union(enum(u8)) {
                     },
                 }
             },
-            .blocks => {
+            .grid => {
                 try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
                 const tag = @typeInfo(Block).@"enum".tag_type;
-                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.blocks);
-                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.blocks);
+                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.grid);
+                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
 
                 selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
-                if (isOneBlock(self.blocks)) |block| {
+                if (isOneBlock(self.grid)) |block| {
                     @branchHint(.unlikely);
                     const f = ztracy.ZoneNC(@src(), "free", 4322);
                     defer f.End();
 
                     try pool_mutex.lock(io);
-                    memory_pool.destroy(@alignCast(self.blocks));
+                    memory_pool.destroy(@alignCast(self.grid));
                     pool_count.* -= 1;
                     pool_mutex.unlock(io);
 
@@ -68,8 +68,8 @@ pub const BlockEncoding = union(enum(u8)) {
         }
     }
 
-    pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-        if (self.* == .blocks) return;
+    pub fn toBlocks(self: *Encoding, io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
+        if (self.* == .grid) return;
         const t = ztracy.ZoneNC(@src(), "toBlocks", 10);
         defer t.End();
         const a = ztracy.ZoneNC(@src(), "alloc", 54334);
@@ -89,12 +89,53 @@ pub const BlockEncoding = union(enum(u8)) {
         a.End();
         const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
         @memset(flatblocks, self.one_block);
-        self.* = .{ .blocks = mem };
+        self.* = .{ .grid = mem };
     }
 
-    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) BlockEncoding {
-        return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .blocks = blocks };
+    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
+        return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
     }
+
+    pub const FaceRotation = enum { xplus, xminus, yplus, yminus, zplus, zminus };
+
+    pub fn extractFace(self: Encoding, comptime rotation: FaceRotation) Face {
+        switch (self) {
+            .grid => |grid| {
+                var result: [ChunkSize][ChunkSize]Block = undefined;
+                switch (comptime rotation) {
+                    .xplus => result = grid[ChunkSize - 1],
+                    .xminus => result = grid[0],
+                    .yplus => for (&result, 0..) |*row, i| {
+                        row.* = grid[i][ChunkSize - 1];
+                    },
+                    .yminus => for (&result, 0..) |*row, i| {
+                        row.* = grid[i][0];
+                    },
+                    .zplus => {
+                        for (&result, 0..) |*row, i| {
+                            for (row, 0..) |*item, j| {
+                                item.* = grid[i][j][ChunkSize - 1];
+                            }
+                        }
+                    },
+                    .zminus => {
+                        for (&result, 0..) |*row, i| {
+                            for (row, 0..) |*item, j| {
+                                item.* = grid[i][j][0];
+                            }
+                        }
+                    },
+                }
+                return .{ .blocks = result };
+            },
+            .one_block => |block| return .{ .one_block = block },
+        }
+    }
+
+    pub const Face = union(enum) {
+        blocks: [ChunkSize][ChunkSize]Block,
+        one_block: Block,
+    };
 
     test "merge" {
         try std.testing.fuzz(std.testing.io, testOne, .{});
@@ -105,29 +146,24 @@ pub const BlockEncoding = union(enum(u8)) {
         defer pool.deinit(std.testing.allocator);
         var g1: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         var g2: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var b1: BlockEncoding = .fuzzerMakeEncoding(&g1, smith);
-        const b2: BlockEncoding = .fuzzerMakeEncoding(&g2, smith);
+        var b1: Encoding = .fuzzerMakeEncoding(&g1, smith);
+        const b2: Encoding = .fuzzerMakeEncoding(&g2, smith);
         var pc: u64 = 2;
         var pm: std.Io.Mutex = .init;
         try b1.merge(io, b2, &pool, &pc, &pm);
     }
 
-    pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) BlockEncoding {
+    pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
         @disableInstrumentation();
         @setRuntimeSafety(false);
-        return switch (smith.value(@typeInfo(BlockEncoding).@"union".tag_type.?)) {
-            .blocks => blk: {
+        return switch (smith.value(@typeInfo(Encoding).@"union".tag_type.?)) {
+            .grid => blk: {
                 grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-                break :blk BlockEncoding{ .blocks = grid };
+                break :blk Encoding{ .grid = grid };
             },
             .one_block => .{ .one_block = smith.value(Block) },
         };
     }
-};
-
-pub const ChunkFaceEncoding = union(enum(u8)) {
-    blocks: [ChunkSize][ChunkSize]Block,
-    one_block: Block,
 };
 
 pub const Genstate = enum(u8) {
@@ -136,7 +172,7 @@ pub const Genstate = enum(u8) {
 };
 
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
-pub fn from(blockEncoding: BlockEncoding, io: std.Io, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !*@This() {
+pub fn from(blockEncoding: Encoding, io: std.Io, chunk_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !*@This() {
     var chunk: *@This() = undefined;
     while (true) {
         try pool_mutex.lock(io);
@@ -169,38 +205,19 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 }
 
 /// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
-pub fn merge(self: *@This(), io: std.Io, mergeBlocks: BlockEncoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
+pub fn merge(self: *@This(), io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
     try self.addAndLock(io);
     defer self.releaseAndUnlock(io);
     try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
-pub fn extractFace(self: *@This(), io: std.Io, comptime face: enum { xPlus, xMinus, yPlus, yMinus, zPlus, zMinus }, comptime removeRef: bool) !ChunkFaceEncoding {
+pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
     try self.addAndLockShared(io);
     defer {
         if (removeRef) self.release(io);
         self.releaseAndUnlockShared(io);
     }
-    var cube: *const [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    switch (self.blocks) {
-        .blocks => cube = self.blocks.blocks,
-        .one_block => |block| return .{ .one_block = block },
-    }
-    var result: [ChunkSize][ChunkSize]Block = undefined;
-    @setEvalBranchQuota(10000);
-    inline for (&result, 0..) |*row, i| {
-        inline for (row, 0..) |*item, j| {
-            item.* = switch (comptime face) {
-                .xPlus => cube[ChunkSize - 1][i][comptime j],
-                .xMinus => cube[0][comptime i][comptime j],
-                .yPlus => cube[comptime i][ChunkSize - 1][comptime j],
-                .yMinus => cube[comptime i][0][comptime j],
-                .zPlus => cube[comptime i][comptime j][ChunkSize - 1],
-                .zMinus => cube[comptime i][comptime j][0],
-            };
-        }
-    }
-    return .{ .blocks = result };
+    return self.blocks.extractFace(rotation);
 }
 
 /// Returns true if the chunk was converted to blocks, false if it was already blocks.
@@ -223,9 +240,9 @@ pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, 
     _ = io.swapCancelProtection(.unblocked);
     defer self.unlockExclusive(io);
     switch (self.blocks) {
-        .blocks => {
+        .grid => {
             pool_mutex.lockUncancelable(io);
-            memory_pool.destroy(@alignCast(self.blocks.blocks));
+            memory_pool.destroy(@alignCast(self.blocks.grid));
             pool_count.* -= 1;
             pool_mutex.unlock(io);
         },
@@ -364,7 +381,7 @@ test "toBlocks" {
 
     switch (chunk.blocks) {
         .one_block => unreachable,
-        .blocks => |blocks| {
+        .grid => |blocks| {
             try testing.expect(blocks[0][0][0] == .stone);
             try testing.expect(blocks[10][20][30] == .stone);
         },
@@ -396,16 +413,16 @@ test "merge_test" { // avoid collision with BlockEncoding.merge or the file merg
     var blocks2: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
     blocks2[0][0][1] = .grass;
 
-    const chunk1_encoding = BlockEncoding.fromBlocks(blocks1);
+    const chunk1_encoding = Encoding.fromBlocks(blocks1);
     var chunk1 = try from(chunk1_encoding, io, &chunk_pool, &chunk_count, &chunk_mutex);
 
-    const chunk2_encoding = BlockEncoding.fromBlocks(&blocks2);
+    const chunk2_encoding = Encoding.fromBlocks(&blocks2);
 
     try chunk1.merge(io, chunk2_encoding, &block_pool, &block_count, &block_mutex);
 
     switch (chunk1.blocks) {
         .one_block => return error.TestFailed,
-        .blocks => |blocks| {
+        .grid => |blocks| {
             try testing.expect(blocks[0][0][0] == .dirt);
             try testing.expect(blocks[0][0][1] == .grass);
             try testing.expect(blocks[1][1][1] == .air);

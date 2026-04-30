@@ -22,28 +22,33 @@ pub const Face = packed struct(u64) {
     y: u5,
     z: u5,
     rot: FaceRotation,
-    isGreedy: bool,
-    height: i6,
-    width: i6,
-    BlockType: u20,
-    _: u12,
+    isGreedy: bool = false,
+    height: i6 = 1,
+    width: i6 = 1,
+    BlockType: Block,
+    _: u16 = undefined,
 };
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn fromChunks(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
-    if (@bitSizeOf(Block) > 20) @compileError("@bitSizeOf(Block) must be <= 20");
+pub fn fromChunks(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer) !void {
     const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
     defer mdc.End();
+    if (shouldSkip(neighbor_faces, mainblocks)) return;
+    try meshSimple(mainblocks, neighbor_faces, opaque_writer);
+}
+
+fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.Encoding) bool {
     var all_invisible: bool = true;
     for (neighbor_faces) |face| {
         all_invisible |= (face == .one_block and !face.one_block.isVisible());
     }
     all_invisible |= mainblocks == .one_block and !mainblocks.one_block.isVisible();
-    if (!all_invisible) return;
-    try meshSimple(mainblocks, neighbor_faces, writer);
+    return !all_invisible;
 }
 
-fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding, writer: *std.Io.Writer) !void {
+//fn meshFace(blocks: Chunk.Encoding, neighbor_face: *Chunk.Encoding.Face, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {}
+
+fn meshSimple(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer) !void {
     const ecp = ztracy.ZoneNC(@src(), "extendedChunkparent", 1111);
     var extendedBlocks: [ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block = undefined;
     GenerateExtendedChunk(&extendedBlocks, mainblocks, neighbor_faces);
@@ -66,17 +71,13 @@ fn meshSimple(mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.C
                 inline for (0..6) |i| {
                     if (neighboring_blocks[i].isTransparent() and (!block_transparent or block != neighboring_blocks[i])) {
                         const face = Face{
-                            .BlockType = @intFromEnum(block),
-                            .isGreedy = false,
-                            .height = 1,
-                            .width = 1,
+                            .BlockType = block,
                             .rot = @enumFromInt(i),
                             .x = @intCast(x - 1),
                             .y = @intCast(y - 1),
                             .z = @intCast(z - 1),
-                            ._ = undefined,
                         };
-                        try writer.writeAll(std.mem.asBytes(&face));
+                        try opaque_writer.writeAll(std.mem.asBytes(&face));
                     }
                 }
             }
@@ -103,7 +104,7 @@ test "MeshBenchmark" {
     const test_amount = 100; // reduced from 100000
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
-        try fromChunks(.{ .blocks = &blocks }, &@splat(Chunk.ChunkFaceEncoding{ .one_block = .air }), &writer.writer);
+        try fromChunks(.{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &writer.writer);
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
@@ -117,19 +118,19 @@ test "FuzzMesh" {
 
 fn testOne(_: void, smith: *std.testing.Smith) !void {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    const mainblocks: Chunk.BlockEncoding = .fuzzerMakeEncoding(&blocks, smith);
-    const neighbor_faces: [6]Chunk.ChunkFaceEncoding = smith.value([6]Chunk.ChunkFaceEncoding);
+    const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
+    const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
     var writer = std.Io.Writer.Discarding.init(&.{});
     try meshSimple(mainblocks, &neighbor_faces, &writer.writer);
 }
 
 ///x+,x-,y+,y-,z+,z-
-fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.BlockEncoding, neighbor_faces: *const [6]Chunk.ChunkFaceEncoding) void {
+fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) void {
     const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
     defer gec.End();
 
     switch (mainblocks) {
-        .blocks => |blocks| {
+        .grid => |blocks| {
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
                     for (0..ChunkSize) |z| {
