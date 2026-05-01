@@ -72,21 +72,23 @@ pub const Encoding = union(enum) {
         if (self.* == .grid) return;
         const t = tracy.Zone.begin(.{ .src = @src(), .name = "toBlocks" });
         defer t.end();
-        const a = tracy.Zone.begin(.{ .src = @src(), .name = "alloc" });
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        while (true) {
-            try pool_mutex.lock(io);
-            mem = memory_pool.create(undefined) catch {
+        {
+            const a = tracy.Zone.begin(.{ .src = @src(), .name = "alloc" });
+            defer a.end();
+            while (true) {
+                try pool_mutex.lock(io);
+                mem = memory_pool.create(undefined) catch {
+                    pool_mutex.unlock(io);
+                    try io.sleep(.fromMicroseconds(100), .awake);
+                    std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
+                    continue;
+                };
+                pool_count.* += 1;
                 pool_mutex.unlock(io);
-                try io.sleep(.fromMicroseconds(100), .awake);
-                std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
-                continue;
-            };
-            pool_count.* += 1;
-            pool_mutex.unlock(io);
-            break;
+                break;
+            }
         }
-        a.end();
         const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
         @memset(flatblocks, self.one_block);
         self.* = .{ .grid = mem };

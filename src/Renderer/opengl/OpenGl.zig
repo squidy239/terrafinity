@@ -636,7 +636,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             defer z.end();
             std.debug.assert(size > 0);
 
-
             const space_ptr = try self.allocator.create(Space);
             space_ptr.* = Space{
                 .node = undefined,
@@ -708,7 +707,6 @@ fn MultiRenderBuffer(comptime K: type) type {
             const total = self.map.count(io);
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
-
                 const loop = tracy.Zone.begin(.{ .src = @src(), .name = "loop" });
                 defer loop.end();
                 try self.lock.lock(io);
