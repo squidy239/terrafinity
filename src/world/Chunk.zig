@@ -79,7 +79,7 @@ pub const Encoding = union(enum) {
             mem = memory_pool.create(undefined) catch {
                 pool_mutex.unlock(io);
                 try io.sleep(.fromMicroseconds(100), .awake);
-                std.log.err("Failed to allocate memory for chunk blocks, retrying...", .{});
+                std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
                 continue;
             };
             pool_count.* += 1;
@@ -178,8 +178,8 @@ pub fn from(blockEncoding: Encoding, io: std.Io, chunk_pool: anytype, pool_count
         try pool_mutex.lock(io);
         chunk = chunk_pool.create(undefined) catch {
             pool_mutex.unlock(io);
-            std.log.err("Failed to allocate memory for chunk, retrying...", .{});
-            try io.sleep(.fromMicroseconds(1), .awake);
+            std.log.debug("Failed to allocate memory for chunk, retrying...", .{});
+            try io.sleep(.fromMicroseconds(100), .awake);
             continue;
         };
         pool_count.* += 1;

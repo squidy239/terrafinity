@@ -6,10 +6,10 @@ const ztracy = @import("ztracy");
 const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
-const ChunkPos = @import("world/World.zig").ChunkPos;
-const Mesh = @This();
 pub const FaceRotation = Chunk.Encoding.FaceRotation;
+const ChunkPos = @import("world/World.zig").ChunkPos;
 
+const Mesh = @This();
 pub const Face = packed struct(u64) {
     x: u5,
     y: u5,
@@ -34,12 +34,11 @@ pub fn fromChunks(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.En
 }
 
 fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.Encoding) bool {
-    var all_invisible: bool = true;
+    if (mainblocks != .one_block or mainblocks.one_block.isVisible()) return false;
     for (neighbor_faces) |face| {
-        all_invisible |= (face == .one_block and !face.one_block.isVisible());
+        if (face != .one_block or face.one_block.isVisible()) return false;
     }
-    all_invisible |= mainblocks == .one_block and !mainblocks.one_block.isVisible();
-    return !all_invisible;
+    return true;
 }
 
 fn meshChunkFace(one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {

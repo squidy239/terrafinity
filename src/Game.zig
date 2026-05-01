@@ -468,7 +468,11 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     defer GenMeshAndAdd.End();
 
     // Prevent an old version of the chunk from staying loaded
-    if (!self.keepChunkLoaded(io, chunk_pos)) return self.renderer.removeChunk(io, chunk_pos);
+    if (!self.keepChunkLoaded(io, chunk_pos)) {
+        self.renderer.removeChunk(io, chunk_pos);
+        _ = self.loaded_or_meshed.remove(io, chunk_pos);
+        return;
+    }
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
     defer chunk.release(io);
@@ -541,7 +545,7 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     while (try it.next(io)) |entry| {
         if (!self.keepChunkLoaded(io, entry.key_ptr.*)) {
             it.pause(io);
-            std.debug.assert(self.loaded_or_meshed.remove(io, entry.key_ptr.*)); //race
+            _ = self.loaded_or_meshed.remove(io, entry.key_ptr.*);
             try it.unpause(io);
         }
     }
