@@ -482,12 +482,12 @@ const GpuBuffer = struct {
 
     pub fn ensureCapacity(self: *GpuBuffer, io: std.Io, length: usize) !void {
         {
-            self.resize_lock.lockSharedUncancelable(io);
+            try self.resize_lock.lockShared(io);
             defer self.resize_lock.unlockShared(io);
             if (self.mapping != null and length <= self.mapping.?.len) return;
         }
 
-        self.resize_lock.lockUncancelable(io);
+        try self.resize_lock.lock(io);
         defer self.resize_lock.unlock(io);
         if (self.mapping != null and length <= self.mapping.?.len) return;
         const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;

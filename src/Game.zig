@@ -73,14 +73,15 @@ pub const Options = struct {
     generation_distance_x: u32 = 8,
     generation_distance_y: u32 = 6,
 
-    max_chunk_timeout_ms: u64 = 60000,
-    max_grid_timeout_ms: u64 = 60000,
-
-    chunk_capacity: u64 = 262144,
-    block_grid_capacity: u64 = 8196,
-
     unloader_frequency_ms: u64 = 1000,
     loader_frequency_ms: u64 = 250,
+
+    unload_params: World.UnloadParams = .{
+        .max_grid_ms = 60000,
+        .max_chunk_ms = 60000,
+        .chunk_capacity = 262144,
+        .grid_capacity = 8196,
+    },
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -235,10 +236,12 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const grid_capacity = game.options.block_grid_capacity;
-    const chunk_capacity = game.options.chunk_capacity;
+    const grid_capacity = game.options.unload_params.grid_capacity;
+    const chunk_capacity = game.options.unload_params.chunk_capacity;
     game.options_lock.unlockShared(io);
     game.world = .{
+        .unload_params = &game.options.unload_params,
+        .unload_params_lock = game.options_lock,
         .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
         .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
         .config = world_options.world_config,
@@ -315,10 +318,6 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
     const unloader_frequency_ms = self.options.unloader_frequency_ms;
-    const max_grid_timeout_ms = self.options.max_grid_timeout_ms;
-    const max_chunk_timeout_ms = self.options.max_chunk_timeout_ms;
-    const block_grid_capacity = self.options.block_grid_capacity;
-    const chunk_capacity = self.options.chunk_capacity;
     self.options_lock.unlockShared(io);
 
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
@@ -337,7 +336,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
 
         self.chunk_unload_is_running.store(true, .seq_cst);
         self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = io.async(unloadWrapper, .{ self, io, max_grid_timeout_ms, block_grid_capacity, max_chunk_timeout_ms, chunk_capacity });
+        self.unload_future = io.async(unloadWrapper, .{ self, io });
     }
 
     if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
@@ -349,9 +348,9 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
     }
 }
 
-fn unloadWrapper(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
+fn unloadWrapper(self: *@This(), io: std.Io) !void {
     defer self.chunk_unload_is_running.store(false, .seq_cst);
-    try self.world.unloadTimeout(io, max_grid_ms, max_grids, max_chunk_ms, max_chunks);
+    try self.world.unloadTimeout(io);
 }
 
 pub fn handleSelectFutures(self: *@This()) !void {
