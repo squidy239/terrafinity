@@ -3,40 +3,23 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    
-    const sanitize = b.option(bool, "sanitize", "Enable sanitizers") orelse false;
-    
-    const tracy_options = .{
-        .enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false,
-        .enable_fibers = b.option(bool, "enable_fibers", "Enable Tracy fiber support") orelse false,
-        .on_demand = b.option(bool, "on_demand", "Build tracy with TRACY_ON_DEMAND") orelse true,
-    };
 
-    const ztracy = b.dependency("ztracy", .{
-        .enable_ztracy = tracy_options.enable_ztracy,
-        .enable_fibers = tracy_options.enable_fibers,
-        .on_demand = tracy_options.on_demand,
-        .optimize = optimize,
-    });
+    const sanitize = b.option(bool, "sanitize_thread", "Enable thread sanitizer") orelse null;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize,
-        .sanitize_c = if (sanitize) .full else null,
-        .stack_protector = sanitize,
-        .stack_check = sanitize,
     });
 
-    setupDependencies(b, root_module, target, optimize, ztracy, sanitize);
+    setupDependencies(b, root_module, target, optimize, sanitize);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
         .use_llvm = true,
     });
-    exe.root_module.linkLibrary(ztracy.artifact("tracy"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -67,11 +50,8 @@ fn setupDependencies(
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    ztracy: *std.Build.Dependency,
-    sanitize: bool,
+    sanitize: ?bool,
 ) void {
-    root_module.addImport("ztracy", ztracy.module("root"));
-
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
@@ -81,15 +61,11 @@ fn setupDependencies(
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
     rocksdb_mod.sanitize_thread = sanitize;
-    rocksdb_mod.sanitize_c = if (sanitize) .full else null;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
         .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ztracy", .module = ztracy.module("root") },
-        },
     });
     root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
 
@@ -107,6 +83,32 @@ fn setupDependencies(
         .optimize = optimize,
     }).module("obj");
     root_module.addImport("obj", obj_mod);
+
+    // Allow the user to enable or disable Tracy support with a build flag
+    const tracy_enabled = b.option(
+        bool,
+        "tracy",
+        "Build with Tracy support.",
+    ) orelse false;
+
+    // Get the Tracy dependency
+    const tracy = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Make Tracy available as an import
+    root_module.addImport("tracy", tracy.module("tracy"));
+
+    // Pick an implementation based on the build flags.
+    // Don't build both, we don't want to link with Tracy at all unless we intend to enable it.
+    if (tracy_enabled) {
+        // The user asked to enable Tracy, use the real implementation
+        root_module.addImport("tracy_impl", tracy.module("tracy_impl_enabled"));
+    } else {
+        // The user asked to disable Tracy, use the dummy implementation
+        root_module.addImport("tracy_impl", tracy.module("tracy_impl_disabled"));
+    }
 
     const wio = b.dependency("wio", .{
         .target = target,

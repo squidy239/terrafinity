@@ -4,7 +4,7 @@ const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
 const zm = @import("zm");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const wio = @import("wio");
 
 const Mesh = @import("../../Mesh.zig");
@@ -204,12 +204,12 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
-    const c = ztracy.ZoneNC(@src(), "Clear", 32213);
+    var c = tracy.Zone.begin(.{ .src = @src(), .name = "Clear" });
+    defer c.end();
     gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
     gl.Clear(gl.COLOR_BUFFER_BIT);
     gl.ClearDepth(0.0);
     gl.Clear(gl.DEPTH_BUFFER_BIT);
-    c.End();
 }
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
@@ -317,8 +317,8 @@ fn loadFacebuffer(self: *@This()) !void {
 var last_viewport: [2]f32 = undefined;
 
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
-    const c = ztracy.ZoneNC(@src(), "drawChunks", 32213);
-    defer c.End();
+    const c = tracy.Zone.begin(.{ .src = @src(), .name = "drawChunks" });
+    defer c.end();
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
@@ -369,9 +369,10 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
 
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
-    const ff = ztracy.ZoneN(@src(), "finish");
+    const ff = tracy.Zone.begin(.{ .src = @src(), .name = "finish" });
+    defer ff.end();
     gl.Finish(); //TODO better syncronization
-    ff.End();
+
     //std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
@@ -492,8 +493,8 @@ const GpuBuffer = struct {
         const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
         const new_size = @max(scaled_size, length);
         std.log.debug("Expanding buffer to {d}", .{new_size});
-        const e = ztracy.ZoneN(@src(), "Expand");
-        defer e.End();
+        const e = tracy.Zone.begin(.{ .src = @src(), .name = "Expand" });
+        defer e.end();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
         errdefer gl.DeleteBuffers(1, @ptrCast(&new_buffer));
@@ -517,8 +518,8 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegment(self: *GpuBuffer, io: std.Io, offset: usize, data: []const u8) !void {
-        const e = ztracy.ZoneN(@src(), "writeSegment");
-        defer e.End();
+        const e = tracy.Zone.begin(.{ .src = @src(), .name = "writeSegment" });
+        defer e.end();
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(io, offset + data.len);
         self.resize_lock.lockSharedUncancelable(io);
@@ -582,14 +583,14 @@ fn MultiRenderBuffer(comptime K: type) type {
         };
 
         pub fn put(self: *@This(), io: std.Io, key: K, value: []const u8) !void {
-            const z = ztracy.Zone(@src());
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src() });
+            defer z.end();
             var start: usize = undefined;
             {
-                const l = ztracy.ZoneN(@src(), "lock");
+                const l = tracy.Zone.begin(.{ .src = @src(), .name = "lock" });
                 self.lock.lockUncancelable(io);
                 defer self.lock.unlock(io);
-                l.End();
+                l.end();
                 const space = try self.add(value.len);
                 std.debug.assert(space.freelist_node == null);
                 std.debug.assert(space.length == value.len);
@@ -601,8 +602,8 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn add(self: *@This(), length: usize) !*Space {
-            const z = ztracy.ZoneN(@src(), "add");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "add" });
+            defer z.end();
             var space: *Space = undefined;
             var next = self.free_list.first;
             while (true) {
@@ -631,11 +632,11 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn append(self: *@This(), size: usize) !*Space {
-            const z = ztracy.ZoneN(@src(), "append");
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src(), .name = "append" });
+            defer z.end();
             std.debug.assert(size > 0);
-            const wa = ztracy.ZoneN(@src(), "wait_futures");
-            wa.End();
+
+
             const space_ptr = try self.allocator.create(Space);
             space_ptr.* = Space{
                 .node = undefined,
@@ -660,8 +661,8 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         pub fn removeSpace(self: *@This(), space: *Space) void {
-            const rs = ztracy.ZoneN(@src(), "removeSpace");
-            defer rs.End();
+            const rs = tracy.Zone.begin(.{ .src = @src(), .name = "removeSpace" });
+            defer rs.end();
             space.freelist_node = .{};
             const behind = space.node.prev;
             const ahead = space.node.next;
@@ -699,21 +700,17 @@ fn MultiRenderBuffer(comptime K: type) type {
             get_itemdata: fn (userdata: anytype, key: K) ItemData,
             item_userdata: anytype,
         ) !struct { faces: u64, drawn: u64, total: u64 } {
-            const z = ztracy.Zone(@src());
-            defer z.End();
+            const z = tracy.Zone.begin(.{ .src = @src() });
+            defer z.end();
 
             var face_count: u64 = 0;
-
-            const a = ztracy.ZoneN(@src(), "alloc");
-
-            a.End();
             var drawn: usize = 0;
             const total = self.map.count(io);
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
-                const ac = ztracy.ZoneN(@src(), "mapCommands");
-                ac.End();
-                const loop = ztracy.ZoneNC(@src(), "loop", 32213);
+
+                const loop = tracy.Zone.begin(.{ .src = @src(), .name = "loop" });
+                defer loop.end();
                 try self.lock.lock(io);
                 defer self.lock.unlock(io);
                 var it = self.map.iterator();
@@ -727,11 +724,10 @@ fn MultiRenderBuffer(comptime K: type) type {
                     std.debug.assert(!free);
                     const key = entry.key_ptr.*;
                     if (culler) |cullFn| {
-                        const cu = ztracy.ZoneN(@src(), "cull");
-                        defer cu.End();
+                        const cu = tracy.Zone.begin(.{ .src = @src(), .name = "cull" });
+                        defer cu.end();
                         if (cullFn(cull_userdata, key)) continue;
                     }
-
                     const faces = @divExact(length, element_size);
                     face_count += faces;
                     const command: DrawElementsIndirectCommand = .{
@@ -742,13 +738,12 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
-                    const wr = ztracy.ZoneN(@src(), "write");
-                    defer wr.End();
+                    const wr = tracy.Zone.begin(.{ .src = @src(), .name = "write" });
+                    defer wr.end();
                     try self.indirect_buffer.writeSegmentNoFlush(io, drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
                     try self.ssbo.writeSegmentNoFlush(io, drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));
                     drawn += 1;
                 }
-                loop.End();
             }
             if (drawn > 0) {
                 try self.ssbo.flushRange(io, 0, drawn * @sizeOf(ItemData));

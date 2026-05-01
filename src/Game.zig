@@ -5,7 +5,7 @@ const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
 const wio = @import("wio");
 const zm = @import("zm");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
@@ -464,8 +464,8 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
 pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
-    const GenMeshAndAdd = ztracy.ZoneNC(@src(), "GenMeshAndAdd", 324342342);
-    defer GenMeshAndAdd.End();
+    const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
+    defer GenMeshAndAdd.end();
 
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos)) {
@@ -512,8 +512,8 @@ pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bo
 }
 
 pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
-    const unload = ztracy.ZoneNC(@src(), "UnloadMeshes", 75645);
-    defer unload.End();
+    const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
+    defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
 
     const chunkCollector = struct {
@@ -594,7 +594,7 @@ pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3,
 pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer self.chunk_load_is_running.store(false, .seq_cst);
     const playerPos = self.player.physics.pos.load(.seq_cst);
-    const addChunkstoLoad = ztracy.ZoneNC(@src(), "addChunksToLoad", 223);
+    const addChunkstoLoad = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
 
     var levels = self.getLevels(io);
     var level = levels[0];
@@ -603,7 +603,7 @@ pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
         levels = self.getLevels(io);
         amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos, level);
     }
-    addChunkstoLoad.End();
+    addChunkstoLoad.end();
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level

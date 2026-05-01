@@ -40,6 +40,10 @@
             .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
             .hash = "wio-0.0.0-8xHrrx8eBwBliteTXuvS4JKUbdquuaJabO7wMk5FZalf",
         },
+        .tracy = .{
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BUhQAQCLinsSpkKfLYpdgnI8aVTJG3v0XLBkJE5T",
+        },
     },
 
     .paths = .{

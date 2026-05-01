@@ -5,7 +5,7 @@ const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
 const rocksdb = @import("rocksdb");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const builtin = @import("builtin");
 
 isinit: bool,
@@ -60,8 +60,8 @@ const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.Encoding)); //get the ty
 const BlockTagType = std.meta.Tag(Block);
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
-    const save = ztracy.ZoneN(@src(), "saveChunk");
-    defer save.End();
+    const save = tracy.Zone.begin(.{ .src = @src(), .name = "saveChunk" });
+    defer save.end();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.blocks) {
         .grid => return,
         .one_block => {}, //save chunk if it is just one block
@@ -84,8 +84,8 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
-    const load = ztracy.ZoneN(@src(), "getBlocks");
-    defer load.End();
+    const load = tracy.Zone.begin(.{ .src = @src(), .name = "getBlocks" });
+    defer load.end();
 
     const self: *@This() = @ptrCast(@alignCast(source.data));
     _ = allocator;
