@@ -60,7 +60,7 @@ const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.Encoding)); //get the ty
 const BlockTagType = std.meta.Tag(Block);
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
-    const save = tracy.Zone.begin(.{ .src = @src(), .name = "saveChunk" });
+    const save = tracy.Zone.begin(.{ .src = @src() });
     defer save.end();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.blocks) {
         .grid => return,
@@ -84,7 +84,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
-    const load = tracy.Zone.begin(.{ .src = @src(), .name = "getBlocks" });
+    const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
 
     const self: *@This() = @ptrCast(@alignCast(source.data));

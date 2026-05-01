@@ -221,7 +221,7 @@ pub const Explosive = struct {
         var worldReader = World.Reader{ .world = world };
         defer worldReader.clear(io);
 
-        var g = tracy.Zone.begin(.{ .src = @src(), .name = "getblock" });
+        var g = tracy.Zone.begin(.{ .src = @src() });
         if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
             g.end();
             var worldEditor = World.Editor{

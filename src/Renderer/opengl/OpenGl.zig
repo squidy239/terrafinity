@@ -317,7 +317,7 @@ fn loadFacebuffer(self: *@This()) !void {
 var last_viewport: [2]f32 = undefined;
 
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
-    const c = tracy.Zone.begin(.{ .src = @src(), .name = "drawChunks" });
+    const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
@@ -369,7 +369,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
 
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
-    const ff = tracy.Zone.begin(.{ .src = @src(), .name = "finish" });
+    const ff = tracy.Zone.begin(.{ .src = @src() });
     defer ff.end();
     gl.Finish(); //TODO better syncronization
 
@@ -493,7 +493,7 @@ const GpuBuffer = struct {
         const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
         const new_size = @max(scaled_size, length);
         std.log.debug("Expanding buffer to {d}", .{new_size});
-        const e = tracy.Zone.begin(.{ .src = @src(), .name = "Expand" });
+        const e = tracy.Zone.begin(.{ .src = @src() });
         defer e.end();
         var new_buffer: c_uint = undefined;
         gl.CreateBuffers(1, @ptrCast(&new_buffer));
@@ -518,7 +518,7 @@ const GpuBuffer = struct {
     }
 
     pub fn writeSegment(self: *GpuBuffer, io: std.Io, offset: usize, data: []const u8) !void {
-        const e = tracy.Zone.begin(.{ .src = @src(), .name = "writeSegment" });
+        const e = tracy.Zone.begin(.{ .src = @src() });
         defer e.end();
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(io, offset + data.len);
@@ -602,7 +602,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn add(self: *@This(), length: usize) !*Space {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "add" });
+            const z = tracy.Zone.begin(.{ .src = @src() });
             defer z.end();
             var space: *Space = undefined;
             var next = self.free_list.first;
@@ -632,7 +632,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         fn append(self: *@This(), size: usize) !*Space {
-            const z = tracy.Zone.begin(.{ .src = @src(), .name = "append" });
+            const z = tracy.Zone.begin(.{ .src = @src() });
             defer z.end();
             std.debug.assert(size > 0);
 
@@ -660,7 +660,7 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         pub fn removeSpace(self: *@This(), space: *Space) void {
-            const rs = tracy.Zone.begin(.{ .src = @src(), .name = "removeSpace" });
+            const rs = tracy.Zone.begin(.{ .src = @src() });
             defer rs.end();
             space.freelist_node = .{};
             const behind = space.node.prev;
@@ -707,7 +707,7 @@ fn MultiRenderBuffer(comptime K: type) type {
             const total = self.map.count(io);
             if (total == 0) return .{ .drawn = 0, .total = 0, .faces = 0 };
             {
-                const loop = tracy.Zone.begin(.{ .src = @src(), .name = "loop" });
+                const loop = tracy.Zone.begin(.{ .src = @src() });
                 defer loop.end();
                 try self.lock.lock(io);
                 defer self.lock.unlock(io);
@@ -736,7 +736,7 @@ fn MultiRenderBuffer(comptime K: type) type {
                         .instanceCount = @intCast(@divExact(length, element_size)),
                     };
                     const itemdata = get_itemdata(item_userdata, key);
-                    const wr = tracy.Zone.begin(.{ .src = @src(), .name = "write" });
+                    const wr = tracy.Zone.begin(.{ .src = @src() });
                     defer wr.end();
                     try self.indirect_buffer.writeSegmentNoFlush(io, drawn * @sizeOf(DrawElementsIndirectCommand), std.mem.asBytes(&command));
                     try self.ssbo.writeSegmentNoFlush(io, drawn * @sizeOf(ItemData), std.mem.asBytes(&itemdata));

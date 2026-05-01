@@ -98,7 +98,7 @@ pub const DefaultGenerator = struct {
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
-        const gen = tracy.Zone.begin(.{ .src = @src(), .name = "GenChunkBlocks" });
+        const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
             try blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
@@ -144,7 +144,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: ?[ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
-        const caves = tracy.Zone.begin(.{ .src = @src(), .name = "GenCaves" });
+        const caves = tracy.Zone.begin(.{ .src = @src() });
         defer caves.end();
         var grid: [4][4][4]f32 = undefined;
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
@@ -163,7 +163,7 @@ pub const DefaultGenerator = struct {
         }
         caveNoise.end();
 
-        const inter = tracy.Zone.begin(.{ .src = @src(), .name = "Interpolate" });
+        const inter = tracy.Zone.begin(.{ .src = @src() });
         defer inter.end();
         const initinterp = tracy.Zone.begin(.{ .src = @src(), .name = "initinterp" });
         var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
@@ -194,7 +194,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateCavesFull(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
-        const caves = tracy.Zone.begin(.{ .src = @src(), .name = "GenCaves" });
+        const caves = tracy.Zone.begin(.{ .src = @src() });
         defer caves.end();
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunkScale));
@@ -239,7 +239,7 @@ pub const DefaultGenerator = struct {
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
-        const gth = tracy.Zone.begin(.{ .src = @src(), .name = "GetTerrainHeights" });
+        const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
         if (self.terrain_height_cache.get(io, .{ .pos = chunk_pos, .level = level })) |cachedHeight| return cachedHeight;
         const generatedHeights = genTerrainHeight(self.params, level, chunk_pos);
@@ -248,7 +248,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn genTerrainHeight(params: Params, level: i32, chunk_pos: [2]i32) [ChunkSize][ChunkSize]i32 {
-        const gth = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainHeights" });
+        const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
         const chunkSizeGenScale = 1.0 / @as(f32, @floatCast(World.ChunkPos.toScale(level)));
         const scale = (params.terrain_scale * chunkSizeGenScale);
@@ -296,7 +296,7 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
-        const genstructures = tracy.Zone.begin(.{ .src = @src(), .name = "generate_structures" });
+        const genstructures = tracy.Zone.begin(.{ .src = @src() });
         defer genstructures.end();
         var editorBuffer: [100_000]u8 = undefined;
         var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{

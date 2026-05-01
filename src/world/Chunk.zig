@@ -21,7 +21,7 @@ pub const Encoding = union(enum) {
     one_block: Block,
 
     pub fn merge(self: *Encoding, io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-        const m = tracy.Zone.begin(.{ .src = @src(), .name = "merge" });
+        const m = tracy.Zone.begin(.{ .src = @src() });
         defer m.end();
         if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
         switch (mergeBlocks) {
@@ -70,11 +70,11 @@ pub const Encoding = union(enum) {
 
     pub fn toBlocks(self: *Encoding, io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
         if (self.* == .grid) return;
-        const t = tracy.Zone.begin(.{ .src = @src(), .name = "toBlocks" });
+        const t = tracy.Zone.begin(.{ .src = @src() });
         defer t.end();
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
         {
-            const a = tracy.Zone.begin(.{ .src = @src(), .name = "alloc" });
+            const a = tracy.Zone.begin(.{ .src = @src() });
             defer a.end();
             while (true) {
                 try pool_mutex.lock(io);

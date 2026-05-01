@@ -242,7 +242,7 @@ pub fn getGenState(self: *@This(), io: std.Io, chunk_pos: ChunkPos) ?Chunk.Genst
 }
 
 pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const TickEntitiesTask = tracy.Zone.begin(.{ .src = @src(), .name = "TickEntities" });
+    const TickEntitiesTask = tracy.Zone.begin(.{ .src = @src() });
     defer TickEntitiesTask.end();
     var it = self.entitys.iterator();
     defer it.deinit(io);
@@ -260,7 +260,7 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !
 /// Adds a ref and returns a chunk, generating it if it doesn't exist and putting it in the world hashmap.
 /// Ref must be removed if not using the chunk.
 pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
-    const lc = tracy.Zone.begin(.{ .src = @src(), .name = "loadChunk" });
+    const lc = tracy.Zone.begin(.{ .src = @src() });
     defer lc.end();
     const chunk = self.chunks.getAndAddRef(io, chunk_pos);
     if (chunk == null) {
@@ -295,7 +295,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
 }
 
 pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
-    const unloadChunks = tracy.Zone.begin(.{ .src = @src(), .name = "unloadChunks" });
+    const unloadChunks = tracy.Zone.begin(.{ .src = @src() });
     defer unloadChunks.end();
     try self.block_grid_pool_mutex.lock(io);
     const grid_count = self.block_grid_count;
@@ -395,7 +395,7 @@ pub const Editor = struct {
 
     /// Applies the edits in the buffer to the world, frees any temporary allocations. Cleans up even if an error occurs.
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-        const flushh = tracy.Zone.begin(.{ .src = @src(), .name = "flush" });
+        const flushh = tracy.Zone.begin(.{ .src = @src() });
         defer flushh.end();
         defer self.clear();
         self.edit_buffer.lockPointers();
@@ -482,7 +482,7 @@ pub const Editor = struct {
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
-        const place = tracy.Zone.begin(.{ .src = @src(), .name = "PlaceSamplerShape" });
+        const place = tracy.Zone.begin(.{ .src = @src() });
         defer place.end();
         const boundingBox = shape.boundingBox;
         var y = boundingBox[2];
@@ -649,7 +649,7 @@ fn destroyChunkPtr(self: *@This(), io: std.Io, chunk: *Chunk) void {
 }
 
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
-    const deinitWorld = tracy.Zone.begin(.{ .src = @src(), .name = "deinitWorld" });
+    const deinitWorld = tracy.Zone.begin(.{ .src = @src() });
     defer deinitWorld.end();
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
