@@ -17,8 +17,8 @@
             .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen.git#6b21369ac50de8826f8af60a7edb33693b4ec7bf",
-            .hash = "zigglgen-0.5.0-zigglr_CLwBs1aABtYVtxNPo1SB8AzgKMVouoqULqkDQ",
+            .url = "git+https://github.com/castholm/zigglgen.git#7e55ad15655fc4d602ed3bcbe7fb487592063156",
+            .hash = "zigglgen-0.5.0-ziggltzDLwA0Gk0Pj6QMij1j6Z_jkvGEtGKBM6-YlI_s",
         },
         .obj = .{
             .url = "git+https://github.com/chip2n/zig-obj.git#6070356009e761a4aef82256f1f431037ae97426",
@@ -33,8 +33,8 @@
             .hash = "rocksdb-9.7.4-z_CUTiLrAAB9oK1rsqqhTkYEbhu7hjmSvrZqUGRsgW1H",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#2459d676a26c11627593aad5e9ad4cbda42e2f1e",
-            .hash = "dvui-0.5.0-dev-AQFJmT4I3wAC_MQuAnjx7tZe7iRao6cN7E7vcdOlItYa",
+            .url = "git+https://github.com/david-vanderson/dvui#df2eb8009823837f4667fc963d74fe08f5060bdf",
+            .hash = "dvui-0.5.0-dev-AQFJmSYK3wDnZjL4AjbYPJPhFLuTpzET4PsKXTi68mV9",
         },
         .wio = .{
             .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
