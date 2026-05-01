@@ -10,7 +10,6 @@ pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 pub const Entity = @import("world/Entity.zig");
 pub const World = @import("world/World.zig");
 pub const zm = @import("zm");
-pub const ztracy = @import("ztracy");
 const Ui = @import("Ui.zig");
 const Game = @import("Game.zig");
 const dvui = @import("dvui");
@@ -20,10 +19,18 @@ const wio_backend = @import("wio-backend");
 const wio = @import("wio");
 const gl = @import("gl");
 
+pub const tracy_impl = @import("tracy_impl");
+
+pub const tracy = @import("tracy");
+pub const tracy_options: tracy.Options = .{
+    .on_demand = true,
+    .verbose = false,
+};
+
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
-    var tracy_allocator = ztracy.TracyAllocator.init(init.gpa);
+    var tracy_allocator = tracy.Allocator{ .parent = init.gpa };
 
     const gpa = tracy_allocator.allocator();
     const io = init.io;
@@ -124,8 +131,8 @@ pub fn main(init: std.process.Init) !void {
             window.glMakeContextCurrent(ui_context);
         }
         {
-            const dw = ztracy.ZoneN(@src(), "draw ui");
-            defer dw.End();
+            const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+            defer dw.end();
             window.glMakeContextCurrent(ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
             var menuchanged: bool = false;
@@ -155,10 +162,10 @@ pub fn main(init: std.process.Init) !void {
             _ = try ui_window.end(.{});
         }
 
-        const sw = ztracy.ZoneN(@src(), "swap");
+        const sw = tracy.Zone.begin(.{ .src = @src(), .name = "swap" });
         window.glSwapBuffers();
-        sw.End();
-        ztracy.FrameMark();
+        sw.end();
+        tracy.frameMark(null);
     }
 }
 

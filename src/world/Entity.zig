@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const EntityTypes = @import("EntityTypes");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Renderer = @import("../Game.zig").Renderer;
 const World = @import("World.zig");
@@ -48,8 +48,8 @@ pub fn getPos(self: *@This()) ?@Vector(3, f64) {
 ///unloads the entity and frees all resorces allocated by it
 ///the entity ptr is not valid after this
 pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
-    const unloadEntity = ztracy.ZoneNC(@src(), "unloadEntity", 5657656);
-    defer unloadEntity.End();
+    const unloadEntity = tracy.Zone.begin(.{ .src = @src() });
+    defer unloadEntity.end();
     std.debug.assert(try self.waitForRefAmount(io, 1, 10 * std.time.us_per_s));
     return self.vtable.unload(self, io, world, uuid, allocator, save);
 }

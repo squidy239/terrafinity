@@ -1,6 +1,6 @@
 const std = @import("std");
 const zm = @import("zm");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Block = @import("../Block.zig").Block;
 const WorldEditor = @import("../World.zig").Editor;
@@ -67,8 +67,8 @@ pub const Tree = struct {
         const lenscale = if (self.squareEndScale) self.scale * self.scale else self.scale;
 
         while (stack.pop()) |data| {
-            const pstep = ztracy.ZoneNC(@src(), "placeStep", 678678);
-            defer pstep.End();
+            const pstep = tracy.Zone.begin(.{ .src = @src(), .name = "placeStep" });
+            defer pstep.end();
             std.debug.assert(self.steps.len > self.maxRecursionDepth);
             const step = self.steps[data.recursionDepth];
             const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);

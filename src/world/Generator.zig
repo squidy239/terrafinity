@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Cache = @import("Cache").Cache;
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
@@ -98,8 +98,8 @@ pub const DefaultGenerator = struct {
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
-        const gen = ztracy.ZoneNC(@src(), "GenChunkBlocks", 867674577);
-        defer gen.End();
+        const gen = tracy.Zone.begin(.{ .src = @src() });
+        defer gen.end();
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
             try blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
             return;
@@ -112,9 +112,9 @@ pub const DefaultGenerator = struct {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
             heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
-            const genterra = ztracy.ZoneNC(@src(), "GenTerrainBlocks", 22466);
+            const genterra = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
             generateTerrain(&blockgrid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
-            genterra.End();
+            genterra.end();
             const oneblock = Chunk.isOneBlock(&blockgrid);
             if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
         }
@@ -144,13 +144,13 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateCavesInterpolate(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: ?[ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
-        const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
-        defer caves.End();
+        const caves = tracy.Zone.begin(.{ .src = @src() });
+        defer caves.end();
         var grid: [4][4][4]f32 = undefined;
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const onedthreeVec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
         const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunkScale));
-        const caveNoise = ztracy.ZoneNC(@src(), "caveNoise", 33211);
+        const caveNoise = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });
         for (0..4) |x| {
             for (0..4) |y| {
                 for (0..4) |z| {
@@ -161,13 +161,13 @@ pub const DefaultGenerator = struct {
                 }
             }
         }
-        caveNoise.End();
+        caveNoise.end();
 
-        const inter = ztracy.ZoneNC(@src(), "Interpolate", 4221432);
-        defer inter.End();
-        const initinterp = ztracy.ZoneNC(@src(), "initinterp", 23434);
+        const inter = tracy.Zone.begin(.{ .src = @src() });
+        defer inter.end();
+        const initinterp = tracy.Zone.begin(.{ .src = @src(), .name = "initinterp" });
         var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
-        initinterp.End();
+        initinterp.end();
         const oneD32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
         comptime var zs: @Vector(ChunkSize, f32) = undefined;
         comptime for (0..ChunkSize) |i| {
@@ -194,8 +194,8 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateCavesFull(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
-        const caves = ztracy.ZoneNC(@src(), "GenCaves", 13552);
-        defer caves.End();
+        const caves = tracy.Zone.begin(.{ .src = @src() });
+        defer caves.end();
         const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunkScale));
         _ = heights;
@@ -239,8 +239,8 @@ pub const DefaultGenerator = struct {
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
-        const gth = ztracy.ZoneNC(@src(), "GetTerrainHeights", 662291);
-        defer gth.End();
+        const gth = tracy.Zone.begin(.{ .src = @src() });
+        defer gth.end();
         if (self.terrain_height_cache.get(io, .{ .pos = chunk_pos, .level = level })) |cachedHeight| return cachedHeight;
         const generatedHeights = genTerrainHeight(self.params, level, chunk_pos);
         try self.terrain_height_cache.put(io, allocator, .{ .pos = chunk_pos, .level = level }, generatedHeights);
@@ -248,8 +248,8 @@ pub const DefaultGenerator = struct {
     }
 
     fn genTerrainHeight(params: Params, level: i32, chunk_pos: [2]i32) [ChunkSize][ChunkSize]i32 {
-        const gth = ztracy.ZoneNC(@src(), "GenTerrainHeights", 662291);
-        defer gth.End();
+        const gth = tracy.Zone.begin(.{ .src = @src() });
+        defer gth.end();
         const chunkSizeGenScale = 1.0 / @as(f32, @floatCast(World.ChunkPos.toScale(level)));
         const scale = (params.terrain_scale * chunkSizeGenScale);
         const floatpos = @Vector(2, f32){ @floatFromInt(chunk_pos[0]), @floatFromInt(chunk_pos[1]) };
@@ -296,8 +296,8 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
-        const genstructures = ztracy.ZoneNC(@src(), "generate_structures", 94);
-        defer genstructures.End();
+        const genstructures = tracy.Zone.begin(.{ .src = @src() });
+        defer genstructures.end();
         var editorBuffer: [100_000]u8 = undefined;
         var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
             .buffer = &editorBuffer,

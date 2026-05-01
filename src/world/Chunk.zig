@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Block = @import("Block.zig").Block;
 
@@ -21,8 +21,8 @@ pub const Encoding = union(enum) {
     one_block: Block,
 
     pub fn merge(self: *Encoding, io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-        const m = ztracy.ZoneNC(@src(), "merge", 10);
-        defer m.End();
+        const m = tracy.Zone.begin(.{ .src = @src() });
+        defer m.end();
         if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
         switch (mergeBlocks) {
             .one_block => {
@@ -54,8 +54,8 @@ pub const Encoding = union(enum) {
                 selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
                 if (isOneBlock(self.grid)) |block| {
                     @branchHint(.unlikely);
-                    const f = ztracy.ZoneNC(@src(), "free", 4322);
-                    defer f.End();
+                    const f = tracy.Zone.begin(.{ .src = @src(), .name = "free" });
+                    defer f.end();
 
                     try pool_mutex.lock(io);
                     memory_pool.destroy(@alignCast(self.grid));
@@ -70,23 +70,25 @@ pub const Encoding = union(enum) {
 
     pub fn toBlocks(self: *Encoding, io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
         if (self.* == .grid) return;
-        const t = ztracy.ZoneNC(@src(), "toBlocks", 10);
-        defer t.End();
-        const a = ztracy.ZoneNC(@src(), "alloc", 54334);
+        const t = tracy.Zone.begin(.{ .src = @src() });
+        defer t.end();
         var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        while (true) {
-            try pool_mutex.lock(io);
-            mem = memory_pool.create(undefined) catch {
+        {
+            const a = tracy.Zone.begin(.{ .src = @src() });
+            defer a.end();
+            while (true) {
+                try pool_mutex.lock(io);
+                mem = memory_pool.create(undefined) catch {
+                    pool_mutex.unlock(io);
+                    try io.sleep(.fromMicroseconds(100), .awake);
+                    std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
+                    continue;
+                };
+                pool_count.* += 1;
                 pool_mutex.unlock(io);
-                try io.sleep(.fromMicroseconds(100), .awake);
-                std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
-                continue;
-            };
-            pool_count.* += 1;
-            pool_mutex.unlock(io);
-            break;
+                break;
+            }
         }
-        a.End();
         const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
         @memset(flatblocks, self.one_block);
         self.* = .{ .grid = mem };

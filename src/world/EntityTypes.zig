@@ -5,7 +5,7 @@ const Block = @import("Block.zig").Block;
 const Entity = @import("Entity.zig");
 const gl = @import("gl");
 const obj = @import("obj");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 const Physics = @import("Physics.zig");
 const Item = @import("Item.zig");
 const pack = "default";
@@ -192,12 +192,12 @@ pub const Explosive = struct {
     lock: std.Io.RwLock = .init,
 
     pub fn update(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool {
-        const u = ztracy.ZoneNC(@src(), "updateCube", 345433);
-        defer u.End();
+        const u = tracy.Zone.begin(.{ .src = @src(), .name = "updateCube" });
+        defer u.end();
         const self: *@This() = @ptrCast(@alignCast(entity.ptr));
-        const l = ztracy.ZoneNC(@src(), "lock", 6553);
+        var l = tracy.Zone.begin(.{ .src = @src(), .name = "lock" });
+        defer l.end();
         self.lock.lockUncancelable(io);
-        l.End();
         defer self.lock.unlock(io);
 
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
@@ -221,9 +221,9 @@ pub const Explosive = struct {
         var worldReader = World.Reader{ .world = world };
         defer worldReader.clear(io);
 
-        const g = ztracy.ZoneNC(@src(), "getblock", 56565);
+        var g = tracy.Zone.begin(.{ .src = @src() });
         if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
-            g.End();
+            g.end();
             var worldEditor = World.Editor{
                 .world = world,
                 .tempallocator = allocator,
@@ -236,7 +236,7 @@ pub const Explosive = struct {
                 else => return error.Unrecoverable,
             };
             return false;
-        } else g.End();
+        } else g.end();
         _ = uuid;
         return false;
     }

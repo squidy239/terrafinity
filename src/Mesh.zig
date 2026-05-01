@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Obj = @import("obj");
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
@@ -24,8 +24,8 @@ pub const Face = packed struct(u64) {
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn fromChunks(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer) !void {
-    const mdc = ztracy.ZoneNC(@src(), "MeshFromChunks", 222222);
-    defer mdc.End();
+    const mdc = tracy.Zone.begin(.{ .src = @src() });
+    defer mdc.end();
     if (shouldSkip(neighbor_faces, mainblocks)) return;
     inline for (0..6) |i| {
         try meshChunkFace(mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_writer, opaque_writer);
@@ -90,8 +90,8 @@ fn meshChunkFaceGrid(grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *co
 }
 
 fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
-    const ms = ztracy.ZoneN(@src(), "meshSimple");
-    defer ms.End();
+    const ms = tracy.Zone.begin(.{ .src = @src() });
+    defer ms.end();
     const grid: *const [ChunkSize][ChunkSize][ChunkSize]Block = switch (mainblocks) {
         .grid => |g| g,
         .one_block => return,
@@ -183,8 +183,8 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
 
 ///x+,x-,y+,y-,z+,z-
 fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) void {
-    const gec = ztracy.ZoneNC(@src(), "GenerateExtendedChunk", 9328);
-    defer gec.End();
+    const gec = tracy.Zone.begin(.{ .src = @src() });
+    defer gec.end();
 
     switch (mainblocks) {
         .grid => |blocks| {

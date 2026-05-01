@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Cache = @import("Cache").Cache;
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const ztracy = @import("ztracy");
+const tracy = @import("tracy");
 
 const Options = @import("../Game.zig").Options;
 pub const Block = @import("Block.zig").Block;
@@ -242,8 +242,8 @@ pub fn getGenState(self: *@This(), io: std.Io, chunk_pos: ChunkPos) ?Chunk.Genst
 }
 
 pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const TickEntitiesTask = ztracy.ZoneN(@src(), "TickEntities");
-    defer TickEntitiesTask.End();
+    const TickEntitiesTask = tracy.Zone.begin(.{ .src = @src() });
+    defer TickEntitiesTask.end();
     var it = self.entitys.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
@@ -260,8 +260,8 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !
 /// Adds a ref and returns a chunk, generating it if it doesn't exist and putting it in the world hashmap.
 /// Ref must be removed if not using the chunk.
 pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
-    const lc = ztracy.ZoneNC(@src(), "loadChunk", 222222);
-    defer lc.End();
+    const lc = tracy.Zone.begin(.{ .src = @src() });
+    defer lc.end();
     const chunk = self.chunks.getAndAddRef(io, chunk_pos);
     if (chunk == null) {
         const chunkencoding = try self.getBlocks(io, allocator, chunk_pos);
@@ -295,8 +295,8 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
 }
 
 pub fn unloadTimeout(self: *@This(), io: std.Io, max_grid_ms: u64, max_grids: u64, max_chunk_ms: u64, max_chunks: u64) !void {
-    const unloadChunks = ztracy.ZoneNC(@src(), "unloadChunks", 1125878);
-    defer unloadChunks.End();
+    const unloadChunks = tracy.Zone.begin(.{ .src = @src() });
+    defer unloadChunks.end();
     try self.block_grid_pool_mutex.lock(io);
     const grid_count = self.block_grid_count;
     self.block_grid_pool_mutex.unlock(io);
@@ -395,8 +395,8 @@ pub const Editor = struct {
 
     /// Applies the edits in the buffer to the world, frees any temporary allocations. Cleans up even if an error occurs.
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-        const flushh = ztracy.ZoneNC(@src(), "flush", 3563456);
-        defer flushh.End();
+        const flushh = tracy.Zone.begin(.{ .src = @src() });
+        defer flushh.end();
         defer self.clear();
         self.edit_buffer.lockPointers();
         defer self.edit_buffer.unlockPointers();
@@ -482,8 +482,8 @@ pub const Editor = struct {
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
-        const place = ztracy.ZoneNC(@src(), "PlaceSamplerShape", 6544564);
-        defer place.End();
+        const place = tracy.Zone.begin(.{ .src = @src() });
+        defer place.end();
         const boundingBox = shape.boundingBox;
         var y = boundingBox[2];
         while (y < boundingBox[3]) : (y += 1) {
@@ -649,8 +649,8 @@ fn destroyChunkPtr(self: *@This(), io: std.Io, chunk: *Chunk) void {
 }
 
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
-    const deinitWorld = ztracy.ZoneNC(@src(), "deinitWorld", 88124);
-    defer deinitWorld.End();
+    const deinitWorld = tracy.Zone.begin(.{ .src = @src() });
+    defer deinitWorld.end();
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
     {

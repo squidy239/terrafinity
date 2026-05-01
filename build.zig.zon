@@ -12,10 +12,6 @@
             .url = "git+https://codeberg.org/grius/zm#21b71aef4e28b91994e67b6ce002411776f4ea7e",
             .hash = "zm-0.5.1-cLX-WY_hAACaH6l57yntgfwAVbRcjdgTa0-9vHuKiMm5",
         },
-        .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
-            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
-        },
         .zigglgen = .{
             .url = "git+https://github.com/castholm/zigglgen.git#7e55ad15655fc4d602ed3bcbe7fb487592063156",
             .hash = "zigglgen-0.5.0-ziggltzDLwA0Gk0Pj6QMij1j6Z_jkvGEtGKBM6-YlI_s",
@@ -39,6 +35,10 @@
         .wio = .{
             .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
             .hash = "wio-0.0.0-8xHrrx8eBwBliteTXuvS4JKUbdquuaJabO7wMk5FZalf",
+        },
+        .tracy = .{
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BUhQAQCLinsSpkKfLYpdgnI8aVTJG3v0XLBkJE5T",
         },
     },
 
