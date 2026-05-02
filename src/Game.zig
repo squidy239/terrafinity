@@ -9,7 +9,7 @@ const tracy = @import("tracy");
 
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
-const Mesh = @import("Mesh.zig");
+const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
 const Chunk = @import("world/Chunk.zig");
 const Entity = @import("world/Entity.zig");
@@ -487,9 +487,10 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     {
         try chunk.lockShared(io);
         defer chunk.unlockShared(io);
-        try Mesh.fromChunks(
+        try Mesher.mesh(
             chunk.blocks,
             &neighbor_faces,
+            &alloc_writer.writer,
             &alloc_writer.writer,
         );
     }

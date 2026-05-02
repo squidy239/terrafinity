@@ -1,5 +1,5 @@
 const std = @import("std");
-const Mesh = @import("Mesh.zig");
+const Mesher = @import("Mesher.zig");
 const ChunkPos = @import("world/World.zig").ChunkPos;
 
 pub const OpenGl = @import("Renderer/opengl/OpenGl.zig");

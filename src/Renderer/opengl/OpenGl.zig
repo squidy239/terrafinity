@@ -7,7 +7,7 @@ const zm = @import("zm");
 const tracy = @import("tracy");
 const wio = @import("wio");
 
-const Mesh = @import("../../Mesh.zig");
+const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
 const ChunkSize = World.ChunkSize;
@@ -343,7 +343,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
 
     const draw_info = self.render_buffer.rebuild(
         io,
-        @sizeOf(Mesh.Face),
+        @sizeOf(Mesher.Face),
         cullChunkPredicate,
         .{ .frustrum = frustrum, .playerPos = playerPos },
         ChunkDrawData,

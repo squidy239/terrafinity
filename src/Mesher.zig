@@ -9,7 +9,7 @@ const ChunkSize = Chunk.ChunkSize;
 pub const FaceRotation = Chunk.Encoding.FaceRotation;
 const ChunkPos = @import("world/World.zig").ChunkPos;
 
-const Mesh = @This();
+const Mesher = @This();
 pub const Face = packed struct(u64) {
     x: u5,
     y: u5,
@@ -23,14 +23,17 @@ pub const Face = packed struct(u64) {
 };
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn fromChunks(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer) !void {
+pub fn mesh(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
     const mdc = tracy.Zone.begin(.{ .src = @src() });
     defer mdc.end();
     if (shouldSkip(neighbor_faces, mainblocks)) return;
     inline for (0..6) |i| {
         try meshChunkFace(mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_writer, opaque_writer);
     }
-    try meshSimple(mainblocks, opaque_writer);
+    switch (mainblocks) {
+        .one_block => {},// Done meshing, blocks wont make mesh if they are the same type
+        .grid => |grid| try meshBlockGrid(grid, opaque_writer, transparent_writer),
+    }
 }
 
 fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.Encoding) bool {
@@ -89,13 +92,9 @@ fn meshChunkFaceGrid(grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *co
     }
 }
 
-fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
+fn meshBlockGrid(grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
     const ms = tracy.Zone.begin(.{ .src = @src() });
     defer ms.end();
-    const grid: *const [ChunkSize][ChunkSize][ChunkSize]Block = switch (mainblocks) {
-        .grid => |g| g,
-        .one_block => return,
-    };
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
@@ -129,7 +128,11 @@ fn meshSimple(mainblocks: Chunk.Encoding, opaque_writer: *std.Io.Writer) !void {
                                 .y = @intCast(y),
                                 .z = @intCast(z),
                             };
-                            try opaque_writer.writeAll(std.mem.asBytes(&face_data));
+                            switch (face) {
+                                .none => unreachable,
+                                .transparent => try transparent_writer.writeAll(std.mem.asBytes(&face_data)),
+                                .@"opaque" => try opaque_writer.writeAll(std.mem.asBytes(&face_data)),
+                            }
                         }
                     }
                 }
@@ -161,7 +164,7 @@ test "MeshBenchmark" {
     const test_amount = 100; // reduced from 100000
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
-        try fromChunks(.{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &writer.writer);
+        try mesh(.{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &writer.writer, &writer.writer);
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
@@ -178,7 +181,7 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
     const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
     var writer = std.Io.Writer.Discarding.init(&.{});
-    try Mesh.fromChunks(mainblocks, &neighbor_faces, &writer.writer);
+    try Mesher.mesh(mainblocks, &neighbor_faces, &writer.writer, &writer.writer);
 }
 
 ///x+,x-,y+,y-,z+,z-
