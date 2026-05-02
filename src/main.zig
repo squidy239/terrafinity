@@ -121,9 +121,12 @@ pub fn main(init: std.process.Init) !void {
     defer if (ui.menu_state.ingame) game.deinit(io);
     var frame_time: std.Io.Timestamp = .now(io, .awake);
     var action_set = Key.ActionSet.empty;
+    var event_buffer: [1024]wio.Event = undefined;
+    var event_queue: std.Io.Queue(wio.Event) = .init(&event_buffer);
+    var f = try io.concurrent(updater, .{ io, &window, &event_queue });
+    defer f.cancel(io) catch {};
     while (running.load(.unordered)) {
-        wio.update();
-        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake), &event_queue);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
@@ -166,6 +169,16 @@ pub fn main(init: std.process.Init) !void {
         window.glSwapBuffers();
         sw.end();
         tracy.frameMark(null);
+    }
+}
+
+fn updater(io: std.Io, window: *wio.Window, event_queue: *std.Io.Queue(wio.Event)) !void {
+    while (true) {
+        try io.checkCancel();
+        wio.wait(.{ .timeout_ns = std.time.ns_per_ms * 10 });
+        while (window.getEvent()) |event| {
+            try event_queue.putOne(io, event);
+        }
     }
 }
 
@@ -224,6 +237,7 @@ fn handleEvents(
     ui_window: *dvui.Window,
     ui: *Ui,
     dt: std.Io.Duration,
+    event_queue: *std.Io.Queue(wio.Event),
 ) !void {
     ui_backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.playingGame()) {
@@ -238,31 +252,36 @@ fn handleEvents(
     while (it.next()) |action| {
         if (singlepress.contains(action)) action_set.remove(action);
     }
-    while (win.getEvent()) |event| {
-        _ = try ui_backend.addEvent(ui_window, event);
-        switch (event) {
-            .button_press => |key| {
-                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
-                action_set.insert(action);
-            },
-            .button_release => |key| {
-                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
-                action_set.remove(action);
-            },
-            .close => {
-                running.store(false, .unordered);
-            },
-            .scroll_vertical => |scroll| {
-                if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
-            },
-            .mouse_relative => |mouse| {
-                const mouse_moved = (mouse.x != 0 or mouse.y != 0);
-                if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(mouse, ui.game.getMouseSensitivity(io));
-            },
-            .size_physical => |size| {
-                window_size = size;
-            },
-            else => {},
+    {
+        while (true) {
+            var event: [1]wio.Event = undefined;
+            const got = try event_queue.get(io, &event, 0);
+            if (got == 0) break;
+            _ = try ui_backend.addEvent(ui_window, event[0]);
+            switch (event[0]) {
+                .button_press => |key| {
+                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                    action_set.insert(action);
+                },
+                .button_release => |key| {
+                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                    action_set.remove(action);
+                },
+                .close => {
+                    running.store(false, .unordered);
+                },
+                .scroll_vertical => |scroll| {
+                    if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
+                },
+                .mouse_relative => |mouse| {
+                    const mouse_moved = (mouse.x != 0 or mouse.y != 0);
+                    if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(mouse, ui.game.getMouseSensitivity(io));
+                },
+                .size_physical => |size| {
+                    window_size = size;
+                },
+                else => {},
+            }
         }
     }
     if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
