@@ -31,7 +31,7 @@ pub fn mesh(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding
         try meshChunkFace(mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_writer, opaque_writer);
     }
     switch (mainblocks) {
-        .one_block => {},// Done meshing, blocks wont make mesh if they are the same type
+        .one_block => {}, // Done meshing, blocks wont make mesh if they are the same type
         .grid => |grid| try meshBlockGrid(grid, opaque_writer, transparent_writer),
     }
 }

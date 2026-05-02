@@ -1,12 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
-const zm = @import("zm");
 const tracy = @import("tracy");
 const wio = @import("wio");
+const zm = @import("zm");
 
+const setCallback = @import("../../main.zig").setCallback;
 const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
@@ -14,8 +16,6 @@ const ChunkSize = World.ChunkSize;
 const ChunkPos = World.ChunkPos;
 const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
-const builtin = @import("builtin");
-const setCallback = @import("../../main.zig").setCallback;
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 const OpenGlRenderer = @This();
@@ -39,6 +39,10 @@ proc_table: *const gl.ProcTable,
 draw_context: wio.GlContext,
 gl_options: wio.GlOptions,
 
+fbo: c_uint,
+color_texture: c_uint,
+depth_texture: c_uint,
+
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context.*);
@@ -59,6 +63,9 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
         .contexts = try .initCapacity(allocator, cpu_count),
+        .fbo = undefined,
+        .color_texture = undefined,
+        .depth_texture = undefined,
         .interface = .{
             .userdata = @ptrCast(self),
             .vtable = &.{
@@ -104,7 +111,9 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     gl.EnableVertexAttribArray(0);
     gl.BindVertexArray(0);
 
-    gl.Viewport(0, 0, @intFromFloat(@as(f32, @floatFromInt(800))), @intFromFloat(@as(f32, @floatFromInt(600))));
+    self.viewport_pixels = .{ 800, 600 };
+    gl.Viewport(0, 0, 800, 600);
+    self.setupFbo(800, 600);
 
     gl.Enable(gl.MULTISAMPLE);
     gl.Enable(gl.DEPTH_TEST);
@@ -126,6 +135,10 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     gl.DeleteBuffers(1, @ptrCast(&self.indecies));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
 
+    gl.DeleteFramebuffers(1, @ptrCast(&self.fbo));
+    gl.DeleteTextures(1, @ptrCast(&self.color_texture));
+    gl.DeleteTextures(1, @ptrCast(&self.depth_texture));
+
     gl.DeleteProgram(self.shaderprogram);
     gl.DeleteProgram(self.entityshaderprogram);
 
@@ -138,6 +151,25 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.contexts.deinit(self.allocator);
     self.draw_context.destroy();
     std.log.info("renderer deinit", .{});
+}
+
+fn setupFbo(self: *OpenGlRenderer, width: u32, height: u32) void {
+    gl.CreateFramebuffers(1, @ptrCast(&self.fbo));
+    const samples = @max(1, self.gl_options.samples);
+
+    gl.CreateTextures(gl.TEXTURE_2D_MULTISAMPLE, 1, @ptrCast(&self.color_texture));
+    gl.TextureStorage2DMultisample(self.color_texture, @intCast(samples), gl.RGBA8, @intCast(width), @intCast(height), gl.TRUE);
+
+    gl.CreateTextures(gl.TEXTURE_2D_MULTISAMPLE, 1, @ptrCast(&self.depth_texture));
+    gl.TextureStorage2DMultisample(self.depth_texture, @intCast(samples), gl.DEPTH_COMPONENT32F, @intCast(width), @intCast(height), gl.TRUE);
+
+    gl.NamedFramebufferTexture(self.fbo, gl.COLOR_ATTACHMENT0, self.color_texture, 0);
+    gl.NamedFramebufferTexture(self.fbo, gl.DEPTH_ATTACHMENT, self.depth_texture, 0);
+
+    const status = gl.CheckNamedFramebufferStatus(self.fbo, gl.FRAMEBUFFER);
+    if (status != gl.FRAMEBUFFER_COMPLETE) {
+        std.log.err("Framebuffer incomplete: {X}", .{status});
+    }
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
@@ -194,13 +226,31 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
+    gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
+
+    gl.BlitNamedFramebuffer(
+        self.fbo,
+        0,
+        0,
+        0,
+        @intCast(self.viewport_pixels[0]),
+        @intCast(self.viewport_pixels[1]),
+        0,
+        0,
+        @intCast(self.viewport_pixels[0]),
+        @intCast(self.viewport_pixels[1]),
+        gl.COLOR_BUFFER_BIT,
+        gl.NEAREST,
+    );
+    gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
+    gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
     const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
@@ -217,6 +267,7 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
+    self.setupFbo(viewport_pixels[0], viewport_pixels[1]);
     self.viewport_pixels = viewport_pixels;
 }
 
