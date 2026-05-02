@@ -176,6 +176,15 @@ pub const ChunkSource = struct {
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
 fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.Encoding {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
+    errdefer switch (encoding) {
+        .one_block => {},
+        .grid => |grid| {
+            self.block_grid_pool_mutex.lockUncancelable(io);
+            self.block_grid_pool.destroy(@alignCast(grid));
+            self.block_grid_count -= 1;
+            self.block_grid_pool_mutex.unlock(io);
+        },
+    };
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
@@ -277,9 +286,9 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         const chunkencoding = try self.getBlocks(io, allocator, chunk_pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
         _ = chunkptr.add_ref(io);
+        errdefer chunkptr.release(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.chunks.putNoOverrideAddRef(io, allocator, chunk_pos, chunkptr) catch |err| {
-            chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             self.destroyChunkPtr(io, chunkptr);
             return err;
@@ -296,6 +305,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         }
         return chunkptr;
     } else {
+        errdefer chunk.?.release(io);
         if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
             try onLoad(self, io, allocator, chunk.?, chunk_pos);
             chunk.?.genstate.store(.StructuresGenerated, .seq_cst);
@@ -646,7 +656,7 @@ fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block
 
 pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
     const chunk = self.chunks.fetchRemove(io, chunk_pos) orelse return;
-    try self.unloadChunkByPtr(io, chunk, chunk_pos);
+    try self.unloadChunkByPtr(io, chunk, chunk_pos, true);
 }
 
 /// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded.
@@ -659,7 +669,7 @@ pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
 
     const newchunk = bkt.fetchRemove(io, chunk_pos);
     if (newchunk) |ch| {
-        try self.unloadChunkByPtr(io, ch, chunk_pos);
+        try self.unloadChunkByPtr(io, ch, chunk_pos, true);
         return true;
     }
 
@@ -672,8 +682,9 @@ pub fn unloadChunkNoSave(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
 }
 
 /// Does not remove chunk from hashmap, just frees it.
-pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool) !void {
     _ = try chunk.waitForRefAmount(io, 1, null);
+    errdefer if (delete_on_error) self.unloadChunkByPtrNoSave(io, chunk);
     try onUnload(self, io, chunk, chunk_pos);
     self.unloadChunkByPtrNoSave(io, chunk);
 }
@@ -703,7 +714,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
         var it = self.chunks.iterator();
         defer it.deinit(io);
         while (it.next(io) catch unreachable) |c| {
-            self.unloadChunkByPtr(io, c.value_ptr.*, c.key_ptr.*) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
+            self.unloadChunkByPtr(io, c.value_ptr.*, c.key_ptr.*, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
         }
     }
     std.log.info("chunks unloaded", .{});

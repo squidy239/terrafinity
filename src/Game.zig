@@ -229,10 +229,7 @@ pub fn init(
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
-        game.world_storage = try .init(storage_path, .{
-            .create_if_missing = true,
-            .compression = .zstd,
-        }, game.allocator);
+        game.world_storage = try .init(storage_path, game.allocator);
     }
 
     game.options_lock.lockSharedUncancelable(io);

@@ -25,18 +25,20 @@ pub fn getSource(self: *@This()) World.ChunkSource {
 }
 
 ////opens the database, creates it if it doesnt exist
-pub fn init(path: []const u8, config: rocksdb.DBOptions, allocator: std.mem.Allocator) !@This() {
+pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
     var storage: @This() = undefined;
     storage.isinit = true;
-    storage.options = config;
+    storage.options = .{
+        .create_if_missing = true,
+        .compression = .zstd,
+    };
     var err_str: ?rocksdb.Data = null;
     defer if (err_str) |s| {
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
     const column_families: [1]rocksdb.ColumnFamilyDescription = .{.{ .name = "default", .options = .{ .compression = .zstd } }};
-    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, config, &column_families, false, &err_str);
-
+    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
     errdefer storage.database.deinit();
     errdefer allocator.free(storage.column_families);
 

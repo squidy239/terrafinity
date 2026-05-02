@@ -201,11 +201,9 @@ pub fn merge(self: *@This(), io: std.Io, mergeBlocks: Encoding, memory_pool: any
 }
 
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
+    defer if (removeRef) self.release(io);
     try self.addAndLockShared(io);
-    defer {
-        if (removeRef) self.release(io);
-        self.releaseAndUnlockShared(io);
-    }
+    defer self.releaseAndUnlockShared(io);
     return self.blocks.extractFace(rotation);
 }
 
