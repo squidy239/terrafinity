@@ -23,16 +23,16 @@ pub const Face = packed struct(u64) {
 };
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn mesh(mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
     const mdc = tracy.Zone.begin(.{ .src = @src() });
     defer mdc.end();
     if (shouldSkip(neighbor_faces, mainblocks)) return;
     inline for (0..6) |i| {
-        try meshChunkFace(mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_writer, opaque_writer);
+        try meshChunkFace(allocator, mainblocks.extractFace(@enumFromInt(i)), neighbor_faces[i], @enumFromInt(i), opaque_faces, transparent_faces);
     }
     switch (mainblocks) {
         .one_block => {}, // Done meshing, blocks wont make mesh if they are the same type
-        .grid => |grid| try meshBlockGrid(grid, opaque_writer, transparent_writer),
+        .grid => |grid| try meshBlockGrid(allocator, grid, opaque_faces, transparent_faces),
     }
 }
 
@@ -44,7 +44,7 @@ fn shouldSkip(neighbor_faces: *const [6]Chunk.Encoding.Face, mainblocks: Chunk.E
     return true;
 }
 
-fn meshChunkFace(one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+fn meshChunkFace(allocator: std.mem.Allocator, one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
     const grid_one: [ChunkSize][ChunkSize]Block = switch (one) {
         .blocks => |grid| grid,
         .one_block => |block| @splat(@splat(block)),
@@ -53,46 +53,52 @@ fn meshChunkFace(one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime ro
         .blocks => |grid| grid,
         .one_block => |block| @splat(@splat(block)),
     };
-    try meshChunkFaceGrid(&grid_one, &grid_two, rotation, opaque_writer, transparent_writer);
+    try meshChunkFaceGrid(allocator, &grid_one, &grid_two, rotation, opaque_faces, transparent_faces);
 }
 
-fn meshChunkFaceGrid(grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *const [ChunkSize][ChunkSize]Block, comptime rotation: Chunk.Encoding.FaceRotation, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *const [ChunkSize][ChunkSize]Block, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
     for (grid_one, grid_two, 0..) |row_one, row_two, i| {
         for (row_one, row_two, 0..) |one, two, j| {
             const result = meshOne(one, two);
-            if (result == .none) continue;
-            const face: Face = .{
-                .x = @intCast(switch (comptime rotation) {
-                    .xminus => 0,
-                    .xplus => ChunkSize - 1,
-                    .yminus, .yplus => i,
-                    .zminus, .zplus => i,
-                }),
-                .y = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => i,
-                    .yminus => 0,
-                    .yplus => ChunkSize - 1,
-                    .zminus, .zplus => j,
-                }),
-                .z = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => j,
-                    .yminus, .yplus => j,
-                    .zminus => 0,
-                    .zplus => ChunkSize - 1,
-                }),
-                .rot = comptime rotation,
-                .isGreedy = false,
-                .height = 1,
-                .width = 1,
-                .BlockType = one,
-            };
-            if (result == .transparent) try transparent_writer.writeAll(std.mem.asBytes(&face));
-            if (result == .@"opaque") try opaque_writer.writeAll(std.mem.asBytes(&face));
+            if (result) |transparent| {
+                const face: Face = .{
+                    .x = @intCast(switch (comptime rotation) {
+                        .xminus => 0,
+                        .xplus => ChunkSize - 1,
+                        .yminus, .yplus => i,
+                        .zminus, .zplus => i,
+                    }),
+                    .y = @intCast(switch (comptime rotation) {
+                        .xminus, .xplus => i,
+                        .yminus => 0,
+                        .yplus => ChunkSize - 1,
+                        .zminus, .zplus => j,
+                    }),
+                    .z = @intCast(switch (comptime rotation) {
+                        .xminus, .xplus => j,
+                        .yminus, .yplus => j,
+                        .zminus => 0,
+                        .zplus => ChunkSize - 1,
+                    }),
+                    .rot = comptime rotation,
+                    .isGreedy = false,
+                    .height = 1,
+                    .width = 1,
+                    .BlockType = one,
+                };
+                if (transparent) {
+                    std.debug.assert(one.isTransparent());
+                    try transparent_faces.append(allocator, face);
+                } else {
+                    std.debug.assert(!one.isTransparent());
+                    try opaque_faces.append(allocator, face);
+                }
+            }
         }
     }
 }
 
-fn meshBlockGrid(grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_writer: *std.Io.Writer, transparent_writer: *std.Io.Writer) !void {
+fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
     const ms = tracy.Zone.begin(.{ .src = @src() });
     defer ms.end();
     for (0..ChunkSize) |x| {
@@ -119,19 +125,21 @@ fn meshBlockGrid(grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_wri
                             5 => grid[x][y][z - 1],
                             else => unreachable,
                         };
-                        const face = meshOne(block, neighbor);
-                        if (face != .none) {
-                            const face_data = Face{
+                        const result = meshOne(block, neighbor);
+                        if (result) |transparent| {
+                            const face = Face{
                                 .BlockType = block,
                                 .rot = @enumFromInt(i),
                                 .x = @intCast(x),
                                 .y = @intCast(y),
                                 .z = @intCast(z),
                             };
-                            switch (face) {
-                                .none => unreachable,
-                                .transparent => try transparent_writer.writeAll(std.mem.asBytes(&face_data)),
-                                .@"opaque" => try opaque_writer.writeAll(std.mem.asBytes(&face_data)),
+                            if (transparent) {
+                                std.debug.assert(block.isTransparent());
+                                try transparent_faces.append(allocator, face);
+                            } else {
+                                std.debug.assert(!block.isTransparent());
+                                try opaque_faces.append(allocator, face);
                             }
                         }
                     }
@@ -141,9 +149,10 @@ fn meshBlockGrid(grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_wri
     }
 }
 
-fn meshOne(one: Block, two: Block) enum { none, transparent, @"opaque" } {
-    if (one == two or !one.isVisible() or !two.isTransparent()) return .none;
-    return if (one.isTransparent()) .transparent else .@"opaque";
+///returns false if the face is opaque, true if transparent, null if it should not be meshed
+fn meshOne(one: Block, two: Block) ?bool {
+    if (one == two or !one.isVisible() or !two.isTransparent()) return null;
+    return if (one.isTransparent()) true else false;
 }
 
 test "MeshBenchmark" {

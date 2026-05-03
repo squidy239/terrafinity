@@ -482,21 +482,24 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     };
 
     var sfa = std.heap.stackFallback(65536, self.allocator);
-    var alloc_writer: std.Io.Writer.Allocating = .init(sfa.get());
-    defer alloc_writer.deinit();
+    const fallback_allocator = sfa.get();
+    var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
+    defer opaque_faces.deinit(fallback_allocator);
+    var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
+    defer transparent_faces.deinit(fallback_allocator);
     {
         try chunk.lockShared(io);
         defer chunk.unlockShared(io);
         try Mesher.mesh(
+            fallback_allocator,
             chunk.blocks,
             &neighbor_faces,
-            &alloc_writer.writer,
-            &alloc_writer.writer,
+            &opaque_faces,
+            &transparent_faces,
         );
     }
-    const written = alloc_writer.written();
-    if (written.len == 0) return;
-    try self.renderer.addChunk(io, chunk_pos, written);
+    if (opaque_faces.items.len == 0 and transparent_faces.items.len == 0) return;
+    try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
 }
 
 pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {

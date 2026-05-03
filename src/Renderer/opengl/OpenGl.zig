@@ -19,6 +19,19 @@ const Textures = @import("textures.zig");
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 const OpenGlRenderer = @This();
+
+const RenderBufferKey = union(enum) {
+    @"opaque": ChunkPos,
+    transparent: ChunkPos,
+
+    pub fn toPos(self: RenderBufferKey) ChunkPos {
+        return switch (self) {
+            .@"opaque" => |pos| pos,
+            .transparent => |pos| pos,
+        };
+    }
+};
+
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
 indecies: c_uint,
@@ -28,7 +41,7 @@ blockAtlasTextureId: c_uint,
 vao: c_uint,
 uniforms: UniformLocations,
 cameraFront: @Vector(3, f32),
-render_buffer: MultiRenderBuffer(ChunkPos),
+render_buffer: MultiRenderBuffer(RenderBufferKey),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
 window: *wio.Window,
@@ -53,7 +66,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .indecies = undefined,
         .shaderprogram = undefined,
         .proc_table = proc_table,
-        .render_buffer = .{ .allocator = allocator, .map = .init },
+        .render_buffer = .{ .allocator = allocator },
         .entityshaderprogram = undefined,
         .cameraFront = undefined,
         .vao = undefined,
@@ -189,17 +202,26 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     return self.cameraFront;
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, data: []const u8) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
-    self.render_buffer.put(io, chunk_pos, data) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.OutOfVideoMemory,
-    };
+    if (opaque_mesh.len > 0) {
+        self.render_buffer.put(io, .{ .@"opaque" = chunk_pos }, std.mem.sliceAsBytes(opaque_mesh)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OutOfVideoMemory,
+        };
+    }
+    if (transparent_mesh.len > 0) {
+        self.render_buffer.put(io, .{ .transparent = chunk_pos }, std.mem.sliceAsBytes(transparent_mesh)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OutOfVideoMemory,
+        };
+    }
 }
 
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    self.render_buffer.remove(io, chunk_pos);
+    self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
+    self.render_buffer.remove(io, .{ .transparent = chunk_pos });
 }
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
@@ -209,7 +231,7 @@ fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void
 
 fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) bool {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.render_buffer.map.contains(io, chunk_pos);
+    return self.render_buffer.map.contains(io, .{ .@"opaque" = chunk_pos }) or self.render_buffer.map.contains(io, .{ .transparent = chunk_pos });
 }
 
 threadlocal var thread_index: ?usize = null;
@@ -277,7 +299,7 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         it.pause(io);
-        callback(callback_userdata, entry.key_ptr.*);
+        callback(callback_userdata, entry.key_ptr.*.toPos());
         try it.unpause(io);
     }
 }
@@ -423,11 +445,11 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const ff = tracy.Zone.begin(.{ .src = @src() });
     defer ff.end();
     gl.Finish(); //TODO better syncronization
-
-    //std.log.info("drawing {d}/{d} chunks and {d} faces  ", .{ draw_info.drawn, draw_info.total, draw_info.faces });
 }
 
-fn getChunkData(userdata: anytype, chunkpos: ChunkPos) ChunkDrawData {
+fn getChunkData(userdata: anytype, key: RenderBufferKey) ChunkDrawData {
+    const chunkpos = key.toPos();
+
     const playerpos: @Vector(3, f64) = userdata.playerpos;
     const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
     const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
@@ -439,8 +461,8 @@ fn getChunkData(userdata: anytype, chunkpos: ChunkPos) ChunkDrawData {
     };
 }
 
-fn cullChunkPredicate(userdata: anytype, chunkpos: ChunkPos) bool {
-    return cullChunk(&userdata.frustrum, chunkpos, userdata.playerPos);
+fn cullChunkPredicate(userdata: anytype, chunkpos: RenderBufferKey) bool {
+    return cullChunk(&userdata.frustrum, chunkpos.toPos(), userdata.playerPos);
 }
 
 fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
@@ -623,7 +645,7 @@ fn MultiRenderBuffer(comptime K: type) type {
 
         free_list: std.DoublyLinkedList = .{},
 
-        map: Map,
+        map: Map = .init,
         lock: std.Io.Mutex = .init,
 
         const Space = struct {
