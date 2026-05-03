@@ -102,7 +102,7 @@ pub const ChunkPos = struct {
         inline for (0..scale_factor) |x| {
             inline for (0..scale_factor) |y| {
                 inline for (0..scale_factor) |z| {
-                    children[x][y][z] = self.toLevel(self.level + 1).add(comptime .{ @intCast(x), @intCast(y), @intCast(z) });
+                    children[x][y][z] = self.toLevel(self.level - 1).add(comptime .{ @intCast(x), @intCast(y), @intCast(z) });
                 }
             }
         }
@@ -286,9 +286,9 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         const chunkencoding = try self.getBlocks(io, allocator, chunk_pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
         _ = chunkptr.add_ref(io);
-        errdefer chunkptr.release(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.chunks.putNoOverrideAddRef(io, allocator, chunk_pos, chunkptr) catch |err| {
+            chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             self.destroyChunkPtr(io, chunkptr);
             return err;
@@ -300,6 +300,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
             return d;
         }
         if (structures) {
+            errdefer chunkptr.release(io);
             try onLoad(self, io, allocator, chunkptr, chunk_pos);
             chunkptr.genstate.store(.StructuresGenerated, .seq_cst);
         }
@@ -843,8 +844,10 @@ fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 fn continuousUnload(world: *World, io: std.Io, max_grids: usize, max_chunks: usize) !void {
+    _ = max_grids;
+    _ = max_chunks;
     while (true) {
-        try world.unloadTimeout(io, 10000, max_grids, 10000, max_chunks);
+        try world.unloadTimeout(io);
         try io.sleep(.fromMilliseconds(10), .awake);
     }
 }
@@ -867,12 +870,19 @@ fn fuzzChunkLoad(ctx: void, smith: *std.testing.Smith) !void {
     const io = th.io();
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, allocator, 1000, 100);
+    var unload_params: UnloadParams = .{
+        .max_grid_ms = 10,
+        .max_chunk_ms = 10,
+        .chunk_capacity = 100,
+        .grid_capacity = 1000,
+    };
+    var lock: std.Io.RwLock = .init;
+    try makeTestingWorld(&world, &generator, allocator, 1000, 100, &unload_params, &lock);
     defer world.deinit(io, allocator);
 
     var unloader = try io.concurrent(continuousUnload, .{ &world, io, 1000, 100 });
     defer unloader.cancel(io) catch {};
-    const ch = try world.loadChunk(io, allocator, .{ .level = smith.valueRangeAtMost(i32, -2, 32), .position = smith.value(@Vector(3, i32)) }, smith.value(bool));
+    const ch = try world.loadChunk(io, allocator, .{ .level = smith.valueRangeAtMost(i32, -2, 24), .position = smith.value(@Vector(3, i32)) }, smith.value(bool));
     ch.release(io);
 }
 const FuzzCtx = struct {

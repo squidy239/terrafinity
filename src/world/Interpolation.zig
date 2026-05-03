@@ -75,9 +75,9 @@ pub const NaturalCubicInterpolator3D = struct {
 
     pub fn sample(interp: *const Self, x: f32, y: f32, z: f32) f32 {
         // Step 1: X interpolation
-        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimd(f32, 16, &interp.tvgrid, &interp.coeffs_x_vectorized, x));
+        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimd(f32, 16, @bitCast(interp.tvgrid), interp.coeffs_x_vectorized, x));
         // Step 2: Y interpolation
-        const yresult = splineEvalSimd(f32, 4, xresult, &interp.coeffs_y_vectorized, y);
+        const yresult = splineEvalSimd(f32, 4, xresult, interp.coeffs_y_vectorized, y);
         // Step 3: Z interpolation
         return splineEval(f32, yresult, interp.coeffs_z_vectorized, z);
     }
@@ -157,6 +157,23 @@ pub const NaturalCubicInterpolator3D = struct {
         const localT_v: @Vector(len, T) = comptime @splat(localT);
         const a_v: @Vector(len, T) = comptime @splat(1.0 - localT);
         const h2_6_v: @Vector(len, T) = comptime @splat(2 / 6);
-        return a_v * values[i] + localT_v * values[i + 1] + ((comptime (a_v * a_v * a_v - a_v)) * m[i] + (comptime (localT_v * localT_v * localT_v - localT_v)) * m[i + 1]) * h2_6_v;
+        return a_v * values[i] + localT_v * values[i + 1] + ((comptime (a_v * a_v * a_v - a_v)) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
     }
-};
+    };
+
+    test "Interpolation Fuzz" {
+        try std.testing.fuzz({}, testInterpolation, .{});
+    }
+
+    fn testInterpolation(_: void, smith: *std.testing.Smith) !void {
+        const grid = smith.value([4][4][4]f32);
+        const interp = NaturalCubicInterpolator3D.init(grid);
+
+        const x = @abs(smith.value(f32));
+        const y = @abs(smith.value(f32));
+        const z = @abs(smith.value(f32));
+
+        const val = interp.sample(x - @floor(x), y - @floor(y), z - @floor(z));
+        // basic sanity check: result should not be NaN or Inf if input isn't
+        if (!std.math.isFinite(val)) return error.TestFailed;
+    }

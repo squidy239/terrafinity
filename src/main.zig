@@ -241,9 +241,9 @@ fn handleEvents(
 ) !void {
     ui_backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.playingGame()) {
-        win.setCursorMode(.relative);
+        win.enableRelativeMouse();
     } else {
-        win.setCursorMode(.normal);
+        win.disableRelativeMouse();
         ui_backend.setCursor(ui_window.cursorRequested());
     }
 

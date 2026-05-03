@@ -29,12 +29,12 @@
             .hash = "rocksdb-9.7.4-z_CUTiLrAAB9oK1rsqqhTkYEbhu7hjmSvrZqUGRsgW1H",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#df2eb8009823837f4667fc963d74fe08f5060bdf",
-            .hash = "dvui-0.5.0-dev-AQFJmSYK3wDnZjL4AjbYPJPhFLuTpzET4PsKXTi68mV9",
+            .url = "git+https://github.com/david-vanderson/dvui#ca1511854c43a99cb8e2e22d28030050524a2f7c",
+            .hash = "dvui-0.5.0-dev-AQFJmSoN3wDGSqN3wpLhqOyXAgJvtFSY-90QNLpyKLtN",
         },
         .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#92a7a2eb0cc7a82b62bd3ca699c79ff50a9a5873",
-            .hash = "wio-0.0.0-8xHrrx8eBwBliteTXuvS4JKUbdquuaJabO7wMk5FZalf",
+            .url = "https://github.com/ypsvlq/wio/archive/a182eaa77077270fc780667296d9258df994a8bc.tar.gz",
+            .hash = "wio-0.0.0-8xHrr-1JBwAsNpE9xSRToIPsyCqsnhtpeeydBE8ukWP_",
         },
         .tracy = .{
             .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
