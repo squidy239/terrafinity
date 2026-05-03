@@ -414,17 +414,22 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
     const frustrum = Frustum.extractFrustumPlanes(projview);
 
-    const draw_info = self.render_buffer.rebuild(
+    try drawChunksReal(self, io, playerPos, frustrum, false);
+    try drawChunksReal(self, io, playerPos, frustrum, true);
+}
+
+fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustrum: Frustum, is_transparent: bool) !void{
+    const opaque_draw_info = self.render_buffer.rebuild(
         io,
         @sizeOf(Mesher.Face),
         cullChunkPredicate,
-        .{ .frustrum = frustrum, .playerPos = playerPos },
+        .{ .frustrum = frustrum, .playerPos = playerPos, .is_transparent = is_transparent },
         ChunkDrawData,
         getChunkData,
         .{ .playerpos = playerPos },
     ) catch return error.DrawFailed;
 
-    if (draw_info.drawn == 0) return;
+    if (opaque_draw_info.drawn == 0) return;
     self.render_buffer.buffer.resize_lock.lockSharedUncancelable(io);
     defer self.render_buffer.buffer.resize_lock.unlockShared(io);
     self.render_buffer.ssbo.resize_lock.lockSharedUncancelable(io);
@@ -441,7 +446,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
-    gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(draw_info.drawn), 0);
+    gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(opaque_draw_info.drawn), 0);
     const ff = tracy.Zone.begin(.{ .src = @src() });
     defer ff.end();
     gl.Finish(); //TODO better syncronization
@@ -462,6 +467,8 @@ fn getChunkData(userdata: anytype, key: RenderBufferKey) ChunkDrawData {
 }
 
 fn cullChunkPredicate(userdata: anytype, chunkpos: RenderBufferKey) bool {
+    const is_transparent = chunkpos == .transparent;
+    if (userdata.is_transparent != is_transparent) return true;
     return cullChunk(&userdata.frustrum, chunkpos.toPos(), userdata.playerPos);
 }
 
