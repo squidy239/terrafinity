@@ -543,9 +543,10 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     var it = self.loaded_or_meshed.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
-        if (!self.keepChunkLoaded(io, entry.key_ptr.*)) {
+        const key = entry.key_ptr.*;
+        if (!self.keepChunkLoaded(io, key)) {
             it.pause(io);
-            _ = self.loaded_or_meshed.remove(io, entry.key_ptr.*);
+            _ = self.loaded_or_meshed.remove(io, key);
             try it.unpause(io);
         }
     }

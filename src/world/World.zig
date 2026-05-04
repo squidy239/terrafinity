@@ -353,8 +353,6 @@ pub fn unloadTimeout(self: *@This(), io: std.Io) !void {
 
     var buffer: [self.chunks.buckets.len]std.Io.Future(@typeInfo(@TypeOf(unloadTimeoutBucket)).@"fn".return_type.?) = undefined;
     var futures: std.ArrayList(std.Io.Future(@typeInfo(@TypeOf(unloadTimeoutBucket)).@"fn".return_type.?)) = .initBuffer(&buffer);
-    var it = self.chunks.iterator();
-    defer it.deinit(io);
     for (0..self.chunks.buckets.len) |bucket_index| {
         const future = io.async(unloadTimeoutBucket, .{ self, bucket_index, io, chunk_timeout, grid_timeout });
         futures.appendBounded(future) catch unreachable;
@@ -374,6 +372,8 @@ fn unloadTimeoutBucket(self: *World, bucket_index: usize, io: std.Io, chunk_time
     const currenttime = std.Io.Timestamp.now(io, .awake);
     while (it.next()) |c| {
         const chunk = c.value_ptr.*;
+        const chunk_pos = c.key_ptr.*;
+        
         const lastaccess = chunk.last_access.load(.unordered);
 
         try chunk.lock.lockShared(io);
@@ -386,7 +386,7 @@ fn unloadTimeoutBucket(self: *World, bucket_index: usize, io: std.Io, chunk_time
         };
         if (currenttime.nanoseconds - lastaccess < timeout) continue;
         bucket.lock.unlockShared(io);
-        _ = try self.tryUnloadChunk(io, c.key_ptr.*);
+        _ = try self.tryUnloadChunk(io, chunk_pos, bucket);
         bucket.lock.lockSharedUncancelable(io);
     }
 }
@@ -660,21 +660,26 @@ pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
     try self.unloadChunkByPtr(io, chunk, chunk_pos, true);
 }
 
-/// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded.
-pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !bool {
+/// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded or not in map.
+pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, bucket: *@TypeOf(self.chunks).Bkt) !bool {
     const bkt = self.chunks.getBucket(chunk_pos);
-    const chunk = bkt.get(io, chunk_pos) orelse return false;
-    if (chunk.ref_count.load(.seq_cst) != 1) {
-        return false;
-    }
-
-    const newchunk = bkt.fetchRemove(io, chunk_pos);
+    std.debug.assert(bkt == bucket);
+    try bucket.lock.lock(io);
+    const newchunk = bucket.hash_map.get(chunk_pos);
     if (newchunk) |ch| {
+        if (ch.ref_count.load(.seq_cst) != 1) {
+            bucket.lock.unlock(io);
+            return false;
+        }
+        std.debug.assert(bucket.hash_map.remove(chunk_pos));
+        bucket.lock.unlock(io);
+        std.debug.assert(ch.ref_count.load(.seq_cst) == 1);
         try self.unloadChunkByPtr(io, ch, chunk_pos, true);
         return true;
+    } else {
+        bucket.lock.unlock(io);
+        return true;
     }
-
-    return true;
 }
 
 pub fn unloadChunkNoSave(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {

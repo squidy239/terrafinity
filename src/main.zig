@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     if (options.test_play) {
-        _ = try io.concurrent(exiter, .{io, &running});
+        _ = try io.concurrent(exiter, .{ io, &running });
     }
 
     //TODO make this an argument once std.cli is added

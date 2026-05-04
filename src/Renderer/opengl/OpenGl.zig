@@ -298,8 +298,9 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
     var it = self.render_buffer.map.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
+        const chunk_pos = entry.key_ptr.*.toPos();
         it.pause(io);
-        callback(callback_userdata, entry.key_ptr.*.toPos());
+        callback(callback_userdata, chunk_pos);
         try it.unpause(io);
     }
 }

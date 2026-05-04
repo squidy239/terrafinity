@@ -5,7 +5,7 @@ const Chunk = @import("Chunk").Chunk;
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
         const Map = @This();
-        const Bkt = Bucket(K, V, Context, maxloadpercentage);
+        pub const Bkt = Bucket(K, V, Context, maxloadpercentage);
         ctx: Context,
         buckets: [bucketamount]Bkt,
 
