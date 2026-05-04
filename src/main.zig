@@ -30,8 +30,6 @@ pub const tracy_options: tracy.Options = .{
 fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
     io.sleep(.fromSeconds(30), .awake) catch unreachable;
     running.store(false, .unordered);
-    io.sleep(.fromSeconds(5), .awake) catch unreachable;
-    std.process.exit(0);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -42,9 +40,12 @@ pub fn main(init: std.process.Init) !void {
     const gpa = tracy_allocator.allocator();
     const io = init.io;
 
-    if (options.test_play) {
-        _ = try io.concurrent(exiter, .{ io, &running });
-    }
+    var exit = if (options.test_play)
+        try io.concurrent(exiter, .{ io, &running })
+    else
+        null;
+    defer if (options.test_play) exit.await(io);
+    
 
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
