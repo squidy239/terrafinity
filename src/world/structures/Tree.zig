@@ -85,7 +85,7 @@ pub const Tree = struct {
                             var z = -halfLeaf;
                             while (z <= halfLeaf) : (z += 1) {
                                 const block: Block = if (getRand(&index) < self.leafDensity) step.endBlock else .air;
-                                try editor.placeBlock(block, @intFromFloat(@round(data.pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) })), level);
+                                try editor.placeBlock(block, @round(data.pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) }), level);
                             }
                         }
                     }

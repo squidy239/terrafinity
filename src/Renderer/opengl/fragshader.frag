@@ -8,6 +8,7 @@ flat in uint blockArrayLayer;
 uniform float fogDensity;
 uniform sampler2DArray TextureArray;
 out vec4 FragColor;
+flat in float scale;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -78,4 +79,5 @@ void main()
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
     FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
+    gl_FragDepth = gl_FragCoord.z / pow(scale, 8);
 }

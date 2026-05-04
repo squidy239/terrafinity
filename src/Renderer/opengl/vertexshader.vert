@@ -10,6 +10,7 @@ flat out uint side;
 out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
+flat out float scale;
 
 struct Chunk {
     vec3 absolute_position;
@@ -114,7 +115,7 @@ float rand(vec2 co) {
 void main() {
     vec3 relative_position = chunks[gl_DrawID].relative_position;
     vec3 absolute_position = chunks[gl_DrawID].absolute_position;
-    float scale = chunks[gl_DrawID].scale;
+    scale = chunks[gl_DrawID].scale;
     
     uvec3 pos = DecodePosition(data);
     blocktype = DecodeBlockType(data);

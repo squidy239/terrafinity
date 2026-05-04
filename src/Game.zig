@@ -632,7 +632,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
             try io.checkCancel();
-            //update radiuses more frequently incase they are set wayy to high
+            //update radiuses more frequently incase they are set way too high
             outer_radius = game.getGenDistance(io);
             inner_radius = game.getInnerGenRadius(io, outer_radius, level);
             while (y < outer_radius[1]) {
