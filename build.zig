@@ -29,9 +29,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const check_step = b.step("check", "");
-    check_step.dependOn(&b.addTest(.{ .root_module = root_module }).step);
-
     const tests = b.addTest(.{
         .root_module = root_module,
         .use_llvm = true,

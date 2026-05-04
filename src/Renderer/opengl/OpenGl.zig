@@ -581,8 +581,7 @@ const GpuBuffer = struct {
         gl.NamedBufferStorage(new_buffer, @intCast(new_size), null, gl.MAP_WRITE_BIT | gl.MAP_PERSISTENT_BIT | gl.CLIENT_STORAGE_BIT);
         errdefer _ = gl.UnmapNamedBuffer(new_buffer);
         if (self.buffer) |oldbuffer| {
-            gl.Finish(); //RACE CONDITION this only syncs the current thread
-            try io.sleep(.fromMilliseconds(100), .awake); //very very bad "temporary" fix
+            gl.Finish();
             const data_len = if (self.mapping != null) self.mapping.?.len else 0;
             if (self.mapping != null) _ = gl.UnmapNamedBuffer(oldbuffer);
             self.mapping = null;
@@ -602,24 +601,25 @@ const GpuBuffer = struct {
         defer e.end();
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(io, offset + data.len);
-        self.resize_lock.lockSharedUncancelable(io);
+        try self.resize_lock.lockShared(io);
         defer self.resize_lock.unlockShared(io);
         std.debug.assert(self.mapping.?.len >= data.len);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
-        try self.flushRange(io, offset, data.len);
+        gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(data.len));
+        gl.Flush();
     }
 
     pub fn writeSegmentNoFlush(self: *GpuBuffer, io: std.Io, offset: usize, data: []const u8) !void {
         std.debug.assert(data.len > 0);
         try self.ensureCapacity(io, offset + data.len);
-        self.resize_lock.lockSharedUncancelable(io);
+        try self.resize_lock.lockShared(io);
         std.debug.assert(self.mapping.?.len >= data.len);
         defer self.resize_lock.unlockShared(io);
         @memcpy(self.mapping.?[offset .. offset + data.len], data);
     }
 
     pub fn flushRange(self: *GpuBuffer, io: std.Io, offset: usize, length: usize) !void {
-        self.resize_lock.lockSharedUncancelable(io);
+        try self.resize_lock.lockShared(io);
         defer self.resize_lock.unlockShared(io);
         gl.FlushMappedNamedBufferRange(self.buffer.?, @intCast(offset), @intCast(length));
         gl.Flush();
@@ -731,11 +731,11 @@ fn MultiRenderBuffer(comptime K: type) type {
         }
 
         pub fn remove(self: *@This(), io: std.Io, key: K) void {
+            self.lock.lockUncancelable(io);
+            defer self.lock.unlock(io);
             const space = self.map.fetchRemove(io, key) orelse {
                 return;
             };
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
             self.removeSpace(space);
         }
 
