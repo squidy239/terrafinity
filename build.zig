@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const sanitize = b.option(bool, "sanitize_thread", "Enable thread sanitizer") orelse null;
+    const test_play = b.option(bool, "test_play", "Run test play") orelse null;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -20,6 +21,9 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
         .use_llvm = true,
     });
+    var options: *std.Build.Step.Options = .create(b);
+    options.addOption(bool, "test_play", test_play orelse false);
+    exe.root_module.addOptions("options", options);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

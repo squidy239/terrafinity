@@ -418,7 +418,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     try drawChunksReal(self, io, playerPos, frustrum, true);
 }
 
-fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustrum: Frustum, is_transparent: bool) !void{
+fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustrum: Frustum, is_transparent: bool) !void {
     const opaque_draw_info = self.render_buffer.rebuild(
         io,
         @sizeOf(Mesher.Face),

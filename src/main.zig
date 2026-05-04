@@ -18,7 +18,7 @@ const utils = @import("libs/utils.zig");
 const wio_backend = @import("wio-backend");
 const wio = @import("wio");
 const gl = @import("gl");
-
+const options = @import("options");
 pub const tracy_impl = @import("tracy_impl");
 
 pub const tracy = @import("tracy");
@@ -27,6 +27,13 @@ pub const tracy_options: tracy.Options = .{
     .verbose = false,
 };
 
+fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
+    io.sleep(.fromSeconds(30), .awake) catch unreachable;
+    running.store(false, .unordered);
+    io.sleep(.fromSeconds(5), .awake) catch unreachable;
+    std.process.exit(0);
+}
+
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
@@ -34,6 +41,10 @@ pub fn main(init: std.process.Init) !void {
 
     const gpa = tracy_allocator.allocator();
     const io = init.io;
+
+    if (options.test_play) {
+        _ = try io.concurrent(exiter, .{io, &running});
+    }
 
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
@@ -104,14 +115,16 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .f }, .use_item_primary);
 
     var game: Game = undefined;
-
+    if (options.test_play) {
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window, gloptions, &ui_context, &proc_table);
+    }
     var ui: Ui = .{
         .proc_table = &proc_table,
         .window = &window,
         .config = &config,
         .config_lock = &config_lock,
         .game = &game,
-        .menu_state = .{ .main = true },
+        .menu_state = if (options.test_play) .{ .ingame = true } else .{ .main = true },
         .config_path = config_path,
         .worlds_path = worlds_path,
         .ui_context = &ui_context,
