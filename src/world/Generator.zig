@@ -312,7 +312,7 @@ pub const DefaultGenerator = struct {
             try chunk.addAndLockShared(io);
             defer chunk.releaseAndUnlockShared(io);
 
-            if (chunk.genstate.load(.seq_cst) != .TerrainGenerated) return;
+            if (chunk.structures_generated.load(.seq_cst)) return;
             if (chunk.blocks != .grid) return;
             if (!self.params.gen_structures) return;
             const heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);

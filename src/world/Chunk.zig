@@ -8,7 +8,7 @@ const Block = @import("Block.zig").Block;
 pub const ChunkSize = 32;
 blocks: Encoding,
 lock: std.Io.RwLock = .init,
-genstate: std.atomic.Value(Genstate),
+structures_generated: std.atomic.Value(bool),
 ref_count: std.atomic.Value(u32),
 
 last_access: std.atomic.Value(i128),
@@ -168,17 +168,12 @@ pub const Encoding = union(enum) {
     }
 };
 
-pub const Genstate = enum(u8) {
-    TerrainGenerated,
-    StructuresGenerated,
-};
-
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
 pub fn from(blockEncoding: Encoding, io: std.Io, chunk: *@This()) !*@This() {
     chunk.* = .{
         .blocks = blockEncoding,
         .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
-        .genstate = std.atomic.Value(Genstate).init(.TerrainGenerated),
+        .structures_generated = .init(false),
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return chunk;

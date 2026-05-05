@@ -253,13 +253,6 @@ pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32
     return height;
 }
 
-/// Returns the genstate of a loaded chunk, null if the chunk is not loaded.
-pub fn getGenState(self: *@This(), io: std.Io, chunk_pos: ChunkPos) ?Chunk.Genstate {
-    const chunk = self.chunks.getAndAddRef(io, chunk_pos) orelse return null;
-    defer chunk.release(io);
-    return chunk.genstate.load(.seq_cst);
-}
-
 pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const TickEntitiesTask = tracy.Zone.begin(.{ .src = @src() });
     defer TickEntitiesTask.end();
@@ -302,14 +295,14 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         if (structures) {
             errdefer chunkptr.release(io);
             try onLoad(self, io, allocator, chunkptr, chunk_pos);
-            chunkptr.genstate.store(.StructuresGenerated, .seq_cst);
+            chunkptr.structures_generated.store(true, .seq_cst);
         }
         return chunkptr;
     } else {
         errdefer chunk.?.release(io);
-        if (structures and chunk.?.genstate.load(.seq_cst) == .TerrainGenerated) {
+        if (structures and !chunk.?.structures_generated.load(.seq_cst)) {
             try onLoad(self, io, allocator, chunk.?, chunk_pos);
-            chunk.?.genstate.store(.StructuresGenerated, .seq_cst);
+            chunk.?.structures_generated.store(true, .seq_cst);
         }
         return chunk.?;
     }
