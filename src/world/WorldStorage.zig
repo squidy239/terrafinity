@@ -11,7 +11,9 @@ const builtin = @import("builtin");
 isinit: bool,
 database: rocksdb.database.DB,
 options: rocksdb.DBOptions,
-chunk_column: rocksdb.ColumnFamily,
+chunk_metadata_column: rocksdb.ColumnFamily,
+chunk_grid_column: rocksdb.ColumnFamily,
+chunk_oneblock_column: rocksdb.ColumnFamily,
 
 pub fn getSource(self: *@This()) World.ChunkSource {
     return .{
@@ -30,6 +32,7 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
     storage.isinit = true;
     storage.options = .{
         .create_if_missing = true,
+        .create_missing_column_families = true,
         .compression = .zstd,
     };
     var err_str: ?rocksdb.Data = null;
@@ -37,12 +40,18 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
-    const column_families: [1]rocksdb.ColumnFamilyDescription = .{
-        .{ .name = "default", .options = .{ .compression = .zstd } },
+
+    const column_families: [4]rocksdb.ColumnFamilyDescription = .{
+        .{ .name = "chunk_metadata", .options = .{ .compression = .lz4 } },
+        .{ .name = "chunk_grid", .options = .{ .compression = .zstd } },
+        .{ .name = "chunk_oneblock", .options = .{ .compression = .lz4 } },
+        .{ .name = "default", .options = .{} }, // unused
     };
-    storage.database, const column_families_data = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
-    storage.chunk_column = column_families_data[0];
-    allocator.free(column_families_data);
+    storage.database, const columns = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
+    storage.chunk_metadata_column = columns[0];
+    storage.chunk_grid_column = columns[1];
+    storage.chunk_oneblock_column = columns[2];
+    allocator.free(columns);
 
     return storage;
 }
@@ -54,9 +63,10 @@ const ChunkKey = packed struct {
     level: i32,
 };
 
-const ChunkMetadata = packed struct {
+const ChunkMetadata = packed struct(u8) {
     structures_generated: bool,
     encoding: EncodingTagType,
+    _: u6 = undefined,
 };
 
 fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
@@ -65,7 +75,7 @@ fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk,
     self.saveChunk(io, chunk, chunk_pos) catch return error.Unrecoverable;
 }
 
-const EncodingTagType = std.meta.Tag(std.meta.Tag(Chunk.Encoding)); //get the type of the tagged unions tag
+const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 const BlockTagType = std.meta.Tag(Block);
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
@@ -78,19 +88,24 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     try chunk.encoding_lock.lockShared(io);
-    const bytes = switch (chunk.encoding) {
-        .grid => |blocks| std.mem.asBytes(blocks),
-        .one_block => |block| std.mem.asBytes(&block),
+    var write: rocksdb.WriteBatch = .init();
+    const metadata: ChunkMetadata = .{
+        .encoding = chunk.encoding,
+        .structures_generated = chunk.structures_generated.load(.seq_cst),
     };
+    write.put(self.chunk_metadata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&metadata));
+    switch (chunk.encoding) {
+        .grid => |blocks| write.put(self.chunk_grid_column.handle, std.mem.asBytes(&key), std.mem.asBytes(blocks)),
+        .one_block => |block| write.put(self.chunk_oneblock_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&block)),
+    }
     var err_str: ?rocksdb.Data = null;
-    try self.database.put(self.chunk_column.handle, std.mem.asBytes(&key), bytes, &err_str);
-    chunk.encoding_lock.unlockShared(io);
-    chunk.saved.store(true, .unordered);
-
-    if (err_str) |s| {
+    defer if (err_str) |s| {
         std.log.err("{s}", .{s.data});
         s.deinit();
-    }
+    };
+    try self.database.write(write, &err_str);
+    chunk.encoding_lock.unlockShared(io);
+    chunk.saved.store(true, .unordered);
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool {
@@ -101,24 +116,32 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     _ = allocator;
     var key = ChunkKey{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     var err_str: ?rocksdb.Data = null;
-    const value = (self.database.get(self.chunk_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+    defer if (err_str) |s| {
+        std.log.err("{s}", .{s.data});
+        s.deinit();
+    };
+
+    const metadata_bytes = (self.database.get(self.chunk_metadata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+
+    const metadata = std.mem.bytesToValue(ChunkMetadata, metadata_bytes.data);
+    metadata_bytes.deinit();
 
     if (err_str) |s| {
         std.log.err("{s}", .{s.data});
         s.deinit();
     }
 
-    defer value.deinit();
-
-    const encoding_type: std.meta.Tag(Chunk.Encoding) = switch (value.data.len) {
-        @sizeOf(Block) => .one_block,
-        @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block) => .grid,
-        else => unreachable,
-    };
-
-    const mergeblocks: Chunk.Encoding = switch (encoding_type) {
-        .grid => .{ .grid = @ptrCast(@alignCast(@constCast(value.data))) },
-        .one_block => .{ .one_block = std.mem.bytesToValue(Block, value.data) },
+    var data_bytes: rocksdb.Data = undefined;
+    defer data_bytes.deinit();
+    const mergeblocks: Chunk.Encoding = switch (metadata.encoding) {
+        .grid => gr: {
+            data_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+            break :gr .{ .grid = @ptrCast(@constCast(@alignCast(data_bytes.data))) };
+        },
+        .one_block => ob: {
+            data_bytes = (self.database.get(self.chunk_oneblock_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+            break :ob .{ .one_block = std.mem.bytesToValue(Block, data_bytes.data) };
+        },
     };
 
     try blocks.merge(io, mergeblocks, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);

@@ -19,7 +19,7 @@ modified: std.atomic.Value(bool) = .init(false),
 ///This may not be the current version and modified should be used to check this
 saved: std.atomic.Value(bool) = .init(false),
 
-pub const Encoding = union(enum) {
+pub const Encoding = union(enum(u1)) {
     grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
     one_block: Block,
 
