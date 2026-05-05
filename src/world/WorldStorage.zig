@@ -11,7 +11,7 @@ const builtin = @import("builtin");
 isinit: bool,
 database: rocksdb.database.DB,
 options: rocksdb.DBOptions,
-column_families: []const rocksdb.ColumnFamily,
+chunk_column: rocksdb.ColumnFamily,
 
 pub fn getSource(self: *@This()) World.ChunkSource {
     return .{
@@ -37,10 +37,12 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
-    const column_families: [1]rocksdb.ColumnFamilyDescription = .{.{ .name = "default", .options = .{ .compression = .zstd } }};
-    storage.database, storage.column_families = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
-    errdefer storage.database.deinit();
-    errdefer allocator.free(storage.column_families);
+    const column_families: [1]rocksdb.ColumnFamilyDescription = .{
+        .{ .name = "default", .options = .{ .compression = .zstd } },
+    };
+    storage.database, const column_families_data = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
+    storage.chunk_column = column_families_data[0];
+    allocator.free(column_families_data);
 
     return storage;
 }
@@ -52,10 +54,9 @@ const ChunkKey = packed struct {
     level: i32,
 };
 
-const ChunkValue = extern struct {
+const ChunkMetadata = packed struct {
     structures_generated: bool,
-    was_saved: bool,
-    modified: bool,
+    encoding: EncodingTagType,
 };
 
 fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
@@ -72,7 +73,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     defer save.end();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
         .grid => return,
-        .one_block => if(chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
+        .one_block => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
     };
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
@@ -82,7 +83,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
         .one_block => |block| std.mem.asBytes(&block),
     };
     var err_str: ?rocksdb.Data = null;
-    try self.database.put(self.column_families[0].handle, std.mem.asBytes(&key), bytes, &err_str);
+    try self.database.put(self.chunk_column.handle, std.mem.asBytes(&key), bytes, &err_str);
     chunk.encoding_lock.unlockShared(io);
     chunk.saved.store(true, .unordered);
 
@@ -100,7 +101,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     _ = allocator;
     var key = ChunkKey{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     var err_str: ?rocksdb.Data = null;
-    const value = (self.database.get(self.column_families[0].handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+    const value = (self.database.get(self.chunk_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
 
     if (err_str) |s| {
         std.log.err("{s}", .{s.data});
@@ -135,5 +136,5 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     std.debug.assert(self.isinit);
     self.isinit = false;
     self.database.deinit();
-    allocator.free(self.column_families);
+    _ = allocator;
 }
