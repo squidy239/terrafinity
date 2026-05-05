@@ -29,13 +29,13 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     while (try it.next(io)) |image| {
         switch (image.kind) {
             .file => {
-                if (image.kind == .file and ((std.mem.indexOf(u8, image.name, keyword) != null))) {
+                if (image.kind == .file and ((std.mem.find(u8, image.name, keyword) != null))) {
                     std.debug.assert(i < textureArray.len); //should never happen because invalid textures are skipped
                     var loadedImg = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, image.name, .{}), &read_buffer);
                     errdefer loadedImg.deinit(allocator);
                     try loadedImg.convert(allocator, .rgba32);
                     if (loadedImg.width != resolution[0] or loadedImg.height != resolution[1]) return error.InvalidTextureResolution;
-                    const blockName = image.name[0 .. std.mem.indexOfScalar(u8, image.name, '.') orelse image.name.len];
+                    const blockName = image.name[0 .. std.mem.findScalar(u8, image.name, '.') orelse image.name.len];
                     const blockType = std.meta.stringToEnum(Block, blockName);
                     if (blockType == null) {
                         std.log.warn("Invalid block type: {s}\n", .{blockName});
@@ -75,7 +75,7 @@ fn allSquares(io: std.Io, textures_path: std.Io.Dir, keyword: ?[]const u8) ![2]u
     var it1 = std.Io.Dir.iterate(textures_path);
     var resolution: ?[2]usize = null;
     while (try it1.next(io)) |image| {
-        if (image.kind == .file and (keyword == null or (std.mem.indexOf(u8, image.name, keyword.?) != null))) {
+        if (image.kind == .file and (keyword == null or (std.mem.find(u8, image.name, keyword.?) != null))) {
             const cres = try getResolution(io, try textures_path.openFile(io, image.name, .{}));
             if (resolution == null) {
                 resolution = cres;
@@ -94,7 +94,7 @@ fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
     var it = std.fs.Dir.iterate(textures_path);
     var count: u32 = 0;
     while (try it.next()) |image| {
-        if (image.kind == .file and (keyword == null or (std.mem.indexOf(u8, image.name, keyword.?) != null))) count += 1;
+        if (image.kind == .file and (keyword == null or (std.mem.find(u8, image.name, keyword.?) != null))) count += 1;
     }
     return count;
 }

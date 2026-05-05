@@ -116,7 +116,7 @@ pub const NaturalCubicInterpolator3D = struct {
     /// Evaluate a 1D natural cubic spline segment
     pub fn splineEval(Type: type, values: [4]Type, m: [4]Type, t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
-        const i: usize = @intFromFloat(@min(@floor(t / one_third), 2));
+        const i: usize = @trunc(@min(@floor(t / one_third), 2));
         const localT: Type = t * 3.0 - @as(Type, @floatFromInt(i));
         const a = 1.0 - localT;
         return a * values[i] + localT * values[i + 1] + ((a * a * a - a) * m[i] + (localT * localT * localT - localT) * m[i + 1]) * h2_6;
@@ -124,7 +124,7 @@ pub const NaturalCubicInterpolator3D = struct {
 
     pub fn splineEvalComptimeT(Type: type, values: [4]Type, m: [4]Type, comptime t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
-        const i: usize = comptime @intFromFloat(@min(@floor(t / one_third), 2));
+        const i: usize = comptime @trunc(@min(@floor(t / one_third), 2));
         const localT: Type = comptime t * 3.0 - @as(Type, @floatFromInt(i));
         const a = comptime 1.0 - localT;
         return a * values[i] + localT * values[i + 1] + ((comptime (a * a * a - a)) * m[i] + (comptime (localT * localT * localT - localT)) * m[i + 1]) * h2_6;
@@ -143,7 +143,7 @@ pub const NaturalCubicInterpolator3D = struct {
     }
 
     pub fn splineEvalSimd(comptime T: type, comptime len: usize, values: [4]@Vector(len, T), m: [4][len]T, t: T) @Vector(len, T) {
-        const i: usize = @intFromFloat(@min(@floor(t * 3), 2));
+        const i: usize = @trunc(@min(@floor(t * 3), 2));
         const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = @splat(localT);
         const a_v: @Vector(len, T) = @splat(1.0 - localT);
@@ -152,7 +152,7 @@ pub const NaturalCubicInterpolator3D = struct {
     }
 
     pub fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: [4][len]T, m: [4][len]T, comptime t: T) @Vector(len, T) {
-        const i: usize = comptime @intFromFloat(@min(@floor(t * 3), 2));
+        const i: usize = comptime @trunc(@min(@floor(t * 3), 2));
         const localT: T = comptime t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = comptime @splat(localT);
         const a_v: @Vector(len, T) = comptime @splat(1.0 - localT);

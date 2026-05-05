@@ -232,7 +232,7 @@ pub fn Noise(comptime Float: type) type {
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise2D(x, y))));
             return switch (@typeInfo(T)) {
-                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .int => min + @as(T, @trunc(n * @as(Float, @floatFromInt(max - min)))),
                 .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
@@ -287,7 +287,7 @@ pub fn Noise(comptime Float: type) type {
             // Normalize to range of 0..1
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, self.genNoise3D(x, y, z))));
             return switch (@typeInfo(T)) {
-                .int => min + @as(T, @intFromFloat(n * @as(Float, @floatFromInt(max - min)))),
+                .int => min + @as(T, @trunc(n * @as(Float, @floatFromInt(max - min)))),
                 .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
@@ -362,11 +362,11 @@ pub fn Noise(comptime Float: type) type {
         // Utilities
 
         inline fn fastFloor(f: Float) i32 {
-            return @intFromFloat(if (f >= 0) f else f - 1);
+            return @floor(f);
         }
 
         inline fn fastRound(f: Float) i32 {
-            return @intFromFloat(if (f >= 0) f + 0.5 else f - 0.5);
+            return @round(f);
         }
 
         inline fn lerp(a: Float, b: Float, t: Float) Float {
@@ -941,9 +941,9 @@ pub fn Noise(comptime Float: type) type {
             const y0 = yy - @as(Float, @floatFromInt(j));
             const z0 = zz - @as(Float, @floatFromInt(k));
 
-            var xNSign = @as(i32, @intFromFloat(-x0 - 1.0)) | 1;
-            var yNSign = @as(i32, @intFromFloat(-y0 - 1.0)) | 1;
-            var zNSign = @as(i32, @intFromFloat(-z0 - 1.0)) | 1;
+            var xNSign = @as(i32, @trunc(-x0 - 1.0)) | 1;
+            var yNSign = @as(i32, @trunc(-y0 - 1.0)) | 1;
+            var zNSign = @as(i32, @trunc(-z0 - 1.0)) | 1;
 
             const ax0 = @as(Float, @floatFromInt(xNSign)) * -x0;
             const ay0 = @as(Float, @floatFromInt(yNSign)) * -y0;
@@ -1151,9 +1151,9 @@ pub fn Noise(comptime Float: type) type {
             var y0: Float = y - @as(Float, @floatFromInt(j));
             var z0: Float = z - @as(Float, @floatFromInt(k));
 
-            var xNSign: i32 = @as(i32, @intFromFloat(-1.0 - x0)) | 1;
-            var yNSign: i32 = @as(i32, @intFromFloat(-1.0 - y0)) | 1;
-            var zNSign: i32 = @as(i32, @intFromFloat(-1.0 - z0)) | 1;
+            var xNSign: i32 = @as(i32, @trunc(-1.0 - x0)) | 1;
+            var yNSign: i32 = @as(i32, @trunc(-1.0 - y0)) | 1;
+            var zNSign: i32 = @as(i32, @trunc(-1.0 - z0)) | 1;
 
             var ax0: Float = @as(Float, @floatFromInt(xNSign)) * -x0;
             var ay0: Float = @as(Float, @floatFromInt(yNSign)) * -y0;
@@ -1431,9 +1431,9 @@ pub fn Noise(comptime Float: type) type {
             k *%= prime_z;
 
             const seed2 = seed +% 1293373;
-            const xNMask: i32 = @intFromFloat(-0.5 - xi);
-            const yNMask: i32 = @intFromFloat(-0.5 - yi);
-            const zNMask: i32 = @intFromFloat(-0.5 - zi);
+            const xNMask: i32 = @trunc(-0.5 - xi);
+            const yNMask: i32 = @trunc(-0.5 - yi);
+            const zNMask: i32 = @trunc(-0.5 - zi);
 
             const x0: Float = xi + @as(Float, @floatFromInt(xNMask));
             const y0: Float = yi + @as(Float, @floatFromInt(yNMask));

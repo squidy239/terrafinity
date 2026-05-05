@@ -608,7 +608,7 @@ pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 
 ///loads chunks from top to bottom and in a spiral on a y level
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
-    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@intFromFloat(playerPos), level);
+    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
 
     var outer_radius = game.getGenDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
@@ -657,7 +657,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
 
 fn Move(xzin: [2]i32, c: *usize) [2]i32 {
     const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
-    const mov: i32 = @intFromFloat(@ceil(movf + 0.01));
+    const mov: i32 = @ceil(movf + 0.01);
     var xz = xzin;
     switch (@mod(c.*, 4)) {
         0 => xz[1] += mov,

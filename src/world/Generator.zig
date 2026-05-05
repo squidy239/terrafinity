@@ -196,7 +196,7 @@ pub const DefaultGenerator = struct {
     fn generateCavesFull(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: *const [ChunkSize][ChunkSize]i32, chunkScale: f32, gen_params: Params) void {
         const caves = tracy.Zone.begin(.{ .src = @src() });
         defer caves.end();
-        const floatPos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
+        const floatPos: @Vector(3, f32) = @floatFromInt(chunk_pos.position);
         const oneDterrainScaleVec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunkScale));
         _ = heights;
         for (0..ChunkSize) |x| {
@@ -277,7 +277,7 @@ pub const DefaultGenerator = struct {
                     (std.math.pow(f32, terrainNoise * 2, P) * 0.5)
                 else
                     (1 - (std.math.pow(f32, (1 - terrainNoise) * 2, P) * 0.5)));
-                const block_height: i32 = @intFromFloat(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
+                const block_height: i32 = @trunc(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
                 height[ux][uz] = block_height;
             }
         }
@@ -376,7 +376,7 @@ pub const DefaultGenerator = struct {
             try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
         }
-        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @intFromFloat(radius / 1.5), 0 }), radius);
+        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @trunc(radius / 1.5), 0 }), radius);
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 

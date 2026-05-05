@@ -458,7 +458,7 @@ fn getChunkData(userdata: anytype, key: RenderBufferKey) ChunkDrawData {
 
     const playerpos: @Vector(3, f64) = userdata.playerpos;
     const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
-    const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
+    const chunk_blockpos = @as(@Vector(3, f64), chunkpos.position) * ratio;
     const relative_blockpos = chunk_blockpos - playerpos;
     return ChunkDrawData{
         .absolute_position = @as(@Vector(3, f32), @floatCast(chunk_blockpos)),
@@ -557,7 +557,7 @@ const UniformLocations = struct {
 const GpuBuffer = struct {
     buffer: ?c_uint = null,
     mapping: ?[]u8 = null,
-    growth_factor: f32 = 2,
+    growth_factor: u32 = 2,
     ///shared is for starting writes and reading variables, exclusive is for resizing
     resize_lock: std.Io.RwLock = .init,
 
@@ -571,7 +571,7 @@ const GpuBuffer = struct {
         try self.resize_lock.lock(io);
         defer self.resize_lock.unlock(io);
         if (self.mapping != null and length <= self.mapping.?.len) return;
-        const scaled_size: usize = if (self.mapping != null) @intFromFloat(@as(f32, @floatFromInt(self.mapping.?.len)) * self.growth_factor) else 0;
+        const scaled_size: usize = if (self.mapping != null) self.mapping.?.len * self.growth_factor else 0;
         const new_size = @max(scaled_size, length);
         std.log.debug("Expanding buffer to {d}", .{new_size});
         const e = tracy.Zone.begin(.{ .src = @src() });

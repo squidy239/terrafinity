@@ -7,9 +7,9 @@ const Block = @import("Block.zig").Block;
 const World = @import("World.zig");
 
 ///gets a Physics interface, all functions are thread-safe
-pub fn getInterface(physicsElements: anytype) type {
+pub fn Interface(physics_elements: anytype) type {
     return struct {
-        elements: physicsElements,
+        elements: physics_elements,
         last_update: std.Io.Timestamp,
         last_update_lock: std.Io.RwLock = .init,
         pos: AtomicVector(3, f64),
@@ -79,22 +79,22 @@ pub const Mover = struct {
     pub fn collision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
         defer reader.clear(io);
 
-        const base = @floor(pos); // floor entity pos once
+        const base = @trunc(pos); // floor entity pos once
         var bestMtv: @Vector(3, f64) = @splat(0.0);
         var bestMagnitude: f64 = 0.0;
         var found: bool = false;
         const size = self.boundingBox.size();
-        const checkDistance: i16 = @intFromFloat(@ceil(@max(size.data[0], size.data[1], size.data[2]) / 2));
-        var x: i16 = -@as(i16, checkDistance);
+        const checkDistance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]) / 2);
+        var x: i16 = -checkDistance;
         while (x <= checkDistance) : (x += 1) {
-            var y: i16 = -@as(i16, checkDistance);
+            var y: i16 = -checkDistance;
             while (y <= checkDistance) : (y += 1) {
-                var z: i16 = -@as(i16, checkDistance);
+                var z: i16 = -checkDistance;
                 while (z <= checkDistance) : (z += 1) {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
                     const blockPos = base + offset;
 
-                    const block = try reader.getBlock(io, allocator, @intFromFloat(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io, allocator, @trunc(blockPos), World.standard_level);
                     if (!block.isSolid()) continue;
 
                     const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
@@ -219,7 +219,7 @@ test "AABB penetration" {
 
 test "Gravity" {
     const testing = std.testing;
-    const physics_interface = getInterface(struct { gravity: Gravity });
+    const physics_interface = Interface(struct { gravity: Gravity });
     var physics_object = physics_interface{
         .elements = .{ .gravity = .{} },
         .last_update = .now(testing.io, .awake),
@@ -234,7 +234,7 @@ test "Gravity" {
 
 test "simpleMover" {
     const testing = std.testing;
-    const physics_interface = getInterface(struct { mover: simpleMover });
+    const physics_interface = Interface(struct { mover: simpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
         .last_update = .now(testing.io, .awake),

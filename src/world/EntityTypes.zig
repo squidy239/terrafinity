@@ -90,7 +90,7 @@ pub const Player = struct {
     /// Pitch, yaw, roll, in degrees.
     viewDirection: AtomicVector(3, f32),
 
-    physics: Physics.getInterface(struct {
+    physics: Physics.Interface(struct {
         gravity: Physics.Gravity,
         resistance: Physics.Resistance,
         mover: Physics.Mover,
@@ -222,7 +222,7 @@ pub const Explosive = struct {
         defer worldReader.clear(io);
 
         var g = tracy.Zone.begin(.{ .src = @src() });
-        if (true or (worldReader.getBlockUncached(@intFromFloat(pos), World.standard_level) catch unreachable) != .air) {
+        if (true or (worldReader.getBlockUncached(@trunc(pos), World.standard_level) catch unreachable) != .air) {
             g.end();
             var worldEditor = World.Editor{
                 .world = world,

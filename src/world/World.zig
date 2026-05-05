@@ -126,7 +126,7 @@ pub const ChunkPos = struct {
     pub inline fn toLevel(self: ChunkPos, level: i32) ChunkPos {
         const ratiovec: @Vector(3, f64) = @splat(levelToLevelRatio(self.level, level));
         const posvec: @Vector(3, f64) = @floatFromInt(self.position);
-        return .{ .position = @intFromFloat(posvec * ratiovec), .level = level };
+        return .{ .position = @trunc(posvec * ratiovec), .level = level };
     }
 
     pub inline fn fromGlobalBlockPos(blockPos: BlockPos, level: i32) ChunkPos {
@@ -243,7 +243,7 @@ pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uui
 }
 
 pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-    const pos = @Vector(2, i32){ @intFromFloat(self.config.SpawnCenterPos[0]), @intFromFloat(self.config.SpawnCenterPos[2]) } + @Vector(2, i32){
+    const pos = @Vector(2, i32){ @trunc(self.config.SpawnCenterPos[0]), @trunc(self.config.SpawnCenterPos[2]) } + @Vector(2, i32){
         World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
         World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
     };
@@ -398,7 +398,7 @@ fn unloadTimeoutBucket(self: *World, bucket_index: usize, io: std.Io, chunk_time
 }
 
 fn memCurve(max_ms: u64, fraction: f32) u64 {
-    const time: u64 = @intFromFloat(@as(f32, @floatFromInt(max_ms)) * (1 - fraction));
+    const time: u64 = @trunc(@as(f32, @floatFromInt(max_ms)) * (1 - fraction));
     return time;
 }
 
@@ -556,7 +556,7 @@ pub const Editor = struct {
                 while (dz <= boundingBox[5]) : (dz += 1) {
                     if (shape.isPointInside(.{ dx, y, dz })) {
                         const i64blockpos: @Vector(3, i64) = switch (comptime @typeInfo(@TypeOf(boundingBox[0]))) {
-                            .float => .{ @intFromFloat(dx), @intFromFloat(y), @intFromFloat(dz) },
+                            .float => .{ @trunc(dx), @trunc(y), @trunc(dz) },
                             .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                             else => unreachable,
                         };
