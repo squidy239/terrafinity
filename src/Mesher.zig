@@ -168,12 +168,12 @@ test "MeshBenchmark" {
             }
         }
     }
-    var buf: [256]u8 = undefined;
-    var writer = std.Io.Writer.Discarding.init(&buf);
-    const test_amount = 100; // reduced from 100000
+    var alist: std.ArrayList(Face) = .empty;
+    defer alist.deinit(std.testing.allocator);
+    const test_amount = 1000; 
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
-        try mesh(.{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &writer.writer, &writer.writer);
+        try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &alist, &alist);
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
@@ -189,94 +189,7 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
-    var writer = std.Io.Writer.Discarding.init(&.{});
-    try Mesher.mesh(mainblocks, &neighbor_faces, &writer.writer, &writer.writer);
-}
-
-///x+,x-,y+,y-,z+,z-
-fn GenerateExtendedChunk(blocksToPut: *[ChunkSize + 2][ChunkSize + 2][ChunkSize + 2]Block, mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) void {
-    const gec = tracy.Zone.begin(.{ .src = @src() });
-    defer gec.end();
-
-    switch (mainblocks) {
-        .grid => |blocks| {
-            for (0..ChunkSize) |x| {
-                for (0..ChunkSize) |y| {
-                    for (0..ChunkSize) |z| {
-                        blocksToPut[x + 1][y + 1][z + 1] = blocks[x][y][z];
-                    }
-                }
-            }
-        },
-        .one_block => |block| {
-            for (0..ChunkSize) |x| {
-                for (0..ChunkSize) |y| {
-                    for (0..ChunkSize) |z| {
-                        blocksToPut[x + 1][y + 1][z + 1] = block;
-                    }
-                }
-            }
-        },
-    }
-
-    // Copy neighbor faces
-    // Face 4: -Z face (z=0)
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |y| {
-            blocksToPut[x + 1][y + 1][0] = switch (neighbor_faces[5]) {
-                .blocks => |b| b[x][y],
-                .one_block => |b| b,
-            };
-        }
-    }
-
-    // Face 5: +Z face (z=ChunkSize+1)
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |y| {
-            blocksToPut[x + 1][y + 1][ChunkSize + 1] = switch (neighbor_faces[4]) {
-                .blocks => |b| b[x][y],
-                .one_block => |b| b,
-            };
-        }
-    }
-
-    // Face 0: -X face (x=0)
-    for (0..ChunkSize) |y| {
-        for (0..ChunkSize) |z| {
-            blocksToPut[0][y + 1][z + 1] = switch (neighbor_faces[1]) {
-                .blocks => |b| b[y][z],
-                .one_block => |b| b,
-            };
-        }
-    }
-
-    // Face 1: +X face (x=ChunkSize+1)
-    for (0..ChunkSize) |y| {
-        for (0..ChunkSize) |z| {
-            blocksToPut[ChunkSize + 1][y + 1][z + 1] = switch (neighbor_faces[0]) {
-                .blocks => |b| b[y][z],
-                .one_block => |b| b,
-            };
-        }
-    }
-
-    // Face 2: -Y face (y=0)
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |z| {
-            blocksToPut[x + 1][0][z + 1] = switch (neighbor_faces[3]) {
-                .blocks => |b| b[x][z],
-                .one_block => |b| b,
-            };
-        }
-    }
-
-    // Face 3: +Y face (y=ChunkSize+1)
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |z| {
-            blocksToPut[x + 1][ChunkSize + 1][z + 1] = switch (neighbor_faces[2]) {
-                .blocks => |b| b[x][z],
-                .one_block => |b| b,
-            };
-        }
-    }
+    var alist: std.ArrayList(Face) = .empty;
+    defer alist.deinit(std.testing.allocator);
+    try Mesher.mesh(std.testing.allocator, mainblocks, &neighbor_faces, &alist, &alist);
 }
