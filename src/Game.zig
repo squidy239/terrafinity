@@ -413,7 +413,8 @@ pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.Actio
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
-        .Creative, .Survival, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
+        .Creative, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
+        .Survival => try self.walkMove(io, actions, delta_time_seconds),
     }
     self.setSelectedSlot(actions);
     try self.itemAction(io, actions);
@@ -455,6 +456,25 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
     if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
     if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
     if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?.data, .seq_cst);
+}
+
+fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
+    const cameraFront = self.renderer.getCameraFront();
+    const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
+    const c = zm.Vec3f.crossRH(.{ .data = cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
+    const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
+    var block_reader: World.Reader = .{ .world = &self.world };
+    defer block_reader.clear(io);
+    if (try self.player.physics.elements.mover.collision(io, self.allocator, self.player.physics.pos.load(.seq_cst), &block_reader)) |_| {
+        block_reader.clear(io);
+        if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
+        if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
+        if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * cameraFront, .seq_cst);
+        if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * cameraFront, .seq_cst);
+        if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
+        if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?.data, .seq_cst);
+    }
+
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
