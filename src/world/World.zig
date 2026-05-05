@@ -149,12 +149,17 @@ pub const WorldConfig = struct {
 
 /// Sources must be thread safe.
 pub const ChunkSource = struct {
+    pub const GetBlocksMetadata = struct {
+        from_disk: bool,
+        structures: bool,
+    };
+
     /// Holds any data for the chunk source.
     data: *anyopaque,
 
     /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
     /// Returns true if the chunk was loaded from disk, null if unsuccessful (next source will be tried).
-    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool,
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
     /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
     /// All chunk sources will be tried.
@@ -174,7 +179,7 @@ pub const ChunkSource = struct {
 };
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, bool } {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
     errdefer switch (encoding) {
         .one_block => {},
@@ -188,8 +193,8 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos)) |from_disk| {
-                    return .{ encoding, from_disk };
+                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos)) |metadata| {
+                    return .{ encoding, metadata };
                 }
             }
         }
@@ -278,9 +283,10 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     defer lc.end();
     const chunk = self.chunks.getAndAddRef(io, chunk_pos);
     if (chunk == null) {
-        const chunkencoding, const from_disk = try self.getBlocks(io, allocator, chunk_pos);
+        const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
-        chunkptr.saved.raw = from_disk;
+        chunkptr.structures_generated.raw = metadata.structures;
+        chunkptr.saved.raw = metadata.from_disk;
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.chunks.putNoOverrideAddRef(io, allocator, chunk_pos, chunkptr) catch |err| {
@@ -293,21 +299,22 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
             chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             self.destroyChunkPtr(io, chunkptr);
+            if (structures) try self.tryGenStructures(io, allocator, d, chunk_pos);
             return d;
         }
-        if (structures) {
-            errdefer chunkptr.release(io);
-            try onLoad(self, io, allocator, chunkptr, chunk_pos);
-            chunkptr.structures_generated.store(true, .seq_cst);
-        }
+        if (structures) try self.tryGenStructures(io, allocator, chunkptr, chunk_pos);
         return chunkptr;
     } else {
         errdefer chunk.?.release(io);
-        if (structures and !chunk.?.structures_generated.load(.seq_cst)) {
-            try onLoad(self, io, allocator, chunk.?, chunk_pos);
-            chunk.?.structures_generated.store(true, .seq_cst);
-        }
+        if (structures) try self.tryGenStructures(io, allocator, chunk.?, chunk_pos);
         return chunk.?;
+    }
+}
+
+fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+    if (!chunk.structures_generated.load(.seq_cst)) {
+        try onLoad(self, io, allocator, chunk, chunk_pos);
+        chunk.structures_generated.store(true, .seq_cst);
     }
 }
 

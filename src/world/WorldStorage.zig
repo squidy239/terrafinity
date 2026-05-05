@@ -108,7 +108,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     chunk.saved.store(true, .unordered);
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
     const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
 
@@ -136,7 +136,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     const mergeblocks: Chunk.Encoding = switch (metadata.encoding) {
         .grid => gr: {
             data_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
-            break :gr .{ .grid = @ptrCast(@constCast(@alignCast(data_bytes.data))) };
+            break :gr .{ .grid = @ptrCast(@alignCast(@constCast(data_bytes.data))) };
         },
         .one_block => ob: {
             data_bytes = (self.database.get(self.chunk_oneblock_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
@@ -145,7 +145,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     };
 
     try blocks.merge(io, mergeblocks, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
-    return true;
+    return .{ .from_disk = true, .structures = metadata.structures_generated };
 }
 
 fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {

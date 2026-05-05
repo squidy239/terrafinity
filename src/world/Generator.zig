@@ -29,10 +29,10 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
         try self.genChunk(io, allocator, chunk_pos, blocks, world);
-        return false;
+        return .{ .from_disk = false, .structures = false };
     }
 
     fn genStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void {
