@@ -491,7 +491,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
         defer chunk.unlockShared(io);
         try Mesher.mesh(
             fallback_allocator,
-            chunk.blocks,
+            chunk.encoding,
             &neighbor_faces,
             &opaque_faces,
             &transparent_faces,

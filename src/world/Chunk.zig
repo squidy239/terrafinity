@@ -6,15 +6,18 @@ const tracy = @import("tracy");
 const Block = @import("Block.zig").Block;
 
 pub const ChunkSize = 32;
-blocks: Encoding,
-lock: std.Io.RwLock = .init,
-structures_generated: std.atomic.Value(bool),
+encoding: Encoding,
+encoding_lock: std.Io.RwLock = .init,
 ref_count: std.atomic.Value(u32),
-
 last_access: std.atomic.Value(i128),
+
+structures_generated: std.atomic.Value(bool),
 
 ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
 modified: std.atomic.Value(bool) = .init(false),
+///if this is false, the chunk has not been saved ever, if it is true a version of this chunk has been saved.
+///This may not be the current version and modified should be used to check this
+saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum) {
     grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
@@ -171,7 +174,7 @@ pub const Encoding = union(enum) {
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
 pub fn from(blockEncoding: Encoding, io: std.Io, chunk: *@This()) !*@This() {
     chunk.* = .{
-        .blocks = blockEncoding,
+        .encoding = blockEncoding,
         .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
         .structures_generated = .init(false),
         .ref_count = std.atomic.Value(u32).init(1),
@@ -192,14 +195,14 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
 pub fn merge(self: *@This(), io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
     try self.addAndLock(io);
     defer self.releaseAndUnlock(io);
-    try self.blocks.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
+    try self.encoding.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
 }
 
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
     defer if (removeRef) self.release(io);
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
-    return self.blocks.extractFace(rotation);
+    return self.encoding.extractFace(rotation);
 }
 
 /// Returns true if the chunk was converted to blocks, false if it was already blocks.
@@ -208,8 +211,8 @@ pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u
     defer self.release(io);
     if (lock) try self.lockExclusive(io);
     defer if (lock) self.unlockExclusive(io);
-    if (self.blocks != .one_block) return false;
-    try self.blocks.toBlocks(io, memory_pool, pool_count, pool_mutex);
+    if (self.encoding != .one_block) return false;
+    try self.encoding.toBlocks(io, memory_pool, pool_count, pool_mutex);
     return true;
 }
 
@@ -221,10 +224,10 @@ pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, 
     self.lockExclusive(io) catch unreachable;
     _ = io.swapCancelProtection(.unblocked);
     defer self.unlockExclusive(io);
-    switch (self.blocks) {
+    switch (self.encoding) {
         .grid => {
             pool_mutex.lockUncancelable(io);
-            memory_pool.destroy(@alignCast(self.blocks.grid));
+            memory_pool.destroy(@alignCast(self.encoding.grid));
             pool_count.* -= 1;
             pool_mutex.unlock(io);
         },
@@ -289,23 +292,23 @@ pub fn release(self: *@This(), io: std.Io) void {
 }
 
 pub fn lockExclusive(self: *@This(), io: std.Io) !void {
-    try self.lock.lock(io);
+    try self.encoding_lock.lock(io);
     self.touchModify(io);
 }
 
 pub fn unlockExclusive(self: *@This(), io: std.Io) void {
     self.touchModify(io);
-    self.lock.unlock(io);
+    self.encoding_lock.unlock(io);
 }
 
 pub fn lockShared(self: *@This(), io: std.Io) !void {
-    try self.lock.lockShared(io);
+    try self.encoding_lock.lockShared(io);
     self.touch(io);
 }
 
 pub fn unlockShared(self: *@This(), io: std.Io) void {
     self.touch(io);
-    self.lock.unlockShared(io);
+    self.encoding_lock.unlockShared(io);
 }
 
 pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
@@ -358,7 +361,7 @@ test "toBlocks" {
     const converted = try chunk.toBlocks(io, &block_pool, &block_count, &block_mutex, true);
     try testing.expect(converted);
 
-    switch (chunk.blocks) {
+    switch (chunk.encoding) {
         .one_block => unreachable,
         .grid => |blocks| {
             try testing.expect(blocks[0][0][0] == .stone);
@@ -396,7 +399,7 @@ test "merge_test" { // avoid collision with BlockEncoding.merge or the file merg
 
     try chunk1.merge(io, chunk2_encoding, &block_pool, &block_count, &block_mutex);
 
-    switch (chunk1.blocks) {
+    switch (chunk1.encoding) {
         .one_block => return error.TestFailed,
         .grid => |blocks| {
             try testing.expect(blocks[0][0][0] == .dirt);

@@ -153,8 +153,8 @@ pub const ChunkSource = struct {
     data: *anyopaque,
 
     /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
-    /// Returns true if the chunk was generated, false if unsuccessful (next source will be tried).
-    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool,
+    /// Returns true if the chunk was loaded from disk, null if unsuccessful (next source will be tried).
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool,
 
     /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
     /// All chunk sources will be tried.
@@ -174,7 +174,7 @@ pub const ChunkSource = struct {
 };
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!Chunk.Encoding {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, bool } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
     errdefer switch (encoding) {
         .one_block => {},
@@ -188,7 +188,9 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos)) return encoding;
+                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos)) |from_disk| {
+                    return .{ encoding, from_disk };
+                }
             }
         }
     }
@@ -276,8 +278,9 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     defer lc.end();
     const chunk = self.chunks.getAndAddRef(io, chunk_pos);
     if (chunk == null) {
-        const chunkencoding = try self.getBlocks(io, allocator, chunk_pos);
+        const chunkencoding, const from_disk = try self.getBlocks(io, allocator, chunk_pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
+        chunkptr.saved.raw = from_disk;
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
         const existing = self.chunks.putNoOverrideAddRef(io, allocator, chunk_pos, chunkptr) catch |err| {
@@ -369,12 +372,12 @@ fn unloadTimeoutBucket(self: *World, bucket_index: usize, io: std.Io, chunk_time
     while (it.next()) |c| {
         const chunk = c.value_ptr.*;
         const chunk_pos = c.key_ptr.*;
-        
+
         const lastaccess = chunk.last_access.load(.unordered);
 
-        try chunk.lock.lockShared(io);
-        const blocks_tag = std.meta.activeTag(chunk.blocks);
-        chunk.lock.unlockShared(io);
+        try chunk.encoding_lock.lockShared(io);
+        const blocks_tag = std.meta.activeTag(chunk.encoding);
+        chunk.encoding_lock.unlockShared(io);
 
         const timeout = switch (blocks_tag) {
             .grid => @min(chunk_timeout, grid_timeout),
@@ -409,7 +412,7 @@ pub const Reader = struct {
             };
             try self.lastChunkReadCache.?.chunk.lockShared(io);
         }
-        return switch (self.lastChunkReadCache.?.chunk.blocks) {
+        return switch (self.lastChunkReadCache.?.chunk.encoding) {
             .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
             .one_block => |b| b,
         };
@@ -422,7 +425,7 @@ pub const Reader = struct {
         const chunk = try self.world.loadChunk(io, allocator, chunkPos, false);
         chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
-        return switch (chunk.blocks) {
+        return switch (chunk.encoding) {
             .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
             .one_block => |b| b,
         };
@@ -566,7 +569,7 @@ pub const Editor = struct {
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var isoneblock: bool = false;
         try chunk.lockShared(io);
-        switch (chunk.blocks) {
+        switch (chunk.encoding) {
             .grid => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
             .one_block => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
@@ -581,7 +584,7 @@ pub const Editor = struct {
         var changed_parent = false;
         try parent.lockShared(io);
         defer parent.unlockShared(io);
-        if (isoneblock and parent.blocks == .one_block and parent.blocks.one_block == simplified_blocks[0][0][0]) return false;
+        if (isoneblock and parent.encoding == .one_block and parent.encoding.one_block == simplified_blocks[0][0][0]) return false;
 
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
@@ -591,9 +594,9 @@ pub const Editor = struct {
                         block_pos[1] + @as(i64, @intCast(y)),
                         block_pos[2] + @as(i64, @intCast(z)),
                     };
-                    const current_block = switch (parent.blocks) {
-                        .grid => parent.blocks.grid[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
-                        .one_block => parent.blocks.one_block,
+                    const current_block = switch (parent.encoding) {
+                        .grid => parent.encoding.grid[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
+                        .one_block => parent.encoding.one_block,
                     };
                     const correct_block = simplified_blocks[x][y][z];
                     if (current_block == correct_block) continue;

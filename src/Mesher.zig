@@ -170,7 +170,7 @@ test "MeshBenchmark" {
     }
     var alist: std.ArrayList(Face) = .empty;
     defer alist.deinit(std.testing.allocator);
-    const test_amount = 1000; 
+    const test_amount = 1000;
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
         try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &alist, &alist);

@@ -52,6 +52,12 @@ const ChunkKey = packed struct {
     level: i32,
 };
 
+const ChunkValue = extern struct {
+    structures_generated: bool,
+    was_saved: bool,
+    modified: bool,
+};
+
 fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
     _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
@@ -64,20 +70,21 @@ const BlockTagType = std.meta.Tag(Block);
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
     const save = tracy.Zone.begin(.{ .src = @src() });
     defer save.end();
-    if (chunk.modified.load(.seq_cst) == false) switch (chunk.blocks) {
+    if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
         .grid => return,
-        .one_block => {}, //save chunk if it is just one block
+        .one_block => if(chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
     };
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
-    try chunk.lock.lockShared(io);
-    const bytes = switch (chunk.blocks) {
+    try chunk.encoding_lock.lockShared(io);
+    const bytes = switch (chunk.encoding) {
         .grid => |blocks| std.mem.asBytes(blocks),
         .one_block => |block| std.mem.asBytes(&block),
     };
     var err_str: ?rocksdb.Data = null;
     try self.database.put(self.column_families[0].handle, std.mem.asBytes(&key), bytes, &err_str);
-    chunk.lock.unlockShared(io);
+    chunk.encoding_lock.unlockShared(io);
+    chunk.saved.store(true, .unordered);
 
     if (err_str) |s| {
         std.log.err("{s}", .{s.data});
@@ -85,7 +92,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     }
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool {
     const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
 
@@ -93,7 +100,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     _ = allocator;
     var key = ChunkKey{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     var err_str: ?rocksdb.Data = null;
-    const value = (self.database.get(self.column_families[0].handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return false;
+    const value = (self.database.get(self.column_families[0].handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
 
     if (err_str) |s| {
         std.log.err("{s}", .{s.data});

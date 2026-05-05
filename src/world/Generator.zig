@@ -29,10 +29,10 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!bool {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?bool {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
         try self.genChunk(io, allocator, chunk_pos, blocks, world);
-        return true;
+        return false;
     }
 
     fn genStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void {
@@ -313,7 +313,7 @@ pub const DefaultGenerator = struct {
             defer chunk.releaseAndUnlockShared(io);
 
             if (chunk.structures_generated.load(.seq_cst)) return;
-            if (chunk.blocks != .grid) return;
+            if (chunk.encoding != .grid) return;
             if (!self.params.gen_structures) return;
             const heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const scale: f32 = self.params.terrain_scale * (1.0 / ChunkPos.toScale(chunk_pos.level));
@@ -322,7 +322,7 @@ pub const DefaultGenerator = struct {
                 for (row, 0..) |height, z| {
                     if (@divFloor(height, ChunkSize) != chunk_pos.position[1] or height < self.params.SeaLevel) continue;
                     const y: usize = @intCast(@mod(height, ChunkSize));
-                    if (!chunk.blocks.grid[x][y][z].plantsCanGrow()) continue;
+                    if (!chunk.encoding.grid[x][y][z].plantsCanGrow()) continue;
 
                     const realX: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
                     const realZ: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;

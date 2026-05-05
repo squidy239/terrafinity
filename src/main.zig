@@ -43,10 +43,8 @@ pub fn main(init: std.process.Init) !void {
 
     var exit = if (options.test_play)
         try io.concurrent(exiter, .{ io, &running })
-    else
-        {};
+    else {};
     defer if (options.test_play) exit.await(io);
-
 
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";

@@ -188,8 +188,8 @@ pub const Resistance = struct {
         _ = io;
         if (!self.enabled.load(.monotonic)) return;
         const oldVel: @Vector(3, f64) = physics.velocity.load(.seq_cst);
-        const newVel = std.math.lerp(oldVel, @Vector(3, f64) { 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * deltaT)));
-        _ = physics.velocity.store(newVel, .seq_cst);//could be edited, TODO compare and swap
+        const newVel = std.math.lerp(oldVel, @Vector(3, f64){ 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * deltaT)));
+        _ = physics.velocity.store(newVel, .seq_cst); //could be edited, TODO compare and swap
     }
 };
 
