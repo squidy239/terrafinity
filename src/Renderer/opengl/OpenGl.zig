@@ -99,9 +99,9 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     setCallback();
 
     //preallocate vram to prevent costly buffer resizes
-    try self.render_buffer.buffer.ensureCapacity(io, 128_000_000);
-    try self.render_buffer.ssbo.ensureCapacity(io, 8_000_000);
-    try self.render_buffer.indirect_buffer.ensureCapacity(io, 8_000_000);
+    try self.render_buffer.buffer.ensureCapacity(io, 1024_000_000);
+    try self.render_buffer.ssbo.ensureCapacity(io, 32_000_000);
+    try self.render_buffer.indirect_buffer.ensureCapacity(io, 32_000_000);
 
     self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
 
@@ -666,7 +666,6 @@ fn MultiRenderBuffer(comptime K: type) type {
         pub fn put(self: *@This(), io: std.Io, key: K, value: []const u8) !void {
             const z = tracy.Zone.begin(.{ .src = @src() });
             defer z.end();
-            var start: usize = undefined;
             {
                 const l = tracy.Zone.begin(.{ .src = @src(), .name = "lock" });
                 self.lock.lockUncancelable(io);
@@ -675,11 +674,10 @@ fn MultiRenderBuffer(comptime K: type) type {
                 const space = try self.add(value.len);
                 std.debug.assert(space.freelist_node == null);
                 std.debug.assert(space.length == value.len);
-                start = space.start;
                 const existing = try self.map.fetchPut(io, self.allocator, key, space);
                 if (existing) |e| self.removeSpace(e);
+                try self.buffer.writeSegment(io, space.start, value);
             }
-            try self.buffer.writeSegment(io, start, value);
         }
 
         fn add(self: *@This(), length: usize) !*Space {
@@ -825,8 +823,6 @@ fn MultiRenderBuffer(comptime K: type) type {
                 }
             }
             if (drawn > 0) {
-                try self.ssbo.flushRange(io, 0, drawn * @sizeOf(ItemData));
-                try self.indirect_buffer.flushRange(io, 0, drawn * @sizeOf(DrawElementsIndirectCommand));
                 gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT | gl.COMMAND_BARRIER_BIT | gl.CLIENT_MAPPED_BUFFER_BARRIER_BIT);
                 gl.Flush();
             }

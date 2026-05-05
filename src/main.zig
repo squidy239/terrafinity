@@ -1,27 +1,28 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const EntityTypes = @import("world/EntityTypes.zig");
-pub const Block = @import("world/Block.zig").Block;
 pub const Cache = @import("Cache").Cache;
-pub const Chunk = @import("world/Chunk.zig");
-pub const ChunkSize = Chunk.ChunkSize;
 pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-pub const Entity = @import("world/Entity.zig");
-pub const World = @import("world/World.zig");
-pub const zm = @import("zm");
-const Ui = @import("Ui.zig");
-const Game = @import("Game.zig");
 const dvui = @import("dvui");
-const Key = @import("Key.zig");
-const utils = @import("libs/utils.zig");
-const wio_backend = @import("wio-backend");
-const wio = @import("wio");
 const gl = @import("gl");
 const options = @import("options");
-pub const tracy_impl = @import("tracy_impl");
-
 pub const tracy = @import("tracy");
+pub const tracy_impl = @import("tracy_impl");
+const wio = @import("wio");
+const wio_backend = @import("wio-backend");
+pub const zm = @import("zm");
+
+const Game = @import("Game.zig");
+const Key = @import("Key.zig");
+const utils = @import("libs/utils.zig");
+const Ui = @import("Ui.zig");
+pub const Block = @import("world/Block.zig").Block;
+pub const Chunk = @import("world/Chunk.zig");
+pub const ChunkSize = Chunk.ChunkSize;
+pub const Entity = @import("world/Entity.zig");
+const EntityTypes = @import("world/EntityTypes.zig");
+pub const World = @import("world/World.zig");
+
 pub const tracy_options: tracy.Options = .{
     .on_demand = true,
     .verbose = false,
@@ -43,9 +44,9 @@ pub fn main(init: std.process.Init) !void {
     var exit = if (options.test_play)
         try io.concurrent(exiter, .{ io, &running })
     else
-        null;
+        {};
     defer if (options.test_play) exit.await(io);
-    
+
 
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
