@@ -343,7 +343,7 @@ pub fn unloadTimeout(self: *@This(), io: std.Io) !void {
     self.chunk_pool_mutex.unlock(io);
 
     try self.unload_params_lock.lockShared(io);
-    const params = self.unload_params;
+    const params = self.unload_params.*;
     self.unload_params_lock.unlockShared(io);
 
     const grid_fraction: f32 = @min(1, @as(f32, @floatFromInt(grid_count)) / @as(f32, @floatFromInt(params.grid_capacity)));
@@ -357,6 +357,9 @@ pub fn unloadTimeout(self: *@This(), io: std.Io) !void {
         const future = io.async(unloadTimeoutBucket, .{ self, bucket_index, io, chunk_timeout, grid_timeout });
         futures.appendBounded(future) catch unreachable;
     }
+    errdefer for (0..futures.items.len) |i| {
+        futures.items[i].cancel(io) catch {};
+    };
     for (0..futures.items.len) |i| {
         try futures.items[i].await(io);
     }
