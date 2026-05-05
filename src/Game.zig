@@ -413,8 +413,7 @@ pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.Actio
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
-        .Creative, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
-        else => @panic("TODO"),
+        .Creative, .Survival, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
     }
     self.setSelectedSlot(actions);
     try self.itemAction(io, actions);

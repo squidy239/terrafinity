@@ -183,12 +183,13 @@ pub const Resistance = struct {
     fraction_per_second: std.atomic.Value(f64) = .init(0.1),
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
-        if (!self.enabled.load(.monotonic)) return;
         _ = world;
         _ = allocator;
-        _ = deltaT;
-        _ = physics;
         _ = io;
+        if (!self.enabled.load(.monotonic)) return;
+        const oldVel: @Vector(3, f64) = physics.velocity.load(.seq_cst);
+        const newVel = std.math.lerp(oldVel, @Vector(3, f64) { 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * deltaT)));
+        _ = physics.velocity.store(newVel, .seq_cst);//could be edited, TODO compare and swap
     }
 };
 
