@@ -3,9 +3,10 @@ const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
+const gl = @import("gl");
+const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
-const tracy = @import("tracy");
 
 const Key = @import("Key.zig");
 const utils = @import("libs/utils.zig");
@@ -172,8 +173,6 @@ pub const WorldOptions = struct {
     }
 };
 
-const gl = @import("gl");
-
 pub fn init(
     game: *@This(),
     io: std.Io,
@@ -268,12 +267,12 @@ pub fn init(
                 },
                 .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
-            .pos = .{ .vector = try game.world.getPlayerSpawnPos() },
-            .velocity = .{ .vector = @splat(0) },
+            .pos = try game.world.getPlayerSpawnPos(),
+            .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },
         .gameMode = .init(.Spectator),
-        .viewDirection = .{ .vector = @Vector(3, f32){ 0.0001, -0.4, 0.001 } },
+        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
     }, true);
     playerentity.release();
@@ -284,7 +283,10 @@ pub fn init(
         &game.player.inventory_buffer,
     );
     _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
-    game.renderer.updateCameraDirection(game.player.viewDirection.load(.seq_cst));
+    game.player.viewDirection_mutex.lockUncancelable(io);
+    const viewDirection = game.player.viewDirection;
+    game.player.viewDirection_mutex.unlock(io);
+    game.renderer.updateCameraDirection(viewDirection);
 }
 
 pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
@@ -304,9 +306,19 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var entitys_future = io.async(World.updateEntitys, .{ &self.world, io, allocator });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
-    try self.renderer.clear(self.player.physics.pos.load(.seq_cst));
+
+    self.player.physics.mutex.lockUncancelable(io);
+    const player_pos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
+
+    try self.renderer.clear(player_pos);
     try self.player.physics.update(&self.world, io, allocator);
-    try self.renderer.drawChunks(io, self.player.physics.pos.load(.seq_cst));
+
+    self.player.physics.mutex.lockUncancelable(io);
+    const player_pos_updated = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
+
+    try self.renderer.drawChunks(io, player_pos_updated);
     try self.handleSelectFutures();
     try entitys_future.await(io);
 }
@@ -375,17 +387,19 @@ pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
-pub fn handleMouseMotion(self: *@This(), mouse_motion: wio.RelativePosition, sensitivity: f32) void {
+pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition, sensitivity: f32) void {
     var viewDirDiff: @Vector(2, f32) = @splat(0);
     viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     viewDirDiff *= @splat(sensitivity);
 
     const smallf32 = 0.00001;
 
-    var currentViewDir = self.player.viewDirection.load(.seq_cst);
+    self.player.viewDirection_mutex.lockUncancelable(io);
+    defer self.player.viewDirection_mutex.unlock(io);
+    var currentViewDir = self.player.viewDirection;
     currentViewDir -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
     currentViewDir[0] = std.math.clamp(currentViewDir[0], -90 + smallf32, 90 - smallf32);
-    self.player.viewDirection.store(currentViewDir, .seq_cst);
+    self.player.viewDirection = currentViewDir;
 
     self.renderer.updateCameraDirection(currentViewDir);
 }
@@ -436,26 +450,32 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
 }
 
 pub fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
-    if (actions.contains(.use_item_primary)) try self.world.spawnEntity(io, self.allocator, null, EntityTypes.Explosive{
-        .pos = .{ .vector = self.player.physics.pos.load(.seq_cst) },
-        .dir = .{ .vector = @splat(0) },
-        .timestamp = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
-    }, false);
+    if (actions.contains(.use_item_primary)) {
+        self.player.physics.mutex.lockUncancelable(io);
+        const ppos = self.player.physics.pos;
+        self.player.physics.mutex.unlock(io);
+        try self.world.spawnEntity(io, self.allocator, null, EntityTypes.Explosive{
+            .pos = ppos,
+            .dir = @splat(0),
+            .timestamp = .init(std.Io.Timestamp.now(io, .awake).toNanoseconds()),
+        }, false);
+    }
 }
 
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    _ = io;
     const cameraFront = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
     const c = zm.Vec3f.crossRH(.{ .data = cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
-    if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * cameraFront, .seq_cst);
-    if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * cameraFront, .seq_cst);
-    if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
-    if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
-    if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
-    if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?.data, .seq_cst);
+    self.player.physics.mutex.lockUncancelable(io);
+    defer self.player.physics.mutex.unlock(io);
+    if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cameraFront));
+    if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cameraFront));
+    if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
+    if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
+    if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
+    if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
@@ -465,14 +485,21 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
-    if (try self.player.physics.elements.mover.collision(io, self.allocator, self.player.physics.pos.load(.seq_cst), &block_reader)) |_| {
+
+    self.player.physics.mutex.lockUncancelable(io);
+    const player_pos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
+
+    if (try self.player.physics.elements.mover.collision(io, self.allocator, player_pos, &block_reader)) |_| {
         block_reader.clear(io);
-        if (actions.contains(.up)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, veldiff[1], 0 }, .seq_cst);
-        if (actions.contains(.down)) _ = self.player.physics.velocity.fetchAdd(@Vector(3, f64){ 0, -veldiff[1], 0 }, .seq_cst);
-        if (actions.contains(.forward)) _ = self.player.physics.velocity.fetchAdd(veldiff * cameraFront, .seq_cst);
-        if (actions.contains(.backward)) _ = self.player.physics.velocity.fetchAdd(-veldiff * cameraFront, .seq_cst);
-        if (actions.contains(.right) and cross != null) _ = self.player.physics.velocity.fetchAdd(veldiff * cross.?.data, .seq_cst);
-        if (actions.contains(.left) and cross != null) _ = self.player.physics.velocity.fetchAdd(-veldiff * cross.?.data, .seq_cst);
+        self.player.physics.mutex.lockUncancelable(io);
+        defer self.player.physics.mutex.unlock(io);
+        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
+        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
+        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cameraFront));
+        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cameraFront));
+        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
+        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
     }
 
 }
@@ -523,7 +550,9 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
 
 pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const lowest_level, const highest_level = self.getLevels(io);
-    const playerpos = self.player.physics.pos.load(.seq_cst);
+    self.player.physics.mutex.lockUncancelable(io);
+    const playerpos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
     const gendistance = self.getGenDistance(io);
     const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
@@ -613,7 +642,9 @@ pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3,
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
 pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer self.chunk_load_is_running.store(false, .seq_cst);
-    const playerPos = self.player.physics.pos.load(.seq_cst);
+    self.player.physics.mutex.lockUncancelable(io);
+    const playerPos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
     const addChunkstoLoad = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
 
     var levels = self.getLevels(io);

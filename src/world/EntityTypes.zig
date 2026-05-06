@@ -1,15 +1,17 @@
 const std = @import("std");
-const World = @import("World.zig");
-const zm = @import("zm");
-const Block = @import("Block.zig").Block;
-const Entity = @import("Entity.zig");
+
 const gl = @import("gl");
 const obj = @import("obj");
 const tracy = @import("tracy");
-const Physics = @import("Physics.zig");
+const zm = @import("zm");
+
+const Block = @import("Block.zig").Block;
+const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
+const Physics = @import("Physics.zig");
+const World = @import("World.zig");
+
 const pack = "default";
-const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 
 const EntityMeshBufferIDs = struct {
     vbo: c_uint,
@@ -88,7 +90,8 @@ pub const Player = struct {
     /// Main inventory and hotbar.
     main_inventory: Item.Inventory,
     /// Pitch, yaw, roll, in degrees.
-    viewDirection: AtomicVector(3, f32),
+    viewDirection: @Vector(3, f32),
+    viewDirection_mutex: std.Io.Mutex = .init,
 
     physics: Physics.Interface(struct {
         gravity: Physics.Gravity,
@@ -131,9 +134,12 @@ pub const Player = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
+    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        return self.physics.pos.load(.seq_cst);
+        self.physics.mutex.lockUncancelable(io);
+        defer self.physics.mutex.unlock(io);
+        
+        return self.physics.pos;
     }
 
     pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
@@ -186,8 +192,8 @@ pub const Player = struct {
 
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
-    pos: AtomicVector(3, f64),
-    dir: AtomicVector(3, f32),
+    pos: @Vector(3, f64),
+    dir: @Vector(3, f32),
     timestamp: std.atomic.Value(i128),
     lock: std.Io.RwLock = .init,
 
@@ -205,8 +211,8 @@ pub const Explosive = struct {
         self.timestamp.store(now_ns, .seq_cst);
         const dt = @as(f32, @floatFromInt(now_ns - prev_ns)) * 1e-9;
 
-        var dir = self.dir.load(.seq_cst);
-        var pos = self.pos.load(.seq_cst);
+        var dir = self.dir;
+        var pos = self.pos;
 
         //dir[0] += (std.crypto.random.float(f64) - 0.5) * dt;
         //dir[1] += (std.crypto.random.float(f64) - 0.5) * dt;
@@ -215,8 +221,8 @@ pub const Explosive = struct {
         dir *= @splat(10 * dt);
         pos += dir;
 
-        self.dir.store(dir, .seq_cst);
-        self.pos.store(pos, .seq_cst);
+        self.dir = dir;
+        self.pos = pos;
 
         var worldReader = World.Reader{ .world = world };
         defer worldReader.clear(io);
@@ -251,9 +257,11 @@ pub const Explosive = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque) @Vector(3, f64) {
+    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        return self.pos.load(.seq_cst);
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
+        return self.pos;
     }
 
     pub fn getInterface(self: *const @This()) Entity.interface {

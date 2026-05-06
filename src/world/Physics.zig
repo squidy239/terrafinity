@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zm = @import("zm");
 
-const AtomicVector = @import("../libs/utils.zig").AtomicVector;
 const Block = @import("Block.zig").Block;
 const World = @import("World.zig");
 
@@ -12,8 +11,9 @@ pub fn Interface(physics_elements: anytype) type {
         elements: physics_elements,
         last_update: std.Io.Timestamp,
         last_update_lock: std.Io.RwLock = .init,
-        pos: AtomicVector(3, f64),
-        velocity: AtomicVector(3, f64),
+        pos: @Vector(3, f64),
+        velocity: @Vector(3, f64),
+        mutex: std.Io.Mutex = .init,
 
         pub fn lapUpdateTimer(self: *@This(), io: std.Io) std.Io.Duration {
             self.last_update_lock.lockUncancelable(io);
@@ -39,10 +39,11 @@ pub const simpleMover = struct {
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = self;
         _ = world;
-        _ = io;
         _ = allocator;
-        const posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.pos.fetchAdd(posOffset, .seq_cst);
+        physics.mutex.lockUncancelable(io);
+        defer physics.mutex.unlock(io);
+        const posOffset = physics.velocity * @as(@Vector(3, f64), @splat(deltaT));
+        physics.pos += posOffset;
     }
 };
 
@@ -54,24 +55,39 @@ pub const Mover = struct {
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled.load(.monotonic)) return;
-        defer if (self.zeroVelocity.load(.monotonic)) physics.velocity.store(.{ 0, 0, 0 }, .seq_cst);
-        var posOffset = physics.velocity.load(.seq_cst) * @as(@Vector(3, f64), @splat(deltaT));
+        defer {
+            if (self.zeroVelocity.load(.monotonic)) {
+                physics.mutex.lockUncancelable(io);
+                physics.velocity = .{ 0, 0, 0 };
+                physics.mutex.unlock(io);
+            }
+        }
+        physics.mutex.lockUncancelable(io);
+        var posOffset = physics.velocity * @as(@Vector(3, f64), @splat(deltaT));
+        physics.mutex.unlock(io);
+
         if (!self.collisions.load(.monotonic)) {
-            _ = physics.pos.fetchAdd(posOffset, .seq_cst);
+            physics.mutex.lockUncancelable(io);
+            physics.pos += posOffset;
+            physics.mutex.unlock(io);
             return;
         }
         const maxMove: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
         defer reader.clear(io);
+        physics.mutex.lockUncancelable(io);
+        defer physics.mutex.unlock(io);
         while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
             const move = std.math.clamp(posOffset, -maxMove, maxMove);
             posOffset -= move;
-            var newPos = physics.pos.fetchAdd(move, .seq_cst);
-            while (try self.collision(io, allocator, newPos, &reader)) |mtv| {
-                newPos = physics.pos.fetchAdd(-mtv, .seq_cst);
-                if (mtv[0] != 0.0) @atomicStore(f64, &physics.velocity.vector[0], 0.0, .seq_cst);
-                if (mtv[1] != 0.0) @atomicStore(f64, &physics.velocity.vector[1], 0.0, .seq_cst);
-                if (mtv[2] != 0.0) @atomicStore(f64, &physics.velocity.vector[2], 0.0, .seq_cst);
+            physics.pos += move;
+            var currentPos = physics.pos;
+            while (try self.collision(io, allocator, currentPos, &reader)) |mtv| {
+                physics.pos -= mtv;
+                currentPos = physics.pos;
+                if (mtv[0] != 0.0) physics.velocity[0] = 0.0;
+                if (mtv[1] != 0.0) physics.velocity[1] = 0.0;
+                if (mtv[2] != 0.0) physics.velocity[2] = 0.0;
             }
         }
     }
@@ -171,9 +187,10 @@ pub const Gravity = struct {
         if (!self.enabled.load(.monotonic)) return;
         _ = world;
         _ = allocator;
-        _ = io;
         const velOffset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic))) * self.up * @as(@Vector(3, f64), @splat(deltaT));
-        _ = physics.velocity.fetchAdd(-velOffset, .seq_cst);
+        physics.mutex.lockUncancelable(io);
+        defer physics.mutex.unlock(io);
+        physics.velocity -= velOffset;
     }
 };
 
@@ -185,11 +202,12 @@ pub const Resistance = struct {
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = world;
         _ = allocator;
-        _ = io;
         if (!self.enabled.load(.monotonic)) return;
-        const oldVel: @Vector(3, f64) = physics.velocity.load(.seq_cst);
+        physics.mutex.lockUncancelable(io);
+        defer physics.mutex.unlock(io);
+        const oldVel: @Vector(3, f64) = physics.velocity;
         const newVel = std.math.lerp(oldVel, @Vector(3, f64){ 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * deltaT)));
-        _ = physics.velocity.store(newVel, .seq_cst); //could be edited, TODO compare and swap
+        physics.velocity = newVel;
     }
 };
 
@@ -223,13 +241,15 @@ test "Gravity" {
     var physics_object = physics_interface{
         .elements = .{ .gravity = .{} },
         .last_update = .now(testing.io, .awake),
-        .pos = .{ .vector = .{ 0, 0, 0 } },
-        .velocity = .{ .vector = .{ 0, 0, 0 } },
+        .pos = .{ 0, 0, 0 },
+        .velocity = .{ 0, 0, 0 },
     };
     _ = physics_object.lapUpdateTimer(testing.io);
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.velocity.load(.seq_cst)[1] < 0);
+    physics_object.mutex.lockUncancelable(testing.io);
+    defer physics_object.mutex.unlock(testing.io);
+    try testing.expect(physics_object.velocity[1] < 0);
 }
 
 test "simpleMover" {
@@ -238,11 +258,13 @@ test "simpleMover" {
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
         .last_update = .now(testing.io, .awake),
-        .pos = .{ .vector = .{ 0, 0, 0 } },
-        .velocity = .{ .vector = .{ 0, 10, 0 } },
+        .pos = .{ 0, 0, 0 },
+        .velocity = .{ 0, 10, 0 },
     };
     _ = physics_object.lapUpdateTimer(testing.io);
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     try physics_object.update(undefined, testing.io, std.testing.allocator); //world is not used so this is ok
-    try testing.expect(physics_object.pos.load(.seq_cst)[1] > 0);
+    physics_object.mutex.lockUncancelable(testing.io);
+    defer physics_object.mutex.unlock(testing.io);
+    try testing.expect(physics_object.pos[1] > 0);
 }

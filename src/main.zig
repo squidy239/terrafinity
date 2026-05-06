@@ -271,7 +271,7 @@ fn handleEvents(
                 },
                 .mouse_relative => |mouse| {
                     const mouse_moved = (mouse.x != 0 or mouse.y != 0);
-                    if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(mouse, ui.game.getMouseSensitivity(io));
+                    if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(io, mouse, ui.game.getMouseSensitivity(io));
                 },
                 .size_physical => |size| {
                     window_size = size;

@@ -19,7 +19,7 @@ pub const interface = struct {
     ///unloads the entity and frees all resorces allocated by it
     ///the entity ptr is not valid after this
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
-    getPos: ?*const fn (self: *anyopaque) @Vector(3, f64) = null,
+    getPos: ?*const fn (self: *anyopaque, io: std.Io) @Vector(3, f64) = null,
     draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };
 
