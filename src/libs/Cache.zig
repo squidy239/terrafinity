@@ -15,7 +15,7 @@ pub fn Cache(
         const Self = @This();
         const Shard = SetAssociativeCache.SetAssociativeCacheType(Key, Value, key_from_value, hash, layout);
         shards: [fragments]Shard,
-        shard_locks: [fragments]std.Io.RwLock,
+        shard_locks: [fragments]std.Io.Mutex,
 
         pub fn init(allocator: mem.Allocator, value_count_max: u64, options: Shard.Options) !Self {
             var self: Self = .{
@@ -42,21 +42,21 @@ pub fn Cache(
             }
         }
 
-        pub fn get(self: *Self, io: std.Io, key: Key) ?*Value {
+        pub fn get(self: *Self, io: std.Io, key: Key) ?Value {
             const shard, const lock = self.getShardAndLock(key);
-            lock.lockSharedUncancelable(io);
-            defer lock.unlockShared(io);
-            return shard.get(key);
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
+            return if (shard.get(key)) |v| v.* else null;
         }
 
-        pub fn remove(self: *Self, key: Key) ?Value {
+        pub fn remove(self: *Self, io: std.Io, key: Key) ?Value {
             const shard, const lock = self.getShardAndLock(key);
-            lock.lockUncancelable();
-            defer lock.unlock();
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
             return shard.remove(key);
         }
 
-        pub fn getShardAndLock(self: *Self, key: Key) struct { *Shard, *std.Io.RwLock } {
+        pub fn getShardAndLock(self: *Self, key: Key) struct { *Shard, *std.Io.Mutex } {
             const shard_index = hash(key) % fragments;
             const shard = &self.shards[shard_index];
             const lock = &self.shard_locks[shard_index];

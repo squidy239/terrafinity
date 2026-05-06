@@ -192,8 +192,8 @@ pub const ChunkSource = struct {
 /// Fetches the chunk from the cache and adds a reference to it.
 fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
-    lock.lockSharedUncancelable(io);
-    defer lock.unlockShared(io);
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
     const chunk = shard.get(chunk_pos);
     if (chunk) |ch| {
         ch.chunk.add_ref(io);
@@ -210,7 +210,6 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
         ch.chunk.add_ref(io);
         return .{ .existing = &ch.chunk };
     }
-
     var ev: bool = false;
     if (shard.peek_victim(chunk_pos)) |evicted| {
         try self.unloadChunkByPtr(io, &evicted.chunk, chunk_pos, true);
@@ -220,8 +219,8 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
         .chunk = chunk,
         .pos = chunk_pos,
     });
-    if (result.evicted) |_| {
-        std.debug.assert(ev);
+    if (ev) {
+        std.debug.assert(result.evicted != null);
         std.debug.assert(result.updated == .insert);
     }
     return .{ .inserted = &shard.get(chunk_pos).?.chunk };
