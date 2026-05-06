@@ -72,7 +72,7 @@ pub const Options = struct {
 
     loader_frequency_ms: u64 = 250,
 
-    chunk_capacity: u64 = 262144,
+    chunk_cache_bytes: u64 = 1073741824,
     grid_capacity: u64 = 8196,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
@@ -220,10 +220,11 @@ pub fn init(
 
     game.options_lock.lockSharedUncancelable(io);
     const grid_capacity = game.options.grid_capacity;
-    const chunk_capacity = game.options.chunk_capacity;
+    const chunk_cache_bytes = std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue));
     game.options_lock.unlockShared(io);
+    std.log.debug("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_bytes, chunk_cache_bytes * @sizeOf(World.ChunkValue) });
     game.world = .{
-        .chunks = try .init(allocator, chunk_capacity, .{ .name = "chunk cache" }),
+        .chunks = try .init(allocator, chunk_cache_bytes, .{ .name = "chunk cache" }),
         .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },

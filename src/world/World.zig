@@ -20,7 +20,7 @@ pub const WorldStorage = @import("WorldStorage.zig");
 const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
-const ChunkValue = struct {
+pub const ChunkValue = struct {
     chunk: Chunk,
     pos: ChunkPos,
 
