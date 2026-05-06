@@ -33,7 +33,6 @@ pub fn SetAssociativeCacheType(
     comptime layout: Layout,
 ) type {
     assert(math.isPowerOfTwo(@sizeOf(Key)));
-    assert(math.isPowerOfTwo(@sizeOf(Value)));
 
     switch (layout.ways) {
         // An 8-way set-associative cache has the clock hand as a u3, which would introduce padding.
@@ -64,11 +63,6 @@ pub fn SetAssociativeCacheType(
     assert(@sizeOf(Key) < layout.cache_line_size);
     assert(layout.cache_line_size % @sizeOf(Key) == 0);
 
-    if (layout.cache_line_size > @sizeOf(Value)) {
-        assert(layout.cache_line_size % @sizeOf(Value) == 0);
-    } else {
-        assert(@sizeOf(Value) % layout.cache_line_size == 0);
-    }
 
     const clock_hand_bits = math.log2_int(u64, layout.ways);
     assert(math.isPowerOfTwo(clock_hand_bits));
@@ -94,11 +88,7 @@ pub fn SetAssociativeCacheType(
         /// it to be a multiple of `value_count_max_multiple`. The calculation below
         /// follows from a multiple which will satisfy all asserts.
         pub const value_count_max_multiple: u64 = @max(
-            // `values`:
-            @divExact(
-                @max(@sizeOf(Value), layout.cache_line_size),
-                @min(@sizeOf(Value), layout.cache_line_size),
-            ) * layout.ways,
+            layout.ways,
             @divExact(layout.cache_line_size * 8, layout.clock_bits), // `counts`
         );
 
