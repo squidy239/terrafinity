@@ -55,16 +55,6 @@ onEdit: ?struct {
     onEditFnArgs: *anyopaque,
 } = null,
 
-unload_params: *const UnloadParams,
-unload_params_lock: *std.Io.RwLock,
-
-pub const UnloadParams = struct {
-    max_grid_ms: u64,
-    grid_capacity: u64,
-    max_chunk_ms: u64,
-    chunk_capacity: u64,
-};
-
 /// The level where one block in a chunk is one block.
 pub const standard_level = 0;
 
@@ -191,6 +181,8 @@ pub const ChunkSource = struct {
 
 /// Fetches the chunk from the cache and adds a reference to it.
 fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
     lock.lockUncancelable(io);
     defer lock.unlock(io);
@@ -203,6 +195,8 @@ fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
 }
 
 fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !union(enum) { existing: ?*Chunk, inserted: *Chunk } {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
     lock.lockUncancelable(io);
     defer lock.unlock(io);
@@ -360,15 +354,12 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
 }
 
 fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
     if (!chunk.structures_generated.load(.seq_cst)) {
         try onLoad(self, io, allocator, chunk, chunk_pos);
         chunk.structures_generated.store(true, .seq_cst);
     }
-}
-
-fn memCurve(max_ms: u64, fraction: f32) u64 {
-    const time: u64 = @trunc(@as(f32, @floatFromInt(max_ms)) * (1 - fraction));
-    return time;
 }
 
 pub const Reader = struct {
@@ -630,38 +621,6 @@ fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block
     return best;
 }
 
-pub fn unloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !void {
-    const chunk = self.chunks.fetchRemove(io, chunk_pos) orelse return;
-    try self.unloadChunkByPtr(io, chunk, chunk_pos, true);
-}
-
-/// Tries to unload a chunk if it is not in use. Returns true if the chunk was unloaded or not in map.
-pub fn tryUnloadChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, bucket: *@TypeOf(self.chunks).Bkt) !bool {
-    const bkt = self.chunks.getBucket(chunk_pos);
-    std.debug.assert(bkt == bucket);
-    try bucket.lock.lock(io);
-    const newchunk = bucket.hash_map.get(chunk_pos);
-    if (newchunk) |ch| {
-        if (ch.ref_count.load(.seq_cst) != 1) {
-            bucket.lock.unlock(io);
-            return false;
-        }
-        std.debug.assert(bucket.hash_map.remove(chunk_pos));
-        bucket.lock.unlock(io);
-        std.debug.assert(ch.ref_count.load(.seq_cst) == 1);
-        try self.unloadChunkByPtr(io, ch, chunk_pos, true);
-        return true;
-    } else {
-        bucket.lock.unlock(io);
-        return true;
-    }
-}
-
-pub fn unloadChunkNoSave(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    const chunk = self.chunks.fetchRemove(io, chunk_pos) orelse return;
-    self.unloadChunkByPtrNoSave(io, chunk);
-}
-
 /// Does not remove chunk from hashmap, just frees it.
 pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool) !void {
     _ = try chunk.waitForRefAmount(io, 1, null);
@@ -739,15 +698,8 @@ test "cube benchmark" {
 
     var generator: DefaultGenerator = .{ .params = .default, .terrain_height_cache = .init(1024) };
     generator.params.setSeeds(io);
-    const unload_params: UnloadParams = .{
-        .max_grid_ms = 0,
-        .max_chunk_ms = 0,
-        .chunk_capacity = 100000,
-        .grid_capacity = 6000,
-    };
     var lock: std.Io.RwLock = .init;
     var world: World = .{
-        .unload_params = &unload_params,
         .unload_params_lock = &lock,
         .chunk_pool = try .initCapacity(allocator, 100000),
         .block_grid_pool = try .initCapacity(allocator, 6000),
@@ -785,12 +737,11 @@ fn loadchunktest(self: *World, io: std.Io, allocator: std.mem.Allocator, chunk_p
     _ = counter.fetchAdd(1, .seq_cst);
 }
 
-fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.mem.Allocator, grids: usize, chunks: usize, unload_params: *const UnloadParams, lock: *std.Io.RwLock) !void {
+fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.mem.Allocator, grids: usize, chunks: usize, lock: *std.Io.RwLock) !void {
     generator.* = .{ .params = .default, .terrain_height_cache = .init(100) };
     generator.params.seed = 0;
+    _ = lock;
     world.* = .{
-        .unload_params = unload_params,
-        .unload_params_lock = lock,
         .chunk_pool = try std.heap.memory_pool.Extra(Chunk, .{ .growable = false }).initCapacity(allocator, chunks),
         .block_grid_pool = std.heap.memory_pool.Extra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }).initCapacity(allocator, grids) catch |err| {
             world.chunk_pool.deinit(allocator);
@@ -804,14 +755,8 @@ fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.
 fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    var unload_params: UnloadParams = .{
-        .max_grid_ms = 0,
-        .max_chunk_ms = 0,
-        .chunk_capacity = 100,
-        .grid_capacity = 100,
-    };
     var lock: std.Io.RwLock = .init;
-    try makeTestingWorld(&world, &generator, allocator, 100, 100, &unload_params, &lock);
+    try makeTestingWorld(&world, &generator, allocator, 100, 100, &lock);
     defer world.deinit(io, allocator);
 
     const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true);
@@ -845,14 +790,8 @@ fn fuzzChunkLoad(ctx: void, smith: *std.testing.Smith) !void {
     const io = th.io();
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    var unload_params: UnloadParams = .{
-        .max_grid_ms = 10,
-        .max_chunk_ms = 10,
-        .chunk_capacity = 100,
-        .grid_capacity = 1000,
-    };
     var lock: std.Io.RwLock = .init;
-    try makeTestingWorld(&world, &generator, allocator, 1000, 100, &unload_params, &lock);
+    try makeTestingWorld(&world, &generator, allocator, 1000, 100, &lock);
     defer world.deinit(io, allocator);
 
     var unloader = try io.concurrent(continuousUnload, .{ &world, io, 1000, 100 });

@@ -38,10 +38,6 @@ last_chunk_load: std.Io.Timestamp = .zero,
 chunk_load_is_running: std.atomic.Value(bool) = .init(false),
 load_future: ?std.Io.Future(@typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?) = null,
 
-last_chunk_unload: std.Io.Timestamp = .zero,
-chunk_unload_is_running: std.atomic.Value(bool) = .init(false),
-unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadWrapper)).@"fn".return_type.?) = null,
-
 last_mesh_unload: std.Io.Timestamp = .zero,
 mesh_unload_is_running: std.atomic.Value(bool) = .init(false),
 mesh_unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadChunkMeshes)).@"fn".return_type.?) = null,
@@ -74,15 +70,10 @@ pub const Options = struct {
     generation_distance_x: u32 = 8,
     generation_distance_y: u32 = 6,
 
-    unloader_frequency_ms: u64 = 1000,
     loader_frequency_ms: u64 = 250,
 
-    unload_params: World.UnloadParams = .{
-        .max_grid_ms = 60000,
-        .max_chunk_ms = 60000,
-        .chunk_capacity = 262144,
-        .grid_capacity = 8196,
-    },
+    chunk_capacity: u64 = 262144,
+    grid_capacity: u64 = 8196,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -228,13 +219,11 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const grid_capacity = game.options.unload_params.grid_capacity;
-    const chunk_capacity = game.options.unload_params.chunk_capacity;
+    const grid_capacity = game.options.grid_capacity;
+    const chunk_capacity = game.options.chunk_capacity;
     game.options_lock.unlockShared(io);
     game.world = .{
         .chunks = try .init(allocator, chunk_capacity, .{ .name = "chunk cache" }),
-        .unload_params = &game.options.unload_params,
-        .unload_params_lock = game.options_lock,
         .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
@@ -322,7 +311,6 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
-    const unloader_frequency_ms = self.options.unloader_frequency_ms;
     self.options_lock.unlockShared(io);
 
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
@@ -336,26 +324,13 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
         self.load_future = io.concurrent(@This().loadChunks, .{ self, io, allocator }) catch io.async(@This().loadChunks, .{ self, io, allocator });
     }
 
-    if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
-        if (self.unload_future) |*f| try f.await(io);
-
-        self.chunk_unload_is_running.store(true, .seq_cst);
-        self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = io.async(unloadWrapper, .{ self, io });
-    }
-
-    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
+    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
         if (self.mesh_unload_future) |*f| try f.await(io);
 
         self.mesh_unload_is_running.store(true, .seq_cst);
         self.last_mesh_unload = .now(io, .awake);
         self.mesh_unload_future = io.async(unloadChunkMeshes, .{ self, io });
     }
-}
-
-fn unloadWrapper(self: *@This(), io: std.Io) !void {
-    defer self.chunk_unload_is_running.store(false, .seq_cst);
-    _ = io;
 }
 
 pub fn handleSelectFutures(self: *@This()) !void {
@@ -741,7 +716,6 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .monotonic);
     if (self.load_future) |*future| future.cancel(io) catch {};
-    if (self.unload_future) |*future| future.cancel(io) catch {};
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
 
