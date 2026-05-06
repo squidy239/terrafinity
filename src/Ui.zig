@@ -109,9 +109,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     });
     defer text.deinit();
 
-    try self.game.world.chunk_pool_mutex.lock(io);
-    const chunk_count = self.game.world.chunk_count;
-    self.game.world.chunk_pool_mutex.unlock(io);
+    const chunk_count = 0;
 
     try self.game.world.block_grid_pool_mutex.lock(io);
     const grid_count = self.game.world.block_grid_count;

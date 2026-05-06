@@ -8,10 +8,10 @@ const Block = @import("Block.zig").Block;
 pub const ChunkSize = 32;
 encoding: Encoding,
 encoding_lock: std.Io.RwLock = .init,
-ref_count: std.atomic.Value(u32),
+ref_count: std.atomic.Value(u32) = .init(1),
 last_access: std.atomic.Value(i128),
 
-structures_generated: std.atomic.Value(bool),
+structures_generated: std.atomic.Value(bool) = .init(false),
 
 ///if this false negitive it means the chunk has not been modified after its load, otherwise it has
 modified: std.atomic.Value(bool) = .init(false),
@@ -176,7 +176,6 @@ pub fn from(blockEncoding: Encoding, io: std.Io, chunk: *@This()) !*@This() {
     chunk.* = .{
         .encoding = blockEncoding,
         .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
-        .structures_generated = .init(false),
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return chunk;

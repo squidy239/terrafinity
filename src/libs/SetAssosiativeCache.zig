@@ -345,6 +345,54 @@ pub fn SetAssociativeCacheType(
             };
         }
 
+        /// Returns a pointer to the value that will be usurped (evicted/overwritten)
+        /// if `upsert` is called with this key. Returns `null` if the cache will
+        /// simply use an empty slot and no existing data needs to be evicted.
+        pub fn peek_victim(self: *const SetAssociativeCache, key: Key) ?*align(value_alignment) Value {
+            const set = self.associate(key);
+
+            // Path 1: The key already exists. This exact entry will be overwritten (updated).
+            if (self.search(set, key)) |way| {
+                return @alignCast(&set.values[way]);
+            }
+
+            // Path 2: The key does not exist. We must simulate the CLOCK eviction algorithm.
+            const clock_index = @divExact(set.offset, layout.ways);
+            var way = self.clocks.get(clock_index);
+
+            // We cannot mutate the actual cache counts during a "peek", so we copy
+            // the counts for this specific set into a tiny local array to simulate the math.
+            var local_counts: [layout.ways]Count = undefined;
+            for (0..layout.ways) |i| {
+                local_counts[i] = self.counts.get(set.offset + i);
+            }
+
+            const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
+            var safety_count: usize = 0;
+
+            while (safety_count <= clock_iterations_max) : ({
+                safety_count += 1;
+                way +%= 1;
+            }) {
+                var count = local_counts[way];
+
+                if (count == 0) {
+                    // The slot is completely free. No item will be usurped.
+                    return null;
+                }
+
+                count -= 1;
+                local_counts[way] = count;
+
+                if (count == 0) {
+                    // This occupied slot will be the one chosen for eviction.
+                    return @alignCast(&set.values[way]);
+                }
+            } else {
+                unreachable;
+            }
+        }
+
         const Set = struct {
             tag: Tag,
             offset: u64,

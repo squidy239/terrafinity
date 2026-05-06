@@ -235,7 +235,6 @@ pub fn init(
         .chunks = try .init(allocator, chunk_capacity, .{ .name = "chunk cache" }),
         .unload_params = &game.options.unload_params,
         .unload_params_lock = game.options_lock,
-        .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
         .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },

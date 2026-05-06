@@ -21,7 +21,7 @@ const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 const ChunkValue = struct {
-    chunk: *Chunk,
+    chunk: Chunk,
     pos: ChunkPos,
 
     pub inline fn key_from_value(value: *const ChunkValue) ChunkPos {
@@ -43,10 +43,6 @@ config: WorldConfig,
 block_grid_pool_mutex: std.Io.Mutex = .init,
 block_grid_count: u64 = 0,
 block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }),
-
-chunk_pool_mutex: std.Io.Mutex = .init,
-chunk_count: u64 = 0,
-chunk_pool: std.heap.MemoryPoolExtra(Chunk, .{ .growable = false }),
 
 /// Tries each source in order of priority (0 is highest).
 /// If a source returns false, the next source will be tried.
@@ -201,29 +197,34 @@ fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     const chunk = shard.get(chunk_pos);
     if (chunk) |ch| {
         ch.chunk.add_ref(io);
-        return ch.chunk;
+        return &ch.chunk;
     }
     return null;
 }
 
-fn putChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !?*Chunk {
+fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !union(enum) { existing: ?*Chunk, inserted: *Chunk } {
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
     lock.lockUncancelable(io);
+    defer lock.unlock(io);
     if (shard.get(chunk_pos)) |ch| {
         ch.chunk.add_ref(io);
-        lock.unlock(io);
-        return ch.chunk;
+        return .{ .existing = &ch.chunk };
+    }
+
+    var ev: bool = false;
+    if (shard.peek_victim(chunk_pos)) |evicted| {
+        try self.unloadChunkByPtr(io, &evicted.chunk, chunk_pos, true);
+        ev = true;
     }
     const result = shard.upsert(&.{
         .chunk = chunk,
         .pos = chunk_pos,
     });
-    lock.unlock(io);
-    if (result.evicted) |evicted| {
+    if (result.evicted) |_| {
+        std.debug.assert(ev);
         std.debug.assert(result.updated == .insert);
-        try self.unloadChunkByPtr(io, evicted.chunk, chunk_pos, true);
     }
-    return null;
+    return .{ .inserted = &shard.get(chunk_pos).?.chunk };
 }
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
@@ -332,26 +333,26 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     const chunk = try self.fetchChunk(io, chunk_pos);
     if (chunk == null) {
         const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos);
-        const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
-        chunkptr.structures_generated.raw = metadata.structures;
-        chunkptr.saved.raw = metadata.from_disk;
-        _ = chunkptr.add_ref(io);
-        std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
-        const existing = self.putChunk(io, chunkptr, chunk_pos) catch |err| {
-            chunkptr.release(io);
-            chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-            self.destroyChunkPtr(io, chunkptr);
+        var newchunk: Chunk = .{
+            .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
+            .encoding = chunkencoding,
+            .saved = .init(metadata.from_disk),
+            .structures_generated = .init(metadata.structures),
+            .ref_count = .init(2), //one for this function, one for the cache
+        };
+        const result = self.putChunk(io, newchunk, chunk_pos) catch |err| {
+            newchunk.ref_count.raw -= 1;
+            newchunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             return err;
         };
-        if (existing) |d| {
-            chunkptr.release(io);
-            chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-            self.destroyChunkPtr(io, chunkptr);
-            if (structures) try self.tryGenStructures(io, allocator, d, chunk_pos);
-            return d;
+        if (result == .existing) {
+            if (result.existing) |existing| {
+                if (structures) try self.tryGenStructures(io, allocator, existing, chunk_pos);
+                return existing;
+            }
         }
-        if (structures) try self.tryGenStructures(io, allocator, chunkptr, chunk_pos);
-        return chunkptr;
+        if (structures) try self.tryGenStructures(io, allocator, result.inserted, chunk_pos);
+        return result.inserted;
     } else {
         errdefer chunk.?.release(io);
         if (structures) try self.tryGenStructures(io, allocator, chunk.?, chunk_pos);
@@ -364,22 +365,6 @@ fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         try onLoad(self, io, allocator, chunk, chunk_pos);
         chunk.structures_generated.store(true, .seq_cst);
     }
-}
-
-pub fn getChunkFromPool(self: *@This(), io: std.Io) !*Chunk {
-    var chunk: *Chunk = undefined;
-    while (true) {
-        try self.chunk_pool_mutex.lock(io);
-        chunk = self.chunk_pool.create(undefined) catch {
-            self.chunk_pool_mutex.unlock(io);
-            std.log.debug("Failed to allocate memory for chunk, retrying...", .{});
-            continue;
-        };
-        self.chunk_count += 1;
-        self.chunk_pool_mutex.unlock(io);
-        break;
-    }
-    return chunk;
 }
 
 fn memCurve(max_ms: u64, fraction: f32) u64 {
@@ -686,20 +671,13 @@ pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: Ch
     self.unloadChunkByPtrNoSave(io, chunk);
 }
 
+/// Does not destroy the pointer
 pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) void {
     _ = io.swapCancelProtection(.blocked);
     _ = chunk.waitForRefAmount(io, 1, null) catch unreachable;
     _ = io.swapCancelProtection(.unblocked);
 
     chunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-    self.destroyChunkPtr(io, chunk);
-}
-
-fn destroyChunkPtr(self: *@This(), io: std.Io, chunk: *Chunk) void {
-    self.chunk_pool_mutex.lockUncancelable(io);
-    self.chunk_pool.destroy(chunk);
-    self.chunk_count -= 1;
-    self.chunk_pool_mutex.unlock(io);
 }
 
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
@@ -711,8 +689,8 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
         for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
             lock.lockUncancelable(io);
             defer lock.unlock(io);
-            for (shard.values) |c| {
-                self.unloadChunkByPtr(io, c.chunk, c.key_from_value(), true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+            for (shard.values) |*c| {
+                self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
             }
         }
     }
@@ -726,8 +704,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     }
     std.debug.assert(self.block_grid_pool_mutex.tryLock());
     self.block_grid_pool.deinit(allocator);
-    std.debug.assert(self.chunk_pool_mutex.tryLock());
-    self.chunk_pool.deinit(allocator);
     self.entitys.deinit(io, allocator);
     std.log.info("entitys unloaded", .{});
     for (self.chunk_sources) |source| {
