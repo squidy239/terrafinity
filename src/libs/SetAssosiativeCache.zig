@@ -1,3 +1,6 @@
+// This file is a slightly modified version of the Tigerbeetle SetAssociativeCache
+// https://github.com/tigerbeetle/tigerbeetle/blob/main/src/lsm/set_associative_cache.zig
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -703,7 +706,6 @@ test "PackedUnsignedIntegerArray: unit" {
         words[0],
     );
 }
-
 
 inline fn fastrange(word: u64, p: u64) u64 {
     const lword: u128 = @intCast(word);

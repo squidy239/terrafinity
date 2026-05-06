@@ -218,11 +218,8 @@ pub fn init(
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
-    const terrain_height_cache_size = 65536;
-    game.generator = World.DefaultGenerator{
-        .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{.name = "terrain_height_cache"}),
-        .params = world_options.generator_config,
-    };
+    const terrain_height_cache_bytes = 268435456; //256 MiB
+    game.generator = try .init(allocator, terrain_height_cache_bytes, world_options.generator_config);
     errdefer game.generator.terrain_height_cache.deinit(allocator);
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {

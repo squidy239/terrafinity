@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const tracy = @import("tracy");
-const SetAssociativeCache = @import("../libs/SetAssosiativeCache.zig");
+const Cache = @import("Cache").Cache;
 const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
@@ -15,7 +15,7 @@ const ChunkPos = World.ChunkPos;
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
     params: Params,
-    terrain_height_cache: SetAssociativeCache.SetAssociativeCacheType(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}),
+    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, 8),
 
     const ChunkHeightsValue = struct {
         value: [ChunkSize][ChunkSize]i32,
@@ -38,6 +38,15 @@ pub const DefaultGenerator = struct {
             return hasher.final();
         }
     };
+
+    pub fn init(allocator: std.mem.Allocator, terrain_height_cache_bytes: usize, params: Params) !DefaultGenerator {
+        const terrain_height_cache_size = terrain_height_cache_bytes / @sizeOf(ChunkHeightsValue);
+        return DefaultGenerator{
+            .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
+            .params = params,
+        };
+    }
+
     pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,
@@ -260,13 +269,12 @@ pub const DefaultGenerator = struct {
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
-        _ = io;
         _ = allocator;
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        if (self.terrain_height_cache.get(.{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level })) |cachedHeight| return cachedHeight.value;
+        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level })) |cachedHeight| return cachedHeight.value;
         const generatedHeights = genTerrainHeight(self.params, level, chunk_pos);
-        _ = self.terrain_height_cache.upsert(&.{ .key = .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level }, .value = generatedHeights });
+        _ = self.terrain_height_cache.upsert(io, &.{ .key = .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level }, .value = generatedHeights });
         return generatedHeights;
     }
 

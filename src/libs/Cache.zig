@@ -1,179 +1,82 @@
 const std = @import("std");
+const mem = std.mem;
+const SetAssociativeCache = @import("SetAssosiativeCache.zig");
 
-//TODO make concurrent version with no allocations beyond the initialisation
-pub fn Cache(comptime K: type, comptime V: type) type {
+/// Each Key is associated with a set of n consecutive ways (or slots) that may contain the Value.
+pub fn Cache(
+    comptime Key: type,
+    comptime Value: type,
+    comptime key_from_value: fn (*const Value) callconv(.@"inline") Key,
+    comptime hash: fn (Key) callconv(.@"inline") u64,
+    comptime layout: SetAssociativeCache.Layout,
+    comptime fragments: comptime_int,
+) type {
     return struct {
         const Self = @This();
-        const Node = struct {
-            key: K,
-            value: V,
-            prev: ?*Node,
-            next: ?*Node,
-        };
+        const Shard = SetAssociativeCache.SetAssociativeCacheType(Key, Value, key_from_value, hash, layout);
+        shards: [fragments]Shard,
+        shard_locks: [fragments]std.Io.RwLock,
 
-        map: std.AutoHashMapUnmanaged(K, *Node),
-        head: ?*Node = null, // Most recently used
-        tail: ?*Node = null, // Least recently used
-        capacity: usize,
-        mutex: std.Io.Mutex = .init,
-
-        pub fn init(capacity: usize) Self {
-            return Self{
-                .map = .empty,
-                .capacity = capacity,
+        pub fn init(allocator: mem.Allocator, value_count_max: u64, options: Shard.Options) !Self {
+            var self: Self = .{
+                .shards = undefined,
+                .shard_locks = @splat(.init),
             };
-        }
-
-        pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-            var it = self.map.iterator();
-            while (it.next()) |entry| {
-                allocator.destroy(entry.value_ptr.*);
+            for (&self.shards) |*shard| {
+                shard.* = try .init(allocator, value_count_max / fragments, options);
             }
-            self.map.deinit(allocator);
+            return self;
         }
 
-        pub fn get(self: *Self, io: std.Io, key: K) ?V {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-
-            const node_ptr = self.map.get(key) orelse return null;
-
-            // Move to front (most recently used)
-            self.moveToFront(node_ptr);
-
-            return node_ptr.value;
-        }
-
-        pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-
-            // If key exists, update value and move to front
-            if (self.map.get(key)) |node_ptr| {
-                node_ptr.value = value;
-                self.moveToFront(node_ptr);
-                return;
+        pub fn deinit(self: *Self, allocator: mem.Allocator) void {
+            for (&self.shards) |*shard| {
+                shard.*.deinit(allocator);
             }
+        }
 
-            // Create new node
-            const node = try allocator.create(Node);
-            errdefer allocator.destroy(node);
-            node.* = .{
-                .key = key,
-                .value = value,
-                .prev = null,
-                .next = self.head,
+        pub fn reset(self: *Self, io: std.Io) void {
+            for (&self.shards, &self.shard_locks) |*shard, *lock| {
+                lock.lockUncancelable(io);
+                defer lock.unlock();
+                shard.*.reset();
+            }
+        }
+
+        pub fn get(self: *Self, io: std.Io, key: Key) ?*Value {
+            const shard, const lock = self.getShardAndLock(key);
+            lock.lockSharedUncancelable(io);
+            defer lock.unlockShared(io);
+            return shard.get(key);
+        }
+
+        pub fn remove(self: *Self, key: Key) ?Value {
+            const shard, const lock = self.getShardAndLock(key);
+            lock.lockUncancelable();
+            defer lock.unlock();
+            return shard.remove(key);
+        }
+
+        pub fn getShardAndLock(self: *Self, key: Key) struct {*Shard, *std.Io.RwLock } {
+            const shard_index = hash(key) % fragments;
+            const shard = &self.shards[shard_index];
+            const lock = &self.shard_locks[shard_index];
+            return .{ shard, lock };
+        }
+
+        pub fn upsert(self: *Self, io: std.Io, value: *const Value) struct {
+            index: usize,
+            updated: SetAssociativeCache.UpdateOrInsert,
+            evicted: ?Value,
+        } {
+            const shard, const lock = self.getShardAndLock(key_from_value(value));
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
+            const result = shard.upsert(value);
+            return .{
+                .index = result.index,
+                .updated = result.updated,
+                .evicted = result.evicted,
             };
-
-            // Add to map
-            try self.map.put(allocator, key, node);
-
-            // If we have a head, update its prev pointer
-            if (self.head) |head| {
-                head.prev = node;
-            }
-
-            // Update head
-            self.head = node;
-
-            // If this is the first node, it's also the tail
-            if (self.tail == null) {
-                self.tail = node;
-            }
-
-            // If we're over capacity, remove tail (LRU element)
-            if (self.map.count() > self.capacity) {
-                self.removeTail(allocator);
-            }
-        }
-
-        pub fn remove(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K) bool {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-
-            const node_ptr = self.map.get(key) orelse return false;
-
-            // Remove from linked list
-            if (node_ptr.prev) |prev| {
-                prev.next = node_ptr.next;
-            } else {
-                // This was the head
-                self.head = node_ptr.next;
-            }
-
-            if (node_ptr.next) |next| {
-                next.prev = node_ptr.prev;
-            } else {
-                // This was the tail
-                self.tail = node_ptr.prev;
-            }
-
-            // Remove from map and free memory
-            _ = self.map.remove(key);
-            allocator.destroy(node_ptr);
-
-            return true;
-        }
-
-        fn moveToFront(self: *Self, node: *Node) void {
-            // If node is already at the front, return
-            if (node.prev == null) return;
-
-            // Remove node from its current position
-            node.prev.?.next = node.next;
-
-            if (node.next) |next| {
-                next.prev = node.prev;
-            } else {
-                // This was the tail
-                self.tail = node.prev;
-            }
-
-            // Move to front
-            node.prev = null;
-            node.next = self.head;
-            self.head.?.prev = node;
-            self.head = node;
-        }
-
-        fn removeTail(self: *Self, allocator: std.mem.Allocator) void {
-            const tail = self.tail orelse return;
-
-            // Update tail pointer
-            self.tail = tail.prev;
-
-            // If there's a new tail, update its next pointer
-            if (self.tail) |new_tail| {
-                new_tail.next = null;
-            } else {
-                // List is now empty
-                self.head = null;
-            }
-
-            // Remove from map and free memory
-            _ = self.map.remove(tail.key);
-            allocator.destroy(tail);
         }
     };
-}
-
-test "LRUCache" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var cache = Cache(u32, u32).init(2);
-    defer cache.deinit(io, allocator);
-
-    try cache.put(io, allocator, 1, 10);
-    try cache.put(io, allocator, 2, 20);
-
-    try std.testing.expectEqual(@as(?u32, 10), cache.get(io, 1));
-
-    // This will evict key 2 because 1 was recently accessed
-    try cache.put(io, allocator, 3, 30);
-
-    try std.testing.expectEqual(@as(?u32, null), cache.get(io, 2));
-    try std.testing.expectEqual(@as(?u32, 10), cache.get(io, 1));
-    try std.testing.expectEqual(@as(?u32, 30), cache.get(io, 3));
 }
