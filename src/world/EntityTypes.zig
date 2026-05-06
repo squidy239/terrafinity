@@ -138,7 +138,7 @@ pub const Player = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.physics.mutex.lockUncancelable(io);
         defer self.physics.mutex.unlock(io);
-        
+
         return self.physics.pos;
     }
 

@@ -218,13 +218,12 @@ pub fn init(
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
-    const terrain_height_cache_memory = 100 * 1024 * 1024;
-    const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
+    const terrain_height_cache_size = 65536;
     game.generator = World.DefaultGenerator{
-        .terrain_height_cache = .init(thc_size),
+        .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{.name = "terrain_height_cache"}),
         .params = world_options.generator_config,
     };
-    errdefer game.generator.terrain_height_cache.deinit(io, allocator);
+    errdefer game.generator.terrain_height_cache.deinit(allocator);
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
@@ -501,7 +500,6 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
         if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
         if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
     }
-
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.

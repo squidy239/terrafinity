@@ -1,8 +1,7 @@
 const std = @import("std");
 
-const Cache = @import("Cache").Cache;
 const tracy = @import("tracy");
-
+const SetAssociativeCache = @import("../libs/SetAssosiativeCache.zig");
 const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
@@ -16,8 +15,29 @@ const ChunkPos = World.ChunkPos;
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
     params: Params,
-    terrain_height_cache: Cache(struct { pos: [2]i32, level: i32 }, [ChunkSize][ChunkSize]i32),
+    terrain_height_cache: SetAssociativeCache.SetAssociativeCacheType(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}),
 
+    const ChunkHeightsValue = struct {
+        value: [ChunkSize][ChunkSize]i32,
+        key: ChunkHeightsKey align(4096),
+
+        pub inline fn key_from_value(value: *const ChunkHeightsValue) ChunkHeightsKey {
+            return value.key;
+        }
+    };
+
+    const ChunkHeightsKey = packed struct {
+        x: i32,
+        y: i32,
+        level: i32,
+        _: u32 = 0,
+
+        pub inline fn hash(key: ChunkHeightsKey) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, key);
+            return hasher.final();
+        }
+    };
     pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
             .data = self,
@@ -46,8 +66,9 @@ pub const DefaultGenerator = struct {
 
     fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
         _ = world;
+        _ = io;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        generator.terrain_height_cache.deinit(io, allocator);
+        generator.terrain_height_cache.deinit(allocator);
     }
 
     pub const Params = struct {
@@ -239,11 +260,13 @@ pub const DefaultGenerator = struct {
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
+        _ = io;
+        _ = allocator;
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        if (self.terrain_height_cache.get(io, .{ .pos = chunk_pos, .level = level })) |cachedHeight| return cachedHeight;
+        if (self.terrain_height_cache.get(.{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level })) |cachedHeight| return cachedHeight.value;
         const generatedHeights = genTerrainHeight(self.params, level, chunk_pos);
-        try self.terrain_height_cache.put(io, allocator, .{ .pos = chunk_pos, .level = level }, generatedHeights);
+        _ = self.terrain_height_cache.upsert(&.{ .key = .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level }, .value = generatedHeights });
         return generatedHeights;
     }
 
