@@ -63,7 +63,6 @@ pub fn SetAssociativeCacheType(
     assert(@sizeOf(Key) < layout.cache_line_size);
     assert(layout.cache_line_size % @sizeOf(Key) == 0);
 
-
     const clock_hand_bits = math.log2_int(u64, layout.ways);
     assert(math.isPowerOfTwo(clock_hand_bits));
     assert((1 << clock_hand_bits) == layout.ways);
@@ -261,7 +260,7 @@ pub fn SetAssociativeCacheType(
                 if ((ways >> @as(u4, @intCast(way)) & 1) == 1 and
                     self.counts.get(set.offset + way) > 0)
                 {
-                    if (key_from_value(&set.values[way]) == key) {
+                    if (std.meta.eql(key_from_value(&set.values[way]), key)) {
                         return @intCast(way);
                     }
                 }

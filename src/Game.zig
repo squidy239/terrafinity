@@ -232,6 +232,7 @@ pub fn init(
     const chunk_capacity = game.options.unload_params.chunk_capacity;
     game.options_lock.unlockShared(io);
     game.world = .{
+        .chunks = try .init(allocator, chunk_capacity, .{ .name = "chunk cache" }),
         .unload_params = &game.options.unload_params,
         .unload_params_lock = game.options_lock,
         .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
@@ -355,7 +356,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
 
 fn unloadWrapper(self: *@This(), io: std.Io) !void {
     defer self.chunk_unload_is_running.store(false, .seq_cst);
-    try self.world.unloadTimeout(io);
+    _ = io;
 }
 
 pub fn handleSelectFutures(self: *@This()) !void {

@@ -20,9 +20,24 @@ pub const WorldStorage = @import("WorldStorage.zig");
 const World = @This();
 threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
+const ChunkValue = struct {
+    chunk: *Chunk,
+    pos: ChunkPos,
+
+    pub inline fn key_from_value(value: *const ChunkValue) ChunkPos {
+        return value.pos;
+    }
+};
+
+inline fn hash_chunk_pos(pos: ChunkPos) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hasher, pos);
+    return hasher.final();
+}
+
 entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256) = .init,
 
-chunks: ConcurrentHashMap(ChunkPos, *Chunk, std.hash_map.AutoContext(ChunkPos), 80, 256) = .init,
+chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash_chunk_pos, .{}, 32),
 config: WorldConfig,
 
 block_grid_pool_mutex: std.Io.Mutex = .init,
@@ -178,6 +193,39 @@ pub const ChunkSource = struct {
     deinit: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void,
 };
 
+/// Fetches the chunk from the cache and adds a reference to it.
+fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
+    const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
+    lock.lockSharedUncancelable(io);
+    defer lock.unlockShared(io);
+    const chunk = shard.get(chunk_pos);
+    if (chunk) |ch| {
+        ch.chunk.add_ref(io);
+        return ch.chunk;
+    }
+    return null;
+}
+
+fn putChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !?*Chunk {
+    const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
+    lock.lockUncancelable(io);
+    if (shard.get(chunk_pos)) |ch| {
+        ch.chunk.add_ref(io);
+        lock.unlock(io);
+        return ch.chunk;
+    }
+    const result = shard.upsert(&.{
+        .chunk = chunk,
+        .pos = chunk_pos,
+    });
+    lock.unlock(io);
+    if (result.evicted) |evicted| {
+        std.debug.assert(result.updated == .insert);
+        try self.unloadChunkByPtr(io, evicted.chunk, chunk_pos, true);
+    }
+    return null;
+}
+
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
 fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
@@ -281,7 +329,7 @@ pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !
 pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
     const lc = tracy.Zone.begin(.{ .src = @src() });
     defer lc.end();
-    const chunk = self.chunks.getAndAddRef(io, chunk_pos);
+    const chunk = try self.fetchChunk(io, chunk_pos);
     if (chunk == null) {
         const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos);
         const chunkptr: *Chunk = try .from(chunkencoding, io, self.getChunkFromPool(io) catch return error.Unrecoverable);
@@ -289,7 +337,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         chunkptr.saved.raw = metadata.from_disk;
         _ = chunkptr.add_ref(io);
         std.debug.assert(chunkptr.ref_count.load(.seq_cst) == 2);
-        const existing = self.chunks.putNoOverrideAddRef(io, allocator, chunk_pos, chunkptr) catch |err| {
+        const existing = self.putChunk(io, chunkptr, chunk_pos) catch |err| {
             chunkptr.release(io);
             chunkptr.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
             self.destroyChunkPtr(io, chunkptr);
@@ -325,7 +373,6 @@ pub fn getChunkFromPool(self: *@This(), io: std.Io) !*Chunk {
         chunk = self.chunk_pool.create(undefined) catch {
             self.chunk_pool_mutex.unlock(io);
             std.log.debug("Failed to allocate memory for chunk, retrying...", .{});
-            try self.unloadTimeout(io); //TODO do something like this for blocks too
             continue;
         };
         self.chunk_count += 1;
@@ -333,68 +380,6 @@ pub fn getChunkFromPool(self: *@This(), io: std.Io) !*Chunk {
         break;
     }
     return chunk;
-}
-
-pub fn unloadTimeout(self: *@This(), io: std.Io) !void {
-    const unloadChunks = tracy.Zone.begin(.{ .src = @src() });
-    defer unloadChunks.end();
-    try self.block_grid_pool_mutex.lock(io);
-    const grid_count = self.block_grid_count;
-    self.block_grid_pool_mutex.unlock(io);
-    try self.chunk_pool_mutex.lock(io);
-    const chunk_count = self.chunk_count;
-    self.chunk_pool_mutex.unlock(io);
-
-    try self.unload_params_lock.lockShared(io);
-    const params = self.unload_params.*;
-    self.unload_params_lock.unlockShared(io);
-
-    const grid_fraction: f32 = @min(1, @as(f32, @floatFromInt(grid_count)) / @as(f32, @floatFromInt(params.grid_capacity)));
-    const chunk_fraction: f32 = @min(1, @as(f32, @floatFromInt(chunk_count)) / @as(f32, @floatFromInt(params.chunk_capacity)));
-    const grid_timeout = memCurve(params.max_grid_ms, grid_fraction) * std.time.ns_per_ms;
-    const chunk_timeout = memCurve(params.max_chunk_ms, chunk_fraction) * std.time.ns_per_ms;
-
-    var buffer: [self.chunks.buckets.len]std.Io.Future(@typeInfo(@TypeOf(unloadTimeoutBucket)).@"fn".return_type.?) = undefined;
-    var futures: std.ArrayList(std.Io.Future(@typeInfo(@TypeOf(unloadTimeoutBucket)).@"fn".return_type.?)) = .initBuffer(&buffer);
-    for (0..self.chunks.buckets.len) |bucket_index| {
-        const future = io.async(unloadTimeoutBucket, .{ self, bucket_index, io, chunk_timeout, grid_timeout });
-        futures.appendBounded(future) catch unreachable;
-    }
-    errdefer for (0..futures.items.len) |i| {
-        futures.items[i].cancel(io) catch {};
-    };
-    for (0..futures.items.len) |i| {
-        try futures.items[i].await(io);
-    }
-}
-
-fn unloadTimeoutBucket(self: *World, bucket_index: usize, io: std.Io, chunk_timeout: u64, grid_timeout: u64) !void {
-    const utb = tracy.Zone.begin(.{ .src = @src() });
-    defer utb.end();
-    const bucket = &self.chunks.buckets[bucket_index];
-    try bucket.lock.lockShared(io);
-    defer bucket.lock.unlockShared(io);
-    var it = bucket.hash_map.iterator();
-    const currenttime = std.Io.Timestamp.now(io, .awake);
-    while (it.next()) |c| {
-        const chunk = c.value_ptr.*;
-        const chunk_pos = c.key_ptr.*;
-
-        const lastaccess = chunk.last_access.load(.unordered);
-
-        try chunk.encoding_lock.lockShared(io);
-        const blocks_tag = std.meta.activeTag(chunk.encoding);
-        chunk.encoding_lock.unlockShared(io);
-
-        const timeout = switch (blocks_tag) {
-            .grid => @min(chunk_timeout, grid_timeout),
-            .one_block => chunk_timeout,
-        };
-        if (currenttime.nanoseconds - lastaccess < timeout) continue;
-        bucket.lock.unlockShared(io);
-        _ = try self.tryUnloadChunk(io, chunk_pos, bucket);
-        bucket.lock.lockSharedUncancelable(io);
-    }
 }
 
 fn memCurve(max_ms: u64, fraction: f32) u64 {
@@ -723,10 +708,12 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
     {
-        var it = self.chunks.iterator();
-        defer it.deinit(io);
-        while (it.next(io) catch unreachable) |c| {
-            self.unloadChunkByPtr(io, c.value_ptr.*, c.key_ptr.*, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_ptr.*, err });
+        for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
+            for (shard.values) |c| {
+                self.unloadChunkByPtr(io, c.chunk, c.key_from_value(), true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+            }
         }
     }
     std.log.info("chunks unloaded", .{});
@@ -746,7 +733,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     for (self.chunk_sources) |source| {
         if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
-    self.chunks.deinit(io, allocator);
+    self.chunks.deinit(allocator);
     std.log.info("world closed", .{});
 }
 

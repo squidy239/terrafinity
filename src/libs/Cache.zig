@@ -56,7 +56,7 @@ pub fn Cache(
             return shard.remove(key);
         }
 
-        pub fn getShardAndLock(self: *Self, key: Key) struct {*Shard, *std.Io.RwLock } {
+        pub fn getShardAndLock(self: *Self, key: Key) struct { *Shard, *std.Io.RwLock } {
             const shard_index = hash(key) % fragments;
             const shard = &self.shards[shard_index];
             const lock = &self.shard_locks[shard_index];

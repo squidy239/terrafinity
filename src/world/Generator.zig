@@ -41,7 +41,7 @@ pub const DefaultGenerator = struct {
 
     pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !DefaultGenerator {
         const terrain_height_cache_size = std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue));
-        std.log.debug("creating terrain height cache with size {d} ({d} bytes)", .{terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue)});
+        std.log.debug("creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
         return DefaultGenerator{
             .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
             .params = params,
