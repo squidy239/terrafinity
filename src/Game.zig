@@ -487,7 +487,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     }
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
-    defer chunk.release(io);
+    defer chunk.release();
     const neighbor_faces = [6]Chunk.Encoding.Face{
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xminus, true),
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xplus, true),

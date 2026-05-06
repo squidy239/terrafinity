@@ -188,7 +188,7 @@ fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     defer lock.unlock(io);
     const chunk = shard.get(chunk_pos);
     if (chunk) |ch| {
-        ch.chunk.add_ref(io);
+        ch.chunk.addRef();
         return &ch.chunk;
     }
     return null;
@@ -201,7 +201,7 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
     lock.lockUncancelable(io);
     defer lock.unlock(io);
     if (shard.get(chunk_pos)) |ch| {
-        ch.chunk.add_ref(io);
+        ch.chunk.addRef();
         return .{ .existing = &ch.chunk };
     }
     var ev: bool = false;
@@ -327,7 +327,6 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     if (chunk == null) {
         const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos);
         var newchunk: Chunk = .{
-            .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
             .encoding = chunkencoding,
             .saved = .init(metadata.from_disk),
             .structures_generated = .init(metadata.structures),
@@ -347,7 +346,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
         if (structures) try self.tryGenStructures(io, allocator, result.inserted, chunk_pos);
         return result.inserted;
     } else {
-        errdefer chunk.?.release(io);
+        errdefer chunk.?.release();
         if (structures) try self.tryGenStructures(io, allocator, chunk.?, chunk_pos);
         return chunk.?;
     }
@@ -432,7 +431,7 @@ pub const Editor = struct {
         while (it.next()) |diffChunk| {
             const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
             const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
-            defer chunk.release(io);
+            defer chunk.release();
             var sides: [6]Chunk.Encoding.Face = undefined;
             if (callIfNeighborFacesChanged) {
                 inline for (0..6) |side| {
@@ -547,7 +546,7 @@ pub const Editor = struct {
         const pos_in_parent = chunk_pos.posInParent() * @as(@Vector(3, u8), @splat(simplified_size));
         const block_pos = parent_pos.toLocalBlockPos() + pos_in_parent;
         const parent = try self.world.loadChunk(io, allocator, parent_pos, false);
-        defer parent.release(io);
+        defer parent.release();
         var changed_parent = false;
         try parent.lockShared(io);
         defer parent.unlockShared(io);
@@ -578,7 +577,7 @@ pub const Editor = struct {
     /// Returns true if the parent chunk was changed.
     pub fn propagateToParentByCoords(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) !bool {
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-        defer chunk.release(io);
+        defer chunk.release();
         return try self.propagateToParent(io, allocator, chunk, chunk_pos);
     }
 

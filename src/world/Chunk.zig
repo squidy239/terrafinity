@@ -9,7 +9,6 @@ pub const ChunkSize = 32;
 encoding: Encoding,
 encoding_lock: std.Io.RwLock = .init,
 ref_count: std.atomic.Value(u32) = .init(1),
-last_access: std.atomic.Value(i128),
 
 structures_generated: std.atomic.Value(bool) = .init(false),
 
@@ -198,7 +197,7 @@ pub fn merge(self: *@This(), io: std.Io, mergeBlocks: Encoding, memory_pool: any
 }
 
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
-    defer if (removeRef) self.release(io);
+    defer if (removeRef) self.release();
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
     return self.encoding.extractFace(rotation);
@@ -206,7 +205,7 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceR
 
 /// Returns true if the chunk was converted to blocks, false if it was already blocks.
 pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
-    self.add_ref(io);
+    self.addRef(io);
     defer self.release(io);
     if (lock) try self.lockExclusive(io);
     defer if (lock) self.unlockExclusive(io);
@@ -271,42 +270,33 @@ fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatM
     }
 }
 
-pub fn touch(self: *@This(), io: std.Io) void {
-    self.last_access.store(std.Io.Timestamp.now(io, .awake).toNanoseconds(), .unordered);
-}
-
-pub fn touchModify(self: *@This(), io: std.Io) void {
-    self.touch(io);
+pub fn modify(self: *@This()) void {
     self.modified.store(true, .seq_cst);
 }
 
-pub fn add_ref(self: *@This(), io: std.Io) void {
+pub fn addRef(self: *@This()) void {
     _ = self.ref_count.fetchAdd(1, .seq_cst);
-    self.touch(io);
 }
 
-pub fn release(self: *@This(), io: std.Io) void {
-    self.touch(io);
+pub fn release(self: *@This()) void {
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
 pub fn lockExclusive(self: *@This(), io: std.Io) !void {
     try self.encoding_lock.lock(io);
-    self.touchModify(io);
+    self.modify();
 }
 
 pub fn unlockExclusive(self: *@This(), io: std.Io) void {
-    self.touchModify(io);
+    self.modify();
     self.encoding_lock.unlock(io);
 }
 
 pub fn lockShared(self: *@This(), io: std.Io) !void {
     try self.encoding_lock.lockShared(io);
-    self.touch(io);
 }
 
 pub fn unlockShared(self: *@This(), io: std.Io) void {
-    self.touch(io);
     self.encoding_lock.unlockShared(io);
 }
 
