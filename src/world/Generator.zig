@@ -132,13 +132,13 @@ pub const DefaultGenerator = struct {
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
-            try blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try world.mergeEncoding(blocks, io, .{ .one_block = .air });
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, chunk_pos.level).position[1]) {
-            try blocks.merge(io, .{ .one_block = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try world.mergeEncoding(blocks, io, .{ .one_block = .stone });
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
@@ -147,13 +147,13 @@ pub const DefaultGenerator = struct {
             generateTerrain(&blockgrid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.end();
             const oneblock = Chunk.isOneBlock(&blockgrid);
-            if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            if (oneblock != null and oneblock.? == .air) return world.mergeEncoding(blocks, io, .{ .one_block = .air });
         }
         generateCavesInterpolate(&blockgrid, chunk_pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            try blocks.merge(io, .{ .one_block = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
-        } else try blocks.merge(io, .{ .grid = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            try world.mergeEncoding(blocks, io, .{ .one_block = block });
+        } else try world.mergeEncoding(blocks, io, .{ .grid = &blockgrid });
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {

@@ -144,7 +144,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
         },
     };
 
-    try blocks.merge(io, mergeblocks, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+    try world.mergeEncoding(blocks, io, mergeblocks);
     return .{ .from_disk = true, .structures = metadata.structures_generated };
 }
 

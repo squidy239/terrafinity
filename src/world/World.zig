@@ -29,6 +29,15 @@ pub const ChunkValue = struct {
     }
 };
 
+pub const GridValue = struct {
+    grid: [ChunkSize][ChunkSize][ChunkSize]Block,
+    chunk: *Chunk,
+
+    pub inline fn key_from_value(value: *const GridValue) *Chunk {
+        return value.chunk;
+    }
+};
+
 inline fn hash_chunk_pos(pos: ChunkPos) u64 {
     var hasher = std.hash.Wyhash.init(0);
     std.hash.autoHash(&hasher, pos);
@@ -352,6 +361,106 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     }
 }
 
+pub fn mergeEncoding(self: *World, blocks: *Chunk.Encoding, io: std.Io, mergeBlocks: Chunk.Encoding) !void {
+    const m = tracy.Zone.begin(.{ .src = @src() });
+    defer m.end();
+    if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
+    switch (mergeBlocks) {
+        .one_block => {
+            switch (blocks.*) {
+                .one_block => {
+                    if (mergeBlocks.one_block != .null) {
+                        blocks.* = mergeBlocks;
+                    }
+                },
+                .grid => {
+                    if (mergeBlocks.one_block != .null) {
+                        //safe because caller holds the lock
+                        try self.block_grid_pool_mutex.lock(io);
+                        self.block_grid_pool.destroy(@alignCast(blocks.grid));
+                        self.block_grid_count -= 1;
+                        self.block_grid_pool_mutex.unlock(io);
+
+                        blocks.* = .{ .one_block = mergeBlocks.one_block };
+                    }
+                },
+            }
+        },
+        .grid => {
+            try self.toBlocks(blocks, io);
+            const tag = @typeInfo(Block).@"enum".tag_type;
+            const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
+            const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
+
+            selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
+            if (Chunk.isOneBlock(blocks.grid)) |block| {
+                @branchHint(.unlikely);
+                const f = tracy.Zone.begin(.{ .src = @src(), .name = "free" });
+                defer f.end();
+
+                try self.block_grid_pool_mutex.lock(io);
+                self.block_grid_pool.destroy(@alignCast(blocks.grid));
+                self.block_grid_count -= 1;
+                self.block_grid_pool_mutex.unlock(io);
+
+                blocks.* = .{ .one_block = block };
+            }
+        },
+    }
+}
+
+fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
+    if (comptime std.simd.suggestVectorLength(T)) |vlen| {
+        const VT = @Vector(vlen, T);
+        var i: usize = 0;
+        while (i + vlen <= len) : (i += vlen) {
+            const a: VT = flatArray.*[i..][0..vlen].*;
+            const b: VT = flatMergeArray[i..][0..vlen].*;
+            const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
+            const result = @select(T, pred, a, b);
+            flatArray.*[i..][0..vlen].* = result;
+        }
+        // handle remainder scalarly
+        while (i < len) : (i += 1) {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    } else {
+        for (0..len) |i| {
+            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                flatArray.*[i] = flatMergeArray[i];
+            }
+        }
+    }
+}
+
+pub fn toBlocks(self:*@This(), blocks: *Chunk.Encoding, io: std.Io) !void {
+    if (blocks.* == .grid) return;
+    const t = tracy.Zone.begin(.{ .src = @src() });
+    defer t.end();
+    var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    {
+        const a = tracy.Zone.begin(.{ .src = @src() });
+        defer a.end();
+        while (true) {
+            try self.block_grid_pool_mutex.lock(io);
+            mem = self.block_grid_pool.create(undefined) catch {
+                self.block_grid_pool_mutex.unlock(io);
+                try io.sleep(.fromMicroseconds(100), .awake);
+                std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
+                continue;
+            };
+            self.block_grid_count += 1;
+            self.block_grid_pool_mutex.unlock(io);
+            break;
+        }
+    }
+    const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
+    @memset(flatblocks, blocks.one_block);
+    blocks.* = .{ .grid = mem };
+}
+
 fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
@@ -438,7 +547,12 @@ pub const Editor = struct {
                     sides[side] = try chunk.extractFace(io, @enumFromInt(side), false);
                 }
             }
-            try chunk.merge(io, encoding, &self.world.block_grid_pool, &self.world.block_grid_count, &self.world.block_grid_pool_mutex);
+
+            {
+                try chunk.lockExclusive(io);
+                defer chunk.unlockExclusive(io);
+                try self.world.mergeEncoding(&chunk.encoding, io, encoding);
+            }
 
             if (self.propagate_changes) {
                 var coords: ChunkPos = diffChunk.key_ptr.*;

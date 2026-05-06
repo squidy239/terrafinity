@@ -22,80 +22,6 @@ pub const Encoding = union(enum(u1)) {
     grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
     one_block: Block,
 
-    pub fn merge(self: *Encoding, io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-        const m = tracy.Zone.begin(.{ .src = @src() });
-        defer m.end();
-        if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
-        switch (mergeBlocks) {
-            .one_block => {
-                switch (self.*) {
-                    .one_block => {
-                        if (mergeBlocks.one_block != .null) {
-                            self.* = mergeBlocks;
-                        }
-                    },
-                    .grid => {
-                        if (mergeBlocks.one_block != .null) {
-                            //safe because caller holds the lock
-                            try pool_mutex.lock(io);
-                            memory_pool.destroy(@alignCast(self.grid));
-                            pool_count.* -= 1;
-                            pool_mutex.unlock(io);
-
-                            self.* = .{ .one_block = mergeBlocks.one_block };
-                        }
-                    },
-                }
-            },
-            .grid => {
-                try self.toBlocks(io, memory_pool, pool_count, pool_mutex);
-                const tag = @typeInfo(Block).@"enum".tag_type;
-                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(self.grid);
-                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
-
-                selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
-                if (isOneBlock(self.grid)) |block| {
-                    @branchHint(.unlikely);
-                    const f = tracy.Zone.begin(.{ .src = @src(), .name = "free" });
-                    defer f.end();
-
-                    try pool_mutex.lock(io);
-                    memory_pool.destroy(@alignCast(self.grid));
-                    pool_count.* -= 1;
-                    pool_mutex.unlock(io);
-
-                    self.* = .{ .one_block = block };
-                }
-            },
-        }
-    }
-
-    pub fn toBlocks(self: *Encoding, io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-        if (self.* == .grid) return;
-        const t = tracy.Zone.begin(.{ .src = @src() });
-        defer t.end();
-        var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        {
-            const a = tracy.Zone.begin(.{ .src = @src() });
-            defer a.end();
-            while (true) {
-                try pool_mutex.lock(io);
-                mem = memory_pool.create(undefined) catch {
-                    pool_mutex.unlock(io);
-                    try io.sleep(.fromMicroseconds(100), .awake);
-                    std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
-                    continue;
-                };
-                pool_count.* += 1;
-                pool_mutex.unlock(io);
-                break;
-            }
-        }
-        const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
-        @memset(flatblocks, self.one_block);
-        self.* = .{ .grid = mem };
-    }
-
     pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
         return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
     }
@@ -189,13 +115,6 @@ pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Bl
     return if (@reduce(.And, oneblock)) blockArray[0][0][0] else null;
 }
 
-/// Merges the chunk with mergeBlocks, copying all non-null mergeBlocks to blocks.
-pub fn merge(self: *@This(), io: std.Io, mergeBlocks: Encoding, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) !void {
-    try self.addAndLock(io);
-    defer self.releaseAndUnlock(io);
-    try self.encoding.merge(io, mergeBlocks, memory_pool, pool_count, pool_mutex);
-}
-
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
     defer if (removeRef) self.release();
     try self.addAndLockShared(io);
@@ -242,32 +161,6 @@ pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroT
         try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     return true;
-}
-
-fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
-    if (comptime std.simd.suggestVectorLength(T)) |vlen| {
-        const VT = @Vector(vlen, T);
-        var i: usize = 0;
-        while (i + vlen <= len) : (i += vlen) {
-            const a: VT = flatArray.*[i..][0..vlen].*;
-            const b: VT = flatMergeArray[i..][0..vlen].*;
-            const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
-            const result = @select(T, pred, a, b);
-            flatArray.*[i..][0..vlen].* = result;
-        }
-        // handle remainder scalarly
-        while (i < len) : (i += 1) {
-            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                flatArray.*[i] = flatMergeArray[i];
-            }
-        }
-    } else {
-        for (0..len) |i| {
-            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                flatArray.*[i] = flatMergeArray[i];
-            }
-        }
-    }
 }
 
 pub fn modify(self: *@This()) void {
