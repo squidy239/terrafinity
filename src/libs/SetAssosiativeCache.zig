@@ -222,6 +222,30 @@ pub fn SetAssociativeCacheType(
             }
         }
 
+        pub const Iterator = struct {
+            cache: *const SetAssociativeCache,
+            index: usize = 0,
+
+            /// Returns a pointer to the next active Value in the cache, or null if iteration is complete.
+            pub fn next(it: *Iterator) ?*align(value_alignment) Value {
+                while (it.index < it.cache.values.len) {
+                    const current_index = it.index;
+                    it.index += 1; // Always advance the iterator for the next call
+
+                    // If the count is > 0, the slot is occupied and valid.
+                    if (it.cache.counts.get(current_index) > 0) {
+                        return @alignCast(&it.cache.values[current_index]);
+                    }
+                }
+                return null;
+            }
+        };
+
+        /// Returns an iterator over all currently active items in the cache.
+        pub fn iterator(self: *const SetAssociativeCache) Iterator {
+            return .{ .cache = self };
+        }
+
         pub fn get(self: *const SetAssociativeCache, key: Key) ?*align(value_alignment) Value {
             const index = self.get_index(key) orelse return null;
             return @alignCast(&self.values[index]);

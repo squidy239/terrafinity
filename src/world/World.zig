@@ -37,7 +37,7 @@ inline fn hash_chunk_pos(pos: ChunkPos) u64 {
 
 entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256) = .init,
 
-chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash_chunk_pos, .{}, 32),
+chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash_chunk_pos, .{}, 256),
 config: WorldConfig,
 
 block_grid_pool_mutex: std.Io.Mutex = .init,
@@ -211,8 +211,8 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
         return .{ .existing = &ch.chunk };
     }
     var ev: bool = false;
-    if (shard.peek_victim(chunk_pos)) |evicted| {
-        try self.unloadChunkByPtr(io, &evicted.chunk, chunk_pos, true);
+    if (shard.peek_victim(chunk_pos)) |victim| {
+        try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true);
         ev = true;
     }
     const result = shard.upsert(&.{
@@ -670,13 +670,14 @@ pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: Ch
     self.unloadChunkByPtrNoSave(io, chunk);
 }
 
-/// Does not destroy the pointer
+/// Does not destroy the pointer, the chunk is not valid after this call.
 pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) void {
     _ = io.swapCancelProtection(.blocked);
     _ = chunk.waitForRefAmount(io, 1, null) catch unreachable;
     _ = io.swapCancelProtection(.unblocked);
 
     chunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
+    chunk.* = undefined;
 }
 
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
@@ -688,7 +689,8 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
         for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
             lock.lockUncancelable(io);
             defer lock.unlock(io);
-            for (shard.values) |*c| {
+            var it = shard.iterator();
+            while (it.next()) |c| {
                 self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
             }
         }
