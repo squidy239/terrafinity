@@ -110,16 +110,16 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     });
     defer text.deinit();
 
-    const chunk_count = 0;
+    const chunk_count = self.game.world.chunks.count();
 
-    const grid_count = 0;
+    const grid_count = self.game.world.grids.count();
 
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
-        \\chunks loaded: {d}
-        \\grids loaded: {d}
+        \\chunks cached: {d}
+        \\grids cached: {d}
     ,
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),

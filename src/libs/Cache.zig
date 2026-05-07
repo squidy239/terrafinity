@@ -1,6 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
-const SetAssociativeCache = @import("SetAssosiativeCache.zig");
+const SetAssociativeCache = @import("SetAssociativeCache.zig");
 
 /// Each Key is associated with a set of n consecutive ways (or slots) that may contain the Value.
 pub fn Cache(
@@ -37,7 +37,7 @@ pub fn Cache(
         pub fn reset(self: *Self, io: std.Io) void {
             for (&self.shards, &self.shard_locks) |*shard, *lock| {
                 lock.lockUncancelable(io);
-                defer lock.unlock();
+                defer lock.unlock(io);
                 shard.*.reset();
             }
         }
@@ -61,6 +61,14 @@ pub fn Cache(
             const shard = &self.shards[shard_index];
             const lock = &self.shard_locks[shard_index];
             return .{ shard, lock };
+        }
+
+        pub fn count(self: *const Self) u64 {
+            var total: u64 = 0;
+            for (&self.shards) |*shard| {
+                total += shard.metrics.value_count;
+            }
+            return total;
         }
 
         pub fn upsert(self: *Self, io: std.Io, value: *const Value) struct {

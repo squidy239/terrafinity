@@ -71,7 +71,7 @@ pub const Options = struct {
     generation_distance_y: u32 = 6,
 
     loader_frequency_ms: u64 = 250,
-
+    terrain_height_cache_bytes: u64 = 268435456,
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
 
@@ -209,8 +209,7 @@ pub fn init(
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
-    const terrain_height_cache_bytes = 268435456; //256 MiB
-    game.generator = try .init(allocator, terrain_height_cache_bytes, world_options.generator_config);
+    game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
     errdefer game.generator.terrain_height_cache.deinit(allocator);
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
