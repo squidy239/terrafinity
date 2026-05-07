@@ -59,9 +59,9 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        try self.genChunk(io, allocator, chunk_pos, blocks, world);
+        try self.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
         return .{ .from_disk = false, .structures = false };
     }
 
@@ -127,18 +127,19 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
+        _ = world;
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
-            try world.mergeEncoding(blocks, io, .{ .one_block = .air });
+            _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, chunk_pos.level).position[1]) {
-            try world.mergeEncoding(blocks, io, .{ .one_block = .stone });
+            _ = try World.mergeEncoding(blocks, .{ .one_block = .stone }, grid_buffer);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
@@ -147,13 +148,16 @@ pub const DefaultGenerator = struct {
             generateTerrain(&blockgrid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.end();
             const oneblock = Chunk.isOneBlock(&blockgrid);
-            if (oneblock != null and oneblock.? == .air) return world.mergeEncoding(blocks, io, .{ .one_block = .air });
+            if (oneblock != null and oneblock.? == .air) {
+                _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
+                return;
+            }
         }
         generateCavesInterpolate(&blockgrid, chunk_pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            try world.mergeEncoding(blocks, io, .{ .one_block = block });
-        } else try world.mergeEncoding(blocks, io, .{ .grid = &blockgrid });
+            _ = try World.mergeEncoding(blocks, .{ .one_block = block }, grid_buffer);
+        } else _ = try World.mergeEncoding(blocks, .{ .grid = &blockgrid }, grid_buffer);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {

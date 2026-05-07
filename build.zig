@@ -61,7 +61,7 @@ fn setupDependencies(
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
-    rocksdb_mod.sanitize_thread = sanitize;
+    rocksdb_mod.sanitize_thread = false;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{

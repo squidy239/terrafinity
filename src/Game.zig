@@ -73,7 +73,7 @@ pub const Options = struct {
     loader_frequency_ms: u64 = 250,
 
     chunk_cache_bytes: u64 = 1073741824,
-    grid_capacity: u64 = 8196,
+    grid_cache_bytes: u64 = 1073741824,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -219,13 +219,15 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const grid_capacity = game.options.grid_capacity;
-    const chunk_cache_bytes = std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue));
+    const chunk_cache_capacity = std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue));
+    const chunk_grid_capacity = std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue));
     game.options_lock.unlockShared(io);
-    std.log.debug("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_bytes, chunk_cache_bytes * @sizeOf(World.ChunkValue) });
+    std.log.debug("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
+    std.log.debug("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
+
     game.world = .{
-        .chunks = try .init(allocator, chunk_cache_bytes, .{ .name = "chunk cache" }),
-        .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
+        .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
+        .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = .{
@@ -716,9 +718,10 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .monotonic);
+
+    self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
     if (self.load_future) |*future| future.cancel(io) catch {};
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
-    self.select.cancelDiscard();
 
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);

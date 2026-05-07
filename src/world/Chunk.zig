@@ -133,26 +133,8 @@ pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u
     return true;
 }
 
-/// Frees the chunk's blocks, does not free the chunk itself.
-/// The chunk must only have 1 ref before calling — use WaitForRefAmount.
-pub fn free(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex) void {
-    std.debug.assert(self.ref_count.load(.seq_cst) == 1);
-    _ = io.swapCancelProtection(.blocked);
-    self.lockExclusive(io) catch unreachable;
-    _ = io.swapCancelProtection(.unblocked);
-    defer self.unlockExclusive(io);
-    switch (self.encoding) {
-        .grid => {
-            pool_mutex.lockUncancelable(io);
-            memory_pool.destroy(@alignCast(self.encoding.grid));
-            pool_count.* -= 1;
-            pool_mutex.unlock(io);
-        },
-        .one_block => {},
-    }
-}
-
 pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
+    std.debug.assert(self.encoding == .grid or self.encoding == .one_block);
     if (self.ref_count.load(.seq_cst) == amount) return true;
     const st = std.Io.Timestamp.now(io, .awake);
     while (self.ref_count.load(.seq_cst) != amount) {

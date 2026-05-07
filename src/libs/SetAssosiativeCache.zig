@@ -417,6 +417,53 @@ pub fn SetAssociativeCacheType(
             }
         }
 
+        /// Skips the current eviction candidate for the given key's set.
+        /// It runs the CLOCK algorithm to find the next eviction candidate,
+        /// but instead of overwriting it, it grants the candidate an extra chance
+        /// (setting its count to 1) and advances the clock hand past it.
+        pub fn skip_victim(self: *SetAssociativeCache, key: Key) void {
+            const set = self.associate(key);
+
+            // If the key already exists, an upsert would just update it, not evict anything.
+            // Therefore, there is no victim to skip.
+            if (self.search(set, key)) |_| {
+                return;
+            }
+
+            const clock_index = @divExact(set.offset, layout.ways);
+            var way = self.clocks.get(clock_index);
+
+            const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
+            var safety_count: usize = 0;
+
+            // Run the actual CLOCK algorithm to decrement counts and find the victim.
+            while (safety_count <= clock_iterations_max) : ({
+                safety_count += 1;
+                way +%= 1;
+            }) {
+                var count = self.counts.get(set.offset + way);
+                if (count == 0) break; // Way is already free.
+
+                count -= 1;
+                self.counts.set(set.offset + way, count);
+                if (count == 0) {
+                    // Way has become free. This is the victim we want to skip.
+                    break;
+                }
+            } else {
+                unreachable;
+            }
+            assert(self.counts.get(set.offset + way) == 0);
+
+            // To "skip" this victim and protect it from being immediately chosen
+            // by the next operation, we give it another chance.
+            self.counts.set(set.offset + way, 1);
+
+            // Advance the clock hand past this protected way so the next
+            // lookup/eviction starts at the next slot.
+            self.clocks.set(clock_index, way +% 1);
+        }
+
         const Set = struct {
             tag: Tag,
             offset: u64,

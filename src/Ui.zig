@@ -93,6 +93,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
 }
 
 pub fn debugInfo(self: *@This(), io: std.Io) !void {
+    _ = io;
     var fmt_buffer: [16000]u8 = undefined;
     const box = dvui.box(@src(), .{}, .{
         .gravity_x = 0.0,
@@ -111,9 +112,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
 
     const chunk_count = 0;
 
-    try self.game.world.block_grid_pool_mutex.lock(io);
-    const grid_count = self.game.world.block_grid_count;
-    self.game.world.block_grid_pool_mutex.unlock(io);
+    const grid_count = 0;
 
     const str = try std.fmt.bufPrint(
         &fmt_buffer,

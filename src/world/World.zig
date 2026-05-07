@@ -32,26 +32,24 @@ pub const ChunkValue = struct {
 pub const GridValue = struct {
     grid: [ChunkSize][ChunkSize][ChunkSize]Block,
     chunk: *Chunk,
+    pos: ChunkPos,
 
-    pub inline fn key_from_value(value: *const GridValue) *Chunk {
-        return value.chunk;
+    pub inline fn key_from_value(value: *const GridValue) ChunkPos {
+        return value.pos;
     }
 };
 
-inline fn hash_chunk_pos(pos: ChunkPos) u64 {
+inline fn hash(item: anytype) u64 {
     var hasher = std.hash.Wyhash.init(0);
-    std.hash.autoHash(&hasher, pos);
+    std.hash.autoHash(&hasher, item);
     return hasher.final();
 }
 
-entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 256) = .init,
+entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32) = .init,
 
-chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash_chunk_pos, .{}, 256),
+grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32),
+chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32),
 config: WorldConfig,
-
-block_grid_pool_mutex: std.Io.Mutex = .init,
-block_grid_count: u64 = 0,
-block_grid_pool: std.heap.MemoryPoolExtra([ChunkSize][ChunkSize][ChunkSize]Block, .{ .growable = false, .alignment = .@"64" }),
 
 /// Tries each source in order of priority (0 is highest).
 /// If a source returns false, the next source will be tried.
@@ -169,7 +167,7 @@ pub const ChunkSource = struct {
 
     /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
     /// Returns true if the chunk was loaded from disk, null if unsuccessful (next source will be tried).
-    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
     /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
     /// All chunk sources will be tried.
@@ -193,7 +191,7 @@ fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
-    lock.lockUncancelable(io);
+    try lock.lock(io);
     defer lock.unlock(io);
     const chunk = shard.get(chunk_pos);
     if (chunk) |ch| {
@@ -203,11 +201,12 @@ fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     return null;
 }
 
-fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !union(enum) { existing: ?*Chunk, inserted: *Chunk } {
+fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !union(enum) { existing: *Chunk, inserted: *Chunk } {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
+    std.debug.assert(chunk.ref_count.raw == 2);
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
-    lock.lockUncancelable(io);
+    try lock.lock(io);
     defer lock.unlock(io);
     if (shard.get(chunk_pos)) |ch| {
         ch.chunk.addRef();
@@ -215,7 +214,7 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
     }
     var ev: bool = false;
     if (shard.peek_victim(chunk_pos)) |victim| {
-        try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true);
+        try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true, true);
         ev = true;
     }
     const result = shard.upsert(&.{
@@ -226,25 +225,48 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
         std.debug.assert(result.evicted != null);
         std.debug.assert(result.updated == .insert);
     }
-    return .{ .inserted = &shard.get(chunk_pos).?.chunk };
+    const chunkptr = &shard.get(chunk_pos).?.chunk;
+    try self.ownGrid(io, chunkptr, chunk_pos, shard);
+    return .{ .inserted = chunkptr };
+}
+
+fn freeGrid(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
+    _ = self.grids.remove(io, chunk_pos);
+}
+
+/// This must be called in the chunk's cache shard lock.
+fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) !void {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
+    comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len); //Works based on this assumption
+    if (chunk_ptr.encoding != .grid) return;
+    const grid_shard, const lock = self.grids.getShardAndLock(chunk_pos);
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+    while (grid_shard.peek_victim(chunk_pos)) |victim| {
+        std.debug.assert(victim.chunk != chunk_ptr);
+        if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+            grid_shard.skip_victim(chunk_pos);
+            continue;
+        }
+        std.debug.assert(victim.chunk.encoding == .grid);
+        onUnload(self, io, victim.chunk, victim.pos) catch unreachable;
+        victim.chunk.* = undefined;
+        std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
+        break;
+    }
+    _ = grid_shard.upsert(&GridValue{ .chunk = chunk_ptr, .grid = chunk_ptr.encoding.grid.*, .pos = chunk_pos });
+
+    chunk_ptr.encoding.grid = &grid_shard.get(chunk_pos).?.grid;
 }
 
 /// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
-    errdefer switch (encoding) {
-        .one_block => {},
-        .grid => |grid| {
-            self.block_grid_pool_mutex.lockUncancelable(io);
-            self.block_grid_pool.destroy(@alignCast(grid));
-            self.block_grid_count -= 1;
-            self.block_grid_pool_mutex.unlock(io);
-        },
-    };
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos)) |metadata| {
+                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
                     return .{ encoding, metadata };
                 }
             }
@@ -264,6 +286,8 @@ fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chun
 }
 
 fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.onUnload) |onUnloadFn| {
@@ -334,26 +358,25 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     defer lc.end();
     const chunk = try self.fetchChunk(io, chunk_pos);
     if (chunk == null) {
-        const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos);
-        var newchunk: Chunk = .{
+        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos, &grid_buffer);
+        const newchunk: Chunk = .{
             .encoding = chunkencoding,
             .saved = .init(metadata.from_disk),
             .structures_generated = .init(metadata.structures),
             .ref_count = .init(2), //one for this function, one for the cache
         };
-        const result = self.putChunk(io, newchunk, chunk_pos) catch |err| {
-            newchunk.ref_count.raw -= 1;
-            newchunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
-            return err;
-        };
-        if (result == .existing) {
-            if (result.existing) |existing| {
+        const result = try self.putChunk(io, newchunk, chunk_pos);
+        switch (result) {
+            .existing => |existing| {
                 if (structures) try self.tryGenStructures(io, allocator, existing, chunk_pos);
                 return existing;
-            }
+            },
+            .inserted => |inserted| {
+                if (structures) try self.tryGenStructures(io, allocator, inserted, chunk_pos);
+                return inserted;
+            },
         }
-        if (structures) try self.tryGenStructures(io, allocator, result.inserted, chunk_pos);
-        return result.inserted;
     } else {
         errdefer chunk.?.release();
         if (structures) try self.tryGenStructures(io, allocator, chunk.?, chunk_pos);
@@ -361,10 +384,11 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     }
 }
 
-pub fn mergeEncoding(self: *World, blocks: *Chunk.Encoding, io: std.Io, mergeBlocks: Chunk.Encoding) !void {
+/// Returns old it must be freed
+pub fn mergeEncoding(blocks: *Chunk.Encoding, mergeBlocks: Chunk.Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !?*[ChunkSize][ChunkSize][ChunkSize]Block {
     const m = tracy.Zone.begin(.{ .src = @src() });
     defer m.end();
-    if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return;
+    if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return null;
     switch (mergeBlocks) {
         .one_block => {
             switch (blocks.*) {
@@ -375,19 +399,15 @@ pub fn mergeEncoding(self: *World, blocks: *Chunk.Encoding, io: std.Io, mergeBlo
                 },
                 .grid => {
                     if (mergeBlocks.one_block != .null) {
-                        //safe because caller holds the lock
-                        try self.block_grid_pool_mutex.lock(io);
-                        self.block_grid_pool.destroy(@alignCast(blocks.grid));
-                        self.block_grid_count -= 1;
-                        self.block_grid_pool_mutex.unlock(io);
-
+                        const old_grid = blocks.grid;
                         blocks.* = .{ .one_block = mergeBlocks.one_block };
+                        return old_grid;
                     }
                 },
             }
         },
         .grid => {
-            try self.toBlocks(blocks, io);
+            try toBlocks(blocks, grid_buffer);
             const tag = @typeInfo(Block).@"enum".tag_type;
             const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
             const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
@@ -395,18 +415,14 @@ pub fn mergeEncoding(self: *World, blocks: *Chunk.Encoding, io: std.Io, mergeBlo
             selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
             if (Chunk.isOneBlock(blocks.grid)) |block| {
                 @branchHint(.unlikely);
-                const f = tracy.Zone.begin(.{ .src = @src(), .name = "free" });
-                defer f.end();
-
-                try self.block_grid_pool_mutex.lock(io);
-                self.block_grid_pool.destroy(@alignCast(blocks.grid));
-                self.block_grid_count -= 1;
-                self.block_grid_pool_mutex.unlock(io);
+                const old_grid = blocks.grid;
 
                 blocks.* = .{ .one_block = block };
+                return old_grid;
             }
         },
     }
+    return null;
 }
 
 fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
@@ -435,30 +451,14 @@ fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatM
     }
 }
 
-pub fn toBlocks(self:*@This(), blocks: *Chunk.Encoding, io: std.Io) !void {
+pub fn toBlocks(blocks: *Chunk.Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
     if (blocks.* == .grid) return;
     const t = tracy.Zone.begin(.{ .src = @src() });
     defer t.end();
-    var mem: *[ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    {
-        const a = tracy.Zone.begin(.{ .src = @src() });
-        defer a.end();
-        while (true) {
-            try self.block_grid_pool_mutex.lock(io);
-            mem = self.block_grid_pool.create(undefined) catch {
-                self.block_grid_pool_mutex.unlock(io);
-                try io.sleep(.fromMicroseconds(100), .awake);
-                std.log.debug("Failed to allocate memory for chunk blocks, retrying...", .{});
-                continue;
-            };
-            self.block_grid_count += 1;
-            self.block_grid_pool_mutex.unlock(io);
-            break;
-        }
-    }
-    const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(mem);
+
+    const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(grid_buffer);
     @memset(flatblocks, blocks.one_block);
-    blocks.* = .{ .grid = mem };
+    blocks.* = .{ .grid = grid_buffer };
 }
 
 fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -551,7 +551,17 @@ pub const Editor = struct {
             {
                 try chunk.lockExclusive(io);
                 defer chunk.unlockExclusive(io);
-                try self.world.mergeEncoding(&chunk.encoding, io, encoding);
+                var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+                const was_grid: bool = chunk.encoding == .grid;
+                const old = try mergeEncoding(&chunk.encoding, encoding, &grid_buffer);
+                if (!was_grid and chunk.encoding == .grid) {
+                    const shard, const lock = self.world.chunks.getShardAndLock(diffChunk.key_ptr.*);
+                    lock.lockUncancelable(io);
+                    defer lock.unlock(io);
+                    try self.world.ownGrid(io, chunk, diffChunk.key_ptr.*, shard);
+                } else if (old) |_| {
+                    self.world.freeGrid(io, diffChunk.key_ptr.*);
+                }
             }
 
             if (self.propagate_changes) {
@@ -735,20 +745,32 @@ fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block
 }
 
 /// Does not remove chunk from hashmap, just frees it.
-pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool) !void {
+pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool, lock_grids: bool) !void {
     _ = try chunk.waitForRefAmount(io, 1, null);
-    errdefer if (delete_on_error) self.unloadChunkByPtrNoSave(io, chunk);
+    std.debug.assert(chunk.encoding == .grid or chunk.encoding == .one_block);
+    errdefer if (delete_on_error) self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
     try onUnload(self, io, chunk, chunk_pos);
-    self.unloadChunkByPtrNoSave(io, chunk);
+    self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
 }
 
 /// Does not destroy the pointer, the chunk is not valid after this call.
-pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk) void {
-    _ = io.swapCancelProtection(.blocked);
+/// Asserts that the chunk is not locked after waiting for 1 reference.
+pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk, lock_grids: bool, chunk_pos: ChunkPos) void {
+    const last_prot = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(last_prot);
     _ = chunk.waitForRefAmount(io, 1, null) catch unreachable;
-    _ = io.swapCancelProtection(.unblocked);
-
-    chunk.free(io, &self.block_grid_pool, &self.block_grid_count, &self.block_grid_pool_mutex);
+    std.debug.assert(chunk.encoding_lock.mutex.state.raw == .unlocked);
+    switch (chunk.encoding) {
+        .grid => {
+            if (lock_grids) {
+                std.debug.assert(self.grids.remove(io, chunk_pos) != null);
+            } else {
+                const shard, _ = self.grids.getShardAndLock(chunk_pos);
+                std.debug.assert(shard.remove(chunk_pos) != null);
+            }
+        },
+        .one_block => {},
+    }
     chunk.* = undefined;
 }
 
@@ -763,7 +785,8 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
             defer lock.unlock(io);
             var it = shard.iterator();
             while (it.next()) |c| {
-                self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+                std.debug.assert(c.chunk.encoding == .grid or c.chunk.encoding == .one_block);
+                self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
             }
         }
     }
@@ -775,13 +798,12 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
             c.value_ptr.*.unload(io, self, c.key_ptr.*, allocator, true) catch std.log.err("error unloading entity\n", .{});
         }
     }
-    std.debug.assert(self.block_grid_pool_mutex.tryLock());
-    self.block_grid_pool.deinit(allocator);
     self.entitys.deinit(io, allocator);
     std.log.info("entitys unloaded", .{});
     for (self.chunk_sources) |source| {
         if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
+    self.grids.deinit(allocator);
     self.chunks.deinit(allocator);
     std.log.info("world closed", .{});
 }
