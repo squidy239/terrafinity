@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize,
     });
 
-    setupDependencies(b, root_module, target, optimize, sanitize);
+    setupDependencies(b, root_module, target, optimize);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
@@ -51,13 +51,11 @@ fn setupDependencies(
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    sanitize: ?bool,
 ) void {
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
-        .optimize = optimize,
-        .sanitize_thread = sanitize,
+        .optimize = .ReleaseFast,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
