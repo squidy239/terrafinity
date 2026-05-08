@@ -206,28 +206,28 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
     defer z.end();
     std.debug.assert(chunk.ref_count.raw == 2);
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
-    try lock.lock(io);
-    defer lock.unlock(io);
-    if (shard.get(chunk_pos)) |ch| {
-        ch.chunk.addRef();
-        return .{ .existing = &ch.chunk };
+    while (true) {
+        try lock.lock(io);
+        defer lock.unlock(io);
+        if (shard.get(chunk_pos)) |ch| {
+            ch.chunk.addRef();
+            return .{ .existing = &ch.chunk };
+        }
+        if(shard.peek_victim(chunk_pos))|victim|{
+            if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+                shard.skip_victim(chunk_pos);
+                continue;
+            }
+            try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true, true);
+        }
+        _ = shard.upsert(&.{
+            .chunk = chunk,
+            .pos = chunk_pos,
+        });
+        const chunkptr = &shard.get(chunk_pos).?.chunk;
+        try self.ownGrid(io, chunkptr, chunk_pos, shard);
+        return .{ .inserted = chunkptr };
     }
-    var ev: bool = false;
-    if (shard.peek_victim(chunk_pos)) |victim| {
-        try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true, true);
-        ev = true;
-    }
-    const result = shard.upsert(&.{
-        .chunk = chunk,
-        .pos = chunk_pos,
-    });
-    if (ev) {
-        std.debug.assert(result.evicted != null);
-        std.debug.assert(result.updated == .insert);
-    }
-    const chunkptr = &shard.get(chunk_pos).?.chunk;
-    try self.ownGrid(io, chunkptr, chunk_pos, shard);
-    return .{ .inserted = chunkptr };
 }
 
 fn freeGrid(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
@@ -251,8 +251,8 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
         }
         std.debug.assert(victim.chunk.encoding == .grid);
         onUnload(self, io, victim.chunk, victim.pos) catch unreachable;
-        victim.chunk.* = undefined;
         std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
+        victim.chunk.* = undefined;
         break;
     }
     _ = grid_shard.upsert(&GridValue{ .chunk = chunk_ptr, .grid = chunk_ptr.encoding.grid.*, .pos = chunk_pos });
@@ -763,10 +763,10 @@ pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk, lock_gr
     switch (chunk.encoding) {
         .grid => {
             if (lock_grids) {
-                std.debug.assert(self.grids.remove(io, chunk_pos) != null);
+                _ = self.grids.remove(io, chunk_pos);
             } else {
                 const shard, _ = self.grids.getShardAndLock(chunk_pos);
-                std.debug.assert(shard.remove(chunk_pos) != null);
+                _ = shard.remove(chunk_pos);
             }
         },
         .one_block => {},

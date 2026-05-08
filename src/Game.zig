@@ -218,11 +218,11 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const chunk_cache_capacity = std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue));
-    const chunk_grid_capacity = std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue));
+    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue)), game.world.chunks.shards.len * 256);
+    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue)), game.world.grids.shards.len * 256);
     game.options_lock.unlockShared(io);
-    std.log.debug("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
-    std.log.debug("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
+    std.log.info("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
+    std.log.info("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
 
     game.world = .{
         .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
@@ -720,6 +720,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
 
     self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
     if (self.load_future) |*future| future.cancel(io) catch {};
+    self.select.cancelDiscard();
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
 
     self.opengl_renderer.deinit(io);

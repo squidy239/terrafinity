@@ -14,8 +14,10 @@ const ChunkPos = World.ChunkPos;
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
+    const thc_fragments = 8;
+    
     params: Params,
-    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, 8),
+    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, thc_fragments),
 
     const ChunkHeightsValue = struct {
         value: [ChunkSize][ChunkSize]i32,
@@ -40,8 +42,8 @@ pub const DefaultGenerator = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !DefaultGenerator {
-        const terrain_height_cache_size = std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue));
-        std.log.debug("creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
+        const terrain_height_cache_size = @max(std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue)), 256 * thc_fragments);
+        std.log.info("Creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
         return DefaultGenerator{
             .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
             .params = params,

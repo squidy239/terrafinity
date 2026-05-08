@@ -19,9 +19,9 @@ pub const Layout = struct {
 };
 
 const Metrics = struct {
-    hits: u64 = 0,
-    misses: u64 = 0,
-    value_count: u64 = 0,
+    hits: std.atomic.Value(u64) = .init(0),
+    misses: std.atomic.Value(u64) = .init(0),
+    value_count: std.atomic.Value(u64) = .init(0),
 };
 
 /// Each Key is associated with a set of n consecutive ways (or slots) that may contain the Value.
@@ -212,12 +212,12 @@ pub fn SetAssociativeCacheType(
         pub fn get_index(self: *const SetAssociativeCache, key: Key) ?usize {
             const set = self.associate(key);
             if (self.search(set, key)) |way| {
-                self.metrics.hits += 1;
+                 _= self.metrics.hits.fetchAdd(1, .acq_rel);
                 const count = self.counts.get(set.offset + way);
                 self.counts.set(set.offset + way, count +| 1);
                 return set.offset + way;
             } else {
-                self.metrics.misses += 1;
+                _ = self.metrics.misses.fetchAdd(1, .acq_rel);
                 return null;
             }
         }
@@ -260,7 +260,7 @@ pub fn SetAssociativeCacheType(
             const removed: Value = set.values[way];
             self.counts.set(set.offset + way, 0);
             set.values[way] = undefined;
-            self.metrics.value_count -= 1;
+            _ = self.metrics.value_count.fetchSub(1, .acq_rel);
 
             return removed;
         }
@@ -360,7 +360,7 @@ pub fn SetAssociativeCacheType(
             set.values[way] = value.*;
             self.counts.set(set.offset + way, 1);
             self.clocks.set(clock_index, way +% 1);
-            if (evicted == null) self.metrics.value_count += 1;
+            if (evicted == null) _ = self.metrics.value_count.fetchAdd(1, .acq_rel    );
 
             return .{
                 .index = set.offset + way,

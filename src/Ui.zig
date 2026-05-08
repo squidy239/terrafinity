@@ -195,7 +195,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
         defer world_name_widget.deinit();
         if (create) {
             const world_name = world_name_widget.textGet();
-            std.log.info("creating world: {any}\n", .{world_name});
+            std.log.info("Creating world: {any}\n", .{world_name});
             var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
             defer worlds_dir.close(io);
             var worldfolder = try worlds_dir.createDirPathOpen(io, world_name, .{});

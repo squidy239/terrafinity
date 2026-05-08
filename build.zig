@@ -73,9 +73,6 @@ fn setupDependencies(
     const Cache = b.addModule("Cache", .{
         .root_source_file = b.path("src/libs/Cache.zig"),
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
-        },
     });
     root_module.addImport("Cache", Cache);
 

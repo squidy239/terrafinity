@@ -66,7 +66,7 @@ pub fn Cache(
         pub fn count(self: *const Self) u64 {
             var total: u64 = 0;
             for (&self.shards) |*shard| {
-                total += shard.metrics.value_count;
+                total += shard.metrics.value_count.load(.acquire);
             }
             return total;
         }
