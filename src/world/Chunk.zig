@@ -1,7 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const tracy = @import("tracy");
 
 const Block = @import("Block.zig").Block;
 
@@ -67,22 +64,6 @@ pub const Encoding = union(enum(u1)) {
         one_block: Block,
     };
 
-    test "merge" {
-        try std.testing.fuzz(std.testing.io, testOne, .{});
-    }
-
-    fn testOne(io: std.Io, smith: *std.testing.Smith) !void {
-        var pool: std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block) = try .initCapacity(std.testing.allocator, 1);
-        defer pool.deinit(std.testing.allocator);
-        var g1: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var g2: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-        var b1: Encoding = .fuzzerMakeEncoding(&g1, smith);
-        const b2: Encoding = .fuzzerMakeEncoding(&g2, smith);
-        var pc: u64 = 2;
-        var pm: std.Io.Mutex = .init;
-        try b1.merge(io, b2, &pool, &pc, &pm);
-    }
-
     pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
         @disableInstrumentation();
         @setRuntimeSafety(false);
@@ -97,10 +78,9 @@ pub const Encoding = union(enum(u1)) {
 };
 
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
-pub fn from(blockEncoding: Encoding, io: std.Io, chunk: *@This()) !*@This() {
+pub fn from(blockEncoding: Encoding, chunk: *@This()) !*@This() {
     chunk.* = .{
         .encoding = blockEncoding,
-        .last_access = .init(std.Io.Timestamp.now(io, .awake).nanoseconds),
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return chunk;
@@ -120,17 +100,6 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceR
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
     return self.encoding.extractFace(rotation);
-}
-
-/// Returns true if the chunk was converted to blocks, false if it was already blocks.
-pub fn toBlocks(self: *@This(), io: std.Io, memory_pool: anytype, pool_count: *u64, pool_mutex: *std.Io.Mutex, comptime lock: bool) !bool {
-    self.addRef(io);
-    defer self.release(io);
-    if (lock) try self.lockExclusive(io);
-    defer if (lock) self.unlockExclusive(io);
-    if (self.encoding != .one_block) return false;
-    try self.encoding.toBlocks(io, memory_pool, pool_count, pool_mutex);
-    return true;
 }
 
 pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
@@ -206,93 +175,6 @@ test "IsOneBlock" {
     var all_stone_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
     try testing.expect(isOneBlock(&all_stone_chunk) != null);
     try testing.expect(isOneBlock(&all_stone_chunk).? == .stone);
-}
-
-test "toBlocks" {
-    const testing = std.testing;
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-
-    var chunk_data: @This() = undefined;
-
-    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
-    defer block_pool.deinit(allocator);
-    var block_count: u64 = 0;
-    var block_mutex: std.Io.Mutex = .init;
-
-    var chunk = try from(.{ .one_block = .stone }, io, &chunk_data);
-
-    const converted = try chunk.toBlocks(io, &block_pool, &block_count, &block_mutex, true);
-    try testing.expect(converted);
-
-    switch (chunk.encoding) {
-        .one_block => unreachable,
-        .grid => |blocks| {
-            try testing.expect(blocks[0][0][0] == .stone);
-            try testing.expect(blocks[10][20][30] == .stone);
-        },
-    }
-
-    chunk.free(io, &block_pool, &block_count, &block_mutex);
-}
-
-test "merge_test" { // avoid collision with BlockEncoding.merge or the file merge
-    const testing = std.testing;
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-
-    var chunk_data: @This() = undefined;
-
-    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
-    defer block_pool.deinit(allocator);
-    var block_count: u64 = 0;
-    var block_mutex: std.Io.Mutex = .init;
-
-    const blocks1 = try block_pool.create(allocator);
-    @memset(@as(*[ChunkSize * ChunkSize * ChunkSize]Block, @ptrCast(blocks1)), .air);
-    blocks1[0][0][0] = .dirt;
-    block_count += 1;
-
-    var blocks2: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
-    blocks2[0][0][1] = .grass;
-
-    const chunk1_encoding = Encoding.fromBlocks(blocks1);
-    var chunk1 = try from(chunk1_encoding, io, &chunk_data);
-
-    const chunk2_encoding = Encoding.fromBlocks(&blocks2);
-
-    try chunk1.merge(io, chunk2_encoding, &block_pool, &block_count, &block_mutex);
-
-    switch (chunk1.encoding) {
-        .one_block => return error.TestFailed,
-        .grid => |blocks| {
-            try testing.expect(blocks[0][0][0] == .dirt);
-            try testing.expect(blocks[0][0][1] == .grass);
-            try testing.expect(blocks[1][1][1] == .air);
-        },
-    }
-
-    chunk1.free(io, &block_pool, &block_count, &block_mutex);
-}
-
-fn testToBlocksAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
-    var chunk_data: @This() = undefined;
-
-    var block_pool = try std.heap.MemoryPool([ChunkSize][ChunkSize][ChunkSize]Block).initCapacity(allocator, 1);
-    defer block_pool.deinit(allocator);
-    var block_count: u64 = 0;
-    var block_mutex: std.Io.Mutex = .init;
-
-    var chunk = try from(.{ .one_block = .stone }, io, &chunk_data);
-
-    _ = try chunk.toBlocks(io, &block_pool, &block_count, &block_mutex, true);
-
-    chunk.free(io, &block_pool, &block_count, &block_mutex);
-}
-
-test "toBlocks allocation failure" {
-    const io = std.testing.io;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, testToBlocksAllocation, .{io});
 }
 
 test {

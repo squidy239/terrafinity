@@ -212,7 +212,7 @@ pub fn SetAssociativeCacheType(
         pub fn get_index(self: *const SetAssociativeCache, key: Key) ?usize {
             const set = self.associate(key);
             if (self.search(set, key)) |way| {
-                 _= self.metrics.hits.fetchAdd(1, .acq_rel);
+                _ = self.metrics.hits.fetchAdd(1, .acq_rel);
                 const count = self.counts.get(set.offset + way);
                 self.counts.set(set.offset + way, count +| 1);
                 return set.offset + way;
@@ -360,7 +360,7 @@ pub fn SetAssociativeCacheType(
             set.values[way] = value.*;
             self.counts.set(set.offset + way, 1);
             self.clocks.set(clock_index, way +% 1);
-            if (evicted == null) _ = self.metrics.value_count.fetchAdd(1, .acq_rel    );
+            if (evicted == null) _ = self.metrics.value_count.fetchAdd(1, .acq_rel);
 
             return .{
                 .index = set.offset + way,

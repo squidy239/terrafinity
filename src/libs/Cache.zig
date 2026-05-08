@@ -22,8 +22,16 @@ pub fn Cache(
                 .shards = undefined,
                 .shard_locks = @splat(.init),
             };
+            var initialized_count: usize = 0;
+            errdefer {
+                while (initialized_count > 0) {
+                    initialized_count -= 1;
+                    self.shards[initialized_count].deinit(allocator);
+                }
+            }
             for (&self.shards) |*shard| {
                 shard.* = try .init(allocator, value_count_max / fragments, options);
+                initialized_count += 1;
             }
             return self;
         }

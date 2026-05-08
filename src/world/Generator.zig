@@ -15,7 +15,7 @@ const ChunkPos = World.ChunkPos;
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
     const thc_fragments = 8;
-    
+
     params: Params,
     terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, thc_fragments),
 

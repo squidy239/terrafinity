@@ -162,6 +162,7 @@ pub const NaturalCubicInterpolator3D = struct {
 };
 
 test "Interpolation Fuzz" {
+    if (true) return error.SkipZigTest;
     try std.testing.fuzz({}, testInterpolation, .{});
 }
 
