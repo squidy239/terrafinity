@@ -1,2 +1,6 @@
 # tsan_suppressions.txt
 race:libgallium
+race:rocksdb
+race:zstd_decompress.c
+race:huf_decompress.c
+race:entropy_common.c

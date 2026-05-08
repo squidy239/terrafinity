@@ -93,6 +93,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
 }
 
 pub fn debugInfo(self: *@This(), io: std.Io) !void {
+    _ = io;
     var fmt_buffer: [16000]u8 = undefined;
     const box = dvui.box(@src(), .{}, .{
         .gravity_x = 0.0,
@@ -109,20 +110,16 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     });
     defer text.deinit();
 
-    try self.game.world.chunk_pool_mutex.lock(io);
-    const chunk_count = self.game.world.chunk_count;
-    self.game.world.chunk_pool_mutex.unlock(io);
+    const chunk_count = self.game.world.chunks.count();
 
-    try self.game.world.block_grid_pool_mutex.lock(io);
-    const grid_count = self.game.world.block_grid_count;
-    self.game.world.block_grid_pool_mutex.unlock(io);
+    const grid_count = self.game.world.grids.count();
 
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
-        \\chunks loaded: {d}
-        \\grids loaded: {d}
+        \\chunks cached: {d}
+        \\grids cached: {d}
     ,
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),
@@ -198,7 +195,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
         defer world_name_widget.deinit();
         if (create) {
             const world_name = world_name_widget.textGet();
-            std.log.info("creating world: {any}\n", .{world_name});
+            std.log.info("Creating world: {any}\n", .{world_name});
             var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
             defer worlds_dir.close(io);
             var worldfolder = try worlds_dir.createDirPathOpen(io, world_name, .{});

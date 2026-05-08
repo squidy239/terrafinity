@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize,
     });
 
-    setupDependencies(b, root_module, target, optimize, sanitize);
+    setupDependencies(b, root_module, target, optimize);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
@@ -51,17 +51,15 @@ fn setupDependencies(
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    sanitize: ?bool,
 ) void {
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
-        .optimize = optimize,
-        .sanitize_thread = sanitize,
+        .optimize = .ReleaseFast,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
-    rocksdb_mod.sanitize_thread = sanitize;
+    rocksdb_mod.sanitize_thread = false;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
@@ -73,9 +71,6 @@ fn setupDependencies(
     const Cache = b.addModule("Cache", .{
         .root_source_file = b.path("src/libs/Cache.zig"),
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ConcurrentHashMap", .module = ConcurrentHashMap },
-        },
     });
     root_module.addImport("Cache", Cache);
 

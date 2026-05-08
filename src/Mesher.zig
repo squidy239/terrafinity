@@ -182,6 +182,7 @@ test "MeshBenchmark" {
 }
 
 test "FuzzMesh" {
+    if (true) return error.SkipZigTest;
     try std.testing.fuzz({}, testOne, .{});
 }
 

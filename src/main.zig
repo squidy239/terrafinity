@@ -29,7 +29,7 @@ pub const tracy_options: tracy.Options = .{
 };
 
 fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(30), .awake) catch unreachable;
+    io.sleep(.fromSeconds(60), .awake) catch unreachable;
     running.store(false, .unordered);
 }
 
@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });
     defer window.destroy();
 
-    window.setMode(.maximized);
+    if (!options.test_play) window.setMode(.maximized);
 
     var ui_context = try window.glCreateContext(.{ .options = gloptions });
     defer ui_context.destroy();

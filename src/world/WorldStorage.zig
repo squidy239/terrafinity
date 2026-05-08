@@ -108,10 +108,11 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     chunk.saved.store(true, .unordered);
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
     const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
-
+    _ = io;
+    _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
     _ = allocator;
     var key = ChunkKey{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
@@ -144,7 +145,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
         },
     };
 
-    try blocks.merge(io, mergeblocks, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+    _ = try World.mergeEncoding(blocks, mergeblocks, grid_buffer);
     return .{ .from_disk = true, .structures = metadata.structures_generated };
 }
 

@@ -38,10 +38,6 @@ last_chunk_load: std.Io.Timestamp = .zero,
 chunk_load_is_running: std.atomic.Value(bool) = .init(false),
 load_future: ?std.Io.Future(@typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?) = null,
 
-last_chunk_unload: std.Io.Timestamp = .zero,
-chunk_unload_is_running: std.atomic.Value(bool) = .init(false),
-unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadWrapper)).@"fn".return_type.?) = null,
-
 last_mesh_unload: std.Io.Timestamp = .zero,
 mesh_unload_is_running: std.atomic.Value(bool) = .init(false),
 mesh_unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadChunkMeshes)).@"fn".return_type.?) = null,
@@ -74,15 +70,10 @@ pub const Options = struct {
     generation_distance_x: u32 = 8,
     generation_distance_y: u32 = 6,
 
-    unloader_frequency_ms: u64 = 1000,
     loader_frequency_ms: u64 = 250,
-
-    unload_params: World.UnloadParams = .{
-        .max_grid_ms = 60000,
-        .max_chunk_ms = 60000,
-        .chunk_capacity = 262144,
-        .grid_capacity = 8196,
-    },
+    terrain_height_cache_bytes: u64 = 268435456,
+    chunk_cache_bytes: u64 = 1073741824,
+    grid_cache_bytes: u64 = 1073741824,
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -218,13 +209,8 @@ pub fn init(
     world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
-    const terrain_height_cache_memory = 100 * 1024 * 1024;
-    const thc_size = @divFloor(terrain_height_cache_memory, @sizeOf(i32) * Chunk.ChunkSize * Chunk.ChunkSize);
-    game.generator = World.DefaultGenerator{
-        .terrain_height_cache = .init(thc_size),
-        .params = world_options.generator_config,
-    };
-    errdefer game.generator.terrain_height_cache.deinit(io, allocator);
+    game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
+    errdefer game.generator.terrain_height_cache.deinit(allocator);
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
@@ -232,14 +218,15 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const grid_capacity = game.options.unload_params.grid_capacity;
-    const chunk_capacity = game.options.unload_params.chunk_capacity;
+    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue)), game.world.chunks.shards.len * 256);
+    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue)), game.world.grids.shards.len * 256);
     game.options_lock.unlockShared(io);
+    std.log.info("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
+    std.log.info("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
+
     game.world = .{
-        .unload_params = &game.options.unload_params,
-        .unload_params_lock = game.options_lock,
-        .chunk_pool = try .initCapacity(game.allocator, chunk_capacity),
-        .block_grid_pool = try .initCapacity(game.allocator, grid_capacity),
+        .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
+        .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = .{
@@ -326,7 +313,6 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
-    const unloader_frequency_ms = self.options.unloader_frequency_ms;
     self.options_lock.unlockShared(io);
 
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
@@ -340,26 +326,13 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
         self.load_future = io.concurrent(@This().loadChunks, .{ self, io, allocator }) catch io.async(@This().loadChunks, .{ self, io, allocator });
     }
 
-    if (!self.chunk_unload_is_running.load(.seq_cst) and self.last_chunk_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
-        if (self.unload_future) |*f| try f.await(io);
-
-        self.chunk_unload_is_running.store(true, .seq_cst);
-        self.last_chunk_unload = .now(io, .awake);
-        self.unload_future = io.async(unloadWrapper, .{ self, io });
-    }
-
-    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > unloader_frequency_ms) {
+    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
         if (self.mesh_unload_future) |*f| try f.await(io);
 
         self.mesh_unload_is_running.store(true, .seq_cst);
         self.last_mesh_unload = .now(io, .awake);
         self.mesh_unload_future = io.async(unloadChunkMeshes, .{ self, io });
     }
-}
-
-fn unloadWrapper(self: *@This(), io: std.Io) !void {
-    defer self.chunk_unload_is_running.store(false, .seq_cst);
-    try self.world.unloadTimeout(io);
 }
 
 pub fn handleSelectFutures(self: *@This()) !void {
@@ -501,7 +474,6 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
         if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
         if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
     }
-
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
@@ -517,7 +489,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     }
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
-    defer chunk.release(io);
+    defer chunk.release();
     const neighbor_faces = [6]Chunk.Encoding.Face{
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xminus, true),
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xplus, true),
@@ -745,10 +717,11 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
 
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .monotonic);
+
+    self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
     if (self.load_future) |*future| future.cancel(io) catch {};
-    if (self.unload_future) |*future| future.cancel(io) catch {};
-    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
+    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
 
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);

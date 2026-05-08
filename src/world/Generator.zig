@@ -1,8 +1,7 @@
 const std = @import("std");
 
-const Cache = @import("Cache").Cache;
 const tracy = @import("tracy");
-
+const Cache = @import("Cache").Cache;
 const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
@@ -15,8 +14,41 @@ const ChunkPos = World.ChunkPos;
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
+    const thc_fragments = 8;
+
     params: Params,
-    terrain_height_cache: Cache(struct { pos: [2]i32, level: i32 }, [ChunkSize][ChunkSize]i32),
+    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, thc_fragments),
+
+    const ChunkHeightsValue = struct {
+        value: [ChunkSize][ChunkSize]i32,
+        key: ChunkHeightsKey,
+
+        pub inline fn key_from_value(value: *const ChunkHeightsValue) ChunkHeightsKey {
+            return value.key;
+        }
+    };
+
+    const ChunkHeightsKey = packed struct {
+        x: i32,
+        y: i32,
+        level: i32,
+        _: u32 = 0,
+
+        pub inline fn hash(key: ChunkHeightsKey) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, key);
+            return hasher.final();
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !DefaultGenerator {
+        const terrain_height_cache_size = @max(std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue)), 256 * thc_fragments);
+        std.log.info("Creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
+        return DefaultGenerator{
+            .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
+            .params = params,
+        };
+    }
 
     pub fn getSource(self: *DefaultGenerator) World.ChunkSource {
         return .{
@@ -29,9 +61,9 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
-        try self.genChunk(io, allocator, chunk_pos, blocks, world);
+        try self.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
         return .{ .from_disk = false, .structures = false };
     }
 
@@ -46,8 +78,9 @@ pub const DefaultGenerator = struct {
 
     fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
         _ = world;
+        _ = io;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
-        generator.terrain_height_cache.deinit(io, allocator);
+        generator.terrain_height_cache.deinit(allocator);
     }
 
     pub const Params = struct {
@@ -96,18 +129,19 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
+        _ = world;
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
-            try blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, chunk_pos.level).position[1]) {
-            try blocks.merge(io, .{ .one_block = .stone }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            _ = try World.mergeEncoding(blocks, .{ .one_block = .stone }, grid_buffer);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
@@ -116,13 +150,16 @@ pub const DefaultGenerator = struct {
             generateTerrain(&blockgrid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.end();
             const oneblock = Chunk.isOneBlock(&blockgrid);
-            if (oneblock != null and oneblock.? == .air) return blocks.merge(io, .{ .one_block = .air }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            if (oneblock != null and oneblock.? == .air) {
+                _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
+                return;
+            }
         }
         generateCavesInterpolate(&blockgrid, chunk_pos, heights, @floatCast(chunkscale), self.params);
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            try blocks.merge(io, .{ .one_block = block }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
-        } else try blocks.merge(io, .{ .grid = &blockgrid }, &world.block_grid_pool, &world.block_grid_count, &world.block_grid_pool_mutex);
+            _ = try World.mergeEncoding(blocks, .{ .one_block = block }, grid_buffer);
+        } else _ = try World.mergeEncoding(blocks, .{ .grid = &blockgrid }, grid_buffer);
     }
 
     fn generateTerrain(chunkBlocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunkScale: f32) void {
@@ -239,11 +276,12 @@ pub const DefaultGenerator = struct {
     var cache_misses: std.atomic.Value(usize) = .init(0);
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
+        _ = allocator;
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        if (self.terrain_height_cache.get(io, .{ .pos = chunk_pos, .level = level })) |cachedHeight| return cachedHeight;
+        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level })) |cachedHeight| return cachedHeight.value;
         const generatedHeights = genTerrainHeight(self.params, level, chunk_pos);
-        try self.terrain_height_cache.put(io, allocator, .{ .pos = chunk_pos, .level = level }, generatedHeights);
+        _ = self.terrain_height_cache.upsert(io, &.{ .key = .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level }, .value = generatedHeights });
         return generatedHeights;
     }
 
