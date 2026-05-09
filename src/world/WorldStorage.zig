@@ -41,8 +41,14 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
     };
 
     const column_families: [3]rocksdb.ColumnFamilyDescription = .{
-        .{ .name = "chunk_data", .options = .{ .compression = .lz4 } },
-        .{ .name = "chunk_grid", .options = .{ .compression = .zstd } },
+        .{ .name = "chunk_data", .options = .{
+            .compression = .no_compression,
+            .optimize_filters_for_hits = false,
+        } },
+        .{ .name = "chunk_grid", .options = .{
+            .compression = .zstd,
+            .block_size = @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block),
+        } },
         .{ .name = "default", .options = .{} }, // unused
     };
     storage.database, const columns = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
@@ -124,31 +130,28 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
         s.deinit();
     };
 
-    const metadata_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+    const data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
 
-    const metadata = std.mem.bytesToValue(ChunkData, metadata_bytes.data);
-    metadata_bytes.deinit();
+    const data = std.mem.bytesToValue(ChunkData, data_bytes.data);
+    data_bytes.deinit();
 
     if (err_str) |s| {
         std.log.err("{s}", .{s.data});
         s.deinit();
     }
 
-    var data_bytes: rocksdb.Data = undefined;
-    defer data_bytes.deinit();
-    const mergeblocks: Chunk.Encoding = switch (metadata.encoding) {
+    var grid_bytes: ?rocksdb.Data = null;
+    defer if (grid_bytes) |b| b.deinit();
+    const mergeblocks: Chunk.Encoding = switch (data.encoding) {
         .grid => gr: {
-            data_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
-            break :gr .{ .grid = @ptrCast(@alignCast(@constCast(data_bytes.data))) };
+            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+            break :gr .{ .grid = @ptrCast(@alignCast(@constCast(grid_bytes.?.data))) };
         },
-        .one_block => ob: {
-            data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
-            break :ob .{ .one_block = std.mem.bytesToValue(Block, data_bytes.data) };
-        },
+        .one_block => .{ .one_block = data.one_block },
     };
 
     _ = try World.mergeEncoding(blocks, mergeblocks, grid_buffer);
-    return .{ .from_disk = true, .structures = metadata.structures_generated };
+    return .{ .from_disk = true, .structures = data.structures_generated };
 }
 
 fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
