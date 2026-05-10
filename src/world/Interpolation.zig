@@ -147,7 +147,7 @@ pub const NaturalCubicInterpolator3D = struct {
         const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = @splat(localT);
         const a_v: @Vector(len, T) = @splat(1.0 - localT);
-        const h2_6_v: @Vector(len, T) = comptime @splat(2 / 6);
+        const h2_6_v: @Vector(len, T) = comptime @splat(2.0 / 6.0);
         return a_v * values[i] + localT_v * values[i + 1] + ((a_v * a_v * a_v - a_v) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
     }
 
@@ -156,7 +156,7 @@ pub const NaturalCubicInterpolator3D = struct {
         const localT: T = comptime t * 3.0 - @as(f32, @floatFromInt(i));
         const localT_v: @Vector(len, T) = comptime @splat(localT);
         const a_v: @Vector(len, T) = comptime @splat(1.0 - localT);
-        const h2_6_v: @Vector(len, T) = comptime @splat(2 / 6);
+        const h2_6_v: @Vector(len, T) = comptime @splat(2.0 / 6.0);
         return a_v * values[i] + localT_v * values[i + 1] + ((comptime (a_v * a_v * a_v - a_v)) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
     }
 };

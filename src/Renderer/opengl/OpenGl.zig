@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
-const ConcurrentQueue = @import("ConcurrentQueue").ConcurrentQueue;
 const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
@@ -475,7 +474,7 @@ fn cullChunkPredicate(userdata: anytype, chunkpos: RenderBufferKey) bool {
 
 fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
-    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(ChunkSize * scale));
+    const chunkSizeVec: @Vector(3, f32) = @splat(ChunkSize * scale);
     const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
     return !frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }

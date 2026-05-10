@@ -1565,14 +1565,6 @@ pub fn Noise(comptime Float: type) type {
             return value * 9.046026385208288;
         }
 
-        inline fn fastSqrt(f: f32) f32 {
-            const xhalf = 0.5 * f;
-            var a: f32 = @bitCast(0x5F3759DF - (@as(u32, @bitCast(f)) >> 1));
-            a = a * (1.5 - xhalf * a * a);
-
-            return f * a;
-        }
-
         // Cellular Noise
 
         fn singleCellular2D(self: *const State, seed: i32, x: Float, y: Float) Float {

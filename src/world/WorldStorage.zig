@@ -1,12 +1,10 @@
 const std = @import("std");
 const Block = @import("Block.zig").Block;
-const Cache = @import("Cache").Cache;
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
 const rocksdb = @import("rocksdb");
 const tracy = @import("tracy");
-const builtin = @import("builtin");
 
 isinit: bool,
 database: rocksdb.database.DB,
@@ -79,7 +77,7 @@ fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk,
 }
 
 const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
-const BlockTagType = std.meta.Tag(Block);
+
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
     const save = tracy.Zone.begin(.{ .src = @src() });

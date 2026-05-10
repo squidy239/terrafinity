@@ -79,5 +79,5 @@ void main()
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
     FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
-    gl_FragDepth = gl_FragCoord.z / pow(scale, 8);
+    gl_FragDepth = gl_FragCoord.z / pow(max(1, scale), 8);
 }

@@ -1,8 +1,6 @@
 const utils = @import("utils.zig");
 
 const std = @import("std");
-const zm = @import("root").zm;
-const tracy = @import("root").tracy;
 
 const Block = @import("../World.zig").Block;
 const World = @import("../World.zig");
@@ -62,8 +60,5 @@ pub fn projectEquirectangular(shapeP: @Vector(3, f64), sphere_radius: f64) @Vect
     const phi = std.math.asin(std.math.clamp(y / r, -1.0, 1.0)); // latitude
     const lambda = std.math.atan2(z, x); // longitude
 
-    const X = sphere_radius * lambda;
-    const Y = sphere_radius * phi;
-
-    return @Vector(2, f64){ X, Y };
+    return @Vector(2, f64){ sphere_radius * lambda, sphere_radius * phi };
 }

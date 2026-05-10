@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
 const dvui = @import("dvui");
@@ -16,8 +15,6 @@ const Chunk = @import("world/Chunk.zig");
 const Entity = @import("world/Entity.zig");
 const EntityTypes = @import("world/EntityTypes.zig");
 const World = @import("world/World.zig");
-const ChunkSize = World.ChunkSize;
-const Block = World.Block;
 
 const Game = @This();
 

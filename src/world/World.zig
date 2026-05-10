@@ -808,10 +808,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     std.log.info("world closed", .{});
 }
 
-fn normilizeInRange(num: anytype, oldLowerBound: anytype, oldUpperBound: anytype, newLowerBound: anytype, newUpperBound: anytype) @TypeOf(num, oldLowerBound, oldUpperBound, newLowerBound, newUpperBound) {
-    return (num - oldLowerBound) / (oldUpperBound - oldLowerBound) * (newUpperBound - newLowerBound) + newLowerBound;
-}
-
 test "ChunkPos" {
     const testing = std.testing;
     const pos1 = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const tracy = @import("tracy");
 const Cache = @import("Cache").Cache;
-const utils = @import("../libs/utils.zig");
 const Block = @import("Block.zig").Block;
 const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
 const Chunk = @import("Chunk.zig");
@@ -272,9 +271,6 @@ pub const DefaultGenerator = struct {
         return if (block_height < seaLevel) Block.dirt else if (a < 0.25) Block.grass else if (a < 0.4) Block.dirt else if (a < 0.6) Block.stone else Block.snow;
     }
 
-    var get_requests: std.atomic.Value(usize) = .init(0);
-    var cache_misses: std.atomic.Value(usize) = .init(0);
-
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
         _ = allocator;
         const gth = tracy.Zone.begin(.{ .src = @src() });
@@ -320,17 +316,6 @@ pub const DefaultGenerator = struct {
             }
         }
         return height;
-    }
-
-    fn scaleHeight(height: f32) f32 {
-        const terms = comptime [_]f32{ -2.5408277295123904e-003, 1.2812501147500588e+000, -1.6573684564075566e+000, 1.0594173030800080e-001, 1.5586796210829328e+000, -8.8744433151283975e-001 };
-        var t: f32 = 1;
-        var r: f32 = 0;
-        inline for (terms) |c| {
-            r += c * t;
-            t *= height;
-        }
-        return r;
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {

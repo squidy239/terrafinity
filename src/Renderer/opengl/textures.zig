@@ -4,11 +4,13 @@ const Block = @import("../../main.zig").Block;
 const gl = @import("gl");
 const zigimg = @import("zigimg");
 
+//TODO redo this
+
 ///must be run in a valid opengl context
 pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.mem.Allocator) !c_uint {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
     const keyword = ".png";
-    const resolution = try allSquares(io, textures_path, keyword);
+    const resolution = try allSquares(io, allocator, textures_path, keyword);
     const missing_texture_pixels = try allocator.alloc(u8, resolution[0] * resolution[1] * 3);
     defer allocator.free(missing_texture_pixels);
     io.random(missing_texture_pixels);
@@ -71,12 +73,12 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     return gltexarrayid;
 }
 
-fn allSquares(io: std.Io, textures_path: std.Io.Dir, keyword: ?[]const u8) ![2]usize {
+fn allSquares(io: std.Io, allocator: std.mem.Allocator, textures_path: std.Io.Dir, keyword: ?[]const u8) ![2]usize {
     var it1 = std.Io.Dir.iterate(textures_path);
     var resolution: ?[2]usize = null;
     while (try it1.next(io)) |image| {
         if (image.kind == .file and (keyword == null or (std.mem.find(u8, image.name, keyword.?) != null))) {
-            const cres = try getResolution(io, try textures_path.openFile(io, image.name, .{}));
+            const cres = try getResolution(io, allocator, try textures_path.openFile(io, image.name, .{}));
             if (resolution == null) {
                 resolution = cres;
             } else {
@@ -99,12 +101,9 @@ fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
     return count;
 }
 
-fn getResolution(io: std.Io, texture: std.Io.File) ![2]usize {
+fn getResolution(io: std.Io, allocator: std.mem.Allocator, texture: std.Io.File) ![2]usize {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
-    var fbuf: [100000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&fbuf);
-    const alloc = fba.allocator();
-    var img = try zigimg.Image.fromFile(alloc, io, texture, &read_buffer);
-    defer img.deinit(alloc);
+    var img = try zigimg.Image.fromFile(allocator, io, texture, &read_buffer);
+    defer img.deinit(allocator);
     return [2]usize{ img.width, img.height };
 }
