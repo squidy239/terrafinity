@@ -21,20 +21,20 @@
             .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
         .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg#c7e81a13bff1cf4c5b7f085a8360f9d551143d40",
-            .hash = "zigimg-0.1.0-8_eo2uScFwCnpzB1Y2n_jf3euDfMEeCLxJE_E5_W5BNe",
+            .url = "git+https://github.com/zigimg/zigimg#84210734425d7d87fe9ff4417b32776b94a496c3",
+            .hash = "zigimg-0.1.0-8_eo2sKcFwA_kUjxZ0A4V2XdgC3u77TfQMDJys9tvF6r",
         },
         .rocksdb = .{
             .url = "git+https://github.com/squidy239/rocksdb-zig#795fb4d0ee50acf2878220a9012aa9ce2f2a554c",
             .hash = "rocksdb-9.7.4-z_CUTpR5AQCEsJwQ5QzO921yzTX3jYOkXje3dItqVFuC",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#5f8b28332dd1e427f54e52f13eba3f1bb711cd18",
-            .hash = "dvui-0.5.0-dev-AQFJmTAZ3wAzfqLicWDu7bMmsAlQXMZ67GnTUmMW_I_R",
+            .url = "git+https://github.com/david-vanderson/dvui#eedd5385867332f546cf2cede3cc22ea40ec536e",
+            .hash = "dvui-0.5.0-dev-AQFJmUPe9QC9J3xGMmG_3iZ2Mn1CTl0Hioow2pVsb7-1",
         },
         .wio = .{
-            .url = "https://github.com/ypsvlq/wio/archive/a182eaa77077270fc780667296d9258df994a8bc.tar.gz",
-            .hash = "wio-0.0.0-8xHrr-1JBwAsNpE9xSRToIPsyCqsnhtpeeydBE8ukWP_",
+            .url = "https://github.com/ypsvlq/wio/archive/7fcf078c07c4e673d43283bce93d58132d15c728.tar.gz",
+            .hash = "wio-0.0.0-8xHrr0NUBwBhzDtDk-sSuT4z3mTXSsGAK-q6AySjIEpZ",
         },
         .tracy = .{
             .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
