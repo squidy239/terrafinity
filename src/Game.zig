@@ -208,6 +208,7 @@ pub fn init(
 
     game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
     errdefer game.generator.terrain_height_cache.deinit(allocator);
+
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
@@ -234,49 +235,23 @@ pub fn init(
     };
     errdefer game.world.deinit(io, allocator);
 
-    const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
-        .player_name = .fromString("squid"),
-        .fly_speed = .init(100),
-        .fly_speed_linear = .init(10),
-        .physics = .{
-            .elements = .{
-                .mover = .{
-                    .collisions = .init(false),
-                    .boundingBox = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
-                    .enabled = .init(true),
-                    .zeroVelocity = .init(true),
-                },
-                .gravity = .{
-                    .enabled = .init(false),
-                },
-                .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
-            },
-            .pos = try game.world.getPlayerSpawnPos(),
-            .velocity = @splat(0),
-            .last_update = .now(io, .awake),
-        },
-        .gameMode = .init(.Spectator),
-        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
-        .main_inventory = undefined,
-    }, true);
-    playerentity.release();
-    game.player = @ptrCast(@alignCast(playerentity.ptr));
-    game.player.main_inventory = .initBuffer(
-        10,
-        16,
-        &game.player.inventory_buffer,
-    );
-    _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
-    game.player.viewDirection_mutex.lockUncancelable(io);
-    const viewDirection = game.player.viewDirection;
-    game.player.viewDirection_mutex.unlock(io);
-    game.renderer.updateCameraDirection(viewDirection);
+    try game.spawnPlayer(io, allocator);
 }
 
-fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return .{ self.options.generation_distance_x, self.options.generation_distance_y };
+pub fn deinit(self: *@This(), io: std.Io) void {
+    self.running.store(false, .monotonic);
+
+    self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
+    if (self.load_future) |*future| future.cancel(io) catch {};
+    self.select.cancelDiscard();
+    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
+
+    self.opengl_renderer.deinit(io);
+    self.loaded_or_meshed.deinit(io, self.allocator);
+    self.world.deinit(io, self.allocator);
+
+    self.game_arena.deinit();
+    self.* = undefined;
 }
 
 pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -345,21 +320,9 @@ fn handleSelectFutures(self: *@This()) !void {
     }
 }
 
-pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return .{ self.options.lowest_level, self.options.highest_level };
-}
-
-fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
-    if (level <= (self.getLevels(io))[0]) return @splat(0);
-    const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-    return inner_radius -| @Vector(2, u32){ 1, 1 };
-}
-
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
     const sensitivity = self.getMouseSensitivity(io);
-    
+
     var viewDirDiff: @Vector(2, f32) = @splat(0);
     viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     viewDirDiff *= @splat(sensitivity);
@@ -387,12 +350,6 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
         },
         .Survival => {},
     }
-}
-
-fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return self.options.mouse_sensitivity;
 }
 
 pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
@@ -475,6 +432,30 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
     }
 }
 
+pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
+    return .{ self.options.lowest_level, self.options.highest_level };
+}
+
+fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
+    return .{ self.options.generation_distance_x, self.options.generation_distance_y };
+}
+
+fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+    if (level <= (self.getLevels(io))[0]) return @splat(0);
+    const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+    return inner_radius -| @Vector(2, u32){ 1, 1 };
+}
+
+fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
+    return self.options.mouse_sensitivity;
+}
+
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
@@ -519,6 +500,16 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
 }
 
+fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
+    try self.loaded_or_meshed.put(io, allocator, chunk_pos, {});
+    self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
+}
+
+fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
+    const game: *@This() = @ptrCast(@alignCast(args));
+    game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
+}
+
 fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const lowest_level, const highest_level = self.getLevels(io);
     self.player.physics.mutex.lockUncancelable(io);
@@ -528,57 +519,6 @@ fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
     return inside_range;
-}
-
-fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
-    const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
-    defer unload.end();
-    defer self.mesh_unload_is_running.store(false, .seq_cst);
-
-    const chunkCollector = struct {
-        game: *Game,
-        io: std.Io,
-        chunks: u64 = 0,
-        unloaded: u64 = 0,
-
-        pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) void {
-            const ctx: *@This() = @ptrCast(@alignCast(userdata));
-            ctx.chunks += 1;
-            const keep = ctx.game.keepChunkLoaded(ctx.io, chunk_pos);
-            if (keep) return;
-            _ = ctx.game.loaded_or_meshed.remove(ctx.io, chunk_pos);
-            ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
-            ctx.unloaded += 1;
-        }
-    };
-    var ctx = chunkCollector{
-        .game = self,
-        .io = io,
-    };
-
-    try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
-    self.debug_menu.meshes.store(ctx.chunks, .unordered);
-
-    var it = self.loaded_or_meshed.iterator();
-    defer it.deinit(io);
-    while (try it.next(io)) |entry| {
-        const key = entry.key_ptr.*;
-        if (!self.keepChunkLoaded(io, key)) {
-            it.pause(io);
-            _ = self.loaded_or_meshed.remove(io, key);
-            try it.unpause(io);
-        }
-    }
-}
-
-fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
-    try self.loaded_or_meshed.put(io, allocator, chunk_pos, {});
-    self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
-}
-
-fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
-    const game: *@This() = @ptrCast(@alignCast(args));
-    game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
 fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), chunk_pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
@@ -646,10 +586,10 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             break;
         }
 
-        const m = Move(xz, &c);
+        const m = move(xz, &c);
 
         var cc: i32 = 0;
-        while (Line(&xz, &cc, m)) {
+        while (line(&xz, &cc, m)) {
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
@@ -677,7 +617,88 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
     return amount_loaded;
 }
 
-fn Move(xzin: [2]i32, c: *usize) [2]i32 {
+fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
+    const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
+    defer unload.end();
+    defer self.mesh_unload_is_running.store(false, .seq_cst);
+
+    const chunkCollector = struct {
+        game: *Game,
+        io: std.Io,
+        chunks: u64 = 0,
+        unloaded: u64 = 0,
+
+        pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) void {
+            const ctx: *@This() = @ptrCast(@alignCast(userdata));
+            ctx.chunks += 1;
+            const keep = ctx.game.keepChunkLoaded(ctx.io, chunk_pos);
+            if (keep) return;
+            _ = ctx.game.loaded_or_meshed.remove(ctx.io, chunk_pos);
+            ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
+            ctx.unloaded += 1;
+        }
+    };
+    var ctx = chunkCollector{
+        .game = self,
+        .io = io,
+    };
+
+    try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
+    self.debug_menu.meshes.store(ctx.chunks, .unordered);
+
+    var it = self.loaded_or_meshed.iterator();
+    defer it.deinit(io);
+    while (try it.next(io)) |entry| {
+        const key = entry.key_ptr.*;
+        if (!self.keepChunkLoaded(io, key)) {
+            it.pause(io);
+            _ = self.loaded_or_meshed.remove(io, key);
+            try it.unpause(io);
+        }
+    }
+}
+
+fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
+        .player_name = .fromString("squid"),
+        .fly_speed = .init(100),
+        .fly_speed_linear = .init(10),
+        .physics = .{
+            .elements = .{
+                .mover = .{
+                    .collisions = .init(false),
+                    .boundingBox = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
+                    .enabled = .init(true),
+                    .zeroVelocity = .init(true),
+                },
+                .gravity = .{
+                    .enabled = .init(false),
+                },
+                .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
+            },
+            .pos = try game.world.getPlayerSpawnPos(),
+            .velocity = @splat(0),
+            .last_update = .now(io, .awake),
+        },
+        .gameMode = .init(.Spectator),
+        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
+        .main_inventory = undefined,
+    }, true);
+    playerentity.release();
+    game.player = @ptrCast(@alignCast(playerentity.ptr));
+    game.player.main_inventory = .initBuffer(
+        10,
+        16,
+        &game.player.inventory_buffer,
+    );
+    _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
+    game.player.viewDirection_mutex.lockUncancelable(io);
+    const viewDirection = game.player.viewDirection;
+    game.player.viewDirection_mutex.unlock(io);
+    game.renderer.updateCameraDirection(viewDirection);
+}
+
+fn move(xzin: [2]i32, c: *usize) [2]i32 {
     const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
     const mov: i32 = @ceil(movf + 0.01);
     var xz = xzin;
@@ -692,7 +713,7 @@ fn Move(xzin: [2]i32, c: *usize) [2]i32 {
     return xz;
 }
 
-fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
+fn line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     defer c.* += 1;
     if (c.* == 0) return true;
     if (xz[0] == end[0] and xz[1] == end[1]) return false;
@@ -712,22 +733,6 @@ fn Line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     }
     if (xz[0] == end[0] and xz[1] == end[1]) return false;
     return true;
-}
-
-pub fn deinit(self: *@This(), io: std.Io) void {
-    self.running.store(false, .monotonic);
-
-    self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
-    if (self.load_future) |*future| future.cancel(io) catch {};
-    self.select.cancelDiscard();
-    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
-
-    self.opengl_renderer.deinit(io);
-    self.loaded_or_meshed.deinit(io, self.allocator);
-    self.world.deinit(io, self.allocator);
-
-    self.game_arena.deinit();
-    self.* = undefined;
 }
 
 test {
