@@ -84,7 +84,6 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
                 .addChunk = vtableAddChunk,
                 .removeChunk = vtableRemoveChunk,
                 .drawChunks = vtableDrawChunks,
-                .containsChunk = vtableContainsChunk,
                 .clear = vtableClear,
                 .setViewport = vtableSetViewport,
                 .updateCameraDirection = vtableUpdateCameraDirection,
@@ -226,11 +225,6 @@ pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     return self.remove(io, chunk_pos);
-}
-
-fn vtableContainsChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) bool {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.render_buffer.map.contains(io, .{ .@"opaque" = chunk_pos }) or self.render_buffer.map.contains(io, .{ .transparent = chunk_pos });
 }
 
 threadlocal var thread_index: ?usize = null;

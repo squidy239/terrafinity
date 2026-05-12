@@ -273,7 +273,7 @@ pub fn init(
     game.renderer.updateCameraDirection(viewDirection);
 }
 
-pub fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
+fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.generation_distance_x, self.options.generation_distance_y };
@@ -307,7 +307,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     try entitys_future.await(io);
 }
 
-pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
     self.options_lock.unlockShared(io);
@@ -332,7 +332,7 @@ pub fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Alloca
     }
 }
 
-pub fn handleSelectFutures(self: *@This()) !void {
+fn handleSelectFutures(self: *@This()) !void {
     var select_completion_buffer: [1024]SelectUnion = undefined;
     while (true) {
         const completed = try self.select.awaitMany(&select_completion_buffer, 0);
@@ -351,13 +351,15 @@ pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-pub fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
     if (level <= (self.getLevels(io))[0]) return @splat(0);
     const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
-pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition, sensitivity: f32) void {
+pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
+    const sensitivity = self.getMouseSensitivity(io);
+    
     var viewDirDiff: @Vector(2, f32) = @splat(0);
     viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     viewDirDiff *= @splat(sensitivity);
@@ -387,7 +389,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     }
 }
 
-pub fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
+fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return self.options.mouse_sensitivity;
@@ -419,7 +421,7 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
 }
 
-pub fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
+fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     if (actions.contains(.use_item_primary)) {
         self.player.physics.mutex.lockUncancelable(io);
         const ppos = self.player.physics.pos;
@@ -474,7 +476,7 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
-pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
+fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer GenMeshAndAdd.end();
 
@@ -517,7 +519,7 @@ pub fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator
     try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
 }
 
-pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
+fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const lowest_level, const highest_level = self.getLevels(io);
     self.player.physics.mutex.lockUncancelable(io);
     const playerpos = self.player.physics.pos;
@@ -528,7 +530,7 @@ pub fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bo
     return inside_range;
 }
 
-pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
+fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
     defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
@@ -569,17 +571,17 @@ pub fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     }
 }
 
-pub fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
+fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
     try self.loaded_or_meshed.put(io, allocator, chunk_pos, {});
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
 }
 
-pub fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
+fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }
 
-pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), chunk_pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), chunk_pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
     if (lowest_level) |l| {
         if (chunk_pos.level < l) return false;
     }
@@ -609,7 +611,7 @@ pub fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3,
 }
 
 ///Loads all chunks in gendistance and unloads all chunks out of loadistance
-pub fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer self.chunk_load_is_running.store(false, .seq_cst);
     self.player.physics.mutex.lockUncancelable(io);
     const playerPos = self.player.physics.pos;

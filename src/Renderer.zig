@@ -12,7 +12,6 @@ pub const VTable = struct {
     removeChunk: *const fn (*anyopaque, std.Io, ChunkPos) void,
     addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const Mesher.Face, []const Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void,
     drawChunks: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) error{DrawFailed}!void,
-    containsChunk: *const fn (*anyopaque, std.Io, ChunkPos) bool,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
     setViewport: *const fn (*anyopaque, @Vector(2, u32)) error{ViewportSetFailed}!void,
     updateCameraDirection: *const fn (*anyopaque, @Vector(3, f32)) void,
@@ -27,18 +26,12 @@ pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []
 
 ///removes a chunk mesh from the renderer and frees all associated resources, this function may be called on any thread
 pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    if (!self.vtable.containsChunk(self.userdata, io, chunk_pos)) return;
     return self.vtable.removeChunk(self.userdata, io, chunk_pos);
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
 pub fn drawChunks(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     return self.vtable.drawChunks(self.userdata, io, viewpos);
-}
-
-///checks if a chunk mesh is loaded, this function may be called on any thread
-pub fn containsChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) bool {
-    return self.vtable.containsChunk(self.userdata, io, chunk_pos);
 }
 
 ///clears the screen and draws any skyboxes, this function should only be called on the main thread
