@@ -133,7 +133,7 @@ fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: 
 fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     var parent = chunk_pos;
     const levels = self.getLevels(io);
-    while (parent.level <= levels[1]) {//TODO handle top level out of range
+    while (parent.level <= levels[1]) { //TODO handle top level out of range
         parent = parent.parent();
         if (self.loaded_or_meshed.get(io, parent)) |par| {
             if (par.is_active) return true;
@@ -146,12 +146,13 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     return state.allCoveredChildren();
 }
 
-fn removeChunkFromLoaded(
+fn tryRemoveChunkFromLoaded(
     self: *@This(),
     io: std.Io,
     allocator: std.mem.Allocator,
     chunk_pos: World.ChunkPos,
 ) !void {
+    if (!self.canUnloadMesh(io, chunk_pos)) return;
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     try bucket.lock.lock(io);
     var state = bucket.hash_map.get(chunk_pos) orelse {
@@ -599,7 +600,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos)) {
         self.renderer.removeChunk(io, chunk_pos);
-        try self.removeChunkFromLoaded(io, self.allocator, chunk_pos);
+        try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
     }
 
@@ -799,7 +800,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
             if (ctx.game.keepChunkLoaded(ctx.io, chunk_pos)) return;
             if (!ctx.game.canUnloadMesh(ctx.io, chunk_pos)) return; // children not ready
 
-            ctx.game.removeChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch @panic("TODO figure out how to handle this");
+            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch @panic("TODO figure out how to handle this");
             ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
             ctx.unloaded += 1;
         }
@@ -820,7 +821,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
-        self.removeChunkFromLoaded(io, self.allocator, key) catch @panic("TODO handle error");
+        self.tryRemoveChunkFromLoaded(io, self.allocator, key) catch @panic("TODO handle error");
         try it.unpause(io);
     }
 }
