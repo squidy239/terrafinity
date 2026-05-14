@@ -113,7 +113,6 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     return state.covered_children == World.scale_factor * World.scale_factor * World.scale_factor;
 }
 
-
 fn removeChunkFromLoaded(
     self: *@This(),
     io: std.Io,
@@ -127,7 +126,11 @@ fn removeChunkFromLoaded(
         return;
     };
 
-    if (!state.is_active) {
+    const was_active = state.is_active;
+    const was_queued = state.is_queued;
+
+    // Only return if it's a completely dead ghost node
+    if (!was_active and !was_queued) {
         bucket.lock.unlock(io);
         return;
     }
@@ -142,9 +145,9 @@ fn removeChunkFromLoaded(
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
     bucket.lock.unlock(io);
-    //TODO unlock on error
-    // If children don't fully cover this chunk, it just lost subtree-coverage.
-    if (!still_covered) {
+
+    // Only un-cover the parent if this chunk was ACTUALLY fully active
+    if (was_active and !still_covered) {
         try self.markUncovered(io, allocator, chunk_pos);
     }
 }
@@ -592,8 +595,25 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
             &transparent_faces,
         );
     }
-    if (opaque_faces.items.len == 0 and transparent_faces.items.len == 0) return;
-    try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+    if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
+        try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+    }
+
+    var was_active = false;
+    {
+        const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+        var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{};
+        was_active = state.is_active;
+        state.is_active = true;
+        state.is_queued = false;
+        try bucket.hash_map.put(allocator, chunk_pos, state);
+    }
+
+    if (!was_active) {
+        try self.markCovered(io, allocator, chunk_pos);
+    }
 }
 
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
@@ -605,10 +625,6 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
         const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{});
         was_active = entry.value_ptr.is_active;
         entry.value_ptr.is_queued = true;
-    }
-
-    if (!was_active) {
-        try self.markCovered(io, allocator, chunk_pos);
     }
 
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
@@ -761,7 +777,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     while (try it.next(io)) |entry| {
         const key = entry.key_ptr.*;
         if (self.keepChunkLoaded(io, key)) continue;
-        if (!entry.value_ptr.is_active) continue; // ghost entry, skip
+        if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
         self.removeChunkFromLoaded(io, self.allocator, key) catch @panic("TODO handle error");
