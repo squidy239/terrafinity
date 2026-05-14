@@ -77,18 +77,25 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
     const pos_in_parent = pos.posInParent();
     if (parent.level > highest) return;
 
+    var bubble_up = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(parent);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         var state: Game.NodeData = bucket.hash_map.get(parent) orelse .{};
+
+        const was_covering = state.allCoveredChildren() or state.is_active;
         state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = true;
-        
+        const is_covering = state.allCoveredChildren() or state.is_active;
+
         try bucket.hash_map.put(allocator, parent, state);
-        const mark_parent_covered = state.allCoveredChildren() or state.is_active;
-        if(!mark_parent_covered) return;
+
+        bubble_up = !was_covering and is_covering;
     }
-    try self.markCovered(io, allocator, parent);
+
+    if (bubble_up) {
+        try self.markCovered(io, allocator, parent);
+    }
 }
 
 fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
@@ -96,29 +103,41 @@ fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: 
     const parent = pos.parent();
     const pos_in_parent = pos.posInParent();
     if (parent.level > highest) return;
+
+    var bubble_up = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(parent);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         var state = bucket.hash_map.get(parent) orelse return;
+
+        const was_covering = state.allCoveredChildren() or state.is_active;
         state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = false;
+        const is_covering = state.allCoveredChildren() or state.is_active;
+
         const remove_node = state.noCoveredChildren() and !state.is_active and !state.is_queued;
         if (remove_node) {
             _ = bucket.hash_map.remove(parent);
-            //now mark uncovered out of this block
         } else {
             try bucket.hash_map.put(allocator, parent, state);
         }
-        const mark_parent_uncovered = state.allCoveredChildren() and !state.is_active;
-        if(!mark_parent_uncovered) return;
+
+        bubble_up = was_covering and !is_covering;
     }
-    try self.markUncovered(io, allocator, parent);
+
+    if (bubble_up) {
+        try self.markUncovered(io, allocator, parent);
+    }
 }
 
 fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
-    const parent = chunk_pos.parent();
-    if (self.loaded_or_meshed.get(io, parent)) |par| {//TODO handle top level out of range
-        if (par.is_active) return true;
+    var parent = chunk_pos;
+    const levels = self.getLevels(io);
+    while (parent.level <= levels[1]) {//TODO handle top level out of range
+        parent = parent.parent();
+        if (self.loaded_or_meshed.get(io, parent)) |par| {
+            if (par.is_active) return true;
+        }
     }
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     bucket.lock.lockSharedUncancelable(io);
@@ -150,8 +169,12 @@ fn removeChunkFromLoaded(
         return;
     }
 
+    const was_covering = state.allCoveredChildren() or state.is_active;
+
     state.is_active = false;
     state.is_queued = false;
+
+    const is_covering = state.allCoveredChildren() or state.is_active;
 
     if (state.noCoveredChildren()) {
         _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
@@ -160,7 +183,7 @@ fn removeChunkFromLoaded(
     }
     bucket.lock.unlock(io);
 
-    if (state.noCoveredChildren()) {
+    if (was_covering and !is_covering) {
         try self.markUncovered(io, allocator, chunk_pos);
     }
 }
@@ -611,20 +634,24 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
         try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
     }
-
-    var was_active = false;
+    var was_covering = false;
+    var is_covering = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{};
-        was_active = state.is_active;
+
+        was_covering = state.allCoveredChildren() or state.is_active;
+
         state.is_active = true;
         state.is_queued = false;
+
+        is_covering = state.allCoveredChildren() or state.is_active;
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
 
-    if (!was_active) {
+    if (!was_covering and is_covering) {
         try self.markCovered(io, allocator, chunk_pos);
     }
 }
