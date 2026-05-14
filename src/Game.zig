@@ -55,17 +55,26 @@ debug_menu: struct {
 
 const NodeData = struct {
     /// How many direct children are currently subtree-covered.
-    covered_children: u32 = 0,
+    covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = @splat(@splat(@splat(false))),
     /// True when this chunk is queued or currently in the renderer.
     /// False for ghost entries that exist only to track child coverage.
     is_active: bool = false,
-
+    /// True when this chunk is queued for rendering but not yet processed.
     is_queued: bool = false,
+
+    pub fn noCoveredChildren(state: NodeData) bool {
+        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false)))));
+    }
+
+    pub fn allCoveredChildren(state: NodeData) bool {
+        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(true)))));
+    }
 };
 
 fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
     _, const highest = self.getLevels(io);
     const parent = pos.parent();
+    const pos_in_parent = pos.posInParent();
     if (parent.level > highest) return;
 
     {
@@ -73,10 +82,11 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         var state: Game.NodeData = bucket.hash_map.get(parent) orelse .{};
-        state.covered_children += 1;
-
+        state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = true;
+        
         try bucket.hash_map.put(allocator, parent, state);
-        if (!(state.covered_children == World.scale_factor * World.scale_factor * World.scale_factor and !state.is_active)) return;
+        const mark_parent_covered = state.allCoveredChildren() or state.is_active;
+        if(!mark_parent_covered) return;
     }
     try self.markCovered(io, allocator, parent);
 }
@@ -84,33 +94,37 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
 fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
     _, const highest = self.getLevels(io);
     const parent = pos.parent();
+    const pos_in_parent = pos.posInParent();
     if (parent.level > highest) return;
     {
         const bucket = self.loaded_or_meshed.getBucket(parent);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         var state = bucket.hash_map.get(parent) orelse return;
-        state.covered_children -= 1;
-        if (state.covered_children == 0 and !state.is_active) {
+        state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = false;
+        const remove_node = state.noCoveredChildren() and !state.is_active and !state.is_queued;
+        if (remove_node) {
             _ = bucket.hash_map.remove(parent);
+            //now mark uncovered out of this block
         } else {
             try bucket.hash_map.put(allocator, parent, state);
         }
-        if (!(state.covered_children + 1 == World.scale_factor * World.scale_factor * World.scale_factor and !state.is_active)) return;
+        const mark_parent_uncovered = state.allCoveredChildren() and !state.is_active;
+        if(!mark_parent_uncovered) return;
     }
     try self.markUncovered(io, allocator, parent);
 }
 
 fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const parent = chunk_pos.parent();
-    if (self.loaded_or_meshed.get(io, parent)) |par| {
+    if (self.loaded_or_meshed.get(io, parent)) |par| {//TODO handle top level out of range
         if (par.is_active) return true;
     }
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     bucket.lock.lockSharedUncancelable(io);
     defer bucket.lock.unlockShared(io);
     const state = bucket.hash_map.get(chunk_pos) orelse return false;
-    return state.covered_children == World.scale_factor * World.scale_factor * World.scale_factor;
+    return state.allCoveredChildren();
 }
 
 fn removeChunkFromLoaded(
@@ -131,23 +145,22 @@ fn removeChunkFromLoaded(
 
     // Only return if it's a completely dead ghost node
     if (!was_active and !was_queued) {
+        std.debug.assert(!state.noCoveredChildren());
         bucket.lock.unlock(io);
         return;
     }
 
     state.is_active = false;
     state.is_queued = false;
-    const still_covered = state.covered_children == World.scale_factor * World.scale_factor * World.scale_factor;
 
-    if (!still_covered and state.covered_children == 0) {
+    if (state.noCoveredChildren()) {
         _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
     } else {
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
     bucket.lock.unlock(io);
 
-    // Only un-cover the parent if this chunk was ACTUALLY fully active
-    if (was_active and !still_covered) {
+    if (state.noCoveredChildren()) {
         try self.markUncovered(io, allocator, chunk_pos);
     }
 }
