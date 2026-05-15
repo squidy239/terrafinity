@@ -408,8 +408,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const day_length = day_length_sec * std.time.ns_per_s;
-    const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / (@as(f128, day_length) / 360), 360.0);
+    const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
     const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
 
     const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });

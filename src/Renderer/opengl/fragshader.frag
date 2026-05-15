@@ -81,6 +81,6 @@ void main()
     FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
     
-    // GlSL is really weird and I have to have the else or it executes the first branch unconditionally, read the spec for gl_FragDepth
+    // GlSL is really weird and I have to have the else or FragDepth is undefined, read the spec for gl_FragDepth
     if (draw_over) {gl_FragDepth = gl_FragCoord.z / pow(max(1, scale), 8.0);} else {gl_FragDepth = gl_FragCoord.z;}
 }
