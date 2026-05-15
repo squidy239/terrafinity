@@ -119,6 +119,7 @@ fn setupDependencies(
         .optimize = optimize,
         .freetype = false,
         .@"tree-sitter" = false,
+        .tvg = false,
         .backend = .wio,
     });
     root_module.addImport("dvui", dvui_dep.module("dvui_wio"));

@@ -628,17 +628,17 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zplus, true),
     };
 
-    var sfa = std.heap.stackFallback(65536, self.allocator);
-    const fallback_allocator = sfa.get();
+    var buffer: [65536]u8 = undefined;
+    var bfa: std.heap.BufferFirstAllocator = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer opaque_faces.deinit(fallback_allocator);
+    defer opaque_faces.deinit(bfa.allocator());
     var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer transparent_faces.deinit(fallback_allocator);
+    defer transparent_faces.deinit(bfa.allocator());
     {
         try chunk.lockShared(io);
         defer chunk.unlockShared(io);
         try Mesher.mesh(
-            fallback_allocator,
+            bfa.allocator(),
             chunk.encoding,
             &neighbor_faces,
             &opaque_faces,

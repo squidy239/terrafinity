@@ -3,7 +3,6 @@ const std = @import("std");
 const tracy = @import("tracy");
 const Cache = @import("Cache").Cache;
 const Block = @import("Block.zig").Block;
-const BufferFallbackAllocator = @import("BufferFallbackAllocator.zig");
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const defaults = @import("defaults.zig");
@@ -322,13 +321,8 @@ pub const DefaultGenerator = struct {
         const genstructures = tracy.Zone.begin(.{ .src = @src() });
         defer genstructures.end();
         var editorBuffer: [100_000]u8 = undefined;
-        var bfa: BufferFallbackAllocator.BufferFallbackAllocator() = .{
-            .buffer = &editorBuffer,
-            .fallback_allocator = allocator,
-            .fixed_buffer_allocator = undefined,
-        };
-        const tempAllocator = bfa.get();
-        var worldEditor = World.Editor{ .world = world, .tempallocator = tempAllocator, .propagate_changes = false };
+        var bfa: std.heap.BufferFirstAllocator = .init(&editorBuffer, allocator);
+        var worldEditor = World.Editor{ .world = world, .tempallocator = bfa.allocator(), .propagate_changes = false };
         defer worldEditor.clear();
 
         {
