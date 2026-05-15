@@ -208,6 +208,8 @@ pub const Options = struct {
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
 
+    render_options: Renderer.OpenGl.RenderOptions = .{},
+
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
             .display = .read_write,
@@ -326,7 +328,7 @@ pub fn init(
         .player = undefined,
     };
 
-    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table);
+    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table, &game_options.render_options, game_options_lock);
     errdefer game.opengl_renderer.deinit(io);
 
     game.renderer = game.opengl_renderer.interface;

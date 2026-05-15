@@ -55,10 +55,19 @@ fbo: c_uint,
 color_texture: c_uint,
 depth_texture: c_uint,
 
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable) !void {
+render_options: *RenderOptions,
+render_options_lock: *std.Io.RwLock,
+
+pub const RenderOptions = struct {
+    draw_over: bool = false,
+};
+
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable, render_options: *RenderOptions, render_options_lock: *std.Io.RwLock) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context.*);
     self.* = @This(){
+        .render_options = render_options,
+        .render_options_lock = render_options_lock,
         .allocator = allocator,
         .gl_options = gl_options,
         .facebuffer = undefined,
@@ -386,6 +395,10 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
+    self.render_options_lock.lockSharedUncancelable(io);
+    const draw_over = self.render_options.draw_over;
+    self.render_options_lock.unlockShared(io);
+    
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
@@ -406,6 +419,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
+    gl.Uniform1i(self.uniforms.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
     const frustrum = Frustum.extractFrustumPlanes(projview);
 
     try drawChunksReal(self, io, playerPos, frustrum, false);
@@ -530,6 +544,7 @@ const UniformLocations = struct {
     fogDensity: c_int,
     skyColor: c_int,
     timelocation: c_int,
+    draw_over: c_int,
 
     pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
         return @This(){
@@ -543,6 +558,7 @@ const UniformLocations = struct {
             .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
+            .draw_over = gl.GetUniformLocation(shaderprogram, "draw_over"),
         };
     }
 };
