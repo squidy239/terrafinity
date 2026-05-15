@@ -122,8 +122,8 @@ pub const ChunkPos = struct {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
     }
 
-    pub inline fn posInParent(self: ChunkPos) @Vector(3, u8) {
-        return @intCast(@mod(self.position, @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
+    pub inline fn posInParent(self: ChunkPos) @Vector(3, @Int(.unsigned, std.math.log2(scale_factor))) {
+        return @intCast(@mod(self.position, comptime @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
     }
 
     /// Returns the local block pos of the chunk where one block is one block at the chunk's level.

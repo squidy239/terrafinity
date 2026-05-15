@@ -9,6 +9,7 @@ uniform float fogDensity;
 uniform sampler2DArray TextureArray;
 out vec4 FragColor;
 flat in float scale;
+uniform bool draw_over;
 
 float rand(vec2 co) {
     return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -79,5 +80,7 @@ void main()
     FragColor = texture(TextureArray, vec3(((texcoords.xy) + 1) / 2, blockArrayLayer));
     FragColor = vec4((0.5 + diffuse) * FragColor.xyz, FragColor[3]);
     if (FragColor.a < 0.01) discard;
-    gl_FragDepth = gl_FragCoord.z / pow(max(1, scale), 8);
+    
+    // GlSL is really weird and I have to have the else or FragDepth is undefined, read the spec for gl_FragDepth
+    if (draw_over) {gl_FragDepth = gl_FragCoord.z / pow(max(1, scale), 8.0);} else {gl_FragDepth = gl_FragCoord.z;}
 }

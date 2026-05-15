@@ -55,10 +55,21 @@ fbo: c_uint,
 color_texture: c_uint,
 depth_texture: c_uint,
 
-pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable) !void {
+render_options: *RenderOptions,
+render_options_lock: *std.Io.RwLock,
+
+pub const RenderOptions = struct {
+    draw_over: bool = false,
+    fov: f32 = 90.0,
+    day_length_sec: f32 = 60 * 5,
+};
+
+pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable, render_options: *RenderOptions, render_options_lock: *std.Io.RwLock) !void {
     const cpu_count = try std.Thread.getCpuCount();
     defer window.glMakeContextCurrent(share_context.*);
     self.* = @This(){
+        .render_options = render_options,
+        .render_options_lock = render_options_lock,
         .allocator = allocator,
         .gl_options = gl_options,
         .facebuffer = undefined,
@@ -386,17 +397,23 @@ var last_viewport: [2]f32 = undefined;
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
+    self.render_options_lock.lockSharedUncancelable(io);
+    const draw_over = self.render_options.draw_over;
+    const fov = std.math.degreesToRadians(self.render_options.fov);
+    const day_length_sec = self.render_options.day_length_sec;
+    self.render_options_lock.unlockShared(io);
+
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, std.math.degreesToRadians(180));
+    const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
+    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
 
     const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
-    const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
-    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.1).transpose();
+    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
@@ -406,6 +423,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
     gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
     gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
+    gl.Uniform1i(self.uniforms.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
     const frustrum = Frustum.extractFrustumPlanes(projview);
 
     try drawChunksReal(self, io, playerPos, frustrum, false);
@@ -530,6 +548,7 @@ const UniformLocations = struct {
     fogDensity: c_int,
     skyColor: c_int,
     timelocation: c_int,
+    draw_over: c_int,
 
     pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
         return @This(){
@@ -543,6 +562,7 @@ const UniformLocations = struct {
             .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
             .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
             .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
+            .draw_over = gl.GetUniformLocation(shaderprogram, "draw_over"),
         };
     }
 };

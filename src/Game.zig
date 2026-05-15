@@ -26,7 +26,7 @@ renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
-loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, void, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
+loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
 
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
 selected_inventory_col: std.atomic.Value(u32) = .init(0),
@@ -53,6 +53,153 @@ debug_menu: struct {
     meshes: std.atomic.Value(u64) = .init(0),
 } = .{},
 
+const NodeData = struct {
+    /// How many direct children are currently subtree-covered.
+    covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = @splat(@splat(@splat(false))),
+    /// True when this chunk is queued or currently in the renderer.
+    /// False for ghost entries that exist only to track child coverage.
+    is_active: bool = false,
+    /// True when this chunk is queued for rendering but not yet processed.
+    is_queued: bool = false,
+
+    pub fn noCoveredChildren(state: NodeData) bool {
+        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false)))));
+    }
+
+    pub fn allCoveredChildren(state: NodeData) bool {
+        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(true)))));
+    }
+};
+
+fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
+    _, const highest = self.getLevels(io);
+    const parent = pos.parent();
+    const pos_in_parent = pos.posInParent();
+    if (parent.level > highest) return;
+
+    var bubble_up = false;
+    {
+        const bucket = self.loaded_or_meshed.getBucket(parent);
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+        var state: Game.NodeData = bucket.hash_map.get(parent) orelse .{};
+
+        const was_covering = state.allCoveredChildren() or state.is_active;
+        state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = true;
+        const is_covering = state.allCoveredChildren() or state.is_active;
+
+        try bucket.hash_map.put(allocator, parent, state);
+
+        bubble_up = !was_covering and is_covering;
+    }
+
+    if (bubble_up) {
+        try self.markCovered(io, allocator, parent);
+    }
+}
+
+fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
+    const parent = pos.parent();
+    const pos_in_parent = pos.posInParent();
+
+    var bubble_up = false;
+    {
+        const bucket = self.loaded_or_meshed.getBucket(parent);
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+        var state = bucket.hash_map.get(parent) orelse return;
+
+        const was_covering = state.allCoveredChildren() or state.is_active;
+        state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = false;
+        const is_covering = state.allCoveredChildren() or state.is_active;
+
+        const remove_node = state.noCoveredChildren() and !state.is_active and !state.is_queued;
+        if (remove_node) {
+            _ = bucket.hash_map.remove(parent);
+        } else {
+            try bucket.hash_map.put(allocator, parent, state);
+        }
+
+        bubble_up = was_covering and !is_covering;
+    }
+
+    if (bubble_up) {
+        try self.markUncovered(io, allocator, parent);
+    }
+}
+
+fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
+    var parent = chunk_pos;
+    _, const highest_level = self.getLevels(io);
+    if (parent.level > highest_level) return true;
+    while (parent.level < highest_level) {
+        parent = parent.parent();
+        std.debug.assert(parent.level <= highest_level);
+        if (self.loaded_or_meshed.get(io, parent)) |par| {
+            if (par.is_active) return true;
+        }
+    }
+    std.debug.assert(parent.level == highest_level);
+
+    {
+        // Check if the highest level parent is out of render distance.
+        self.player.physics.mutex.lockUncancelable(io);
+        const playerpos = self.player.physics.pos;
+        self.player.physics.mutex.unlock(io);
+        const render_distance = self.getRenderDistance(io);
+        const inside_range = keepLoaded(null, null, playerpos, parent, null, render_distance);
+        if (!inside_range) return true;
+    }
+    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+    bucket.lock.lockSharedUncancelable(io);
+    defer bucket.lock.unlockShared(io);
+    const state = bucket.hash_map.get(chunk_pos) orelse return false;
+    return state.allCoveredChildren();
+}
+
+fn tryRemoveChunkFromLoaded(
+    self: *@This(),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chunk_pos: World.ChunkPos,
+) !void {
+    if (!self.canUnloadMesh(io, chunk_pos)) return;
+    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+    try bucket.lock.lock(io);
+    var state = bucket.hash_map.get(chunk_pos) orelse {
+        bucket.lock.unlock(io);
+        return;
+    };
+
+    const was_active = state.is_active;
+    const was_queued = state.is_queued;
+
+    // Only return if it's a completely dead ghost node
+    if (!was_active and !was_queued) {
+        std.debug.assert(!state.noCoveredChildren());
+        bucket.lock.unlock(io);
+        return;
+    }
+
+    const was_covering = state.allCoveredChildren() or state.is_active;
+
+    state.is_active = false;
+    state.is_queued = false;
+
+    const is_covering = state.allCoveredChildren() or state.is_active;
+
+    if (state.noCoveredChildren()) {
+        _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
+    } else {
+        try bucket.hash_map.put(allocator, chunk_pos, state);
+    }
+    bucket.lock.unlock(io);
+
+    if (was_covering and !is_covering) {
+        try self.markUncovered(io, allocator, chunk_pos);
+    }
+}
+
 const SelectUnion = union(enum) {
     addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
 };
@@ -64,13 +211,15 @@ pub const Options = struct {
     lowest_level: i32 = 0,
     highest_level: i32 = 10,
 
-    generation_distance_x: u32 = 8,
-    generation_distance_y: u32 = 6,
+    render_distance_x: u32 = 8,
+    render_distance_y: u32 = 6,
 
     loader_frequency_ms: u64 = 250,
     terrain_height_cache_bytes: u64 = 268435456,
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
+
+    render_options: Renderer.OpenGl.RenderOptions = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -82,7 +231,7 @@ pub const Options = struct {
         .lowest_level = .{ .number = .{
             .display = .none,
         } },
-        .generation_distance_x = .{ .number = .{
+        .render_distance_x = .{ .number = .{
             .min = 6,
             .max = 32,
             .widget_type = .slider,
@@ -92,7 +241,7 @@ pub const Options = struct {
             .max = 5,
             .widget_type = .slider,
         } },
-        .generation_distance_y = .{ .number = .{
+        .render_distance_y = .{ .number = .{
             .min = 6,
             .max = 32,
             .widget_type = .slider,
@@ -190,7 +339,7 @@ pub fn init(
         .player = undefined,
     };
 
-    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table);
+    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table, &game_options.render_options, game_options_lock);
     errdefer game.opengl_renderer.deinit(io);
 
     game.renderer = game.opengl_renderer.interface;
@@ -295,7 +444,7 @@ fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator)
         //this requires concurrency incase the Select buffer is full.
         //it catches becuase that is unlikely and I want it to work in single threaded mode.
         //TODO find a way to make it safely async
-        self.load_future = io.concurrent(@This().loadChunks, .{ self, io, allocator }) catch io.async(@This().loadChunks, .{ self, io, allocator });
+        self.load_future = io.concurrent(loadChunks, .{ self, io, allocator }) catch io.async(loadChunks, .{ self, io, allocator });
     }
 
     if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
@@ -438,10 +587,10 @@ pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
+fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return .{ self.options.generation_distance_x, self.options.generation_distance_y };
+    return .{ self.options.render_distance_x, self.options.render_distance_y };
 }
 
 fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
@@ -464,7 +613,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos)) {
         self.renderer.removeChunk(io, chunk_pos);
-        _ = self.loaded_or_meshed.remove(io, chunk_pos);
+        try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
     }
 
@@ -496,12 +645,42 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
             &transparent_faces,
         );
     }
-    if (opaque_faces.items.len == 0 and transparent_faces.items.len == 0) return;
-    try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+    if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
+        try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+    }
+    var was_covering = false;
+    var is_covering = false;
+    {
+        const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+        var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{};
+
+        was_covering = state.allCoveredChildren() or state.is_active;
+
+        state.is_active = true;
+        state.is_queued = false;
+
+        is_covering = state.allCoveredChildren() or state.is_active;
+        try bucket.hash_map.put(allocator, chunk_pos, state);
+    }
+
+    if (!was_covering and is_covering) {
+        try self.markCovered(io, allocator, chunk_pos);
+    }
 }
 
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
-    try self.loaded_or_meshed.put(io, allocator, chunk_pos, {});
+    var was_active = false;
+    {
+        const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{});
+        was_active = entry.value_ptr.is_active;
+        entry.value_ptr.is_queued = true;
+    }
+
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
 }
 
@@ -515,7 +694,7 @@ fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     self.player.physics.mutex.lockUncancelable(io);
     const playerpos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
-    const gendistance = self.getGenDistance(io);
+    const gendistance = self.getRenderDistance(io);
     const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
     return inside_range;
@@ -572,7 +751,7 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
 
-    var outer_radius = game.getGenDistance(io);
+    var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
 
     var amount_loaded: u64 = 0;
@@ -595,7 +774,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
             try io.checkCancel();
             //update radiuses more frequently incase they are set way too high
-            outer_radius = game.getGenDistance(io);
+            outer_radius = game.getRenderDistance(io);
             inner_radius = game.getInnerGenRadius(io, outer_radius, level);
             while (y < outer_radius[1]) {
                 defer y += 1;
@@ -605,9 +784,9 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
                 if (!in_range)
                     continue;
 
-                const loaded = game.loaded_or_meshed.contains(io, chunk_pos);
+                const node_data = game.loaded_or_meshed.get(io, chunk_pos);
 
-                if (!loaded) {
+                if (node_data == null or (!node_data.?.is_active and !node_data.?.is_queued)) {
                     amount_loaded += 1;
                     try game.addChunkToRenderAsync(io, allocator, chunk_pos, true);
                 }
@@ -631,9 +810,10 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
             ctx.chunks += 1;
-            const keep = ctx.game.keepChunkLoaded(ctx.io, chunk_pos);
-            if (keep) return;
-            _ = ctx.game.loaded_or_meshed.remove(ctx.io, chunk_pos);
+            if (ctx.game.keepChunkLoaded(ctx.io, chunk_pos)) return;
+            if (!ctx.game.canUnloadMesh(ctx.io, chunk_pos)) return; // children not ready
+
+            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch @panic("TODO figure out how to handle this");
             ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
             ctx.unloaded += 1;
         }
@@ -650,11 +830,12 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         const key = entry.key_ptr.*;
-        if (!self.keepChunkLoaded(io, key)) {
-            it.pause(io);
-            _ = self.loaded_or_meshed.remove(io, key);
-            try it.unpause(io);
-        }
+        if (self.keepChunkLoaded(io, key)) continue;
+        if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
+
+        it.pause(io);
+        self.tryRemoveChunkFromLoaded(io, self.allocator, key) catch @panic("TODO handle error");
+        try it.unpause(io);
     }
 }
 
