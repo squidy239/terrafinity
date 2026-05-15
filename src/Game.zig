@@ -99,10 +99,8 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
 }
 
 fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: World.ChunkPos) !void {
-    _, const highest = self.getLevels(io);
     const parent = pos.parent();
     const pos_in_parent = pos.posInParent();
-    if (parent.level > highest) return;
 
     var bubble_up = false;
     {
@@ -132,12 +130,25 @@ fn markUncovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: 
 
 fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     var parent = chunk_pos;
-    const levels = self.getLevels(io);
-    while (parent.level <= levels[1]) { //TODO handle top level out of range
+    _, const highest_level = self.getLevels(io);
+    if (parent.level > highest_level) return true;
+    while (parent.level < highest_level) {
         parent = parent.parent();
+        std.debug.assert(parent.level <= highest_level);
         if (self.loaded_or_meshed.get(io, parent)) |par| {
             if (par.is_active) return true;
         }
+    }
+    std.debug.assert(parent.level == highest_level);
+
+    {
+        // Check if the highest level parent is out of render distance.
+        self.player.physics.mutex.lockUncancelable(io);
+        const playerpos = self.player.physics.pos;
+        self.player.physics.mutex.unlock(io);
+        const render_distance = self.getRenderDistance(io);
+        const inside_range = keepLoaded(null, null, playerpos, parent, null, render_distance);
+        if (!inside_range) return true;
     }
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     bucket.lock.lockSharedUncancelable(io);
@@ -200,8 +211,8 @@ pub const Options = struct {
     lowest_level: i32 = 0,
     highest_level: i32 = 10,
 
-    generation_distance_x: u32 = 8,
-    generation_distance_y: u32 = 6,
+    render_distance_x: u32 = 8,
+    render_distance_y: u32 = 6,
 
     loader_frequency_ms: u64 = 250,
     terrain_height_cache_bytes: u64 = 268435456,
@@ -220,7 +231,7 @@ pub const Options = struct {
         .lowest_level = .{ .number = .{
             .display = .none,
         } },
-        .generation_distance_x = .{ .number = .{
+        .render_distance_x = .{ .number = .{
             .min = 6,
             .max = 32,
             .widget_type = .slider,
@@ -230,7 +241,7 @@ pub const Options = struct {
             .max = 5,
             .widget_type = .slider,
         } },
-        .generation_distance_y = .{ .number = .{
+        .render_distance_y = .{ .number = .{
             .min = 6,
             .max = 32,
             .widget_type = .slider,
@@ -576,10 +587,10 @@ pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
-fn getGenDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
+fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return .{ self.options.generation_distance_x, self.options.generation_distance_y };
+    return .{ self.options.render_distance_x, self.options.render_distance_y };
 }
 
 fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
@@ -683,7 +694,7 @@ fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     self.player.physics.mutex.lockUncancelable(io);
     const playerpos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
-    const gendistance = self.getGenDistance(io);
+    const gendistance = self.getRenderDistance(io);
     const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
     return inside_range;
@@ -740,7 +751,7 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
     const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
 
-    var outer_radius = game.getGenDistance(io);
+    var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
 
     var amount_loaded: u64 = 0;
@@ -763,7 +774,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
             try io.checkCancel();
             //update radiuses more frequently incase they are set way too high
-            outer_radius = game.getGenDistance(io);
+            outer_radius = game.getRenderDistance(io);
             inner_radius = game.getInnerGenRadius(io, outer_radius, level);
             while (y < outer_radius[1]) {
                 defer y += 1;

@@ -402,7 +402,7 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
-    
+
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
