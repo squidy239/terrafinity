@@ -60,6 +60,8 @@ render_options_lock: *std.Io.RwLock,
 
 pub const RenderOptions = struct {
     draw_over: bool = false,
+    fov: f32 = 90.0,
+    day_length_sec: f32 = 60 * 5,
 };
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable, render_options: *RenderOptions, render_options_lock: *std.Io.RwLock) !void {
@@ -397,6 +399,8 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     defer c.end();
     self.render_options_lock.lockSharedUncancelable(io);
     const draw_over = self.render_options.draw_over;
+    const fov = std.math.degreesToRadians(self.render_options.fov);
+    const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
     
     gl.makeProcTableCurrent(self.proc_table);
@@ -404,12 +408,13 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
-    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, std.math.degreesToRadians(180));
+    const day_length = day_length_sec * std.time.ns_per_s;
+    const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / (@as(f128, day_length) / 360), 360.0);
+    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
 
     const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
-    const fov = std.math.degreesToRadians(90.0);
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
-    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.1).transpose();
+    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
     gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
