@@ -80,29 +80,21 @@ fn setupDependencies(
     }).module("obj");
     root_module.addImport("obj", obj_mod);
 
-    // Allow the user to enable or disable Tracy support with a build flag
     const tracy_enabled = b.option(
         bool,
         "tracy",
         "Build with Tracy support.",
     ) orelse false;
 
-    // Get the Tracy dependency
     const tracy = b.dependency("tracy", .{
         .target = target,
         .optimize = optimize,
     });
 
-    // Make Tracy available as an import
     root_module.addImport("tracy", tracy.module("tracy"));
-
-    // Pick an implementation based on the build flags.
-    // Don't build both, we don't want to link with Tracy at all unless we intend to enable it.
     if (tracy_enabled) {
-        // The user asked to enable Tracy, use the real implementation
         root_module.addImport("tracy_impl", tracy.module("tracy_impl_enabled"));
     } else {
-        // The user asked to disable Tracy, use the dummy implementation
         root_module.addImport("tracy_impl", tracy.module("tracy_impl_disabled"));
     }
 

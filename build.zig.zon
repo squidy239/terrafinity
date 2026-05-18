@@ -21,7 +21,7 @@
             .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
         .zigimg = .{
-            .url = "git+https://github.com/squidy239/zigimg#ba03ad0f7d692ef14567ffe437f79cf98d682116",
+            .url = "git+https://github.com/zigimg/zigimg#bebd3609158eb8e98db3c4e0eb609cc1252cc535",
             .hash = "zigimg-0.1.0-8_eo2gGbFwCvhBtJ9aO9Gvm2l3WdQF44iu472X5EWCMj",
         },
         .rocksdb = .{
@@ -29,8 +29,8 @@
             .hash = "rocksdb-9.7.4-z_CUTpR5AQCEsJwQ5QzO921yzTX3jYOkXje3dItqVFuC",
         },
         .dvui = .{
-            .url = "git+https://github.com/squidy239/dvui#17d211f274b7f4ba14a5df216285d0e8ae3fdcfd",
-            .hash = "dvui-0.5.0-dev-AQFJmaca9gCxdrcioGLXMHw5Ap-fIJQFKtIufNCfOsF3",
+            .url = "git+https://github.com/david-vanderson/dvui#b876e37c429fb2c299fc76fb92a7a0d5c6604bd0",
+            .hash = "dvui-0.5.0-dev-AQFJmeEb9gBb8imnyhnKkPcNoKinhV_ZcEjaQRvjuEGF",
         },
         .wio = .{
             .url = "https://github.com/ypsvlq/wio/archive/7fcf078c07c4e673d43283bce93d58132d15c728.tar.gz",
