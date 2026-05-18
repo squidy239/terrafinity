@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const tracy = @import("tracy");
-const Cache = @import("Cache").Cache;
+const Cache = @import("../libs/Cache.zig").Cache;
 const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;

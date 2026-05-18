@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const dvui = @import("dvui");
 const gl = @import("gl");
 const tracy = @import("tracy");

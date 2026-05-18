@@ -53,10 +53,6 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
         .use_llvm = true,
     });
-    tests.root_module.addCSourceFile(.{
-        .file = b.path("sanitizer_stubs.c"),
-        .flags = &.{"-fno-sanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc,trace-pc-guard,indirect-calls"},
-    });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addInstallArtifact(tests, .{}).step);
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -77,19 +73,7 @@ fn setupDependencies(
     rocksdb_mod.single_threaded = false;
     rocksdb_mod.sanitize_thread = false;
     root_module.addImport("rocksdb", rocksdb_mod);
-
-    const ConcurrentHashMap = b.addModule("ConcurrentHashMap", .{
-        .root_source_file = b.path("src/libs/ConcurrentHashMap.zig"),
-        .optimize = optimize,
-    });
-    root_module.addImport("ConcurrentHashMap", ConcurrentHashMap);
-
-    const Cache = b.addModule("Cache", .{
-        .root_source_file = b.path("src/libs/Cache.zig"),
-        .optimize = optimize,
-    });
-    root_module.addImport("Cache", Cache);
-
+    
     const obj_mod = b.dependency("obj", .{
         .target = target,
         .optimize = optimize,

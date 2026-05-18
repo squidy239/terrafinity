@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const Cache = @import("Cache").Cache;
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const Cache = @import("../libs/Cache.zig").Cache;
+const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const tracy = @import("tracy");
 
 const Options = @import("../Game.zig").Options;

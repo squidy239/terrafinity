@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");

@@ -293,7 +293,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
 test "ConcurrentHashMap basic" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init();
+    var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init;
     defer map.deinit(io, allocator);
 
     try map.put(io, allocator, 1, 10);
@@ -311,7 +311,7 @@ test "ConcurrentHashMap allocation failure" {
     const io = std.testing.io;
     const test_fn = struct {
         fn run(allocator: std.mem.Allocator, _io: std.Io) !void {
-            var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init();
+            var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init;
             defer map.deinit(_io, allocator);
             try map.put(_io, allocator, 1, 10);
             try map.put(_io, allocator, 2, 20);

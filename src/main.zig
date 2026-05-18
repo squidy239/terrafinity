@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const Cache = @import("Cache").Cache;
-pub const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+pub const Cache = @import("libs/Cache.zig").Cache;
+pub const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const dvui = @import("dvui");
 const gl = @import("gl");
 const options = @import("options");
