@@ -1,6 +1,4 @@
 const std = @import("std");
-
-const Obj = @import("obj");
 const tracy = @import("tracy");
 
 const Block = @import("world/Block.zig").Block;

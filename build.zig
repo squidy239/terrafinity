@@ -26,6 +26,22 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("options", options);
     b.installArtifact(exe);
 
+    // Ephor static analysis
+    const ephor_dep = b.dependency("ephor", .{ .target = target, .optimize = .ReleaseSafe });
+    const ephor_artifact = ephor_dep.artifact("ephor");
+    const ephor_cmd = b.addRunArtifact(ephor_artifact);
+    if (b.args) |args| {
+        ephor_cmd.addArgs(args);
+    }
+    const ephor_step = b.step("ephor", "Run ephor static analysis");
+    ephor_step.dependOn(&ephor_cmd.step);
+
+    // Ephor upgrade
+    const ephor_upgrade_cmd = b.addRunArtifact(ephor_artifact);
+    ephor_upgrade_cmd.addArgs(&.{"upgrade"});
+    const ephor_upgrade_step = b.step("ephor-upgrade", "Upgrade ephor to latest version");
+    ephor_upgrade_step.dependOn(&ephor_upgrade_cmd.step);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
