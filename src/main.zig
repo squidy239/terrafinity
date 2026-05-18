@@ -129,7 +129,12 @@ pub fn main(init: std.process.Init) !void {
         .worlds_path = worlds_path,
         .ui_context = &ui_context,
         .gloptions = gloptions,
+        .running = &running,
+        .ui_window = &ui_window,
+        .menu_background = undefined,
     };
+    try ui.initAssets(gpa);
+    defer ui.deinit();
 
     defer if (ui.menu_state.ingame) game.deinit(io);
     var frame_time: std.Io.Timestamp = .now(io, .awake);

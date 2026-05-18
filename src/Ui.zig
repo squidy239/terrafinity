@@ -8,9 +8,9 @@ const EntityTypes = @import("world/EntityTypes.zig");
 const utils = @import("libs/utils.zig");
 const gl = @import("gl");
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
-const menu_background: []const u8 = @embedFile("assets/terrain.png");
+const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
-
+const zigimg = @import("zigimg");
 const Ui = @This();
 
 proc_table: *const gl.ProcTable,
@@ -22,6 +22,9 @@ config_lock: *std.Io.RwLock,
 game: *Game,
 config_path: []const u8,
 worlds_path: []const u8,
+menu_background: dvui.Texture,
+ui_window: *dvui.Window,
+running: *std.atomic.Value(bool),
 
 menu_state: struct {
     ingame: bool = false,
@@ -41,6 +44,17 @@ menu_state: struct {
         self.settings = false;
     }
 },
+
+pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
+    var image = try zigimg.Image.fromMemory(allocator, menu_background_image);
+    defer image.deinit(allocator);
+    try image.convert(allocator, .rgba32);
+    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), @intCast(image.width), @intCast(image.height), .linear, .rgba_32);
+}
+
+pub fn deinit(self: *@This()) void {
+     self.ui_window.backend.textureDestroy(self.menu_background);
+}
 
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
     var options: dvui.Options = .{
@@ -217,7 +231,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
 pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
-    _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = menu_background } }, .shrink = .vertical }, .{ .expand = .both });
+    _ = dvui.image(@src(), .{ .source = .{ .texture = self.menu_background }, .shrink = .vertical }, .{ .expand = .both });
 
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
@@ -248,6 +262,10 @@ pub fn sidebar(self: *@This()) bool {
         self.menu_state = .{ .settings = true };
         return true;
     }
+    if (dvui.button(@src(), "Quit", .{}, .{ .gravity_x = 0.5, .color_fill = .olive, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
+        self.running.store(false, .unordered);
+        return true;
+    }
     return false;
 }
 
@@ -258,7 +276,7 @@ const FolderData = struct {
 
 pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const continue_games = dvui.scrollArea(@src(), .{
-        .horizontal_bar = .hide,
+        .horizontal_bar = .show,
         .vertical = .none,
         .horizontal = .auto,
     }, .{
