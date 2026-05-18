@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
@@ -392,7 +392,6 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
     gl.EnableVertexAttribArray(0);
 }
-var last_viewport: [2]f32 = undefined;
 
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
     const c = tracy.Zone.begin(.{ .src = @src() });

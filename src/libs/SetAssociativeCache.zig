@@ -79,9 +79,9 @@ pub fn SetAssociativeCacheType(
     return struct {
         const SetAssociativeCache = @This();
 
-        const Tag = meta.Int(.unsigned, layout.tag_bits);
-        const Count = meta.Int(.unsigned, layout.clock_bits);
-        const Clock = meta.Int(.unsigned, clock_hand_bits);
+        const Tag = @Int(.unsigned, layout.tag_bits);
+        const Count = @Int(.unsigned, layout.clock_bits);
+        const Clock = @Int(.unsigned, clock_hand_bits);
 
         /// We don't require `value_count_max` in `init` to be a power of 2, but we do require
         /// it to be a multiple of `value_count_max_multiple`. The calculation below
@@ -293,7 +293,7 @@ pub fn SetAssociativeCacheType(
         }
 
         /// Where each set bit represents the index of a way that has the same tag.
-        const Ways = meta.Int(.unsigned, layout.ways);
+        const Ways = @Int(.unsigned, layout.ways);
 
         inline fn search_tags(tags: *const [layout.ways]Tag, tag: Tag) Ways {
             const x: @Vector(layout.ways, Tag) = tags.*;
@@ -565,7 +565,7 @@ fn set_associative_cache_test(
             for (sac.tags) |tag| try testing.expectEqual(@as(SAC.Tag, 0), tag);
             for (sac.counts.words) |word| try testing.expectEqual(@as(u64, 0), word);
             for (sac.clocks.words) |word| try testing.expectEqual(@as(u64, 0), word);
-            try expectEqual(@as(u64, 0), sac.metrics.value_count);
+            try expectEqual(@as(u64, 0), sac.metrics.value_count.raw);
 
             // Fill up the first set entirely.
             {
@@ -580,7 +580,7 @@ fn set_associative_cache_test(
                     try expect(sac.counts.get(i) == 2);
                 }
                 try expect(sac.clocks.get(0) == 0);
-                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count);
+                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
             if (log) sac.associate(0).inspect(sac);
@@ -601,7 +601,7 @@ fn set_associative_cache_test(
                         try expect(sac.counts.get(i) == 1);
                     }
                 }
-                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count);
+                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
             if (log) sac.associate(0).inspect(sac);
@@ -615,7 +615,7 @@ fn set_associative_cache_test(
                 _ = sac.remove(key);
                 try expectEqual(@as(?*Value, null), sac.get(key));
                 try expect(sac.counts.get(5) == 0);
-                try expectEqual(@as(u64, layout.ways - 1), sac.metrics.value_count);
+                try expectEqual(@as(u64, layout.ways - 1), sac.metrics.value_count.raw);
             }
 
             sac.reset();
@@ -623,7 +623,7 @@ fn set_associative_cache_test(
             for (sac.tags) |tag| try testing.expectEqual(@as(SAC.Tag, 0), tag);
             for (sac.counts.words) |word| try testing.expectEqual(@as(u64, 0), word);
             for (sac.clocks.words) |word| try testing.expectEqual(@as(u64, 0), word);
-            try expectEqual(@as(u64, 0), sac.metrics.value_count);
+            try expectEqual(@as(u64, 0), sac.metrics.value_count.raw);
 
             // Fill up the first set entirely, maxing out the count for each slot.
             {
@@ -643,7 +643,7 @@ fn set_associative_cache_test(
                     try expect(sac.counts.get(i) == math.maxInt(SAC.Count));
                 }
                 try expect(sac.clocks.get(0) == 0);
-                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count);
+                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
             if (log) sac.associate(0).inspect(sac);
@@ -664,7 +664,7 @@ fn set_associative_cache_test(
                         try expect(sac.counts.get(i) == 1);
                     }
                 }
-                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count);
+                try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
             if (log) sac.associate(0).inspect(sac);
@@ -724,7 +724,7 @@ fn PackedUnsignedIntegerArrayType(comptime UInt: type) type {
     const uints_per_word = @divExact(word_bits, uint_bits);
 
     // An index bounded by the number of unsigned integers that fit exactly into a word.
-    const WordIndex = meta.Int(.unsigned, math.log2_int(u64, uints_per_word));
+    const WordIndex = @Int(.unsigned, math.log2_int(u64, uints_per_word));
     assert(math.maxInt(WordIndex) == uints_per_word - 1);
 
     // An index bounded by the number of bits (not unsigned integers) that fit exactly into a word.

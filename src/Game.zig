@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ConcurrentHashMap = @import("ConcurrentHashMap").ConcurrentHashMap;
+const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const dvui = @import("dvui");
 const gl = @import("gl");
 const tracy = @import("tracy");
@@ -260,17 +260,17 @@ pub const WorldOptions = struct {
 
         try world_folder.setTimestamps(io, ".", .{ .access_timestamp = .now });
 
-        const worldConfigFile = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
-        defer worldConfigFile.close(io);
+        const world_config_file = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
+        defer world_config_file.close(io);
 
-        const generatorConfigFile = try world_folder.openFile(io, "config/DefaultGenerator.zon", .{ .lock = .shared });
-        defer generatorConfigFile.close(io);
+        const generator_config_file = try world_folder.openFile(io, "config/DefaultGenerator.zon", .{ .lock = .shared });
+        defer generator_config_file.close(io);
 
-        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, io, generatorConfigFile, allocator, allocator);
+        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, io, generator_config_file, allocator, allocator);
         generator_config.setSeeds(io);
         return .{
             .generator_config = generator_config,
-            .world_config = try utils.loadZON(World.WorldConfig, io, worldConfigFile, allocator, allocator),
+            .world_config = try utils.loadZON(World.WorldConfig, io, world_config_file, allocator, allocator),
         };
     }
 
@@ -287,15 +287,15 @@ pub const WorldOptions = struct {
             else => return err,
         };
 
-        const worldConfigFile = try world_folder.createFile(io, "config/World.zon", .{ .lock = .exclusive });
-        defer worldConfigFile.close(io);
+        const world_config_file = try world_folder.createFile(io, "config/World.zon", .{ .lock = .exclusive });
+        defer world_config_file.close(io);
 
-        var worldconfwriter = worldConfigFile.writer(io, &wbuffer);
+        var worldconfwriter = world_config_file.writer(io, &wbuffer);
 
-        const generatorConfigFile = try world_folder.createFile(io, "config/DefaultGenerator.zon", .{ .lock = .exclusive });
-        defer generatorConfigFile.close(io);
+        const generator_config_file = try world_folder.createFile(io, "config/DefaultGenerator.zon", .{ .lock = .exclusive });
+        defer generator_config_file.close(io);
 
-        var generatorconfwriter = generatorConfigFile.writer(io, &gbuffer);
+        var generatorconfwriter = generator_config_file.writer(io, &gbuffer);
 
         try std.zon.stringify.serialize(self.world_config, .{}, &worldconfwriter.interface);
         try std.zon.stringify.serialize(self.generator_config, .{}, &generatorconfwriter.interface);
@@ -472,16 +472,16 @@ fn handleSelectFutures(self: *@This()) !void {
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
     const sensitivity = self.getMouseSensitivity(io);
 
-    var viewDirDiff: @Vector(2, f32) = @splat(0);
-    viewDirDiff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
-    viewDirDiff *= @splat(sensitivity);
+    var view_dir_diff: @Vector(2, f32) = @splat(0);
+    view_dir_diff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
+    view_dir_diff *= @splat(sensitivity);
 
     const smallf32 = 0.00001;
 
     self.player.viewDirection_mutex.lockUncancelable(io);
     defer self.player.viewDirection_mutex.unlock(io);
     var currentViewDir = self.player.viewDirection;
-    currentViewDir -= @Vector(3, f32){ viewDirDiff[0], viewDirDiff[1], 0 };
+    currentViewDir -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
     currentViewDir[0] = std.math.clamp(currentViewDir[0], -90 + smallf32, 90 - smallf32);
     self.player.viewDirection = currentViewDir;
 
@@ -541,15 +541,15 @@ fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
 }
 
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    const cameraFront = self.renderer.getCameraFront();
+    const camera_front = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.Vec3f.crossRH(.{ .data = cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
+    const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
     self.player.physics.mutex.lockUncancelable(io);
     defer self.player.physics.mutex.unlock(io);
-    if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cameraFront));
-    if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cameraFront));
+    if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
+    if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
     if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
     if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
     if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
@@ -557,9 +557,9 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    const cameraFront = self.renderer.getCameraFront();
+    const camera_front = self.renderer.getCameraFront();
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.Vec3f.crossRH(.{ .data = cameraFront }, .{ .data = Renderer.OpenGl.cameraUp });
+    const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
@@ -574,8 +574,8 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
         defer self.player.physics.mutex.unlock(io);
         if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
         if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
-        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cameraFront));
-        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cameraFront));
+        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
+        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
         if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
         if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
     }
@@ -628,17 +628,17 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zplus, true),
     };
 
-    var sfa = std.heap.stackFallback(65536, self.allocator);
-    const fallback_allocator = sfa.get();
+    var buffer: [65536]u8 = undefined;
+    var bfa: std.heap.BufferFirstAllocator = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer opaque_faces.deinit(fallback_allocator);
+    defer opaque_faces.deinit(bfa.allocator());
     var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer transparent_faces.deinit(fallback_allocator);
+    defer transparent_faces.deinit(bfa.allocator());
     {
         try chunk.lockShared(io);
         defer chunk.unlockShared(io);
         try Mesher.mesh(
-            fallback_allocator,
+            bfa.allocator(),
             chunk.encoding,
             &neighbor_faces,
             &opaque_faces,
@@ -713,18 +713,18 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64
 
     if (innerChunkRange) |icr| {
         const inner: @Vector(3, f64) = .{ icr[0], icr[1], icr[0] };
-        const insideInner =
+        const inside_inner =
             @reduce(.And, player_chunk_pos > (chunk_center - inner)) and
             @reduce(.And, player_chunk_pos < chunk_center + inner);
-        if (insideInner) return false;
+        if (inside_inner) return false;
     }
 
     if (outerChunkRange) |ocr| {
         const outer: @Vector(3, f64) = .{ ocr[0], ocr[1], ocr[0] };
-        const outsideOuter =
+        const outside_outer =
             @reduce(.Or, player_chunk_pos < chunk_center - outer) or
             @reduce(.Or, player_chunk_pos > chunk_center + outer);
-        if (outsideOuter) return false;
+        if (outside_outer) return false;
     }
     return true;
 }
@@ -733,23 +733,22 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64
 fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer self.chunk_load_is_running.store(false, .seq_cst);
     self.player.physics.mutex.lockUncancelable(io);
-    const playerPos = self.player.physics.pos;
+    const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
-    const addChunkstoLoad = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
-
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
+    defer z.end();
     var levels = self.getLevels(io);
     var level = levels[0];
     var amount_loaded: u64 = 0;
     while (level < levels[1]) : (level += 1) {
         levels = self.getLevels(io);
-        amount_loaded += try loadChunksSpiral(self, io, allocator, playerPos, level);
+        amount_loaded += try loadChunksSpiral(self, io, allocator, player_pos, level);
     }
-    addChunkstoLoad.end();
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
-    const playerChunkPos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
+    const player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
 
     var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
@@ -778,7 +777,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             inner_radius = game.getInnerGenRadius(io, outer_radius, level);
             while (y < outer_radius[1]) {
                 defer y += 1;
-                const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + playerChunkPos.position[0], y + playerChunkPos.position[1], xz[1] + playerChunkPos.position[2] }, .level = level };
+                const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
 
                 const in_range = keepLoaded(null, null, playerPos, chunk_pos, inner_radius, outer_radius);
                 if (!in_range)
@@ -801,7 +800,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
 
-    const chunkCollector = struct {
+    const ChunkCollector = struct {
         game: *Game,
         io: std.Io,
         chunks: u64 = 0,
@@ -818,12 +817,12 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
             ctx.unloaded += 1;
         }
     };
-    var ctx = chunkCollector{
+    var ctx = ChunkCollector{
         .game = self,
         .io = io,
     };
 
-    try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
+    try self.renderer.forEachChunk(io, &ctx, ChunkCollector.callback);
     self.debug_menu.meshes.store(ctx.chunks, .unordered);
 
     var it = self.loaded_or_meshed.iterator();
@@ -874,9 +873,9 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     );
     _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
     game.player.viewDirection_mutex.lockUncancelable(io);
-    const viewDirection = game.player.viewDirection;
+    const view_direction = game.player.viewDirection;
     game.player.viewDirection_mutex.unlock(io);
-    game.renderer.updateCameraDirection(viewDirection);
+    game.renderer.updateCameraDirection(view_direction);
 }
 
 fn move(xzin: [2]i32, c: *usize) [2]i32 {

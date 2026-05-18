@@ -11,9 +11,9 @@ const Entity = @This();
 type: Type,
 ptr: *anyopaque,
 ref_count: std.atomic.Value(u32),
-vtable: interface,
+vtable: Interface,
 
-pub const interface = struct {
+pub const Interface = struct {
     ///updates the entity, returns true if the entity was unloaded
     update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool = null,
     ///unloads the entity and frees all resorces allocated by it
@@ -48,8 +48,8 @@ pub fn getPos(self: *@This()) ?@Vector(3, f64) {
 ///unloads the entity and frees all resorces allocated by it
 ///the entity ptr is not valid after this
 pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
-    const unloadEntity = tracy.Zone.begin(.{ .src = @src() });
-    defer unloadEntity.end();
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
     std.debug.assert(try self.waitForRefAmount(io, 1, 10 * std.time.us_per_s));
     return self.vtable.unload(self, io, world, uuid, allocator, save);
 }
@@ -97,7 +97,7 @@ test "Entity.make allocation failure" {
     const DummyEntity = struct {
         pub const Type = Entity.Type.Cube;
         pos: @Vector(3, f64) = .{ 0, 0, 0 },
-        pub fn getInterface(self: *@This()) Entity.interface {
+        pub fn getInterface(self: *@This()) Entity.Interface {
             _ = self;
             return .{
                 .unload = unloadFn,

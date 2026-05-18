@@ -180,7 +180,7 @@ pub const Player = struct {
         return false;
     }
 
-    pub fn getInterface(self: *const @This()) Entity.interface {
+    pub fn getInterface(self: *const @This()) Entity.Interface {
         _ = self;
         return .{
             .getPos = getPos,
@@ -264,7 +264,7 @@ pub const Explosive = struct {
         return self.pos;
     }
 
-    pub fn getInterface(self: *const @This()) Entity.interface {
+    pub fn getInterface(self: *const @This()) Entity.Interface {
         _ = self;
         return .{
             .getPos = getPos,
