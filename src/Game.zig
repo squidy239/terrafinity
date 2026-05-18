@@ -801,7 +801,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
     defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
 
-    const chunkCollector = struct {
+    const ChunkCollector = struct {
         game: *Game,
         io: std.Io,
         chunks: u64 = 0,
@@ -818,12 +818,12 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
             ctx.unloaded += 1;
         }
     };
-    var ctx = chunkCollector{
+    var ctx = ChunkCollector{
         .game = self,
         .io = io,
     };
 
-    try self.renderer.forEachChunk(io, &ctx, chunkCollector.callback);
+    try self.renderer.forEachChunk(io, &ctx, ChunkCollector.callback);
     self.debug_menu.meshes.store(ctx.chunks, .unordered);
 
     var it = self.loaded_or_meshed.iterator();
@@ -874,9 +874,9 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     );
     _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
     game.player.viewDirection_mutex.lockUncancelable(io);
-    const viewDirection = game.player.viewDirection;
+    const view_direction = game.player.viewDirection;
     game.player.viewDirection_mutex.unlock(io);
-    game.renderer.updateCameraDirection(viewDirection);
+    game.renderer.updateCameraDirection(view_direction);
 }
 
 fn move(xzin: [2]i32, c: *usize) [2]i32 {

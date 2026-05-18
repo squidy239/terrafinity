@@ -51,7 +51,7 @@ pub const Tree = struct {
         std.debug.assert(step_buffer.len > self.steps.len);
         std.debug.assert(self.steps.len > self.maxRecursionDepth);
         var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);
-        var branchesCount: u64 = 0;
+        var branches: u64 = 0;
         const trunkVec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, -0.05, 0.05);
 
         try stack.appendBounded(.{
@@ -89,7 +89,7 @@ pub const Tree = struct {
                         }
                     }
                 } else {
-                    branchesCount += 1;
+                    branches += 1;
                     const branch = WorldEditor.Geometry.Cone(f64).init(data.pos, branchVec, @floatCast(length), @floatCast(@max(self.minRadius, data.lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.minRadius, radius)));
                     try editor.placeSamplerShape(step.block, branch, level);
                     const newPos = data.pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
@@ -103,7 +103,7 @@ pub const Tree = struct {
                 }
             }
         }
-        return branchesCount;
+        return branches;
     }
 
     fn rand3Vec(comptime T: type, rangeBase: T, rangeTop: T) @Vector(3, T) {

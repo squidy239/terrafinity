@@ -29,8 +29,8 @@
             .hash = "rocksdb-9.7.4-z_CUTpR5AQCEsJwQ5QzO921yzTX3jYOkXje3dItqVFuC",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#5577c507f746018b7ec29957e62a4b86b5047b9d",
-            .hash = "dvui-0.5.0-dev-AQFJmeTy9QDL3m_yewh656aqxib46ngC37A_goLmAENy",
+            .url = "git+https://github.com/squidy239/dvui#82277681ab4986658a750adba704ad3ba462d540",
+            .hash = "dvui-0.5.0-dev-AQFJmVUa9gBhB38oRv8NsbAkS307XuP3J35jUaEBGuIG",
         },
         .wio = .{
             .url = "https://github.com/ypsvlq/wio/archive/7fcf078c07c4e673d43283bce93d58132d15c728.tar.gz",

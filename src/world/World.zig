@@ -250,7 +250,7 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
             continue;
         }
         std.debug.assert(victim.chunk.encoding == .grid);
-        onUnload(self, io, victim.chunk, victim.pos) catch unreachable;
+        try onUnload(self, io, victim.chunk, victim.pos);
         std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
         victim.chunk.* = undefined;
         break;
