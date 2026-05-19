@@ -84,9 +84,10 @@ pub const Player = struct {
     pub const Type = Entity.Type.Player;
     player_name: Name,
     gameMode: std.atomic.Value(GameMode),
-    fly_speed: std.atomic.Value(f32),
-    walk_speed: std.atomic.Value(f32),
-    fly_speed_linear: std.atomic.Value(f32),
+    fly_speed: std.atomic.Value(f32) = .init(100),
+    walk_speed: std.atomic.Value(f32) = .init(8),
+    jump_strength: std.atomic.Value(f32) = .init(8),
+    fly_speed_linear: std.atomic.Value(f32) = .init(10),
     inventory_buffer: [10 * 16]?Item.Item = @splat(null),
     /// Main inventory and hotbar.
     main_inventory: Item.Inventory,

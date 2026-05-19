@@ -198,7 +198,7 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
     self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    _ = zm.Vec3f.norm(.{ .data = self.cameraFront });
+    self.cameraFront = zm.Vec3f.norm(.{ .data = self.cameraFront }).data;
 }
 
 fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {

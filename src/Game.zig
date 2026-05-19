@@ -540,8 +540,17 @@ fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     }
 }
 
+fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {
+    return @Vector(3, f32){
+        @sin(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(0)),
+        @sin(std.math.degreesToRadians(0)),
+        @cos(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(0)),
+    };
+}
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    const camera_front = self.renderer.getCameraFront();
+    self.player.viewDirection_mutex.lockUncancelable(io);
+    const camera_front = moveCameraFront(self.player.viewDirection);
+    self.player.viewDirection_mutex.unlock(io);
     const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
     const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
@@ -560,8 +569,10 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    const camera_front = self.renderer.getCameraFront();
-    const veldiff: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered) * delta_time_seconds);
+    self.player.viewDirection_mutex.lockUncancelable(io);
+    const camera_front = moveCameraFront(self.player.viewDirection);
+    self.player.viewDirection_mutex.unlock(io);
+    const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
     const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
@@ -573,15 +584,24 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
 
     const ground_dist = try self.player.physics.elements.mover.shortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
     const on_ground = ground_dist <= 0;
-    const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.1);
+    const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.35);
     {
         self.player.physics.mutex.lockUncancelable(io);
         defer self.player.physics.mutex.unlock(io);
-        if (actions.contains(.up) and on_ground) self.player.physics.velocity[1] = 5.0;
-        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front * speed_multiplier));
-        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front * speed_multiplier));
-        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data * speed_multiplier));
-        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data * speed_multiplier));
+        if (actions.contains(.up) and on_ground) self.player.physics.velocity[1] = self.player.jump_strength.load(.unordered);
+        var vel_diff: @Vector(3, f64) = @splat(0.0);
+        if (actions.contains(.forward)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * camera_front));
+        if (actions.contains(.backward)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
+        if (actions.contains(.right) and cross != null) vel_diff += @as(@Vector(3, f64), @floatCast(speed * cross.?.data));
+        if (actions.contains(.left) and cross != null) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * cross.?.data));
+        vel_diff = vel_diff * speed_multiplier;
+        if (on_ground) {
+            self.player.physics.velocity[0] = vel_diff[0];
+            self.player.physics.velocity[2] = vel_diff[2];
+        } else {
+            self.player.physics.velocity[0] += vel_diff[0] * delta_time_seconds;
+            self.player.physics.velocity[2] += vel_diff[2] * delta_time_seconds;
+        }
     }
     try self.player.physics.update(&self.world, io, self.allocator);
 }
@@ -846,9 +866,6 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
         .player_name = .fromString("squid"),
-        .fly_speed = .init(100),
-        .walk_speed = .init(4),
-        .fly_speed_linear = .init(10),
         .physics = .{
             .elements = .{
                 .mover = .{

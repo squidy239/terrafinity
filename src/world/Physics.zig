@@ -212,7 +212,7 @@ pub const Gravity = struct {
     enabled: std.atomic.Value(bool) = .init(true),
     up: @Vector(3, f64) = .{ 0, 1, 0 },
     ///the strength of the gravity in blocks per second squared
-    strength: std.atomic.Value(f64) = .init(9.8),
+    strength: std.atomic.Value(f64) = .init(20.0),
 
     pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled.load(.monotonic)) return;
