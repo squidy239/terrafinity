@@ -73,7 +73,7 @@ fn setupDependencies(
     rocksdb_mod.single_threaded = false;
     rocksdb_mod.sanitize_thread = false;
     root_module.addImport("rocksdb", rocksdb_mod);
-    
+
     const obj_mod = b.dependency("obj", .{
         .target = target,
         .optimize = optimize,

@@ -95,7 +95,7 @@ pub const Mover = struct {
     pub fn collision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
         defer reader.clear(io);
 
-        const base = @trunc(pos); // floor entity pos once
+        const base: World.BlockPos = @round(pos);
         var bestMtv: @Vector(3, f64) = @splat(0.0);
         var bestMagnitude: f64 = 0.0;
         var found: bool = false;
@@ -107,13 +107,14 @@ pub const Mover = struct {
             while (y <= checkDistance) : (y += 1) {
                 var z: i16 = -checkDistance;
                 while (z <= checkDistance) : (z += 1) {
-                    const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
-                    const blockPos = base + offset;
+                    const block_pos = base + World.BlockPos{ x, y, z };
 
-                    const block = try reader.getBlock(io, allocator, @trunc(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
                     if (!block.isSolid()) continue;
 
-                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
+                    const float_block_pos: @Vector(3, f64) = @floatFromInt(block_pos);
+
+                    const blockAABB = zm.AABB(3, f64).init(.{ .data = float_block_pos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = float_block_pos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
 
                     var selfAABB = self.boundingBox;
                     selfAABB.min = selfAABB.min.add(.{ .data = pos });
@@ -136,6 +137,36 @@ pub const Mover = struct {
 
         if (!found) return null;
         return bestMtv;
+    }
+
+    pub fn shortestGroundDistance(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !f64 {
+        defer reader.clear(io);
+
+        const base = @round(pos); // floor entity pos once
+        var best: f64 = 10000000000000.0;
+        const size = self.boundingBox.size();
+        const checkDistance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]));
+        var x: i16 = -checkDistance;
+        while (x <= checkDistance) : (x += 1) {
+            var y: i16 = -checkDistance;
+            while (y <= checkDistance) : (y += 1) {
+                var z: i16 = -checkDistance;
+                while (z <= checkDistance) : (z += 1) {
+                    const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
+                    const blockPos = base + offset;
+
+                    const block = try reader.getBlock(io, allocator, @trunc(blockPos), World.standard_level);
+                    if (!block.isSolid()) continue;
+                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
+
+                    var selfAABB = self.boundingBox;
+                    selfAABB.min = selfAABB.min.add(.{ .data = pos });
+                    selfAABB.max = selfAABB.max.add(.{ .data = pos });
+                    if (getAABBpenetration(blockAABB, selfAABB)[1] != 0) best = @min(getAABBintersect(blockAABB, selfAABB)[1], best);
+                }
+            }
+        }
+        return best;
     }
 
     // Return signed per-axis intersection vector (zero if no overlap)

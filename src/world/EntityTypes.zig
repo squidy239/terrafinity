@@ -85,6 +85,7 @@ pub const Player = struct {
     player_name: Name,
     gameMode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32),
+    walk_speed: std.atomic.Value(f32),
     fly_speed_linear: std.atomic.Value(f32),
     inventory_buffer: [10 * 16]?Item.Item = @splat(null),
     /// Main inventory and hotbar.

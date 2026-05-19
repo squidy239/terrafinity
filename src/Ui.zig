@@ -53,7 +53,7 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
 }
 
 pub fn deinit(self: *@This()) void {
-     self.ui_window.backend.textureDestroy(self.menu_background);
+    self.ui_window.backend.textureDestroy(self.menu_background);
 }
 
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
@@ -379,18 +379,12 @@ fn calculateWidget(widget: *dvui.BoxWidget) void {
 }
 
 fn hovered(wd: *const dvui.WidgetData, opts: HoverOptions) bool {
-    const click_rect = opts.rect orelse wd.borderRectScale().r;
+    const hover_rect = opts.rect orelse wd.borderRectScale().r;
     for (dvui.events()) |*e| {
-        if (!dvui.eventMatch(e, .{ .id = wd.id, .r = click_rect }))
-            continue;
-        if (e.evt == .mouse) {
-            if (e.evt.mouse.action == .position) {
-                if (opts.hover_cursor) |cursor| {
-                    dvui.cursorSet(cursor);
-                }
-                return true;
-            }
-        }
+        if (!dvui.eventMatch(e, .{ .id = wd.id, .r = hover_rect })) continue;
+        if (e.evt != .mouse or e.evt.mouse.action != .position) continue;
+        if (opts.hover_cursor) |cursor| dvui.cursorSet(cursor);
+        return true;
     }
     return false;
 }

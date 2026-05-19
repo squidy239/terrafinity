@@ -546,19 +546,22 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
     const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
 
-    self.player.physics.mutex.lockUncancelable(io);
-    defer self.player.physics.mutex.unlock(io);
-    if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
-    if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
-    if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
-    if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
-    if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
-    if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
+    {
+        self.player.physics.mutex.lockUncancelable(io);
+        defer self.player.physics.mutex.unlock(io);
+        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
+        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
+        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
+        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
+        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
+        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
+    }
+    try self.player.physics.update(&self.world, io, self.allocator);
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
     const camera_front = self.renderer.getCameraFront();
-    const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
+    const veldiff: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered) * delta_time_seconds);
     const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
@@ -568,17 +571,19 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
     const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
 
-    if (try self.player.physics.elements.mover.collision(io, self.allocator, player_pos, &block_reader)) |_| {
-        block_reader.clear(io);
+    const ground_dist = try self.player.physics.elements.mover.shortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
+    const on_ground = ground_dist <= 0;
+    const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.1);
+    {
         self.player.physics.mutex.lockUncancelable(io);
         defer self.player.physics.mutex.unlock(io);
-        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
-        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
-        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
-        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
-        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
-        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
+        if (actions.contains(.up) and on_ground) self.player.physics.velocity[1] = 5.0;
+        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front * speed_multiplier));
+        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front * speed_multiplier));
+        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data * speed_multiplier));
+        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data * speed_multiplier));
     }
+    try self.player.physics.update(&self.world, io, self.allocator);
 }
 
 pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
@@ -842,6 +847,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .fly_speed = .init(100),
+        .walk_speed = .init(4),
         .fly_speed_linear = .init(10),
         .physics = .{
             .elements = .{
