@@ -159,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
                 defer ov.deinit();
 
                 if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
+                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menuchanged) ui.crosshair();
                 if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
                 if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, gpa) catch |err| err: {
                     var error_buffer: [65536]u8 = undefined;

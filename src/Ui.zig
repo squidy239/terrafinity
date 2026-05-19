@@ -33,6 +33,7 @@ menu_state: struct {
     main: bool = false,
     esc: bool = false,
     newgame: bool = false,
+    crosshair: bool = true,
 
     /// Returns true if the player is ingame without a menu open
     pub fn playingGame(self: @This()) bool {
@@ -190,6 +191,11 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     if (config_changed) try self.config.save(io, self.config_path, self.config_lock);
     return menuchanged;
+}
+
+pub fn crosshair(self: *@This()) void {
+    _ = self;
+    _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
 }
 
 var new_world_options: Game.WorldOptions = .default;
