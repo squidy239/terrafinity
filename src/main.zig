@@ -19,8 +19,8 @@ const Ui = @import("Ui.zig");
 pub const Block = @import("world/Block.zig").Block;
 pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
-pub const Entity = @import("world/Entity.zig");
-const EntityTypes = @import("world/EntityTypes.zig");
+pub const Entity = @import("entity/Entity.zig");
+const EntityTypes = @import("entity/EntityTypes.zig");
 pub const World = @import("world/World.zig");
 
 pub const tracy_options: tracy.Options = .{

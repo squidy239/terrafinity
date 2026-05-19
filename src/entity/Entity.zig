@@ -4,7 +4,7 @@ const EntityTypes = @import("EntityTypes");
 const tracy = @import("tracy");
 
 const Renderer = @import("../Game.zig").Renderer;
-const World = @import("World.zig");
+const World = @import("../world/World.zig");
 
 const Entity = @This();
 
@@ -47,7 +47,7 @@ pub fn getPos(self: *@This()) ?@Vector(3, f64) {
 
 ///unloads the entity and frees all resorces allocated by it
 ///the entity ptr is not valid after this
-pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) !void {
+pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, comptime save: bool) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     std.debug.assert(try self.waitForRefAmount(io, 1, 10 * std.time.us_per_s));

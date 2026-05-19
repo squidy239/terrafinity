@@ -2,8 +2,8 @@ const std = @import("std");
 
 const zm = @import("zm");
 
-const Block = @import("Block.zig").Block;
-const World = @import("World.zig");
+const Block = @import("../world/Block.zig").Block;
+const World = @import("../world/World.zig");
 
 ///gets a Physics interface, all functions are thread-safe
 pub fn Interface(physics_elements: anytype) type {

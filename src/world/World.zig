@@ -1,24 +1,16 @@
 const std = @import("std");
 
-const Cache = @import("../libs/Cache.zig").Cache;
-const ConcurrentHashMap = @import("../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const tracy = @import("tracy");
 
 const Options = @import("../Game.zig").Options;
+const Cache = @import("../libs/Cache.zig").Cache;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
-const Entity = @import("Entity.zig");
-const EntityTypes = @import("EntityTypes.zig");
-/// The main world object, this should not handle any rendering tasks.
-/// Chunks use LODs for better performance.
-/// All LODs should be stored since with infinite level every level combined
-/// would only use 14.28571% more space than one LOD.
 pub const WorldStorage = @import("WorldStorage.zig");
 
 const World = @This();
-threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 pub const ChunkValue = struct {
     chunk: Chunk,
@@ -45,15 +37,10 @@ inline fn hash(item: anytype) u64 {
     return hasher.final();
 }
 
-entitys: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32) = .init,
-
 grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32),
 chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32),
 config: WorldConfig,
 
-/// Tries each source in order of priority (0 is highest).
-/// If a source returns false, the next source will be tried.
-/// At least one source must be able to load the chunk.
 chunk_sources: [4]?ChunkSource,
 
 onEdit: ?struct {
@@ -62,19 +49,15 @@ onEdit: ?struct {
     onEditFnArgs: *anyopaque,
 } = null,
 
-/// The level where one block in a chunk is one block.
 pub const standard_level = 0;
 
-/// The factor that each chunk is scaled each level.
 pub const scale_factor = 2;
 
-/// The level where one chunk is one block.
 pub const chunk_level = -std.math.log(i32, scale_factor, ChunkSize);
 
 pub const BlockPos = @Vector(3, i64);
 
 pub const ChunkPos = struct {
-    /// The division level of the chunk. 0 = one chunk is one block, 1 = 0.5 chunks is one block, etc.
     level: i32,
     position: @Vector(3, i32),
 
@@ -117,7 +100,6 @@ pub const ChunkPos = struct {
         return children;
     }
 
-    /// Returns the global block position of the chunk where one block is one block at default level.
     pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
     }
@@ -126,7 +108,6 @@ pub const ChunkPos = struct {
         return @intCast(@mod(self.position, comptime @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
     }
 
-    /// Returns the local block pos of the chunk where one block is one block at the chunk's level.
     pub inline fn toLocalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(ChunkSize));
     }
@@ -155,38 +136,25 @@ pub const WorldConfig = struct {
     SpawnRange: u32 = 0,
 };
 
-/// Sources must be thread safe.
 pub const ChunkSource = struct {
     pub const GetBlocksMetadata = struct {
         from_disk: bool,
         structures: bool,
     };
 
-    /// Holds any data for the chunk source.
     data: *anyopaque,
 
-    /// Must generate the chunk blocks into the blocks array. May be called multiple times on the same position.
-    /// Returns true if the chunk was loaded from disk, null if unsuccessful (next source will be tried).
     getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
-    /// Called for every LoadChunk call (many times per chunk). Intended for structures or similar.
-    /// All chunk sources will be tried.
-    /// onEditFn must be called if chunks are modified, on any modified chunks, once all modifications are complete.
-    /// This function is responsible for locking and adding refs to the chunk.
     onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
-    /// Called for every UnloadChunk call (many times per chunk). All chunk sources will be tried.
-    /// Does not have to be thread safe or lock the chunk since it is only called when the chunk has 1 ref.
     onUnload: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{Unrecoverable}!void,
 
-    /// Should return the height of the terrain in blocks at the given chunk coordinates.
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, chunk_pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32,
 
-    /// Should deinit the chunk source.
     deinit: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void,
 };
 
-/// Fetches the chunk from the cache and adds a reference to it.
 fn fetchChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
@@ -234,11 +202,10 @@ fn freeGrid(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
     _ = self.grids.remove(io, chunk_pos);
 }
 
-/// This must be called in the chunk's cache shard lock.
 fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
-    comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len); //Works based on this assumption
+    comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len);
     if (chunk_ptr.encoding != .grid) return;
     const grid_shard, const lock = self.grids.getShardAndLock(chunk_pos);
     lock.lockUncancelable(io);
@@ -260,7 +227,6 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     chunk_ptr.encoding.grid = &grid_shard.get(chunk_pos).?.grid;
 }
 
-/// Gets the chunk's blocks from sources in order; returns the first source that succeeds.
 fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
     for (self.chunk_sources) |source| {
@@ -297,62 +263,6 @@ fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !voi
     }
 }
 
-pub fn unloadEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, entityUUID: u128) void {
-    const en = self.entitys.fetchRemove(io, entityUUID) orelse return;
-    en.unload(io, self, entityUUID, allocator, true) catch std.log.err("error unloading entity\n", .{});
-}
-
-pub fn spawnEntity(self: *@This(), io: std.Io, allocator: std.mem.Allocator, uuid: ?u128, entity: anytype, comptime return_entity: bool) !if (return_entity) *Entity else void {
-    const UUID = uuid orelse blk: {
-        var random_uuid: u128 = undefined;
-        io.random(std.mem.asBytes(&random_uuid));
-        break :blk random_uuid;
-    };
-    if (self.entitys.contains(io, UUID)) return error.EntityAlreadyExists;
-    const allocated_entity = try Entity.make(entity, allocator);
-    errdefer allocated_entity.unload(io, self, UUID, allocator, false) catch unreachable;
-    if (return_entity) _ = allocated_entity.ref_count.fetchAdd(1, .seq_cst);
-    const existing = try self.entitys.putNoOverrideAddRef(io, allocator, UUID, allocated_entity);
-    std.debug.assert(existing == null);
-    if (return_entity) return allocated_entity;
-}
-
-pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-    const pos = @Vector(2, i32){ @trunc(self.config.SpawnCenterPos[0]), @trunc(self.config.SpawnCenterPos[2]) } + @Vector(2, i32){
-        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
-        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
-    };
-    const height = 1000;
-    std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
-    return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
-}
-
-pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
-    const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
-    const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-    const genSource = self.chunk_sources[self.chunk_sources.len - 1].?;
-    const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }, level))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
-    return height;
-}
-
-pub fn updateEntitys(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const TickEntitiesTask = tracy.Zone.begin(.{ .src = @src() });
-    defer TickEntitiesTask.end();
-    var it = self.entitys.iterator();
-    defer it.deinit(io);
-    while (try it.next(io)) |entry| {
-        const uuid = entry.key_ptr.*;
-        it.pause(io);
-        const entity = self.entitys.getAndAddRef(io, uuid);
-        if (entity) |en| {
-            try en.update(io, allocator, self, uuid);
-        }
-        try it.unpause(io);
-    }
-}
-
-/// Adds a ref and returns a chunk, generating it if it doesn't exist and putting it in the world hashmap.
-/// Ref must be removed if not using the chunk.
 pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
     const lc = tracy.Zone.begin(.{ .src = @src() });
     defer lc.end();
@@ -364,7 +274,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
             .encoding = chunkencoding,
             .saved = .init(metadata.from_disk),
             .structures_generated = .init(metadata.structures),
-            .ref_count = .init(2), //one for this function, one for the cache
+            .ref_count = .init(2),
         };
         const result = try self.putChunk(io, newchunk, chunk_pos);
         switch (result) {
@@ -384,7 +294,6 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     }
 }
 
-/// Returns old it must be freed
 pub fn mergeEncoding(blocks: *Chunk.Encoding, mergeBlocks: Chunk.Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !?*[ChunkSize][ChunkSize][ChunkSize]Block {
     const m = tracy.Zone.begin(.{ .src = @src() });
     defer m.end();
@@ -436,7 +345,6 @@ fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatM
             const result = @select(T, pred, a, b);
             flatArray.*[i..][0..vlen].* = result;
         }
-        // handle remainder scalarly
         while (i < len) : (i += 1) {
             if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
                 flatArray.*[i] = flatMergeArray[i];
@@ -474,8 +382,6 @@ pub const Reader = struct {
     world: *World,
     lastChunkReadCache: ?struct { chunk_pos: ChunkPos, chunk: *Chunk } = null,
 
-    /// Returns a block at the given position. clear() must be called after a series of calls to unlock the cached chunk.
-    /// Better for many block reads.
     pub fn getBlock(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
@@ -493,7 +399,6 @@ pub const Reader = struct {
         };
     }
 
-    /// Returns a block at the given position. Better for fewer block reads.
     pub fn getBlockUncached(self: *@This(), io: std.Io, allocator: std.mem.Allocator, blockpos: BlockPos, level: i32) !Block {
         const chunkPos: ChunkPos = .fromLocalBlockPos(blockpos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(blockpos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
@@ -524,7 +429,6 @@ pub const Editor = struct {
     edit_buffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block, std.hash_map.AutoContext(ChunkPos), 50) = .empty,
     tempallocator: std.mem.Allocator,
 
-    /// Applies the edits in the buffer to the world, frees any temporary allocations. Cleans up even if an error occurs.
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         const flushh = tracy.Zone.begin(.{ .src = @src() });
         defer flushh.end();
@@ -652,8 +556,6 @@ pub const Editor = struct {
 
     const simplified_size = ChunkSize / scale_factor;
 
-    //TODO improve this code
-    /// Returns true if the parent chunk was changed.
     pub fn propagateToParent(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !bool {
         const parent_pos = chunk_pos.parent();
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
@@ -698,7 +600,6 @@ pub const Editor = struct {
         return changed_parent;
     }
 
-    /// Returns true if the parent chunk was changed.
     pub fn propagateToParentByCoords(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) !bool {
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
         defer chunk.release();
@@ -744,7 +645,6 @@ fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block
     return best;
 }
 
-/// Does not remove chunk from hashmap, just frees it.
 pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool, lock_grids: bool) !void {
     _ = try chunk.waitForRefAmount(io, 1, null);
     std.debug.assert(chunk.encoding == .grid or chunk.encoding == .one_block);
@@ -753,8 +653,6 @@ pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: Ch
     self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
 }
 
-/// Does not destroy the pointer, the chunk is not valid after this call.
-/// Asserts that the chunk is not locked after waiting for 1 reference.
 pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk, lock_grids: bool, chunk_pos: ChunkPos) void {
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
@@ -791,15 +689,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
         }
     }
     std.log.info("chunks unloaded", .{});
-    {
-        var it = self.entitys.iterator();
-        defer it.deinit(io);
-        while (it.next(io) catch unreachable) |c| {
-            c.value_ptr.*.unload(io, self, c.key_ptr.*, allocator, true) catch std.log.err("error unloading entity\n", .{});
-        }
-    }
-    self.entitys.deinit(io, allocator);
-    std.log.info("entitys unloaded", .{});
     for (self.chunk_sources) |source| {
         if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
