@@ -12,9 +12,10 @@ const utils = @import("libs/utils.zig");
 const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
 const Chunk = @import("world/Chunk.zig");
-const Entity = @import("world/Entity.zig");
-const EntityTypes = @import("world/EntityTypes.zig");
+const Entity = @import("entity/Entity.zig");
+const EntityTypes = @import("entity/EntityTypes.zig");
 const World = @import("world/World.zig");
+const EntityRegistry = @import("entity/EntityRegistry.zig");
 
 const Game = @This();
 
@@ -27,6 +28,8 @@ generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
+
+entity_registry: EntityRegistry,
 
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
 selected_inventory_col: std.atomic.Value(u32) = .init(0),
@@ -337,6 +340,7 @@ pub fn init(
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
+        .entity_registry = .init(),
     };
 
     try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table, &game_options.render_options, game_options_lock);
@@ -388,9 +392,10 @@ pub fn init(
 }
 
 pub fn deinit(self: *@This(), io: std.Io) void {
-    self.running.store(false, .monotonic);
+    self.running.store(false, .unordered);
 
     self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
+    self.entity_registry.deinit(io, self.allocator, &self.world);
     if (self.load_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
@@ -411,7 +416,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const fps = self.debug_menu.fps.load(.unordered);
     self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
 
-    var entitys_future = io.async(World.updateEntitys, .{ &self.world, io, allocator });
+    var entitys_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
     defer entitys_future.cancel(io) catch {};
     try updateLoadAndUnload(self, io, allocator);
 
@@ -532,7 +537,7 @@ fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
         self.player.physics.mutex.lockUncancelable(io);
         const ppos = self.player.physics.pos;
         self.player.physics.mutex.unlock(io);
-        try self.world.spawnEntity(io, self.allocator, null, EntityTypes.Explosive{
+        try self.entity_registry.spawn(io, self.allocator, EntityTypes.Explosive{
             .pos = ppos,
             .dir = @splat(0),
             .timestamp = .init(std.Io.Timestamp.now(io, .awake).toNanoseconds()),
@@ -864,7 +869,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
 }
 
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const playerentity = try game.world.spawnEntity(io, allocator, null, EntityTypes.Player{
+    const playerentity = try game.entity_registry.spawn(io, allocator, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
             .elements = .{
@@ -879,7 +884,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
                 },
                 .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
-            .pos = try game.world.getPlayerSpawnPos(),
+            .pos = .{0,100,0},
             .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },

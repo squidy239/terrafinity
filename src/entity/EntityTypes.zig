@@ -5,11 +5,11 @@ const obj = @import("obj");
 const tracy = @import("tracy");
 const zm = @import("zm");
 
-const Block = @import("Block.zig").Block;
+const Block = @import("../world/Block.zig").Block;
 const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
-const World = @import("World.zig");
+const World = @import("../world/World.zig");
 
 const pack = "default";
 

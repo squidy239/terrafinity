@@ -11,7 +11,6 @@ pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
 pub const WorldStorage = @import("WorldStorage.zig");
 
 const World = @This();
-threadlocal var prng: std.Random.DefaultPrng = .init(0);
 
 pub const ChunkValue = struct {
     chunk: Chunk,
@@ -262,24 +261,6 @@ fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !voi
             }
         }
     }
-}
-
-pub fn getPlayerSpawnPos(self: *@This()) !@Vector(3, f64) {
-    const pos = @Vector(2, i32){ @trunc(self.config.SpawnCenterPos[0]), @trunc(self.config.SpawnCenterPos[2]) } + @Vector(2, i32){
-        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
-        World.prng.random().intRangeAtMost(i32, -@as(i32, @intCast(self.config.SpawnRange)), @as(i32, @intCast(self.config.SpawnRange))),
-    };
-    const height = 1000;
-    std.log.info("Player spawn pos: {d}, {d}, {d}\n", .{ pos[0], height, pos[1] });
-    return @Vector(3, f64){ @floatFromInt(pos[0]), @floatFromInt(height), @floatFromInt(pos[1]) };
-}
-
-pub fn getTerrainHeightAtCoords(self: *@This(), pos: @Vector(2, i64), level: i32) !i64 {
-    const chunkPos = [2]i32{ @intCast(@divFloor(pos[0], ChunkSize)), @intCast(@divFloor(pos[1], ChunkSize)) };
-    const posInChunk = [2]i32{ @intCast(@mod(pos[0], ChunkSize)), @intCast(@mod(pos[1], ChunkSize)) };
-    const genSource = self.chunk_sources[self.chunk_sources.len - 1].?;
-    const height = (try genSource.getTerrainHeight.?(genSource, self, [2]i32{ chunkPos[0], chunkPos[1] }, level))[@intCast(posInChunk[0])][@intCast(posInChunk[1])];
-    return height;
 }
 
 pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
