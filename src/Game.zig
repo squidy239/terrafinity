@@ -759,19 +759,19 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64
     return true;
 }
 
-///Loads all chunks in gendistance and unloads all chunks out of loadistance
+///Loads all chunks in render distance
 fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    defer self.chunk_load_is_running.store(false, .seq_cst);
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
     defer z.end();
+    defer self.chunk_load_is_running.store(false, .seq_cst);
     var levels = self.getLevels(io);
     var level = levels[0];
     var amount_loaded: u64 = 0;
     while (level <= levels[1]) : (level += 1) {
         levels = self.getLevels(io);
+        try self.player.physics.mutex.lock(io);
+        const player_pos = self.player.physics.pos;
+        self.player.physics.mutex.unlock(io);
         amount_loaded += try loadChunksSpiral(self, io, allocator, player_pos, level);
     }
 }
