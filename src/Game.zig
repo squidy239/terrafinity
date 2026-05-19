@@ -770,7 +770,7 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var levels = self.getLevels(io);
     var level = levels[0];
     var amount_loaded: u64 = 0;
-    while (level < levels[1]) : (level += 1) {
+    while (level <= levels[1]) : (level += 1) {
         levels = self.getLevels(io);
         amount_loaded += try loadChunksSpiral(self, io, allocator, player_pos, level);
     }
