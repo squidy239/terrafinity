@@ -67,6 +67,7 @@ fn setupDependencies(
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
+        .target = target,
         .optimize = .ReleaseFast,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
