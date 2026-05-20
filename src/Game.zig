@@ -687,6 +687,8 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     }
     if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
         try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+    } else {
+        self.renderer.removeChunk(io, chunk_pos);
     }
     var was_covering = false;
     var is_covering = false;
