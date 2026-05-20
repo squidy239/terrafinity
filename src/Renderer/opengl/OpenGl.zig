@@ -112,7 +112,20 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     try self.render_buffer.ssbo.ensureCapacity(io, 32_000_000);
     try self.render_buffer.indirect_buffer.ensureCapacity(io, 32_000_000);
 
-    self.blockAtlasTextureId = try Textures.loadTextureArray(io, try std.Io.Dir.cwd().openDir(io, "packs/default/Blocks/", .{ .iterate = true }), allocator);
+    {
+        //TODO better system for this
+        const dir = try std.Io.Dir.cwd().createDirPathOpen(io, "packs/default/Blocks/", .{ .open_options = .{ .iterate = true } });
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/grass.png"), .sub_path = "grass.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/dirt.png"), .sub_path = "dirt.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/snow.png"), .sub_path = "snow.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/stone.png"), .sub_path = "stone.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/water.png"), .sub_path = "water.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/wood.png"), .sub_path = "wood.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("Blocks/leaves.png"), .sub_path = "leaves.png" });
+
+        self.blockAtlasTextureId = try Textures.loadTextureArray(io, dir, allocator);
+    }
 
     //+1 for main thread, TODO threadlocal
     for (0..cpu_count + 1) |i| {
