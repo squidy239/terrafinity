@@ -360,7 +360,7 @@ pub fn init(
     try world_options.save(io, folder);
 
     game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
-    errdefer game.generator.terrain_height_cache.deinit(allocator);
+    errdefer World.DefaultGenerator.deinit(game.generator.getSource(), io, allocator, undefined);
 
     const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
     {

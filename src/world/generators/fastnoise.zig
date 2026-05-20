@@ -353,9 +353,9 @@ pub fn Noise(comptime Float: type) type {
 
         inline fn doSingleDomainWarp3D(self: *const State, seed: u32, amp: Float, freq: Float, x: Float, y: Float, z: Float, xp: *Float, yp: *Float, zp: *Float) void {
             switch (self.domain_warp_type) {
-                .simplex => singleDomainWarpOpenSimplex2Gradient(seed, amp * 32.69428253173828125, freq, x, y, z, xp, yp, zp, false),
-                .simplex_reduced => singleDomainWarpOpenSimplex2Gradient(seed, amp * 7.71604938271605, freq, x, y, z, xp, yp, zp, true),
-                .basic_grid => singleDomainWarpBasicGrid3D(seed, amp, freq, x, y, z, xp, yp, zp),
+                .simplex => singleDomainWarpOpenSimplex2Gradient(@intCast(seed), amp * 32.69428253173828125, freq, x, y, z, xp, yp, zp, false),
+                .simplex_reduced => singleDomainWarpOpenSimplex2Gradient(@intCast(seed), amp * 7.71604938271605, freq, x, y, z, xp, yp, zp, true),
+                .basic_grid => singleDomainWarpBasicGrid3D(@intCast(seed), amp, freq, x, y, z, xp, yp, zp),
             }
         }
 
@@ -472,7 +472,7 @@ pub fn Noise(comptime Float: type) type {
         }
 
         inline fn gradCoordDual3D(seed: u32, x_primed: i32, y_primed: i32, z_primed: i32, xd: Float, yd: Float, zd: Float, xo: *Float, yo: *Float, zo: *Float) void {
-            const hash = hash3D(seed, x_primed, y_primed, z_primed);
+            const hash = hash3D(@bitCast(seed), x_primed, y_primed, z_primed);
             const index1: usize = @intCast(hash & (63 << 2));
             const index2: usize = @intCast((hash >> 6) & (255 << 2));
 
@@ -556,11 +556,11 @@ pub fn Noise(comptime Float: type) type {
         fn transformDomainWarpCoordinate3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
             switch (state.rotation_type) {
                 .improve_xy_planes => {
-                    const xy: Float = *x + *y;
+                    const xy: Float = x.* + y.*;
                     const s2: Float = xy * -0.211324865405187;
                     z.* *= 0.577350269189626;
-                    x.* += s2 - *z;
-                    y.* = *y + s2 - *z;
+                    x.* += s2 - z.*;
+                    y.* = y.* + s2 - z.*;
                     z.* += xy * 0.577350269189626;
                 },
                 .improve_xz_planes => {
@@ -695,7 +695,7 @@ pub fn Noise(comptime Float: type) type {
             var ys: Float = y.*;
             var zs: Float = z.*;
             state.transformDomainWarpCoordinate3D(&xs, &ys, &zs);
-            state.doSingleDomainWarp3D(state.seed, amp, state.frequency, xs, ys, zs, x, y, z);
+            state.doSingleDomainWarp3D(@intCast(state.seed), amp, state.frequency, xs, ys, zs, x, y, z);
         }
 
         // Domain Warp Fractal Progressive
@@ -721,7 +721,7 @@ pub fn Noise(comptime Float: type) type {
                 var ys: Float = y.*;
                 var zs: Float = z.*;
                 state.transformDomainWarpCoordinate3D(&xs, &ys, &zs);
-                state.doSingleDomainWarp3D(state.seed + @as(i32, @intCast(i)), amp, freq, xs, ys, zs, x, y, z);
+                state.doSingleDomainWarp3D(@intCast(state.seed + @as(i32, @intCast(i))), amp, freq, xs, ys, zs, x, y, z);
                 amp *= state.gain;
                 freq *= state.lacunarity;
             }
@@ -750,7 +750,7 @@ pub fn Noise(comptime Float: type) type {
             var amp = state.domain_warp_amp * state.calculateFractalBounding();
             var freq = state.frequency;
             for (0..state.octaves) |i| {
-                state.doSingleDomainWarp3D(state.seed + @as(i32, @intCast(i)), amp, freq, xs, ys, zs, x, y, z);
+                state.doSingleDomainWarp3D(@bitCast(state.seed + @as(i32, @intCast(i))), amp, freq, xs, ys, zs, x, y, z);
                 amp *= state.gain;
                 freq *= state.lacunarity;
             }
@@ -812,9 +812,9 @@ pub fn Noise(comptime Float: type) type {
             var idx0: usize = @intCast(hash3D(seed, x0, y0, z0) & (255 << 2));
             var idx1: usize = @intCast(hash3D(seed, x1, y0, z0) & (255 << 2));
 
-            const lx0x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
-            const ly0x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
-            const lz0x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
+            var lx0x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
+            var ly0x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
+            var lz0x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
             idx0 = @intCast(hash3D(seed, x0, y1, z0) & (255 << 2));
             idx1 = @intCast(hash3D(seed, x1, y1, z0) & (255 << 2));
@@ -827,15 +827,15 @@ pub fn Noise(comptime Float: type) type {
             const ly0y = lerp(ly0x, ly1x, ys);
             const lz0y = lerp(lz0x, lz1x, ys);
 
-            idx0 = hash3D(seed, x0, y0, z1) & (255 << 2);
-            idx1 = hash3D(seed, x1, y0, z1) & (255 << 2);
+            idx0 = @as(u32, @bitCast(hash3D(seed, x0, y0, z1) & (255 << 2)));
+            idx1 = @as(u32, @bitCast(hash3D(seed, x1, y0, z1) & (255 << 2)));
 
             lx0x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
             ly0x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
             lz0x = lerp(rand_3d[idx0 | 2], rand_3d[idx1 | 2], xs);
 
-            idx0 = hash3D(seed, x0, y1, z1) & (255 << 2);
-            idx1 = hash3D(seed, x1, y1, z1) & (255 << 2);
+            idx0 = @as(u32, @bitCast(hash3D(seed, x0, y1, z1) & (255 << 2)));
+            idx1 = @as(u32, @bitCast(hash3D(seed, x1, y1, z1) & (255 << 2)));
 
             lx1x = lerp(rand_3d[idx0], rand_3d[idx1], xs);
             ly1x = lerp(rand_3d[idx0 | 1], rand_3d[idx1 | 1], xs);
@@ -937,17 +937,17 @@ pub fn Noise(comptime Float: type) type {
             var i = fastRound(xx);
             var j = fastRound(yy);
             var k = fastRound(zz);
-            const x0 = xx - @as(Float, @floatFromInt(i));
-            const y0 = yy - @as(Float, @floatFromInt(j));
-            const z0 = zz - @as(Float, @floatFromInt(k));
+            var x0 = xx - @as(Float, @floatFromInt(i));
+            var y0 = yy - @as(Float, @floatFromInt(j));
+            var z0 = zz - @as(Float, @floatFromInt(k));
 
             var xNSign = @as(i32, @trunc(-x0 - 1.0)) | 1;
             var yNSign = @as(i32, @trunc(-y0 - 1.0)) | 1;
             var zNSign = @as(i32, @trunc(-z0 - 1.0)) | 1;
 
-            const ax0 = @as(Float, @floatFromInt(xNSign)) * -x0;
-            const ay0 = @as(Float, @floatFromInt(yNSign)) * -y0;
-            const az0 = @as(Float, @floatFromInt(zNSign)) * -z0;
+            var ax0 = @as(Float, @floatFromInt(xNSign)) * -x0;
+            var ay0 = @as(Float, @floatFromInt(yNSign)) * -y0;
+            var az0 = @as(Float, @floatFromInt(zNSign)) * -z0;
 
             i *%= prime_x;
             j *%= prime_y;
@@ -961,7 +961,7 @@ pub fn Noise(comptime Float: type) type {
             var zo: Float = undefined;
 
             var seed_value = seed;
-            const a = (0.6 - x0 * x0) - (y0 * y0 + z0 * z0);
+            var a = (0.6 - x0 * x0) - (y0 * y0 + z0 * z0);
             var l: usize = 0;
             while (l < 2) : (l += 1) {
                 const xNSignf: Float = @floatFromInt(xNSign);
@@ -971,9 +971,9 @@ pub fn Noise(comptime Float: type) type {
                 if (a > 0) {
                     const aaaa = (a * a) * (a * a);
                     if (out_grad) {
-                        gradCoordOut3D(seed_value, i, j, k, &xo, &yo, &zo);
+                        gradCoordOut3D(@bitCast(seed_value), i, j, k, &xo, &yo, &zo);
                     } else {
-                        gradCoordDual3D(seed_value, i, j, k, x0, y0, z0, &xo, &yo, &zo);
+                        gradCoordDual3D(@bitCast(seed_value), i, j, k, x0, y0, z0, &xo, &yo, &zo);
                     }
                     vx += aaaa * xo;
                     vy += aaaa * yo;
@@ -1004,9 +1004,9 @@ pub fn Noise(comptime Float: type) type {
                 if (b > 0) {
                     const bbbb = (b * b) * (b * b);
                     if (out_grad) {
-                        gradCoordOut3D(seed_value, ii, jj, kk, &xo, &yo, &zo);
+                        gradCoordOut3D(@bitCast(seed_value), ii, jj, kk, &xo, &yo, &zo);
                     } else {
-                        gradCoordDual3D(seed_value, ii, jj, kk, x1, y1, z1, &xo, &yo, &zo);
+                        gradCoordDual3D(@bitCast(seed_value), ii, jj, kk, x1, y1, z1, &xo, &yo, &zo);
                     }
                     vx += bbbb * xo;
                     vy += bbbb * yo;
@@ -1019,9 +1019,9 @@ pub fn Noise(comptime Float: type) type {
                 ay0 = 0.5 - ay0;
                 az0 = 0.5 - az0;
 
-                x0 = xNSign * ax0;
-                y0 = yNSign * ay0;
-                z0 = zNSign * az0;
+                x0 = @as(Float, @floatFromInt(xNSign)) * ax0;
+                y0 = @as(Float, @floatFromInt(yNSign)) * ay0;
+                z0 = @as(Float, @floatFromInt(zNSign)) * az0;
 
                 a += (0.75 - ax0) - (ay0 + az0);
 
