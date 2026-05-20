@@ -7,7 +7,7 @@ const Cache = @import("../libs/Cache.zig").Cache;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
-pub const DefaultGenerator = @import("generators/Geodes.zig").CosmicGeodeMultiverseGenerator;
+pub const DefaultGenerator = @import("generators/Terrain.zig").DefaultGenerator;
 pub const WorldStorage = @import("WorldStorage.zig");
 const World = @This();
 

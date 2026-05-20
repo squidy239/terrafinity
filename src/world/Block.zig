@@ -42,7 +42,7 @@ pub const Block = enum(u16) {
     pub inline fn getPropagationWeight(self: Block) f32 {
         return switch (self) {
             .null => if (comptime builtin.is_test) 1 else unreachable,
-            .grass => 1,
+            .grass => 1.1,
             .air => 0.7,
             else => 1,
         };

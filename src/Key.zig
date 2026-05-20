@@ -23,6 +23,8 @@ pub const Action = enum {
     hotbar_scroll_down,
     use_item_primary,
     use_item_secondary,
+    use_item_tertiary,
+    use_item_quaternary,
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);

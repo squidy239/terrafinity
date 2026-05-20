@@ -44,7 +44,7 @@ pub const CosmicGeodeMultiverseGenerator = struct {
 
     pub const Params = struct {
         seed: ?u64 = null,
-        
+
         pub const default = Params{};
 
         pub fn setSeeds(self: *Params, io: std.Io) void {
@@ -87,7 +87,7 @@ pub const CosmicGeodeMultiverseGenerator = struct {
         defer gen.end();
 
         const block_scale = @as(i64, @intFromFloat(ChunkPos.toScale(chunk_pos.level)));
-        
+
         const chunk_center_x = (chunk_pos.position[0] * ChunkSize + (ChunkSize / 2)) * block_scale;
         const chunk_center_y = (chunk_pos.position[1] * ChunkSize + (ChunkSize / 2)) * block_scale;
         const chunk_center_z = (chunk_pos.position[2] * ChunkSize + (ChunkSize / 2)) * block_scale;
@@ -110,18 +110,18 @@ pub const CosmicGeodeMultiverseGenerator = struct {
                 const cy = mc_y + @as(i64, @intCast(dy)) - 1;
                 for (0..3) |dz| {
                     const cz = mc_z + @as(i64, @intCast(dz)) - 1;
-                    
+
                     const h = hash3D(cx, cy, cz, self.params.seed.?);
-                    
+
                     // Center point offset within the 1000x1000x1000 box
                     const px = cx * grid_size + @as(i64, @intCast((h >> 10) % @as(u64, @intCast(grid_size))));
                     const py = cy * grid_size + @as(i64, @intCast((h >> 20) % @as(u64, @intCast(grid_size))));
                     const pz = cz * grid_size + @as(i64, @intCast((h >> 30) % @as(u64, @intCast(grid_size))));
-                    
-                    // Outer radius between 400 and 800 blocks. 
+
+                    // Outer radius between 400 and 800 blocks.
                     // This guarantees they will intersect adjacent universes.
                     const outer_radius = 400 + @as(i64, @intCast((h >> 40) % 400));
-                    
+
                     // Shell thickness between 15 and 45 blocks
                     const shell_thickness = 15 + @as(i64, @intCast((h >> 50) % 30));
                     const inner_radius = outer_radius - shell_thickness;
@@ -131,7 +131,9 @@ pub const CosmicGeodeMultiverseGenerator = struct {
                     const local_water_height = py - inner_radius + @as(i64, @intCast(h % @as(u64, @intCast(inner_radius + 200))));
 
                     try local_geodes.append(allocator, .{
-                        .x = px, .y = py, .z = pz,
+                        .x = px,
+                        .y = py,
+                        .z = pz,
                         .outer_r = outer_radius,
                         .outer_r_sq = outer_radius * outer_radius,
                         .inner_r = inner_radius,
@@ -154,14 +156,14 @@ pub const CosmicGeodeMultiverseGenerator = struct {
                 const by = (chunk_pos.position[1] * ChunkSize + @as(i64, @intCast(y))) * block_scale;
                 for (0..ChunkSize) |z| {
                     const bz = (chunk_pos.position[2] * ChunkSize + @as(i64, @intCast(z))) * block_scale;
-                    
+
                     var geode_count: u32 = 0;
                     var primary_geode: ?*const Geode = null;
                     var primary_dist_sq: i64 = 0;
 
                     // Check which geodes enclose this voxel
                     for (geodes) |*g| {
-                        const dist_sq = (bx - g.x)*(bx - g.x) + (by - g.y)*(by - g.y) + (bz - g.z)*(bz - g.z);
+                        const dist_sq = (bx - g.x) * (bx - g.x) + (by - g.y) * (by - g.y) + (bz - g.z) * (bz - g.z);
                         if (dist_sq <= g.outer_r_sq) {
                             geode_count += 1;
                             primary_geode = g;
@@ -170,17 +172,17 @@ pub const CosmicGeodeMultiverseGenerator = struct {
                     }
 
                     if (geode_count == 0) {
-                        // We are in the deep void between universes. 
+                        // We are in the deep void between universes.
                         // Generate sparse stars using the integer hash.
                         if (hash3D(bx, by, bz, self.params.seed.?) % 15000 == 0) {
-                            blockgrid[x][y][z] = .snow; 
+                            blockgrid[x][y][z] = .snow;
                         } else {
                             blockgrid[x][y][z] = .air;
                         }
                     } else if (geode_count > 1) {
                         // MATHEMATICAL MAGIC:
                         // We are inside the overlapping zone of TWO OR MORE massive geodes.
-                        // Forcing this space to be `.air` perfectly carves out massive circular 
+                        // Forcing this space to be `.air` perfectly carves out massive circular
                         // portals between the adjacent worlds.
                         blockgrid[x][y][z] = .air;
                     } else {
@@ -194,15 +196,15 @@ pub const CosmicGeodeMultiverseGenerator = struct {
                             if (by <= g.water_level) {
                                 blockgrid[x][y][z] = .water;
                             } else {
-                                // Instead of just empty air, let's generate alien, floating 
+                                // Instead of just empty air, let's generate alien, floating
                                 // geometric structures purely using trigonometry (no noise).
                                 // Using f64 prevents precision loss at huge coordinate scales.
                                 const fx = @as(f64, @floatFromInt(bx));
                                 const fy = @as(f64, @floatFromInt(by));
                                 const fz = @as(f64, @floatFromInt(bz));
-                                
+
                                 const trig_island = std.math.sin(fx / 45.0) * std.math.cos(fz / 45.0) * std.math.sin(fy / 30.0);
-                                
+
                                 if (trig_island > 0.8) {
                                     blockgrid[x][y][z] = .grass;
                                 } else if (trig_island > 0.75) {

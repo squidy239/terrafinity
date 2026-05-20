@@ -73,7 +73,7 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
+    pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
         _ = world;
         _ = io;
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));

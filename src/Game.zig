@@ -16,6 +16,8 @@ const Entity = @import("entity/Entity.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
 const World = @import("world/World.zig");
 const EntityRegistry = @import("entity/EntityRegistry.zig");
+const Geometry = @import("world/structures/Geometry.zig");
+const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 
 const Game = @This();
 
@@ -533,16 +535,24 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
 }
 
 fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
+    self.player.physics.mutex.lockUncancelable(io);
+    const ppos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
+    const looking = self.renderer.getCameraFront();
+    var editor: World.Editor = .{ .world = &self.world, .tempallocator = self.allocator };
+    defer editor.clear();
     if (actions.contains(.use_item_primary)) {
-        self.player.physics.mutex.lockUncancelable(io);
-        const ppos = self.player.physics.pos;
-        self.player.physics.mutex.unlock(io);
-        try self.entity_registry.spawn(io, self.allocator, EntityTypes.Explosive{
-            .pos = ppos,
-            .dir = @splat(0),
-            .timestamp = .init(std.Io.Timestamp.now(io, .awake).toNanoseconds()),
-        }, false);
+        const cone: Geometry.Cone(f32) = .init(@floatCast(ppos), looking, 100, 10, 10);
+        try editor.placeSamplerShape(.air, cone, 0);
     }
+    if (actions.contains(.use_item_secondary)) {
+        const cone: Geometry.Cone(f32) = .init(@floatCast(ppos), looking, 100, 10, 10);
+        try editor.placeSamplerShape(.stone, cone, 0);
+    }
+    if (actions.contains(.use_item_tertiary)) {
+        try TexturedSphere.NoiseSphere(&editor, @floatCast(ppos), 100, 10, .{}, .air, 0);
+    }
+    try editor.flush(io, self.allocator);
 }
 
 fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {

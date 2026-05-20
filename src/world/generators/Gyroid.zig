@@ -51,10 +51,10 @@ pub const AlienHiveGyroidGenerator = struct {
 
     pub const Params = struct {
         seed: ?u64 = null,
-        scale: f32 = 32.0,        // How wide the giant alien tunnels are
+        scale: f32 = 32.0, // How wide the giant alien tunnels are
         wall_thickness: f32 = 0.2, // Thickness threshold for the surface
         sea_level: i32 = 0,
-        
+
         pub const default = Params{};
 
         pub fn setSeeds(self: *Params, io: std.Io) void {
@@ -69,8 +69,8 @@ pub const AlienHiveGyroidGenerator = struct {
     /// Core Gyroid mathematical function
     inline fn evalGyroid(x: f32, y: f32, z: f32) f32 {
         return std.math.sin(x) * std.math.cos(y) +
-               std.math.sin(y) * std.math.cos(z) +
-               std.math.sin(z) * std.math.cos(x);
+            std.math.sin(y) * std.math.cos(z) +
+            std.math.sin(z) * std.math.cos(x);
     }
 
     /// Combines a massive Gyroid with a small one for organic texture
@@ -81,7 +81,7 @@ pub const AlienHiveGyroidGenerator = struct {
 
         // Base massive tunnel structure
         const base_gyroid = evalGyroid(rx, ry, rz);
-        
+
         // High-frequency detail for bumpy organic walls
         const detail_gyroid = evalGyroid(rx * 4.0, ry * 4.0, rz * 4.0) * 0.25;
 
@@ -112,7 +112,7 @@ pub const AlienHiveGyroidGenerator = struct {
                         // Contextual texturing based on orientation (floor vs ceiling)
                         const above_density = self.getDensity(bx, by + 1, bz);
                         const below_density = self.getDensity(bx, by - 1, bz);
-                        
+
                         const is_floor = above_density <= self.params.wall_thickness;
                         const is_ceiling = below_density <= self.params.wall_thickness;
 

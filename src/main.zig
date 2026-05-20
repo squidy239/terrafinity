@@ -112,7 +112,9 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .d }, .right);
     try keymap.setActionKey(io, .{ .key = .space }, .up);
     try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
-    try keymap.setActionKey(io, .{ .key = .f }, .use_item_primary);
+    try keymap.setActionKey(io, .{ .key = .mouse_left }, .use_item_primary);
+    try keymap.setActionKey(io, .{ .key = .mouse_right }, .use_item_secondary);
+    try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
 
     var game: Game = undefined;
     if (options.test_play) {

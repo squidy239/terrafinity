@@ -45,9 +45,9 @@ pub const InfiniteMengerGenerator = struct {
     pub const Params = struct {
         sea_level: i64 = 0,
         fractal_scale: i64 = 4, // Multiplies the size of the corridors (4 = smallest corridor is 4x4 blocks wide)
-        max_height: i64 = 512,  // The megastructure stops at this height to reveal the sky
+        max_height: i64 = 512, // The megastructure stops at this height to reveal the sky
         seed: ?u64 = null,
-        
+
         pub const default = Params{};
 
         pub fn setSeeds(self: *Params, io: std.Io) void {
@@ -67,7 +67,7 @@ pub const InfiniteMengerGenerator = struct {
         const scaled_z = @divFloor(bz, fractal_scale);
 
         var scale: i64 = 1;
-        
+
         // 15 iterations covers a coordinate space of 3^15 (14,348,907 blocks wide)
         // Adjust higher if you plan on flying out further than 14 million blocks!
         for (0..15) |_| {
@@ -76,7 +76,7 @@ pub const InfiniteMengerGenerator = struct {
             const py = @mod(@divFloor(scaled_y, scale), 3);
             const pz = @mod(@divFloor(scaled_z, scale), 3);
 
-            // A Menger Sponge removes the center sub-cubes. 
+            // A Menger Sponge removes the center sub-cubes.
             // In a 3x3x3 grid, the center cubes are the ones where at least two coordinates are the middle index (1).
             var middle_count: u8 = 0;
             if (px == 1) middle_count += 1;
@@ -85,7 +85,7 @@ pub const InfiniteMengerGenerator = struct {
 
             // If 2 or 3 of the axes are in the middle, this space is hollowed out.
             if (middle_count >= 2) return false;
-            
+
             scale *= 3;
         }
 
@@ -100,7 +100,7 @@ pub const InfiniteMengerGenerator = struct {
         defer gen.end();
 
         const block_scale = @as(i64, @intFromFloat(ChunkPos.toScale(chunk_pos.level)));
-        
+
         // Skip chunk if it's completely above the megastructure ceiling
         if (chunk_pos.position[1] * @as(i32, @intCast(ChunkSize * block_scale)) > self.params.max_height) {
             _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
@@ -113,11 +113,11 @@ pub const InfiniteMengerGenerator = struct {
             const bx = (chunk_pos.position[0] * ChunkSize + @as(i64, @intCast(x))) * block_scale;
             for (0..ChunkSize) |y| {
                 const by = (chunk_pos.position[1] * ChunkSize + @as(i64, @intCast(y))) * block_scale;
-                
+
                 // Cut off the top flatly to leave an open sky
                 if (by > self.params.max_height) {
                     // Loop naturally skips filling these, leaving them as `.air`
-                    continue; 
+                    continue;
                 }
 
                 for (0..ChunkSize) |z| {
@@ -133,7 +133,7 @@ pub const InfiniteMengerGenerator = struct {
                         // If it's the absolute top layer of the megastructure ceiling
                         if (by == self.params.max_height) {
                             blockgrid[x][y][z] = .grass;
-                        } 
+                        }
                         // If it's an interior floor
                         else if (!block_above_solid) {
                             if (by >= self.params.sea_level) {
@@ -141,7 +141,7 @@ pub const InfiniteMengerGenerator = struct {
                             } else {
                                 blockgrid[x][y][z] = .dirt; // Muddy flooded floors
                             }
-                        } 
+                        }
                         // If it's an interior ceiling above water
                         else if (!block_below_solid and by > self.params.sea_level) {
                             // Plant sparse bioluminescent "lights" on the ceilings
@@ -151,7 +151,7 @@ pub const InfiniteMengerGenerator = struct {
                             } else {
                                 blockgrid[x][y][z] = .stone;
                             }
-                        } 
+                        }
                         // Core structural mass
                         else {
                             blockgrid[x][y][z] = .stone;
