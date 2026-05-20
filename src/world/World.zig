@@ -7,7 +7,7 @@ const Cache = @import("../libs/Cache.zig").Cache;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
-pub const DefaultGenerator = @import("Generator.zig").DefaultGenerator;
+pub const DefaultGenerator = @import("generators/Generator.zig").DefaultGenerator;
 pub const WorldStorage = @import("WorldStorage.zig");
 
 const World = @This();
@@ -62,7 +62,7 @@ pub const ChunkPos = struct {
     position: @Vector(3, i32),
 
     pub inline fn levelToBlockRatio(level: i32) i64 {
-        return std.math.powi(i32, scale_factor, level - chunk_level) catch |err| switch (err) {
+        return std.math.powi(i64, scale_factor, level - chunk_level) catch |err| switch (err) {
             error.Overflow => unreachable,
             error.Underflow => 1,
         };

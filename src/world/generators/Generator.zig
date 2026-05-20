@@ -1,13 +1,12 @@
 const std = @import("std");
 
 const tracy = @import("tracy");
-const Cache = @import("../libs/Cache.zig").Cache;
-const Block = @import("Block.zig").Block;
-const Chunk = @import("Chunk.zig");
+const Cache = @import("../../libs/Cache.zig").Cache;
+const Block = @import("../Block.zig").Block;
+const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
-const defaults = @import("defaults.zig");
-const Interpolation = @import("Interpolation.zig");
-const World = @import("World.zig");
+const Interpolation = @import("../Interpolation.zig");
+const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
 
 pub const DefaultGenerator = struct {
@@ -82,7 +81,6 @@ pub const DefaultGenerator = struct {
     }
 
     pub const Params = struct {
-        pub const default = defaults.default_generator;
         terrainblockRandomness: f32,
         terrain_noise: Noise.Noise(f32),
         tree_noise: Noise.Noise(f32),
@@ -114,6 +112,260 @@ pub const DefaultGenerator = struct {
             self.large_terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
             self.large_terrain_noise_warp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
         }
+
+        ///setseeds must be called on this before using it
+        pub const default = Params{
+            .terrainblockRandomness = 0.25,
+            .terrain_noise = .{
+                .frequency = 0.002,
+                .noise_type = .perlin,
+                .rotation_type = .none,
+                .fractal_type = .ridged,
+                .octaves = 12,
+                .lacunarity = 2,
+                .gain = 0.5,
+                .weighted_strength = 0,
+                .ping_pong_strength = 2,
+                .cellular_distance = .euclidean_sq,
+                .cellular_return = .distance,
+                .cellular_jitter_mod = 1,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 10,
+            },
+            .tree_noise = .{
+                .frequency = 0.08,
+                .noise_type = .cellular,
+                .rotation_type = .none,
+                .cellular_distance = .euclidean_sq,
+                .cellular_return = .distance,
+                .cellular_jitter_mod = 0.75,
+            },
+            .terrain_noise_balance = 0.9,
+            .large_terrain_noise = .{
+                .frequency = 0.0008,
+                .noise_type = .perlin,
+                .rotation_type = .none,
+                .fractal_type = .none,
+                .octaves = 1,
+                .lacunarity = 2,
+                .gain = 0.5,
+                .weighted_strength = 0,
+                .ping_pong_strength = 2,
+                .cellular_distance = .euclidean_sq,
+                .cellular_return = .distance,
+                .cellular_jitter_mod = 1,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 1,
+            },
+            .large_terrain_noise_warp = .{
+                .frequency = 0.002,
+                .noise_type = .simplex,
+                .rotation_type = .improve_xy_planes,
+                .fractal_type = .independent,
+                .octaves = 1,
+                .lacunarity = 2,
+                .gain = 0.5,
+                .weighted_strength = 0,
+                .ping_pong_strength = 2,
+                .cellular_distance = .euclidean_sq,
+                .cellular_return = .distance,
+                .cellular_jitter_mod = 1,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 400,
+            },
+            .cave_noise = .{
+                .frequency = 0.08,
+                .noise_type = .perlin,
+                .rotation_type = .none,
+                .fractal_type = .ping_pong,
+                .octaves = 4,
+                .lacunarity = 2,
+                .gain = 0.5,
+                .weighted_strength = 0,
+                .ping_pong_strength = 2,
+                .cellular_distance = .euclidean_sq,
+                .cellular_return = .distance,
+                .domain_warp_type = .simplex,
+                .domain_warp_amp = 1,
+            },
+            .terrainmin = -4096,
+            .terrainmax = 8196,
+            .SeaLevel = 0,
+            .Cavesess = -77882.7,
+            .cave_expansion_max = 8192,
+            .cave_expansion_start = 0,
+            .seed = null,
+            .terrain_scale = 1,
+            .gen_structures = true,
+            .trees = &.{
+                .{
+                    .baseRadius = 15,
+                    .baseRadiusVariation = 0.5,
+                    .trunkHeight = 100,
+                    .trunkHeightVariation = 0.5,
+                    .leafDensity = 0.5,
+                    .enabled = false,
+                    .leafSize = 6,
+                    .steps = &.{
+                        .{
+                            .lengthPercent = 1.0,
+                            .radiusPercent = 1.0,
+                            .branchCountMax = 1,
+                            .branchCountMin = 1,
+                            .branchRange = .{ 0, 0, 0 },
+                            .lengthPercentRandomness = 0.5,
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.5,
+                            .branchRandomness = 0.3,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .lengthPercentRandomness = 0.4,
+                            .branchRange = .{ 0.4, 0.4, 0.4 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.5,
+                            .branchRandomness = 0.3,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .lengthPercentRandomness = 0.4,
+                            .branchRange = .{ 0.4, 0.4, 0.4 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.4, 0.4, 0.4 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.4, 0.4, 0.4 },
+                        },
+                        .{
+                            .lengthPercent = 0.7,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.4, 0.4, 0.4 },
+                        },
+                    },
+                },
+                .{
+                    .baseRadius = 1.3,
+                    .baseRadiusVariation = 0.5,
+                    .trunkHeight = 15,
+                    .trunkHeightVariation = 0.5,
+                    .leafDensity = 0.5,
+                    .leafSize = 4,
+                    .enabled = true,
+                    .steps = &.{
+                        .{
+                            .lengthPercent = 1.0,
+                            .radiusPercent = 1.0,
+                            .branchCountMax = 1,
+                            .branchCountMin = 1,
+                            .branchRange = .{ 0, 0, 0 },
+                            .lengthPercentRandomness = 0.5,
+                        },
+                        .{
+                            .lengthPercent = 0.6,
+                            .radiusPercent = 0.4,
+                            .branchRandomness = 0.3,
+                            .branchCountMax = 8,
+                            .branchCountMin = 5,
+                            .lengthPercentRandomness = 0.4,
+                            .baseRadiusPercent = 0.75,
+                            .branchRange = .{ 1, 1, 1 },
+                        },
+                        .{
+                            .lengthPercent = 0.6,
+                            .radiusPercent = 0.8,
+                            .branchRandomness = 0.3,
+                            .branchCountMax = 8,
+                            .branchCountMin = 5,
+                            .lengthPercentRandomness = 0.4,
+                            .baseRadiusPercent = 0.75,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.6,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.0,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.7, 0.7, 0.7 },
+                        },
+                        .{
+                            .lengthPercent = 0.0,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                        .{
+                            .lengthPercent = 0.0,
+                            .radiusPercent = 0.7,
+                            .branchCountMax = 4,
+                            .branchCountMin = 3,
+                            .branchRandomness = 0.3,
+                            .lengthPercentRandomness = 0.3,
+                            .branchRange = .{ 0.6, 0.6, 0.6 },
+                        },
+                    },
+                },
+            },
+        };
     };
 
     pub const TreeConfig = struct {
