@@ -437,23 +437,24 @@ pub const Editor = struct {
         var it = self.edit_buffer.iterator();
         var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
         defer neghborsToRemesh.deinit();
-        const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
         var propagationEditor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
         defer propagationEditor.clear();
         while (it.next()) |diffChunk| {
             const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
             const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
             defer chunk.release();
-            var sides: [6]Chunk.Encoding.Face = undefined;
-            if (callIfNeighborFacesChanged) {
-                inline for (0..6) |side| {
-                    sides[side] = try chunk.extractFace(io, @enumFromInt(side), false);
-                }
-            }
-
             {
                 try chunk.lockExclusive(io);
                 defer chunk.unlockExclusive(io);
+                const old_sides: ?[6]Chunk.Encoding.Face = blk: {
+                    const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+                    if (!callIfNeighborFacesChanged) break :blk null;
+                    var sides: [6]Chunk.Encoding.Face = undefined;
+                    inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
+                        sides[@intFromEnum(side)] = chunk.encoding.extractFace(side);
+                    }
+                    break :blk sides;
+                };
                 var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
                 const was_grid: bool = chunk.encoding == .grid;
                 const old = try mergeEncoding(&chunk.encoding, encoding, &grid_buffer);
@@ -462,8 +463,18 @@ pub const Editor = struct {
                     lock.lockUncancelable(io);
                     defer lock.unlock(io);
                     try self.world.ownGrid(io, chunk, diffChunk.key_ptr.*, shard);
-                } else if (old) |_| {
+                } else if (old != null) {
                     self.world.freeGrid(io, diffChunk.key_ptr.*);
+                }
+
+                if (old_sides) |os| {
+                    inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
+                        const new = chunk.encoding.extractFace(side);
+                        if (!std.meta.eql(new, os[@intFromEnum(side)])) {
+                            const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + side.direction() };
+                            try neghborsToRemesh.put(toRemeshPos, {});
+                        }
+                    }
                 }
             }
 
@@ -476,28 +487,6 @@ pub const Editor = struct {
                     try propagationEditor.flush(io, allocator);
                     coords = coords.parent();
                     i += 1;
-                }
-            }
-            var sides2: [6]Chunk.Encoding.Face = undefined;
-            if (callIfNeighborFacesChanged) {
-                inline for (0..6) |side| {
-                    sides2[side] = try chunk.extractFace(io, @enumFromInt(side), false);
-                }
-            }
-            if (callIfNeighborFacesChanged) {
-                for (0..6) |side| {
-                    if (!std.meta.eql(sides[side], sides2[side])) {
-                        const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + switch (side) {
-                            0 => @Vector(3, i32){ -1, 0, 0 },
-                            1 => @Vector(3, i32){ 1, 0, 0 },
-                            2 => @Vector(3, i32){ 0, -1, 0 },
-                            3 => @Vector(3, i32){ 0, 1, 0 },
-                            4 => @Vector(3, i32){ 0, 0, -1 },
-                            5 => @Vector(3, i32){ 0, 0, 1 },
-                            else => unreachable,
-                        } };
-                        try neghborsToRemesh.put(toRemeshPos, {});
-                    }
                 }
             }
         }

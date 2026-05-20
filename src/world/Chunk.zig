@@ -23,7 +23,25 @@ pub const Encoding = union(enum(u1)) {
         return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
     }
 
-    pub const FaceRotation = enum(u4) { xplus, xminus, yplus, yminus, zplus, zminus };
+    pub const FaceRotation = enum(u4) {
+        xplus,
+        xminus,
+        yplus,
+        yminus,
+        zplus,
+        zminus,
+
+        pub fn direction(self: FaceRotation) @Vector(3, i32) {
+            return switch (self) {
+                .xplus => @Vector(3, i32){ 1, 0, 0 },
+                .xminus => @Vector(3, i32){ -1, 0, 0 },
+                .yplus => @Vector(3, i32){ 0, 1, 0 },
+                .yminus => @Vector(3, i32){ 0, -1, 0 },
+                .zplus => @Vector(3, i32){ 0, 0, 1 },
+                .zminus => @Vector(3, i32){ 0, 0, -1 },
+            };
+        }
+    };
 
     pub fn extractFace(self: Encoding, comptime rotation: FaceRotation) Face {
         switch (self) {
