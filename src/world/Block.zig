@@ -14,7 +14,7 @@ pub const Block = enum(u16) {
 
     pub inline fn isTransparent(self: Block) bool {
         return switch (self) {
-            .null => if (comptime builtin.is_test) true else unreachable,
+            .null => unreachable,
             .air, .water, .leaves => true,
             else => false,
         };
@@ -22,7 +22,7 @@ pub const Block = enum(u16) {
 
     pub inline fn isSolid(self: Block) bool {
         return switch (self) {
-            .null => if (comptime builtin.is_test) false else unreachable,
+            .null => unreachable,
             .air,
             .water,
             => false,
@@ -32,7 +32,7 @@ pub const Block = enum(u16) {
 
     pub inline fn isVisible(self: Block) bool {
         return switch (self) {
-            .null => if (comptime builtin.is_test) false else unreachable,
+            .null => unreachable,
             .air,
             => false,
             else => true,
@@ -41,7 +41,7 @@ pub const Block = enum(u16) {
 
     pub inline fn getPropagationWeight(self: Block) f32 {
         return switch (self) {
-            .null => if (comptime builtin.is_test) 1 else unreachable,
+            .null => unreachable,
             .grass => 2.0,
             .air => 0.7,
             else => 1,
@@ -50,7 +50,7 @@ pub const Block = enum(u16) {
 
     pub inline fn plantsCanGrow(self: Block) bool {
         return switch (self) {
-            .null => if (comptime builtin.is_test) false else unreachable,
+            .null => unreachable,
             .grass, .dirt => true,
             else => false,
         };

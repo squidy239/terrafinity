@@ -9,15 +9,13 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 
 const Mesher = @This();
 pub const Face = packed struct(u64) {
-    x: u5,
-    y: u5,
-    z: u5,
-    rot: FaceRotation,
-    isGreedy: bool = false,
-    height: i6 = 1,
-    width: i6 = 1,
+    const CoordInChunk = @Int(.unsigned, std.math.log2(ChunkSize));
+    x: CoordInChunk,
+    y: CoordInChunk,
+    z: CoordInChunk,
+    rotation: FaceRotation,
     BlockType: Block,
-    _: u16 = undefined,
+    _: u29 = undefined,
 };
 
 ///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
@@ -78,10 +76,7 @@ fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][
                         .zminus => 0,
                         .zplus => ChunkSize - 1,
                     }),
-                    .rot = comptime rotation,
-                    .isGreedy = false,
-                    .height = 1,
-                    .width = 1,
+                    .rotation = comptime rotation,
                     .BlockType = one,
                 };
                 if (transparent) {
@@ -127,7 +122,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
                         if (result) |transparent| {
                             const face = Face{
                                 .BlockType = block,
-                                .rot = @enumFromInt(i),
+                                .rotation = @enumFromInt(i),
                                 .x = @intCast(x),
                                 .y = @intCast(y),
                                 .z = @intCast(z),
