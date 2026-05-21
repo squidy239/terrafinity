@@ -790,7 +790,7 @@ fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.
 fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, allocator, 100, 100);
+    try makeTestingWorld(&world, &generator, allocator, 2, 2);
     defer world.deinit(io, allocator);
 
     const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true);
