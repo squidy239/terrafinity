@@ -535,7 +535,8 @@ pub const DefaultGenerator = struct {
     fn genTerrainHeight(params: Params, level: i32, chunk_pos: [2]i32) [ChunkSize][ChunkSize]i32 {
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        const chunkSizeGenScale = 1.0 / @as(f32, @floatCast(World.ChunkPos.toScale(level)));
+        //This should be 32, not ChunkSize
+        const chunkSizeGenScale = 32.0 / World.ChunkPos.levelToBlockRatioFloat(level);
         const scale = (params.terrain_scale * chunkSizeGenScale);
         const floatpos = @Vector(2, f32){ @floatFromInt(chunk_pos[0]), @floatFromInt(chunk_pos[1]) };
         const d32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
