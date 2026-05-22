@@ -1,12 +1,10 @@
 const std = @import("std");
-
-const rocksdb = @import("rocksdb");
-const tracy = @import("tracy");
-
 const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
+const rocksdb = @import("rocksdb");
+const tracy = @import("tracy");
 
 isinit: bool,
 database: rocksdb.database.DB,
@@ -21,7 +19,7 @@ pub fn getSource(self: *@This()) World.ChunkSource {
         .getBlocks = getBlocks,
         .onLoad = null,
         .deinit = deinitSource,
-        .save = save,
+        .onUnload = onUnload,
     };
 }
 
@@ -72,29 +70,18 @@ const ChunkData = packed struct {
     one_block: Block, //This is only valid if encoding is .one_block
 };
 
-fn save(source: World.ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const World.ChunkPos) error{Unrecoverable}!void {
+fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
     _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
-    var batch: rocksdb.WriteBatch = .init();
-    defer batch.deinit();
-    for (chunks, chunk_pos) |chunk, pos| {
-        self.saveChunk(io, chunk, pos, &batch) catch return error.Unrecoverable;
-    }
-    var err_str: ?rocksdb.Data = null;
-    defer if (err_str) |s| {
-        std.log.err("{s}", .{s.data});
-        s.deinit();
-    };
-    self.database.write(batch, &err_str) catch return error.Unrecoverable;
-    if (err_str != null) return error.Unrecoverable;
+    self.saveChunk(io, chunk, chunk_pos) catch return error.Unrecoverable;
 }
 
 const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 
 ///saves a chunk to the database if it has been modified
-pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos, batch: *rocksdb.WriteBatch) !void {
-    const z = tracy.Zone.begin(.{ .src = @src() });
-    defer z.end();
+pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
+    const save = tracy.Zone.begin(.{ .src = @src() });
+    defer save.end();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
         .grid => return,
         .one_block => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
@@ -107,13 +94,20 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
         .structures_generated = chunk.structures_generated.load(.seq_cst),
         .one_block = if (chunk.encoding == .one_block) chunk.encoding.one_block else undefined,
     };
+    var err_str: ?rocksdb.Data = null;
+    defer if (err_str) |s| {
+        std.log.err("{s}", .{s.data});
+        s.deinit();
+    };
     switch (chunk.encoding) {
         .grid => |blocks| {
-            batch.put(self.chunk_grid_column.handle, std.mem.asBytes(&key), std.mem.asBytes(blocks));
-            batch.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
+            var write: rocksdb.WriteBatch = .init();
+            write.put(self.chunk_grid_column.handle, std.mem.asBytes(&key), std.mem.asBytes(blocks));
+            write.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
+            try self.database.write(write, &err_str);
         },
         .one_block => {
-            batch.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
+            try self.database.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data), &err_str);
         },
     }
     chunk.saved.store(true, .unordered);

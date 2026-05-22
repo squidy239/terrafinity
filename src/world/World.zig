@@ -147,8 +147,7 @@ pub const ChunkSource = struct {
 
     onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
-    // This function is idempotent
-    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const ChunkPos) error{Unrecoverable}!void,
+    onUnload: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{Unrecoverable}!void,
 
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, chunk_pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32,
 
@@ -254,12 +253,10 @@ fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chun
 fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
-    const chunk_pos_array = [1]ChunkPos{chunk_pos};
-    const chunk_array = [1]*Chunk{chunk};
     for (self.chunk_sources) |source| {
         if (source) |s| {
-            if (s.save) |onUnloadFn| {
-                try onUnloadFn(s, io, self, &chunk_array, &chunk_pos_array);
+            if (s.onUnload) |onUnloadFn| {
+                try onUnloadFn(s, io, self, chunk, chunk_pos);
             }
         }
     }

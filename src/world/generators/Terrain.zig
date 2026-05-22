@@ -54,7 +54,7 @@ pub const DefaultGenerator = struct {
             .getBlocks = &genChunkBlocks,
             .onLoad = genStructures,
             .deinit = &deinit,
-            .save = null,
+            .onUnload = null,
         };
     }
 
