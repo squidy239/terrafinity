@@ -40,8 +40,7 @@ grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32),
 chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32),
 config: WorldConfig,
 
-chunk_sources: []const ChunkSource,
-chunk_source_buffer: [32]ChunkSource,
+chunk_sources: [4]?ChunkSource,
 
 onEdit: ?struct {
     onEditFn: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{OnEditFailed}!void,
@@ -150,7 +149,7 @@ pub const ChunkSource = struct {
     onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
     // This function is idempotent, flushBatch must be called to complete the save and free any batch resources.
-    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunks: *Chunk, chunk_pos: ChunkPos, batch: *SaveBatch) error{Unrecoverable}!void,
+    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const ChunkPos, batch: *SaveBatch) error{Unrecoverable}!void,
 
     flushBatch: ?*const fn (self: ChunkSource, io: std.Io, world: *World, batch: *SaveBatch) error{Unrecoverable}!void,
 
@@ -234,9 +233,11 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
 fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
     for (self.chunk_sources) |source| {
-        if (source.getBlocks) |getBlocksFn| {
-            if (try getBlocksFn(source, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
-                return .{ encoding, metadata };
+        if (source) |s| {
+            if (s.getBlocks) |getBlocksFn| {
+                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
+                    return .{ encoding, metadata };
+                }
             }
         }
     }
@@ -245,8 +246,10 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
 
 fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     for (self.chunk_sources) |source| {
-        if (source.onLoad) |onLoadFn| {
-            try onLoadFn(source, io, allocator, self, chunk, chunk_pos);
+        if (source) |s| {
+            if (s.onLoad) |onLoadFn| {
+                try onLoadFn(s, io, allocator, self, chunk, chunk_pos);
+            }
         }
     }
 }
@@ -254,13 +257,15 @@ fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chun
 fn save(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
+    const chunk_pos_array = [1]ChunkPos{chunk_pos};
+    const chunk_array = [1]*Chunk{chunk};
     for (self.chunk_sources) |source| {
         var batch: ChunkSource.SaveBatch = null;
-        if (source.save) |onUnloadFn| {
-            try onUnloadFn(source, io, self, chunk, chunk_pos, &batch);
-        }
-        if (source.flushBatch) |flushFn| {
-            try flushFn(source, io, self, &batch);
+        if (source) |s| {
+            if (s.save) |onUnloadFn| {
+                try onUnloadFn(s, io, self, &chunk_array, &chunk_pos_array, &batch);
+                try s.flushBatch.?(s, io, self, &batch);
+            }
         }
     }
 }
@@ -588,49 +593,28 @@ pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk, lock_gr
     chunk.* = undefined;
 }
 
-const SaveError = error{FailedToSaveAll} || std.Io.Cancelable;
-pub fn saveAllChunks(self: *@This(), io: std.Io) SaveError!void {
-    var failed: bool = false;
-    var batches: [self.chunk_source_buffer.len]ChunkSource.SaveBatch = @splat(null);
-    defer {
-        for (self.chunk_sources, batches[0..self.chunk_sources.len]) |source, *batch| {
-            if (source.flushBatch) |flushFn| {
-                flushFn(source, io, self, batch) catch {
-                    failed = true;
-                };
-            }
-        }
-    }
-
-    for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-        try lock.lock(io);
-        defer lock.unlock(io);
-        var it = shard.iterator();
-
-        while (it.next()) |c| {
-            for (self.chunk_sources, batches[0..self.chunk_sources.len]) |source, *batch| {
-                if (source.save) |saveFn| {
-                    saveFn(source, io, self, &c.chunk, c.key_from_value(), batch) catch |err| switch (err) {
-                        error.Unrecoverable => failed = true,
-                    };
-                }
-            }
-        }
-    }
-    if (failed) return error.FailedToSaveAll;
-}
-
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     const deinitWorld = tracy.Zone.begin(.{ .src = @src() });
     defer deinitWorld.end();
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
-    self.saveAllChunks(io) catch std.log.err("Failed to save chunks, data will be lost", .{});
+    {
+        for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
+            var it = shard.iterator();
+
+            while (it.next()) |c| {
+                std.debug.assert(c.chunk.encoding == .grid or c.chunk.encoding == .one_block);
+                self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+            }
+        }
+    }
     self.grids.deinit(allocator);
     self.chunks.deinit(allocator);
     std.log.info("chunks unloaded", .{});
     for (self.chunk_sources) |source| {
-        if (source.deinit) |de| de(source, io, allocator, self);
+        if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
     std.log.info("world closed", .{});
     self.* = undefined;

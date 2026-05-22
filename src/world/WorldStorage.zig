@@ -73,16 +73,18 @@ const ChunkData = packed struct {
     one_block: Block, //This is only valid if encoding is .one_block
 };
 
-fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos, batch: *World.ChunkSource.SaveBatch) error{Unrecoverable}!void {
+fn save(source: World.ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const World.ChunkPos, batch: *World.ChunkSource.SaveBatch) error{Unrecoverable}!void {
     _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
     if (batch.* == null) {
         const b: rocksdb.WriteBatch = .init();
         batch.* = b.inner;
     }
-    var write_batch: rocksdb.WriteBatch = .init();
-    write_batch.inner = @ptrCast(batch.*.?);
-    self.saveChunk(io, chunk, chunk_pos, write_batch) catch return error.Unrecoverable;
+    for (chunks, chunk_pos) |chunk, pos| {
+        var write_batch: rocksdb.WriteBatch = .init();
+        write_batch.inner = @ptrCast(batch.*.?);
+        self.saveChunk(io, chunk, pos, write_batch) catch return error.Unrecoverable;
+    }
 }
 
 fn flushBatch(source: World.ChunkSource, io: std.Io, world: *World, batch: *World.ChunkSource.SaveBatch) error{Unrecoverable}!void {
