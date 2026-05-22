@@ -148,7 +148,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
         .one_block => .{ .one_block = data.one_block },
     };
 
-    _ = try World.mergeEncoding(blocks, mergeblocks, grid_buffer);
+    blocks.merge(mergeblocks, grid_buffer);
     return .{ .from_disk = true, .structures = data.structures_generated };
 }
 

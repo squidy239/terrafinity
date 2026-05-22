@@ -245,9 +245,9 @@ pub const CosmicGeodeMultiverseGenerator = struct {
 
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            _ = try World.mergeEncoding(blocks, .{ .one_block = block }, grid_buffer);
+            blocks.merge(.{ .one_block = block }, grid_buffer);
         } else {
-            _ = try World.mergeEncoding(blocks, .{ .grid = &blockgrid }, grid_buffer);
+            blocks.merge(.{ .grid = &blockgrid }, grid_buffer);
         }
     }
 };

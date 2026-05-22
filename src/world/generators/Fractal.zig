@@ -69,13 +69,13 @@ pub const FractalTerrainGenerator = struct {
 
         // Skip generation if completely above terrain max
         if (chunk_pos.position[1] * @as(i32, @intCast(ChunkSize * block_scale)) > self.params.terrainmax) {
-            _ = try World.mergeEncoding(blocks, .{ .one_block = .air }, grid_buffer);
+            blocks.merge(.{ .one_block = .air }, grid_buffer);
             return;
         }
 
         // Generate solid rock if completely below terrain min to create an ultimate floor
         if ((chunk_pos.position[1] + 1) * @as(i32, @intCast(ChunkSize * block_scale)) < self.params.terrainmin) {
-            _ = try World.mergeEncoding(blocks, .{ .one_block = .stone }, grid_buffer);
+            blocks.merge(.{ .one_block = .stone }, grid_buffer);
             return;
         }
 
@@ -130,9 +130,9 @@ pub const FractalTerrainGenerator = struct {
 
         const oneblock = Chunk.isOneBlock(&blockgrid);
         if (oneblock) |block| {
-            _ = try World.mergeEncoding(blocks, .{ .one_block = block }, grid_buffer);
+            blocks.merge(.{ .one_block = block }, grid_buffer);
         } else {
-            _ = try World.mergeEncoding(blocks, .{ .grid = &blockgrid }, grid_buffer);
+            blocks.merge(.{ .grid = &blockgrid }, grid_buffer);
         }
     }
 

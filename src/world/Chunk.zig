@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Block = @import("Block.zig").Block;
+const tracy = @import("tracy");
 
 pub const ChunkSize = 32;
 encoding: Encoding,
@@ -21,6 +22,66 @@ pub const Encoding = union(enum(u1)) {
 
     pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
         return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
+    }
+
+    pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+        const m = tracy.Zone.begin(.{ .src = @src() });
+        defer m.end();
+        switch (mergeBlocks) {
+            .one_block => {
+                if (mergeBlocks.one_block == .null) return;
+                switch (blocks.*) {
+                    .one_block => blocks.* = mergeBlocks,
+                    .grid => blocks.* = .{ .one_block = mergeBlocks.one_block },
+                }
+            },
+            .grid => {
+                toBlocks(blocks, grid_buffer);
+                const tag = @typeInfo(Block).@"enum".tag_type;
+                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
+                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
+
+                selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
+                if (isOneBlock(blocks.grid)) |block| blocks.* = .{ .one_block = block };
+            },
+        }
+    }
+
+    // Workaround for https://codeberg.org/ziglang/zig/issues/35254
+    fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
+        if (comptime std.simd.suggestVectorLength(T)) |vlen| {
+            const VT = @Vector(vlen, T);
+            var i: usize = 0;
+            while (i + vlen <= len) : (i += vlen) {
+                const a: VT = flatArray.*[i..][0..vlen].*;
+                const b: VT = flatMergeArray[i..][0..vlen].*;
+                const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
+                const result = @select(T, pred, a, b);
+                flatArray.*[i..][0..vlen].* = result;
+            }
+            while (i < len) : (i += 1) {
+                if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                    flatArray.*[i] = flatMergeArray[i];
+                }
+            }
+        } else {
+            for (0..len) |i| {
+                if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
+                    flatArray.*[i] = flatMergeArray[i];
+                }
+            }
+        }
+    }
+
+    pub fn toBlocks(blocks: *Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+        if (blocks.* == .grid) return;
+        switch (blocks.*) {
+            .one_block => |block| {
+                grid_buffer.* = @splat(@splat(@splat(block)));
+                blocks.* = .{ .grid = grid_buffer };
+            },
+            .grid => {},
+        }
     }
 
     pub const FaceRotation = enum(u4) {

@@ -293,81 +293,6 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     }
 }
 
-pub fn mergeEncoding(blocks: *Chunk.Encoding, mergeBlocks: Chunk.Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !?*[ChunkSize][ChunkSize][ChunkSize]Block {
-    const m = tracy.Zone.begin(.{ .src = @src() });
-    defer m.end();
-    if (mergeBlocks == .one_block and (mergeBlocks.one_block == .null)) return null;
-    switch (mergeBlocks) {
-        .one_block => {
-            switch (blocks.*) {
-                .one_block => {
-                    if (mergeBlocks.one_block != .null) {
-                        blocks.* = mergeBlocks;
-                    }
-                },
-                .grid => {
-                    if (mergeBlocks.one_block != .null) {
-                        const old_grid = blocks.grid;
-                        blocks.* = .{ .one_block = mergeBlocks.one_block };
-                        return old_grid;
-                    }
-                },
-            }
-        },
-        .grid => {
-            try toBlocks(blocks, grid_buffer);
-            const tag = @typeInfo(Block).@"enum".tag_type;
-            const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
-            const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
-
-            selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
-            if (Chunk.isOneBlock(blocks.grid)) |block| {
-                @branchHint(.unlikely);
-                const old_grid = blocks.grid;
-
-                blocks.* = .{ .one_block = block };
-                return old_grid;
-            }
-        },
-    }
-    return null;
-}
-
-fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
-    if (comptime std.simd.suggestVectorLength(T)) |vlen| {
-        const VT = @Vector(vlen, T);
-        var i: usize = 0;
-        while (i + vlen <= len) : (i += vlen) {
-            const a: VT = flatArray.*[i..][0..vlen].*;
-            const b: VT = flatMergeArray[i..][0..vlen].*;
-            const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
-            const result = @select(T, pred, a, b);
-            flatArray.*[i..][0..vlen].* = result;
-        }
-        while (i < len) : (i += 1) {
-            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                flatArray.*[i] = flatMergeArray[i];
-            }
-        }
-    } else {
-        for (0..len) |i| {
-            if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                flatArray.*[i] = flatMergeArray[i];
-            }
-        }
-    }
-}
-
-pub fn toBlocks(blocks: *Chunk.Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
-    if (blocks.* == .grid) return;
-    const t = tracy.Zone.begin(.{ .src = @src() });
-    defer t.end();
-
-    const flatblocks: *[ChunkSize * ChunkSize * ChunkSize]Block = @ptrCast(grid_buffer);
-    @memset(flatblocks, blocks.one_block);
-    blocks.* = .{ .grid = grid_buffer };
-}
-
 fn tryGenStructures(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
@@ -457,13 +382,13 @@ pub const Editor = struct {
                 };
                 var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
                 const was_grid: bool = chunk.encoding == .grid;
-                const old = try mergeEncoding(&chunk.encoding, encoding, &grid_buffer);
+                chunk.encoding.merge(encoding, &grid_buffer);
                 if (!was_grid and chunk.encoding == .grid) {
                     const shard, const lock = self.world.chunks.getShardAndLock(diffChunk.key_ptr.*);
                     lock.lockUncancelable(io);
                     defer lock.unlock(io);
                     try self.world.ownGrid(io, chunk, diffChunk.key_ptr.*, shard);
-                } else if (old != null) {
+                } else if (was_grid and chunk.encoding != .grid) {
                     self.world.freeGrid(io, diffChunk.key_ptr.*);
                 }
 
