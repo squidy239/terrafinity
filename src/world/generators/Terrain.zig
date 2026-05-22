@@ -52,9 +52,9 @@ pub const DefaultGenerator = struct {
             .data = self,
             .getTerrainHeight = null,
             .getBlocks = &genChunkBlocks,
-            .onLoad = genStructures,
+            .placeStructures = genStructures,
             .deinit = &deinit,
-            .onUnload = null,
+            .save = null,
         };
     }
 

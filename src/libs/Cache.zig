@@ -13,7 +13,7 @@ pub fn Cache(
 ) type {
     return struct {
         const Self = @This();
-        const Shard = SetAssociativeCache.SetAssociativeCacheType(Key, Value, key_from_value, hash, layout);
+        pub const Shard = SetAssociativeCache.SetAssociativeCacheType(Key, Value, key_from_value, hash, layout);
         shards: [fragments]Shard,
         shard_locks: [fragments]std.Io.Mutex,
 

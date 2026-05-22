@@ -44,6 +44,10 @@ last_mesh_unload: std.Io.Timestamp = .zero,
 mesh_unload_is_running: std.atomic.Value(bool) = .init(false),
 mesh_unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadChunkMeshes)).@"fn".return_type.?) = null,
 
+last_save: std.Io.Timestamp = .zero,
+save_is_running: std.atomic.Value(bool) = .init(false),
+save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) = null,
+
 select: std.Io.Select(SelectUnion),
 select_buffer: [65536]SelectUnion = undefined,
 
@@ -220,6 +224,9 @@ pub const Options = struct {
     render_distance_y: u32 = 6,
 
     loader_frequency_ms: u64 = 250,
+    mesh_unload_frequency_ms: u64 = 500,
+    save_frequency_ms: u64 = 5000,
+
     terrain_height_cache_bytes: u64 = 268435456,
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
@@ -401,6 +408,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     if (self.load_future) |*future| future.cancel(io) catch {};
     self.select.cancelDiscard();
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
+    if (self.save_future) |*future| future.cancel(io) catch {};
 
     self.opengl_renderer.deinit(io);
     self.loaded_or_meshed.deinit(io, self.allocator);
@@ -420,7 +428,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 
     var entitys_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
     defer entitys_future.cancel(io) catch {};
-    try updateLoadAndUnload(self, io, allocator);
+    try restartFutures(self, io, allocator);
 
     self.player.physics.mutex.lockUncancelable(io);
     const player_pos = self.player.physics.pos;
@@ -438,9 +446,11 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     try entitys_future.await(io);
 }
 
-fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
+    const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
+    const save_frequency_ms = self.options.save_frequency_ms;
     self.options_lock.unlockShared(io);
 
     if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
@@ -454,13 +464,26 @@ fn updateLoadAndUnload(self: *@This(), io: std.Io, allocator: std.mem.Allocator)
         self.load_future = io.concurrent(loadChunks, .{ self, io, allocator }) catch io.async(loadChunks, .{ self, io, allocator });
     }
 
-    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
+    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > mesh_unload_frequency_ms) {
         if (self.mesh_unload_future) |*f| try f.await(io);
 
         self.mesh_unload_is_running.store(true, .seq_cst);
         self.last_mesh_unload = .now(io, .awake);
         self.mesh_unload_future = io.async(unloadChunkMeshes, .{ self, io });
     }
+
+    if (!self.save_is_running.load(.seq_cst) and self.last_save.durationTo(.now(io, .awake)).toMilliseconds() > save_frequency_ms) {
+        if (self.save_future) |*f| try f.await(io);
+
+        self.save_is_running.store(true, .seq_cst);
+        self.last_save = .now(io, .awake);
+        self.save_future = io.async(saveFuture, .{ self, io });
+    }
+}
+
+fn saveFuture(self: *@This(), io: std.Io) !void {
+    defer self.save_is_running.store(false, .seq_cst);
+    try self.world.trySaveAll(io);
 }
 
 fn handleSelectFutures(self: *@This()) !void {

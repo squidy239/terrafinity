@@ -35,9 +35,10 @@ inline fn hash(item: anytype) u64 {
     std.hash.autoHash(&hasher, item);
     return hasher.final();
 }
+const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32);
 
 grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32),
-chunks: Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32),
+chunks: ChunkMapType,
 config: WorldConfig,
 
 chunk_sources: [4]?ChunkSource,
@@ -145,9 +146,10 @@ pub const ChunkSource = struct {
 
     getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
-    onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
+    placeStructures: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
-    onUnload: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{Unrecoverable}!void,
+    /// Idempotent, caller must hold at least a shared lock on the chunk
+    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{Unrecoverable}!void,
 
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, chunk_pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32,
 
@@ -181,11 +183,12 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
             return .{ .existing = &ch.chunk };
         }
         if (shard.peek_victim(chunk_pos)) |victim| {
-            if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+            if (victim.chunk.ref_count.load(.seq_cst) != 1 or !victim.chunk.encoding_lock.tryLockShared(io)) {
                 shard.skip_victim(chunk_pos);
                 continue;
             }
-            try self.unloadChunkByPtr(io, &victim.chunk, victim.pos, true, true);
+            try self.save(io, &victim.chunk, victim.pos);
+            victim.* = undefined;
         }
         _ = shard.upsert(&.{
             .chunk = chunk,
@@ -211,12 +214,12 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     defer lock.unlock(io);
     while (grid_shard.peek_victim(chunk_pos)) |victim| {
         std.debug.assert(victim.chunk != chunk_ptr);
-        if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+        if (victim.chunk.ref_count.load(.seq_cst) != 1 or !victim.chunk.encoding_lock.tryLockShared(io)) {
             grid_shard.skip_victim(chunk_pos);
             continue;
         }
         std.debug.assert(victim.chunk.encoding == .grid);
-        try onUnload(self, io, victim.chunk, victim.pos);
+        try save(self, io, victim.chunk, victim.pos);
         std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
         victim.chunk.* = undefined;
         break;
@@ -243,20 +246,20 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
 fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     for (self.chunk_sources) |source| {
         if (source) |s| {
-            if (s.onLoad) |onLoadFn| {
+            if (s.placeStructures) |onLoadFn| {
                 try onLoadFn(s, io, allocator, self, chunk, chunk_pos);
             }
         }
     }
 }
 
-fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+fn save(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     for (self.chunk_sources) |source| {
         if (source) |s| {
-            if (s.onUnload) |onUnloadFn| {
-                try onUnloadFn(s, io, self, chunk, chunk_pos);
+            if (s.save) |saveChunk| {
+                try saveChunk(s, io, self, chunk, chunk_pos);
             }
         }
     }
@@ -558,31 +561,46 @@ fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block
     return best;
 }
 
-pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos, comptime delete_on_error: bool, lock_grids: bool) !void {
-    _ = try chunk.waitForRefAmount(io, 1, null);
-    std.debug.assert(chunk.encoding == .grid or chunk.encoding == .one_block);
-    errdefer if (delete_on_error) self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
-    try onUnload(self, io, chunk, chunk_pos);
-    self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
+pub fn saveAll(self: *@This(), io: std.Io) void {
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+    for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
+        group.async(io, saveShard, .{ self, shard, lock, io });
+    }
+    group.await(io) catch unreachable;
 }
 
-pub fn unloadChunkByPtrNoSave(self: *@This(), io: std.Io, chunk: *Chunk, lock_grids: bool, chunk_pos: ChunkPos) void {
-    const last_prot = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(last_prot);
-    _ = chunk.waitForRefAmount(io, 1, null) catch unreachable;
-    std.debug.assert(chunk.encoding_lock.mutex.state.raw == .unlocked);
-    switch (chunk.encoding) {
-        .grid => {
-            if (lock_grids) {
-                _ = self.grids.remove(io, chunk_pos);
-            } else {
-                const shard, _ = self.grids.getShardAndLock(chunk_pos);
-                _ = shard.remove(chunk_pos);
-            }
-        },
-        .one_block => {},
+pub fn saveShard(self: *@This(), shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+    var it = shard.iterator();
+    while (it.next()) |c| {
+        c.chunk.encoding_lock.lockSharedUncancelable(io);
+        defer c.chunk.encoding_lock.unlockShared(io);
+        self.save(io, &c.chunk, c.key_from_value()) catch |err| std.log.err("error saving chunk: {any}, {any}\n", .{ c.key_from_value(), err });
     }
-    chunk.* = undefined;
+}
+
+pub fn trySaveAll(self: *@This(), io: std.Io) !void {
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
+        group.async(io, trySaveShard, .{ self, shard, lock, io });
+    }
+    try group.await(io);
+}
+
+fn trySaveShard(self: *World, shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
+    if (!lock.tryLock()) return;
+    defer lock.unlock(io);
+    var it = shard.iterator();
+    while (it.next()) |c| {
+        if (!c.chunk.encoding_lock.tryLockShared(io)) continue;
+        defer c.chunk.encoding_lock.unlockShared(io);
+        self.save(io, &c.chunk, c.key_from_value()) catch |err| std.log.err("error saving chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+    }
 }
 
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
@@ -590,17 +608,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     defer deinitWorld.end();
     const last_prot = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(last_prot);
-    {
-        for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-            lock.lockUncancelable(io);
-            defer lock.unlock(io);
-            var it = shard.iterator();
-            while (it.next()) |c| {
-                std.debug.assert(c.chunk.encoding == .grid or c.chunk.encoding == .one_block);
-                self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
-            }
-        }
-    }
+    self.saveAll(io);
     std.log.info("chunks unloaded", .{});
     for (self.chunk_sources) |source| {
         if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);

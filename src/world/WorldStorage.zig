@@ -17,9 +17,9 @@ pub fn getSource(self: *@This()) World.ChunkSource {
         .data = self,
         .getTerrainHeight = null,
         .getBlocks = getBlocks,
-        .onLoad = null,
+        .placeStructures = null,
         .deinit = deinitSource,
-        .onUnload = onUnload,
+        .save = save,
     };
 }
 
@@ -70,7 +70,7 @@ const ChunkData = packed struct {
     one_block: Block, //This is only valid if encoding is .one_block
 };
 
-fn onUnload(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
+fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
     _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
     self.saveChunk(io, chunk, chunk_pos) catch return error.Unrecoverable;
@@ -80,15 +80,15 @@ const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagg
 
 ///saves a chunk to the database if it has been modified
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
-    const save = tracy.Zone.begin(.{ .src = @src() });
-    defer save.end();
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
+    _ = io;
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
         .grid => return,
         .one_block => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
     };
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
-    try chunk.encoding_lock.lockShared(io);
     const data: ChunkData = .{
         .encoding = chunk.encoding,
         .structures_generated = chunk.structures_generated.load(.seq_cst),
@@ -110,8 +110,8 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
             try self.database.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data), &err_str);
         },
     }
+    chunk.modified.store(false, .seq_cst);
     chunk.saved.store(true, .unordered);
-    chunk.encoding_lock.unlockShared(io);
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
