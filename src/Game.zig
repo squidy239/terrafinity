@@ -381,13 +381,17 @@ pub fn init(
         .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
         .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
-        .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .onEdit = .{
             .onEditFn = onEditFn,
             .onEditFnArgs = @ptrCast(game),
             .callIfNeighborFacesChanged = true,
         },
+        .chunk_source_buffer = undefined,
+        .chunk_sources = undefined,
     };
+    game.world.chunk_source_buffer[0] = game.world_storage.getSource();
+    game.world.chunk_source_buffer[1] = game.generator.getSource();
+    game.world.chunk_sources = game.world.chunk_source_buffer[0..2];
     errdefer game.world.deinit(io, allocator);
 
     try game.spawnPlayer(io, allocator);
