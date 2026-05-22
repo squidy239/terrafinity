@@ -55,6 +55,7 @@ pub const DefaultGenerator = struct {
             .onLoad = genStructures,
             .deinit = &deinit,
             .save = null,
+            .flushBatch = null,
         };
     }
 

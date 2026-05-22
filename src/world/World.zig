@@ -141,14 +141,17 @@ pub const ChunkSource = struct {
         structures: bool,
     };
 
+    pub const SaveBatch = ?*anyopaque;
     data: *anyopaque,
 
     getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
     onLoad: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
-    // This function is idempotent
-    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const ChunkPos) error{Unrecoverable}!void,
+    // This function is idempotent, flushBatch must be called to complete the save and free any batch resources.
+    save: ?*const fn (self: ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const ChunkPos, batch: *SaveBatch) error{Unrecoverable}!void,
+
+    flushBatch: ?*const fn (self: ChunkSource, io: std.Io, world: *World, batch: *SaveBatch) error{Unrecoverable}!void,
 
     getTerrainHeight: ?*const fn (self: ChunkSource, world: *World, chunk_pos: @Vector(2, i32), level: i32) error{ OutOfMemory, Unrecoverable }![ChunkSize][ChunkSize]i32,
 
@@ -217,7 +220,7 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
             continue;
         }
         std.debug.assert(victim.chunk.encoding == .grid);
-        try onUnload(self, io, victim.chunk, victim.pos);
+        try save(self, io, victim.chunk, victim.pos);
         std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
         victim.chunk.* = undefined;
         break;
@@ -251,15 +254,17 @@ fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chun
     }
 }
 
-fn onUnload(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
+fn save(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     const chunk_pos_array = [1]ChunkPos{chunk_pos};
     const chunk_array = [1]*Chunk{chunk};
     for (self.chunk_sources) |source| {
+        var batch: ChunkSource.SaveBatch = null;
         if (source) |s| {
             if (s.save) |onUnloadFn| {
-                try onUnloadFn(s, io, self, &chunk_array, &chunk_pos_array);
+                try onUnloadFn(s, io, self, &chunk_array, &chunk_pos_array, &batch);
+                try s.flushBatch.?(s, io, self, &batch);
             }
         }
     }
@@ -565,7 +570,7 @@ pub fn unloadChunkByPtr(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: Ch
     _ = try chunk.waitForRefAmount(io, 1, null);
     std.debug.assert(chunk.encoding == .grid or chunk.encoding == .one_block);
     errdefer if (delete_on_error) self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
-    try onUnload(self, io, chunk, chunk_pos);
+    try save(self, io, chunk, chunk_pos);
     self.unloadChunkByPtrNoSave(io, chunk, lock_grids, chunk_pos);
 }
 
@@ -598,19 +603,21 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
             lock.lockUncancelable(io);
             defer lock.unlock(io);
             var it = shard.iterator();
+
             while (it.next()) |c| {
                 std.debug.assert(c.chunk.encoding == .grid or c.chunk.encoding == .one_block);
                 self.unloadChunkByPtr(io, &c.chunk, c.key_from_value(), true, true) catch |err| std.log.err("error unloading chunk: {any}, {any}\n", .{ c.key_from_value(), err });
             }
         }
     }
+    self.grids.deinit(allocator);
+    self.chunks.deinit(allocator);
     std.log.info("chunks unloaded", .{});
     for (self.chunk_sources) |source| {
         if (source) |s| if (s.deinit) |de| de(s, io, allocator, self);
     }
-    self.grids.deinit(allocator);
-    self.chunks.deinit(allocator);
     std.log.info("world closed", .{});
+    self.* = undefined;
 }
 
 test "ChunkPos" {

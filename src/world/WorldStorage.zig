@@ -22,6 +22,7 @@ pub fn getSource(self: *@This()) World.ChunkSource {
         .onLoad = null,
         .deinit = deinitSource,
         .save = save,
+        .flushBatch = flushBatch,
     };
 }
 
@@ -72,27 +73,43 @@ const ChunkData = packed struct {
     one_block: Block, //This is only valid if encoding is .one_block
 };
 
-fn save(source: World.ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const World.ChunkPos) error{Unrecoverable}!void {
+fn save(source: World.ChunkSource, io: std.Io, world: *World, chunks: []const *Chunk, chunk_pos: []const World.ChunkPos, batch: *World.ChunkSource.SaveBatch) error{Unrecoverable}!void {
     _ = world;
     const self: *@This() = @ptrCast(@alignCast(source.data));
-    var batch: rocksdb.WriteBatch = .init();
-    defer batch.deinit();
+    if (batch.* == null) {
+        const b: rocksdb.WriteBatch = .init();
+        batch.* = b.inner;
+    }
     for (chunks, chunk_pos) |chunk, pos| {
-        self.saveChunk(io, chunk, pos, &batch) catch return error.Unrecoverable;
+        var write_batch: rocksdb.WriteBatch = .init();
+        write_batch.inner = @ptrCast(batch.*.?);
+        self.saveChunk(io, chunk, pos, write_batch) catch return error.Unrecoverable;
+    }
+}
+
+fn flushBatch(source: World.ChunkSource, io: std.Io, world: *World, batch: *World.ChunkSource.SaveBatch) error{Unrecoverable}!void {
+    const self: *@This() = @ptrCast(@alignCast(source.data));
+    std.debug.assert(batch.* != null);
+    defer {
+        var b: rocksdb.WriteBatch = undefined;
+        b.inner = @ptrCast(batch.*.?);
+        b.deinit();
     }
     var err_str: ?rocksdb.Data = null;
     defer if (err_str) |s| {
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
-    self.database.write(batch, &err_str) catch return error.Unrecoverable;
+    self.database.write(.{ .inner = @ptrCast(batch.*.?) }, &err_str) catch return error.Unrecoverable;
     if (err_str != null) return error.Unrecoverable;
+    _ = io;
+    _ = world;
 }
 
 const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 
 ///saves a chunk to the database if it has been modified
-pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos, batch: *rocksdb.WriteBatch) !void {
+pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos, batch: rocksdb.WriteBatch) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
