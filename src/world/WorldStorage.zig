@@ -162,6 +162,12 @@ fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloca
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     std.debug.assert(self.isinit);
     self.isinit = false;
+    var es1: ?rocksdb.Data = null;
+    defer if (es1) |s| s.deinit();
+    self.database.flush(self.chunk_grid_column.handle, &es1) catch |err| std.log.warn("Flush failed: {any}\n", .{err});
+    var es2: ?rocksdb.Data = null;
+    defer if (es2) |s| s.deinit();
+    self.database.flush(self.chunkdata_column.handle, &es2) catch |err| std.log.warn("Flush failed: {any}\n", .{err});
     self.database.deinit();
     _ = allocator;
 }

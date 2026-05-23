@@ -469,7 +469,7 @@ fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 
         self.mesh_unload_is_running.store(true, .seq_cst);
         self.last_mesh_unload = .now(io, .awake);
-        self.mesh_unload_future = io.async(unloadChunkMeshes, .{ self, io });
+        self.mesh_unload_future = io.concurrent(unloadChunkMeshes, .{ self, io }) catch io.async(unloadChunkMeshes, .{ self, io });
     }
 
     if (!self.save_is_running.load(.seq_cst) and self.last_save.durationTo(.now(io, .awake)).toMilliseconds() > save_frequency_ms) {
@@ -477,7 +477,7 @@ fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 
         self.save_is_running.store(true, .seq_cst);
         self.last_save = .now(io, .awake);
-        self.save_future = io.async(saveFuture, .{ self, io });
+        self.save_future = io.concurrent(saveFuture, .{ self, io }) catch io.async(saveFuture, .{ self, io });
     }
 }
 
