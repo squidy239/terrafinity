@@ -40,8 +40,7 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
 
     const column_families: [3]rocksdb.ColumnFamilyDescription = .{
         .{ .name = "chunk_data", .options = .{
-            .compression = .no_compression,
-            .optimize_filters_for_hits = false,
+            .compression = .zstd,
         } },
         .{ .name = "chunk_grid", .options = .{
             .compression = .zstd,
