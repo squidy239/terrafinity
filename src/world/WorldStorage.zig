@@ -101,6 +101,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     switch (chunk.encoding) {
         .grid => |blocks| {
             var write: rocksdb.WriteBatch = .init();
+            defer write.deinit();
             write.put(self.chunk_grid_column.handle, std.mem.asBytes(&key), std.mem.asBytes(blocks));
             write.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
             try self.database.write(write, &err_str);

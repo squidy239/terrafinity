@@ -1,20 +1,26 @@
 const std = @import("std");
 
+const ThreadSanitizeMode = enum {
+    None,
+    Normal,
+    Full,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sanitize = b.option(bool, "sanitize_thread", "Enable thread sanitizer") orelse null;
+    const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
     const test_play = b.option(bool, "test_play", "Run test play") orelse null;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .sanitize_thread = sanitize,
+        .sanitize_thread = sanitize != .None,
     });
 
-    setupDependencies(b, root_module, target, optimize);
+    setupDependencies(b, root_module, target, optimize, sanitize);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
@@ -63,6 +69,7 @@ fn setupDependencies(
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    sanitize: ThreadSanitizeMode,
 ) void {
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
@@ -72,7 +79,7 @@ fn setupDependencies(
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
-    rocksdb_mod.sanitize_thread = false;
+    rocksdb_mod.sanitize_thread = sanitize == .Full;
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const obj_mod = b.dependency("obj", .{
