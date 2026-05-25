@@ -57,8 +57,11 @@ pub fn main(init: std.process.Init) !void {
 
     try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
 
-    try wio.init(gpa, io, .{});
+    try wio.init(gpa, io, wio.EventQueue.eventFn, .{});
     defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
 
     const gloptions: wio.GlOptions = .{
         .major_version = 4,
@@ -70,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
         .alpha_bits = 0,
     };
 
-    var window = try wio.createWindow(.{ .title = "terrafinity", .gl_options = gloptions });
+    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gloptions, .event_fn_data = &events});
     defer window.destroy();
 
     if (!options.test_play) window.setMode(.maximized);
@@ -143,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
@@ -242,13 +245,14 @@ fn handleEvents(
     running: *std.atomic.Value(bool),
     ui_backend: *wio_backend,
     win: *wio.Window,
+    events: *wio.EventQueue,
     ui_window: *dvui.Window,
     ui: *Ui,
     dt: std.Io.Duration,
 ) !void {
-    ui_backend.setTextInputRect(ui_window.textInputRequested());
+    ui_backend.textInputRect(ui_window.textInputRequested());
     if (ui.menu_state.playingGame()) {
-        win.enableRelativeMouse();
+        win.enableRelativeMouse(.{.unaccelerated = false});
     } else {
         win.disableRelativeMouse();
         ui_backend.setCursor(ui_window.cursorRequested());
@@ -260,7 +264,7 @@ fn handleEvents(
         if (singlepress.contains(action)) action_set.remove(action);
     }
     {
-        while (win.getEvent()) |event| {
+        while (events.pop()) |event| {
             _ = try ui_backend.addEvent(ui_window, event);
             switch (event) {
                 .button_press => |key| {
