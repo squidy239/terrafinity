@@ -9,6 +9,7 @@ const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("generators/Terrain.zig").DefaultGenerator;
 pub const WorldStorage = @import("WorldStorage.zig");
+
 const World = @This();
 
 pub const ChunkValue = struct {
@@ -146,6 +147,7 @@ pub const ChunkSource = struct {
 
     getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
+    /// May be called on the same chunk multiple times and must result in the same state each time
     placeStructures: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
     /// Idempotent, caller must hold at least a shared lock on the chunk
@@ -183,11 +185,14 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
             return .{ .existing = &ch.chunk };
         }
         if (shard.peek_victim(chunk_pos)) |victim| {
-            if (victim.chunk.ref_count.load(.seq_cst) != 1 or !victim.chunk.encoding_lock.tryLockShared(io)) {
+            if (victim.chunk.ref_count.load(.seq_cst) != 1) {
                 shard.skip_victim(chunk_pos);
                 continue;
             }
+            std.debug.assert(victim.chunk.encoding_lock.tryLockShared(io)); // This chunk cannot be used by another thread since it has 1 ref
+            victim.chunk.encoding_lock.unlockShared(io);
             try self.save(io, &victim.chunk, victim.pos);
+            if (victim.chunk.encoding == .grid) self.freeGrid(io, victim.pos);
             victim.* = undefined;
         }
         _ = shard.upsert(&.{
@@ -195,7 +200,9 @@ fn putChunk(self: *@This(), io: std.Io, chunk: Chunk, chunk_pos: ChunkPos) !unio
             .pos = chunk_pos,
         });
         const chunkptr = &shard.get(chunk_pos).?.chunk;
-        try self.ownGrid(io, chunkptr, chunk_pos, shard);
+        chunkptr.encoding_lock.lockUncancelable(io);
+        self.ownGrid(io, chunkptr, chunk_pos, shard);
+        chunkptr.encoding_lock.unlock(io);
         return .{ .inserted = chunkptr };
     }
 }
@@ -204,7 +211,8 @@ fn freeGrid(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
     _ = self.grids.remove(io, chunk_pos);
 }
 
-fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) !void {
+/// Caller must hold a write lock on the chunk
+fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len);
@@ -219,9 +227,9 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
             continue;
         }
         std.debug.assert(victim.chunk.encoding == .grid);
-        try save(self, io, victim.chunk, victim.pos);
-        std.debug.assert(chunks_shard.remove(victim.pos).?.chunk.encoding == .grid);
+        save(self, io, victim.chunk, victim.pos) catch |err| std.log.err("Failed to save chunk: {}", .{err}); //TODO make this stop close the world
         victim.chunk.* = undefined;
+        _ = chunks_shard.remove(victim.pos);
         break;
     }
     _ = grid_shard.upsert(&GridValue{ .chunk = chunk_ptr, .grid = chunk_ptr.encoding.grid.*, .pos = chunk_pos });
@@ -368,46 +376,57 @@ pub const Editor = struct {
         var propagationEditor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
         defer propagationEditor.clear();
         while (it.next()) |diffChunk| {
+            const chunk_pos = diffChunk.key_ptr.*;
             const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
-            const chunk = try self.world.loadChunk(io, allocator, diffChunk.key_ptr.*, false);
+            const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
             defer chunk.release();
+
             {
-                try chunk.lockExclusive(io);
-                defer chunk.unlockExclusive(io);
-                const old_sides: ?[6]Chunk.Encoding.Face = blk: {
-                    const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
-                    if (!callIfNeighborFacesChanged) break :blk null;
-                    var sides: [6]Chunk.Encoding.Face = undefined;
-                    inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
-                        sides[@intFromEnum(side)] = chunk.encoding.extractFace(side);
-                    }
-                    break :blk sides;
-                };
+                var needs_own_grid: bool = false;
                 var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-                const was_grid: bool = chunk.encoding == .grid;
-                chunk.encoding.merge(encoding, &grid_buffer);
-                if (!was_grid and chunk.encoding == .grid) {
-                    const shard, const lock = self.world.chunks.getShardAndLock(diffChunk.key_ptr.*);
-                    lock.lockUncancelable(io);
-                    defer lock.unlock(io);
-                    try self.world.ownGrid(io, chunk, diffChunk.key_ptr.*, shard);
-                } else if (was_grid and chunk.encoding != .grid) {
-                    self.world.freeGrid(io, diffChunk.key_ptr.*);
+
+                {
+                    try chunk.lockExclusive(io);
+                    defer chunk.unlockExclusive(io);
+                    const old_sides: ?[6]Chunk.Encoding.Face = blk: {
+                        const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+                        if (!callIfNeighborFacesChanged) break :blk null;
+                        var sides: [6]Chunk.Encoding.Face = undefined;
+                        inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
+                            sides[@intFromEnum(side)] = chunk.encoding.extractFace(side);
+                        }
+                        break :blk sides;
+                    };
+                    const was_grid: bool = chunk.encoding == .grid;
+                    chunk.encoding.merge(encoding, &grid_buffer);
+                    if (!was_grid and chunk.encoding == .grid) needs_own_grid = true;
+                    if (was_grid and chunk.encoding != .grid) self.world.freeGrid(io, chunk_pos);
+
+                    if (old_sides) |os| {
+                        inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
+                            const new = chunk.encoding.extractFace(side);
+                            if (!std.meta.eql(new, os[@intFromEnum(side)])) {
+                                const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + side.direction() };
+                                try neghborsToRemesh.put(toRemeshPos, {});
+                            }
+                        }
+                    }
                 }
 
-                if (old_sides) |os| {
-                    inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
-                        const new = chunk.encoding.extractFace(side);
-                        if (!std.meta.eql(new, os[@intFromEnum(side)])) {
-                            const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + side.direction() };
-                            try neghborsToRemesh.put(toRemeshPos, {});
-                        }
+                if (needs_own_grid) {
+                    const shard, const lock = self.world.chunks.getShardAndLock(chunk_pos);
+                    lock.lockUncancelable(io);
+                    defer lock.unlock(io);
+                    chunk.encoding_lock.lockUncancelable(io);
+                    defer chunk.encoding_lock.unlock(io);
+                    if(chunk.encoding == .grid and chunk.encoding.grid == &grid_buffer) {
+                        self.world.ownGrid(io, chunk, chunk_pos, shard);
                     }
                 }
             }
 
             if (self.propagate_changes) {
-                var coords: ChunkPos = diffChunk.key_ptr.*;
+                var coords: ChunkPos = chunk_pos;
                 var i: usize = 0;
                 while (i < 16) {
                     const changed = try propagationEditor.propagateToParentByCoords(io, allocator, coords);
@@ -452,7 +471,7 @@ pub const Editor = struct {
         defer place.end();
         const boundingBox = shape.boundingBox;
         var y = boundingBox[2];
-        while (y < boundingBox[3]) : (y += 1) {
+        while (y <= boundingBox[3]) : (y += 1) {
             var dx = boundingBox[0];
             while (dx <= boundingBox[1]) : (dx += 1) {
                 var dz = boundingBox[4];
@@ -545,12 +564,12 @@ pub const Editor = struct {
 
 fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
     var best: Block = blocks[0];
-    var best_count: f32 = 1;
+    var best_count: f32 = -1.0;
     inline for (0..blocks.len) |i| {
         const block = blocks[i];
         const weight = block.getPropagationWeight();
         var count: f32 = weight;
-        inline for ((i + 1)..8) |j| {
+        inline for ((i + 1)..blocks.len) |j| {
             if (block == blocks[j]) count += weight;
         }
         if (count > best_count) {

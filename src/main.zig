@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
         .alpha_bits = 0,
     };
 
-    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gloptions, .event_fn_data = &events});
+    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gloptions, .event_fn_data = &events });
     defer window.destroy();
 
     if (!options.test_play) window.setMode(.maximized);
@@ -252,7 +252,7 @@ fn handleEvents(
 ) !void {
     ui_backend.textInputRect(ui_window.textInputRequested());
     if (ui.menu_state.playingGame()) {
-        win.enableRelativeMouse(.{.unaccelerated = false});
+        win.enableRelativeMouse(.{ .unaccelerated = false });
     } else {
         win.disableRelativeMouse();
         ui_backend.setCursor(ui_window.cursorRequested());
