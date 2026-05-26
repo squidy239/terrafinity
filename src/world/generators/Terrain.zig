@@ -563,7 +563,7 @@ pub const DefaultGenerator = struct {
                     (std.math.pow(f32, terrainNoise * 2, P) * 0.5)
                 else
                     (1 - (std.math.pow(f32, (1 - terrainNoise) * 2, P) * 0.5)));
-                const block_height: i32 = @trunc(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
+                const block_height: i32 = @floor(E * @abs(floatBounds[@intFromBool(E > 0)]) * scale);
                 height[ux][uz] = block_height;
             }
         }
