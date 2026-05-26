@@ -674,7 +674,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     defer GenMeshAndAdd.end();
 
     // Prevent an old version of the chunk from staying loaded
-    if (!self.keepChunkLoaded(io, chunk_pos)) {
+    if (!self.keepChunkLoaded(io, chunk_pos) and self.canUnloadMesh(io, chunk_pos)) {
         self.renderer.removeChunk(io, chunk_pos);
         try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
