@@ -79,6 +79,22 @@ pub fn Cache(
             return total;
         }
 
+        pub fn hits(self: *const Self) u64 {
+            var total: u64 = 0;
+            for (&self.shards) |*shard| {
+                total += shard.metrics.hits.load(.acquire);
+            }
+            return total;
+        }
+
+        pub fn misses(self: *const Self) u64 {
+            var total: u64 = 0;
+            for (&self.shards) |*shard| {
+                total += shard.metrics.misses.load(.acquire);
+            }
+            return total;
+        }
+
         pub fn upsert(self: *Self, io: std.Io, value: *const Value) struct {
             index: usize,
             updated: SetAssociativeCache.UpdateOrInsert,

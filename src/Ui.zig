@@ -129,18 +129,24 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
 
     const grid_count = self.game.world.grids.count();
 
+    const chunk_hits = self.game.world.chunks.hits();
+    const chunk_misses = self.game.world.chunks.misses();
+
+    const chunk_hit_ratio = @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(chunk_hits + chunk_misses));
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
         \\chunks cached: {d}
         \\grids cached: {d}
+        \\chunk hit ratio: {d:.2}
     ,
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),
             self.game.debug_menu.meshes.load(.unordered),
             chunk_count,
             grid_count,
+            chunk_hit_ratio,
         },
     );
     text.addText(str, .{ .background = false });
