@@ -68,14 +68,18 @@ fn setupDependencies(
     b: *std.Build,
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.OptimizeMode,
     sanitize: ThreadSanitizeMode,
 ) void {
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = switch (optimize) {
+            .Debug, .ReleaseSafe => std.lang.OptimizeMode.ReleaseSafe,
+            .ReleaseFast => std.lang.OptimizeMode.ReleaseFast,
+            .ReleaseSmall => std.lang.OptimizeMode.ReleaseSmall,
+        },
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
