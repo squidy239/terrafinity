@@ -404,15 +404,15 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
     self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
-    self.entity_registry.deinit(io, self.allocator, &self.world);
-    if (self.load_future) |*future| future.cancel(io) catch {};
-    self.select.cancelDiscard();
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
     if (self.save_future) |*future| future.cancel(io) catch {};
+    if (self.load_future) |*future| future.cancel(io) catch {};
+    self.select.cancelDiscard(); // I dont think this will be needed once https://codeberg.org/ziglang/zig/issues/35250 is fixed
 
     self.opengl_renderer.deinit(io);
-    self.loaded_or_meshed.deinit(io, self.allocator);
+    self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
+    self.loaded_or_meshed.deinit(io, self.allocator);
 
     self.game_arena.deinit();
     self.* = undefined;
