@@ -222,10 +222,13 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     defer lock.unlock(io);
     while (grid_shard.peek_victim(chunk_pos)) |victim| {
         std.debug.assert(victim.chunk != chunk_ptr);
-        if (victim.chunk.ref_count.load(.seq_cst) != 1 or !victim.chunk.encoding_lock.tryLockShared(io)) {
+        if (victim.chunk.ref_count.load(.seq_cst) != 1) {
             grid_shard.skip_victim(chunk_pos);
             continue;
         }
+        std.debug.assert(victim.chunk.encoding_lock.tryLockShared(io)); // This chunk cannot be used by another thread since it has 1 ref
+        victim.chunk.encoding_lock.unlockShared(io);
+
         std.debug.assert(victim.chunk.encoding == .grid);
         save(self, io, victim.chunk, victim.pos) catch |err| std.log.err("Failed to save chunk: {}", .{err}); //TODO make this stop close the world
         victim.chunk.* = undefined;
@@ -354,6 +357,36 @@ pub const Reader = struct {
     }
 };
 
+pub fn mergeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
+    var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    var sides_changed: [6]bool = @splat(false);
+
+    try chunk.lockExclusive(io);
+    defer chunk.unlockExclusive(io);
+
+    const callIfNeighborFacesChanged = if (self.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+    const old_sides = if (callIfNeighborFacesChanged) chunk.encoding.extractAllFaces() else null;
+    const was_grid: bool = chunk.encoding == .grid;
+
+    chunk.encoding.merge(merge, &grid_buffer);
+
+    if (was_grid and chunk.encoding != .grid) self.freeGrid(io, chunk_pos);
+    if (!was_grid and chunk.encoding == .grid) {
+        const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
+        lock.lockUncancelable(io);
+        defer lock.unlock(io);
+        self.ownGrid(io, chunk, chunk_pos, shard);
+    }
+
+    if (old_sides) |os| {
+        inline for (std.enums.values(Chunk.Encoding.FaceRotation), os) |side, old| {
+            const new = chunk.encoding.extractFace(side);
+            sides_changed[@intFromEnum(side)] = !std.meta.eql(new, old);
+        }
+    }
+    return sides_changed;
+}
+
 pub const Editor = struct {
     pub const Geometry = @import("structures/Geometry.zig");
     pub const Tree = @import("structures/Tree.zig").Tree;
@@ -361,7 +394,7 @@ pub const Editor = struct {
     world: *World,
     last_chunk_cache: ?struct { chunk_pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
     propagate_changes: bool = true,
-    edit_buffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block, std.hash_map.AutoContext(ChunkPos), 50) = .empty,
+    edit_buffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block, std.hash_map.AutoContext(ChunkPos), 80) = .empty,
     tempallocator: std.mem.Allocator,
 
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -380,51 +413,13 @@ pub const Editor = struct {
             const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
             const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
             defer chunk.release();
+            const sides_changed = try self.world.mergeChunk(io, chunk_pos, chunk, encoding);
 
-            {
-                var needs_own_grid: bool = false;
-                var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-
-                {
-                    try chunk.lockExclusive(io);
-                    defer chunk.unlockExclusive(io);
-                    const old_sides: ?[6]Chunk.Encoding.Face = blk: {
-                        const callIfNeighborFacesChanged = if (self.world.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
-                        if (!callIfNeighborFacesChanged) break :blk null;
-                        var sides: [6]Chunk.Encoding.Face = undefined;
-                        inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
-                            sides[@intFromEnum(side)] = chunk.encoding.extractFace(side);
-                        }
-                        break :blk sides;
-                    };
-                    const was_grid: bool = chunk.encoding == .grid;
-                    chunk.encoding.merge(encoding, &grid_buffer);
-                    if (!was_grid and chunk.encoding == .grid) needs_own_grid = true;
-                    if (was_grid and chunk.encoding != .grid) self.world.freeGrid(io, chunk_pos);
-
-                    if (old_sides) |os| {
-                        inline for (std.enums.values(Chunk.Encoding.FaceRotation)) |side| {
-                            const new = chunk.encoding.extractFace(side);
-                            if (!std.meta.eql(new, os[@intFromEnum(side)])) {
-                                const toRemeshPos: ChunkPos = .{ .level = diffChunk.key_ptr.*.level, .position = diffChunk.key_ptr.*.position + side.direction() };
-                                try neghborsToRemesh.put(toRemeshPos, {});
-                            }
-                        }
-                    }
-                }
-
-                if (needs_own_grid) {
-                    const shard, const lock = self.world.chunks.getShardAndLock(chunk_pos);
-                    lock.lockUncancelable(io);
-                    defer lock.unlock(io);
-                    chunk.encoding_lock.lockUncancelable(io);
-                    defer chunk.encoding_lock.unlock(io);
-                    if(chunk.encoding == .grid and chunk.encoding.grid == &grid_buffer) {
-                        self.world.ownGrid(io, chunk, chunk_pos, shard);
-                    }
-                }
+            for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
+                if (!changed) continue;
+                const toRemeshPos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
+                try neghborsToRemesh.put(toRemeshPos, {});
             }
-
             if (self.propagate_changes) {
                 var coords: ChunkPos = chunk_pos;
                 var i: usize = 0;

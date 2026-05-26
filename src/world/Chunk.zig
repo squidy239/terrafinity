@@ -138,6 +138,14 @@ pub const Encoding = union(enum(u1)) {
         }
     }
 
+    pub fn extractAllFaces(self: Encoding) [6]Face {
+        var result: [6]Face = undefined;
+        inline for (std.enums.values(FaceRotation)) |side| {
+            result[@intFromEnum(side)] = self.extractFace(side);
+        }
+        return result;
+    }
+
     pub const Face = union(enum) {
         blocks: [ChunkSize][ChunkSize]Block,
         one_block: Block,
