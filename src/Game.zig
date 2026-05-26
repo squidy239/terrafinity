@@ -97,7 +97,10 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
         state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = true;
         const is_covering = state.allCoveredChildren() or state.is_active;
 
-        try bucket.hash_map.put(allocator, parent, state);
+        // The thread sanitizer warning that points here may be indirectly related to https://codeberg.org/ziglang/zig/issues/35250
+        // If its not I have no idea but I will come back to it once 35250 is fixed
+        // It repos better with 1 loaded_or_meshed bucket and 128 threads for Io
+        try bucket.hash_map.put(allocator, parent, state); 
 
         bubble_up = !was_covering and is_covering;
     }
@@ -174,35 +177,36 @@ fn tryRemoveChunkFromLoaded(
 ) !void {
     if (!self.canUnloadMesh(io, chunk_pos)) return;
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    try bucket.lock.lock(io);
-    var state = bucket.hash_map.get(chunk_pos) orelse {
-        bucket.lock.unlock(io);
-        return;
-    };
-
+    var was_covering: bool = undefined;
+    var is_covering: bool = undefined;
+    {
+        try bucket.lock.lock(io);
+        defer bucket.lock.unlock(io);
+    
+    var state = bucket.hash_map.get(chunk_pos) orelse return;
+    
     const was_active = state.is_active;
     const was_queued = state.is_queued;
 
     // Only return if it's a completely dead ghost node
     if (!was_active and !was_queued) {
         std.debug.assert(!state.noCoveredChildren());
-        bucket.lock.unlock(io);
         return;
     }
 
-    const was_covering = state.allCoveredChildren() or state.is_active;
+    was_covering = state.allCoveredChildren() or state.is_active;
 
     state.is_active = false;
     state.is_queued = false;
 
-    const is_covering = state.allCoveredChildren() or state.is_active;
+    is_covering = state.allCoveredChildren() or state.is_active;
 
     if (state.noCoveredChildren()) {
         _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
     } else {
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
-    bucket.lock.unlock(io);
+}
 
     if (was_covering and !is_covering) {
         try self.markUncovered(io, allocator, chunk_pos);
@@ -876,8 +880,15 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
             ctx.chunks += 1;
             if (ctx.game.keepChunkLoaded(ctx.io, chunk_pos)) return;
             if (!ctx.game.canUnloadMesh(ctx.io, chunk_pos)) return; // children not ready
+            const prev = ctx.io.swapCancelProtection(.blocked);
+            
+            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| switch (err) {
+                error.Canceled => unreachable,
+                else => @panic("TODO handle error"),
+            };
 
-            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch @panic("TODO figure out how to handle this");
+            _ = ctx.io.swapCancelProtection(prev);
+            
             ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
             ctx.unloaded += 1;
         }
@@ -898,7 +909,10 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
-        self.tryRemoveChunkFromLoaded(io, self.allocator, key) catch @panic("TODO handle error");
+        self.tryRemoveChunkFromLoaded(io, self.allocator, key) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => @panic("TODO handle error"),
+        };
         try it.unpause(io);
     }
 }

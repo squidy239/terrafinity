@@ -4,3 +4,6 @@ race:rocksdb
 race:zstd_decompress.c
 race:huf_decompress.c
 race:entropy_common.c
+race:ZSTD_decodeLiteralsBlock
+race:ZSTD_decompressSequences_body
+race:ZSTD_decompressDCtx

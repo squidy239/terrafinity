@@ -1,10 +1,12 @@
 const std = @import("std");
+
+const rocksdb = @import("rocksdb");
+const tracy = @import("tracy");
+
 const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
-const rocksdb = @import("rocksdb");
-const tracy = @import("tracy");
 
 isinit: bool,
 database: rocksdb.database.DB,
@@ -130,19 +132,20 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
     const data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
 
-    const data = std.mem.bytesToValue(ChunkData, data_bytes.data);
+    var data = std.mem.bytesToValue(ChunkData, data_bytes.data);
     data_bytes.deinit();
-
-    if (err_str) |s| {
-        std.log.err("{s}", .{s.data});
-        s.deinit();
-    }
 
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
-    const mergeblocks: Chunk.Encoding = switch (data.encoding) {
+    const mergeblocks: Chunk.Encoding = get: switch (data.encoding) {
         .grid => gr: {
-            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse {
+                // Retry since the grid was removed between the time we loaded the chunk data and now
+                const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+                data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
+                new_data_bytes.deinit();
+                continue :get data.encoding;
+            };
             break :gr .{ .grid = @ptrCast(@alignCast(@constCast(grid_bytes.?.data))) };
         },
         .one_block => .{ .one_block = data.one_block },
