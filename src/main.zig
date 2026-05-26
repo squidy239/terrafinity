@@ -252,7 +252,7 @@ fn handleEvents(
 ) !void {
     ui_backend.textInputRect(ui_window.textInputRequested());
     if (ui.menu_state.playingGame()) {
-        win.enableRelativeMouse(.{ .unaccelerated = false });
+        win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();
         ui_backend.setCursor(ui_window.cursorRequested());
