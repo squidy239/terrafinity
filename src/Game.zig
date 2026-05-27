@@ -396,9 +396,9 @@ pub fn init(
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
         .edit_callback = .{
-            .onEditFn = onEditFn,
-            .onEditFnArgs = @ptrCast(game),
-            .callIfNeighborFacesChanged = true,
+            .function = editorCallback,
+            .context = @ptrCast(game),
+            .on_neghbor_face_change = true,
         },
     };
     errdefer game.world.deinit(io, allocator);
@@ -719,6 +719,9 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     } else {
         self.renderer.removeChunk(io, chunk_pos);
     }
+    const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
+    defer mark.end();
+    
     var was_covering = false;
     var is_covering = false;
     {
@@ -755,7 +758,7 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
     self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
 }
 
-fn onEditFn(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
+fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
     game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
 }

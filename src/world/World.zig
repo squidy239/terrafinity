@@ -47,9 +47,9 @@ chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
 
 pub const EditCallback = struct {
-    onEditFn: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{ Canceled, OnEditFailed }!void,
-    callIfNeighborFacesChanged: bool,
-    onEditFnArgs: *anyopaque,
+    function: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{ Canceled, OnEditFailed }!void,
+    on_neghbor_face_change: bool,
+    context: *anyopaque,
 };
 
 pub const standard_level = 0;
@@ -407,13 +407,16 @@ pub const Editor = struct {
         _: @Int(.unsigned, 32 - @bitSizeOf(anyerror) - 1) = undefined,
     };
     fn runEditFn(callback: World.EditCallback, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, callback_err: *std.atomic.Value(EditErrorStruct)) std.Io.Cancelable!void {
-        callback.onEditFn(io, allocator, chunk_pos, callback.onEditFnArgs) catch |err| switch (err) {
+        callback.function(io, allocator, chunk_pos, callback.context) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => |e| callback_err.store(.{ .exists = true, .err = @intFromError(e) }, .seq_cst),
         };
     }
 
     fn editChunk(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, encoding: Chunk.Encoding, remesh_neghbors_queue: *std.AutoHashMap(ChunkPos, void), remesh_queue_mutex: *std.Io.Mutex, edit_err: *std.atomic.Value(EditErrorStruct)) std.Io.Cancelable!void {
+        const z = tracy.Zone.begin(.{ .src = @src() });
+        defer z.end();
+        
         const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
@@ -429,6 +432,8 @@ pub const Editor = struct {
             remesh_neghbors_queue.put(toRemeshPos, {}) catch @panic("TODO handle");
         }
         if (self.propagate_changes) {
+            const pr = tracy.Zone.begin(.{ .src = @src(), .name = "propagate" });
+            defer pr.end();
             var propagation_editor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
             defer propagation_editor.clear();
             var coords: ChunkPos = chunk_pos;
@@ -456,7 +461,7 @@ pub const Editor = struct {
         try chunk.lockExclusive(io);
         defer chunk.unlockExclusive(io);
 
-        const callIfNeighborFacesChanged = if (world.edit_callback) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+        const callIfNeighborFacesChanged = if (world.edit_callback) |onEdit| onEdit.on_neghbor_face_change else false;
         const old_sides = if (callIfNeighborFacesChanged) chunk.encoding.extractAllFaces() else null;
         const was_grid: bool = chunk.encoding == .grid;
 
@@ -523,6 +528,9 @@ pub const Editor = struct {
     const simplified_size = ChunkSize / scale_factor;
 
     pub fn propagateToParent(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !bool {
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
+        
         const parent_pos = chunk_pos.parent();
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var isoneblock: bool = false;

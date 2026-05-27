@@ -128,7 +128,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
     }
 
     //+1 for main thread, TODO threadlocal
-    for (0..cpu_count + 1) |i| {
+    for (0..self.contexts.capacity) |i| {
         try self.contexts.append(allocator, try window.glCreateContext(.{ .options = gl_options, .share = self.draw_context }));
         self.window.glMakeContextCurrent(self.contexts.items[i]);
         setCallback();
