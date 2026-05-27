@@ -85,7 +85,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .blockAtlasTextureId = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
-        .contexts = try .initCapacity(allocator, cpu_count),
+        .contexts = try .initCapacity(allocator, cpu_count + 8),
         .fbo = undefined,
         .color_texture = undefined,
         .depth_texture = undefined,

@@ -44,11 +44,13 @@ config: WorldConfig,
 
 chunk_sources: [4]?ChunkSource,
 
-onEdit: ?struct {
-    onEditFn: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{OnEditFailed}!void,
+edit_callback: ?EditCallback = null,
+
+pub const EditCallback = struct {
+    onEditFn: *const fn (io: std.Io, allocator: std.mem.Allocator, chunkPos: ChunkPos, args: *anyopaque) error{ Canceled, OnEditFailed }!void,
     callIfNeighborFacesChanged: bool,
     onEditFnArgs: *anyopaque,
-} = null,
+};
 
 pub const standard_level = 0;
 
@@ -240,7 +242,7 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     chunk_ptr.encoding.grid = &grid_shard.get(chunk_pos).?.grid;
 }
 
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, AllSourcesFailed, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .one_block = .null };
     for (self.chunk_sources) |source| {
         if (source) |s| {
@@ -251,7 +253,7 @@ fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
             }
         }
     }
-    return error.AllSourcesFailed;
+    @panic("at least one ChunkSource must be able to generate a chunk");
 }
 
 fn onLoad(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -276,7 +278,7 @@ fn save(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     }
 }
 
-pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, AllSourcesFailed, Unrecoverable, Canceled }!*Chunk {
+pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, structures: bool) error{ OutOfMemory, Unrecoverable, Canceled }!*Chunk {
     const lc = tracy.Zone.begin(.{ .src = @src() });
     defer lc.end();
     const chunk = try self.fetchChunk(io, chunk_pos);
@@ -357,36 +359,6 @@ pub const Reader = struct {
     }
 };
 
-pub fn mergeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
-    var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    var sides_changed: [6]bool = @splat(false);
-
-    try chunk.lockExclusive(io);
-    defer chunk.unlockExclusive(io);
-
-    const callIfNeighborFacesChanged = if (self.onEdit) |onEdit| onEdit.callIfNeighborFacesChanged else false;
-    const old_sides = if (callIfNeighborFacesChanged) chunk.encoding.extractAllFaces() else null;
-    const was_grid: bool = chunk.encoding == .grid;
-
-    chunk.encoding.merge(merge, &grid_buffer);
-
-    if (was_grid and chunk.encoding != .grid) self.freeGrid(io, chunk_pos);
-    if (!was_grid and chunk.encoding == .grid) {
-        const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
-        lock.lockUncancelable(io);
-        defer lock.unlock(io);
-        self.ownGrid(io, chunk, chunk_pos, shard);
-    }
-
-    if (old_sides) |os| {
-        inline for (std.enums.values(Chunk.Encoding.FaceRotation), os) |side, old| {
-            const new = chunk.encoding.extractFace(side);
-            sides_changed[@intFromEnum(side)] = !std.meta.eql(new, old);
-        }
-    }
-    return sides_changed;
-}
-
 pub const Editor = struct {
     pub const Geometry = @import("structures/Geometry.zig");
     pub const Tree = @import("structures/Tree.zig").Tree;
@@ -404,43 +376,107 @@ pub const Editor = struct {
         self.edit_buffer.lockPointers();
         defer self.edit_buffer.unlockPointers();
         var it = self.edit_buffer.iterator();
-        var neghborsToRemesh: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
-        defer neghborsToRemesh.deinit();
-        var propagationEditor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
-        defer propagationEditor.clear();
+        var remesh_neghbors_queue: std.AutoHashMap(ChunkPos, void) = .init(self.tempallocator);
+        defer remesh_neghbors_queue.deinit();
+        var remesh_queue_mutex: std.Io.Mutex = .init;
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
+        var edit_err: std.atomic.Value(EditErrorStruct) = .init(.{});
         while (it.next()) |diffChunk| {
             const chunk_pos = diffChunk.key_ptr.*;
             const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
-            const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-            defer chunk.release();
-            const sides_changed = try self.world.mergeChunk(io, chunk_pos, chunk, encoding);
-
-            for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
-                if (!changed) continue;
-                const toRemeshPos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
-                try neghborsToRemesh.put(toRemeshPos, {});
-            }
-            if (self.propagate_changes) {
-                var coords: ChunkPos = chunk_pos;
-                var i: usize = 0;
-                while (i < 16) {
-                    const changed = try propagationEditor.propagateToParentByCoords(io, allocator, coords);
-                    if (!changed) break;
-                    try propagationEditor.flush(io, allocator);
-                    coords = coords.parent();
-                    i += 1;
-                }
-            }
+            group.async(io, editChunk, .{ self, io, allocator, chunk_pos, encoding, &remesh_neghbors_queue, &remesh_queue_mutex, &edit_err });
         }
+        try group.await(io);
+        if (edit_err.raw.exists) return @errorFromInt(edit_err.raw.err);
         it.index = 0;
         while (it.next()) |pos| {
-            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(io, allocator, pos.key_ptr.*, onEdit.onEditFnArgs);
+            if (self.world.edit_callback) |onEdit| group.async(io, runEditFn, .{ onEdit, io, allocator, pos.key_ptr.*, &edit_err });
         }
-        var rit = neghborsToRemesh.iterator();
+        var rit = remesh_neghbors_queue.iterator();
         while (rit.next()) |pos| {
-            if (self.world.onEdit) |onEdit| try onEdit.onEditFn(io, allocator, pos.key_ptr.*, onEdit.onEditFnArgs);
+            if (self.world.edit_callback) |onEdit| group.async(io, runEditFn, .{ onEdit, io, allocator, pos.key_ptr.*, &edit_err });
         }
-        if (self.propagate_changes) try propagationEditor.flush(io, allocator);
+        try group.await(io);
+        if (edit_err.raw.exists) return @errorFromInt(edit_err.raw.err);
+    }
+
+    const EditErrorStruct = packed struct(u32) {
+        exists: bool = false,
+        err: @Int(.unsigned, @bitSizeOf(anyerror)) = undefined,
+        _: @Int(.unsigned, 32 - @bitSizeOf(anyerror) - 1) = undefined,
+    };
+    fn runEditFn(callback: World.EditCallback, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, callback_err: *std.atomic.Value(EditErrorStruct)) std.Io.Cancelable!void {
+        callback.onEditFn(io, allocator, chunk_pos, callback.onEditFnArgs) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => |e| callback_err.store(.{ .exists = true, .err = @intFromError(e) }, .seq_cst),
+        };
+    }
+
+    fn editChunk(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, encoding: Chunk.Encoding, remesh_neghbors_queue: *std.AutoHashMap(ChunkPos, void), remesh_queue_mutex: *std.Io.Mutex, edit_err: *std.atomic.Value(EditErrorStruct)) std.Io.Cancelable!void {
+        const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+        };
+        defer chunk.release();
+        const sides_changed = try mergeChunk(self.world, io, chunk_pos, chunk, encoding);
+
+        for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
+            if (!changed) continue;
+            const toRemeshPos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
+            try remesh_queue_mutex.lock(io);
+            defer remesh_queue_mutex.unlock(io);
+            remesh_neghbors_queue.put(toRemeshPos, {}) catch @panic("TODO handle");
+        }
+        if (self.propagate_changes) {
+            var propagation_editor: @This() = .{ .propagate_changes = false, .world = self.world, .tempallocator = self.tempallocator };
+            defer propagation_editor.clear();
+            var coords: ChunkPos = chunk_pos;
+            var i: usize = 0;
+            while (i < 16) {
+                const changed = propagation_editor.propagateToParentByCoords(io, allocator, coords) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+                };
+                if (!changed) break;
+                coords = coords.parent();
+                i += 1;
+            }
+            propagation_editor.flush(io, allocator) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+            };
+        }
+    }
+
+    pub fn mergeChunk(world: *World, io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
+        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var sides_changed: [6]bool = @splat(false);
+
+        try chunk.lockExclusive(io);
+        defer chunk.unlockExclusive(io);
+
+        const callIfNeighborFacesChanged = if (world.edit_callback) |onEdit| onEdit.callIfNeighborFacesChanged else false;
+        const old_sides = if (callIfNeighborFacesChanged) chunk.encoding.extractAllFaces() else null;
+        const was_grid: bool = chunk.encoding == .grid;
+
+        chunk.encoding.merge(merge, &grid_buffer);
+
+        if (was_grid and chunk.encoding != .grid) world.freeGrid(io, chunk_pos);
+        if (!was_grid and chunk.encoding == .grid) {
+            const shard, const lock = world.chunks.getShardAndLock(chunk_pos);
+            lock.lockUncancelable(io);
+            defer lock.unlock(io);
+            world.ownGrid(io, chunk, chunk_pos, shard);
+        }
+
+        if (old_sides) |os| {
+            inline for (std.enums.values(Chunk.Encoding.FaceRotation), os) |side, old| {
+                const new = chunk.encoding.extractFace(side);
+                sides_changed[@intFromEnum(side)] = !std.meta.eql(new, old);
+            }
+        }
+        return sides_changed;
     }
 
     pub fn clear(self: *@This()) void {
@@ -670,7 +706,7 @@ test "cube benchmark" {
     var world: World = .{
         .chunks = chunk_cache,
         .grids = grid_cache,
-        .onEdit = null,
+        .edit_callback = null,
         .chunk_sources = .{ generator.getSource(), null, null, null },
         .config = .{ .SpawnCenterPos = .{ 0, 0, 0 }, .SpawnRange = 0 },
     };

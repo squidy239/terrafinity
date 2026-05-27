@@ -395,7 +395,7 @@ pub fn init(
         .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
-        .onEdit = .{
+        .edit_callback = .{
             .onEditFn = onEditFn,
             .onEditFnArgs = @ptrCast(game),
             .callIfNeighborFacesChanged = true,
