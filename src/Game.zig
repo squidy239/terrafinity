@@ -71,6 +71,8 @@ const NodeData = struct {
     /// True when this chunk is queued for rendering but not yet processed.
     is_queued: bool = false,
 
+    structures_generated: bool,
+
     pub fn noCoveredChildren(state: NodeData) bool {
         return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false)))));
     }
@@ -91,7 +93,7 @@ fn markCovered(self: *@This(), io: std.Io, allocator: std.mem.Allocator, pos: Wo
         const bucket = self.loaded_or_meshed.getBucket(parent);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
-        var state: Game.NodeData = bucket.hash_map.get(parent) orelse .{};
+        var state: Game.NodeData = bucket.hash_map.get(parent) orelse .{ .structures_generated = false };
 
         const was_covering = state.allCoveredChildren() or state.is_active;
         state.covered_children[pos_in_parent[0]][pos_in_parent[1]][pos_in_parent[2]] = true;
@@ -673,7 +675,7 @@ fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
-fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
+fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer GenMeshAndAdd.end();
 
@@ -684,7 +686,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         return;
     }
 
-    const chunk = try self.world.loadChunk(io, allocator, chunk_pos, genStructures);
+    const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
     const neighbor_faces = [6]Chunk.Encoding.Face{
         try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xminus, true),
@@ -723,7 +725,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
-        var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{};
+        var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{ .structures_generated = generate_structures };
 
         was_covering = state.allCoveredChildren() or state.is_active;
 
@@ -745,7 +747,7 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
-        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{});
+        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = genStructures });
         was_active = entry.value_ptr.is_active;
         entry.value_ptr.is_queued = true;
     }
@@ -854,7 +856,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
 
                 const node_data = game.loaded_or_meshed.get(io, chunk_pos);
 
-                if (node_data == null or (!node_data.?.is_active and !node_data.?.is_queued)) {
+                if (node_data == null or (!node_data.?.is_active and !node_data.?.is_queued) or !node_data.?.structures_generated) {
                     amount_loaded += 1;
                     try game.addChunkToRenderAsync(io, allocator, chunk_pos, true);
                 }
