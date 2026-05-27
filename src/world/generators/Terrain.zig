@@ -8,6 +8,7 @@ const ChunkSize = Chunk.ChunkSize;
 const Interpolation = @import("../Interpolation.zig");
 const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
+const JitteredGrid = @import("../structures/JitteredGrid.zig");
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
@@ -83,7 +84,7 @@ pub const DefaultGenerator = struct {
     pub const Params = struct {
         terrainblockRandomness: f32,
         terrain_noise: Noise.Noise(f32),
-        tree_noise: Noise.Noise(f32),
+        tree_jitter: JitteredGrid,
         terrain_noise_balance: f32,
         large_terrain_noise: Noise.Noise(f32),
         large_terrain_noise_warp: Noise.Noise(f32),
@@ -107,7 +108,6 @@ pub const DefaultGenerator = struct {
                 self.seed = randomseed;
             }
             self.cave_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 1));
-            self.tree_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 2));
             self.terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
             self.large_terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
             self.large_terrain_noise_warp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
@@ -132,14 +132,7 @@ pub const DefaultGenerator = struct {
                 .domain_warp_type = .simplex,
                 .domain_warp_amp = 10,
             },
-            .tree_noise = .{
-                .frequency = 0.08,
-                .noise_type = .cellular,
-                .rotation_type = .none,
-                .cellular_distance = .euclidean_sq,
-                .cellular_return = .distance,
-                .cellular_jitter_mod = 0.75,
-            },
+            .tree_jitter = .{},
             .terrain_noise_balance = 0.9,
             .large_terrain_noise = .{
                 .frequency = 0.0008,
@@ -573,6 +566,7 @@ pub const DefaultGenerator = struct {
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
         const genstructures = tracy.Zone.begin(.{ .src = @src() });
         defer genstructures.end();
+        if (chunk_pos.level < 0) return; // Does not work for < 0 level
         var editorBuffer: [100_000]u8 = undefined;
         var bfa: std.heap.BufferFirstAllocator = .init(&editorBuffer, allocator);
         var worldEditor = World.Editor{ .world = world, .tempallocator = bfa.allocator(), .propagate_changes = false };
@@ -583,7 +577,6 @@ pub const DefaultGenerator = struct {
             defer chunk.releaseAndUnlockShared(io);
 
             if (chunk.structures_generated.load(.seq_cst)) return;
-            if (chunk.encoding != .grid) return;
             if (!self.params.gen_structures) return;
             const heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const scale: f32 = self.params.terrain_scale * (1.0 / ChunkPos.toScale(chunk_pos.level));
@@ -592,22 +585,26 @@ pub const DefaultGenerator = struct {
                 for (row, 0..) |height, z| {
                     if (@divFloor(height, ChunkSize) != chunk_pos.position[1] or height < self.params.SeaLevel) continue;
                     const y: usize = @intCast(@mod(height, ChunkSize));
-                    if (!chunk.encoding.grid[x][y][z].plantsCanGrow()) continue;
+                    const block = switch (chunk.encoding) {
+                        .grid => chunk.encoding.grid[x][y][z],
+                        .one_block => chunk.encoding.one_block,
+                    };
+                    if (!block.plantsCanGrow()) continue;
 
-                    const realX: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize))))) / scale;
-                    const realZ: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize))))) / scale;
+                    const lvlx: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize)))));
+                    const lvlz: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize)))));
 
-                    const noise = self.params.tree_noise.genNoise2D(realX, realZ);
+                    const istree = self.params.tree_jitter.isStructure(.{ @intFromFloat(lvlx), @intFromFloat(lvlz) }, @intCast(chunk_pos.level));
 
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
-                        if (isTree(noise, scale)) {
+                        if (istree) { //TODO per tree type jitter
                             const centerPos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                             if (chunk_pos.level > 2) {
                                 try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight, chunk_pos.level);
                             } else {
                                 const realY: f32 = @as(f32, @floatFromInt((chunk_pos.position[1] * ChunkSize) + @as(i32, @intCast(@mod(y, ChunkSize))))) / scale;
-                                const realPos = @Vector(3, f32){ realX, realY, realZ };
+                                const realPos = @Vector(3, f32){ lvlx / scale, realY, lvlz / scale };
                                 try placeTree(&worldEditor, centerPos, scale, realPos, tree_conf, self.params.seed.?, chunk_pos.level);
                             }
                         }
@@ -648,10 +645,5 @@ pub const DefaultGenerator = struct {
         }
         const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @trunc(radius / 1.5), 0 }), radius);
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
-    }
-
-    fn isTree(noise: f32, scale: f32) bool {
-        const cutoff = 0.0001;
-        return noise < -1.0 + cutoff / scale;
     }
 };
