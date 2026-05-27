@@ -227,18 +227,20 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
+
     if (opaque_mesh.len > 0) {
         self.render_buffer.put(io, .{ .@"opaque" = chunk_pos }, std.mem.sliceAsBytes(opaque_mesh)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,
         };
-    }
+    } else self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
+
     if (transparent_mesh.len > 0) {
         self.render_buffer.put(io, .{ .transparent = chunk_pos }, std.mem.sliceAsBytes(transparent_mesh)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,
         };
-    }
+    } else self.render_buffer.remove(io, .{ .transparent = chunk_pos });
 }
 
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
