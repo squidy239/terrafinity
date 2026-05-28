@@ -224,11 +224,15 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     return self.cameraFront;
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
+const indexer = std.enums.EnumIndexer(World.Block);
+fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
 
     if (opaque_mesh.len > 0) {
+        for (opaque_mesh) |*face| {
+            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+        }
         self.render_buffer.put(io, .{ .@"opaque" = chunk_pos }, std.mem.sliceAsBytes(opaque_mesh)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,
@@ -236,6 +240,9 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
     } else self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
 
     if (transparent_mesh.len > 0) {
+        for (transparent_mesh) |*face| {
+            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+        }
         self.render_buffer.put(io, .{ .transparent = chunk_pos }, std.mem.sliceAsBytes(transparent_mesh)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,

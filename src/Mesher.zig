@@ -15,7 +15,7 @@ pub const Face = packed struct(u64) {
     y: CoordInChunk,
     z: CoordInChunk,
     rotation: FaceRotation,
-    BlockType: Block,
+    block_type: @typeInfo(Block).@"enum".tag_type,
     _: u29 = undefined,
 };
 
@@ -69,7 +69,7 @@ fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][
                     .zplus => ChunkSize - 1,
                 }),
                 .rotation = comptime rotation,
-                .BlockType = one,
+                .block_type = @intFromEnum(one),
             };
             if (transparent) {
                 try transparent_faces.append(allocator, face);
@@ -110,7 +110,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
                             const result = meshOne(block, neighbor);
                             if (result) |transparent| {
                                 const face = Face{
-                                    .BlockType = block,
+                                    .block_type = @intFromEnum(block),
                                     .rotation = rotation,
                                     .x = @intCast(x),
                                     .y = @intCast(y),

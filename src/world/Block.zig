@@ -2,22 +2,29 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const Block = enum(u16) {
-    null = 0,
-    air = 1,
-    stone = 2,
-    grass = 3,
-    dirt = 4,
-    wood = 5,
-    leaves = 6,
-    water = 7, //id is 7 hardcoded for waves, TODO make this a property
-    snow = 8,
+    stone = normal_start,
+    grass = normal_start + 1,
+    dirt = normal_start + 2,
+    wood = normal_start + 3,
+    snow = normal_start + 4,
+
+    //transparent blocks, >50,000
+    water = transparent_end - 1, //id is 7 hardcoded for waves, TODO make this a property
+    leaves = transparent_end - 2,
+
+    //invisible blocks, > 60,000
+    air = invis_end - 1,
+    null = invis_end - 2,
+    const invis_end = 2 << 10;
+    const transparent_end = 2 << 11;
+    const normal_start = transparent_end;
 
     pub inline fn isTransparent(self: Block) bool {
-        return switch (self) {
-            .null => unreachable,
-            .air, .water, .leaves => true,
-            else => false,
-        };
+        return @intFromEnum(self) < transparent_end;
+    }
+
+    pub inline fn isVisible(self: Block) bool {
+        return @intFromEnum(self) >= invis_end;
     }
 
     pub inline fn isSolid(self: Block) bool {
@@ -25,15 +32,6 @@ pub const Block = enum(u16) {
             .null => unreachable,
             .air,
             .water,
-            => false,
-            else => true,
-        };
-    }
-
-    pub inline fn isVisible(self: Block) bool {
-        return switch (self) {
-            .null => unreachable,
-            .air,
             => false,
             else => true,
         };

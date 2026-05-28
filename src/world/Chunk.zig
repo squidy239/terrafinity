@@ -155,7 +155,7 @@ pub const Encoding = union(enum(u1)) {
         const flat_blocks: *const [ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self);
         const block_vector: @Vector(ChunkSize * ChunkSize, @typeInfo(Block).@"enum".tag_type) = flat_blocks.*;
         const count = std.simd.countElementsWithValue(block_vector, block_vector[0]);
-        return if (count == ChunkSize * ChunkSize) @enumFromInt(block_vector[0]) else null;
+        return if (count == ChunkSize * ChunkSize) self[0][0] else null;
     }
 
     pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {

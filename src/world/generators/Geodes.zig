@@ -17,7 +17,6 @@ pub const CosmicGeodeMultiverseGenerator = struct {
             .params = params,
         };
     }
-
     pub fn getSource(self: *CosmicGeodeMultiverseGenerator) World.ChunkSource {
         return .{
             .data = self,

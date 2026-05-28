@@ -1,8 +1,9 @@
 const std = @import("std");
-const Block = @import("../../main.zig").Block;
 
 const gl = @import("gl");
 const zigimg = @import("zigimg");
+
+const Block = @import("../../main.zig").Block;
 
 //TODO redo this
 
@@ -16,14 +17,12 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     io.random(missing_texture_pixels);
     const missing_texture = try zigimg.Image.fromRawPixelsOwned(resolution[0], resolution[1], missing_texture_pixels, .rgb24);
 
-    var textureArray = try allocator.alloc(?zigimg.Image, @typeInfo(Block).@"enum".fields.len);
-    @memset(textureArray, null);
+    var textures: std.enums.EnumMap(Block, zigimg.Image) = .init(.{});
     defer {
-        for (textureArray) |*img| {
-            if (img.* == null) continue;
-            img.*.?.deinit(allocator);
+        var it = textures.iterator();
+        while (it.next()) |img| {
+            img.value.deinit(allocator);
         }
-        allocator.free(textureArray);
     }
     std.log.info("texture resolution: {any}\n", .{resolution});
     var it = std.Io.Dir.iterate(textures_path);
@@ -32,7 +31,7 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
         switch (image.kind) {
             .file => {
                 if (image.kind == .file and ((std.mem.find(u8, image.name, keyword) != null))) {
-                    std.debug.assert(i < textureArray.len); //should never happen because invalid textures are skipped
+                    std.debug.assert(i < textures.values.len); //should never happen because invalid textures are skipped
                     var loadedImg = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, image.name, .{}), &read_buffer);
                     errdefer loadedImg.deinit(allocator);
                     try loadedImg.convert(allocator, .rgba32);
@@ -45,9 +44,7 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
                         continue;
                     }
                     std.log.debug("loaded texture: {any}\n", .{blockType.?});
-                    const index = @intFromEnum(blockType.?);
-                    std.debug.assert(index < textureArray.len);
-                    textureArray[index] = loadedImg;
+                    textures.put(blockType.?, loadedImg);
                     i += 1;
                 }
             },
@@ -63,10 +60,24 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-    gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(textureArray.len), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    for (0..textureArray.len) |itt| {
-        const textureData = (textureArray[itt] orelse missing_texture).rawBytes();
-        gl.TexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, @intCast(itt), @intCast(resolution[0]), @intCast(resolution[1]), 1, if (textureArray[itt] != null) gl.RGBA else gl.RGB, gl.UNSIGNED_BYTE, @ptrCast(textureData));
+    gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(textures.values.len), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const indexer = std.enums.EnumIndexer(Block);
+    for (0..textures.values.len) |itt| {
+        const blockType = indexer.keyForIndex(itt);
+        const texture = textures.get(blockType) orelse missing_texture;
+        gl.TexSubImage3D(
+            gl.TEXTURE_2D_ARRAY,
+            0,
+            0,
+            0,
+            @intCast(itt),
+            @intCast(resolution[0]),
+            @intCast(resolution[1]),
+            1,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            texture.rawBytes().ptr,
+        );
     }
     gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, 0);

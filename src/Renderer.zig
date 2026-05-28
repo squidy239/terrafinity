@@ -10,7 +10,7 @@ last_viewport: ?[2]u32 = null,
 
 pub const VTable = struct {
     removeChunk: *const fn (*anyopaque, std.Io, ChunkPos) void,
-    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []const Mesher.Face, []const Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void,
+    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void,
     drawChunks: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) error{DrawFailed}!void,
     clear: *const fn (*anyopaque, @Vector(3, f64)) error{DrawFailed}!void,
     setViewport: *const fn (*anyopaque, @Vector(2, u32)) error{ViewportSetFailed}!void,
@@ -20,7 +20,8 @@ pub const VTable = struct {
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
-pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
+///After this call opaque mesh and transparent mesh are in an undefined state and may not be read
+pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) !void {
     return self.vtable.addChunk(self.userdata, io, chunk_pos, opaque_mesh, transparent_mesh);
 }
 
