@@ -416,7 +416,7 @@ pub const Editor = struct {
     fn editChunk(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, encoding: Chunk.Encoding, remesh_neghbors_queue: *std.AutoHashMap(ChunkPos, void), remesh_queue_mutex: *std.Io.Mutex, edit_err: *std.atomic.Value(EditErrorStruct)) std.Io.Cancelable!void {
         const z = tracy.Zone.begin(.{ .src = @src() });
         defer z.end();
-        
+
         const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
@@ -530,7 +530,7 @@ pub const Editor = struct {
     pub fn propagateToParent(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk: *Chunk, chunk_pos: ChunkPos) !bool {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
-        
+
         const parent_pos = chunk_pos.parent();
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var isoneblock: bool = false;
@@ -599,25 +599,23 @@ pub const Editor = struct {
         }
         return simplified;
     }
-};
 
-fn getBestBlock(blocks: [scale_factor * scale_factor * scale_factor]Block) Block {
-    var best: Block = blocks[0];
-    var best_count: f32 = -1.0;
-    inline for (0..blocks.len) |i| {
-        const block = blocks[i];
-        const weight = block.getPropagationWeight();
-        var count: f32 = weight;
-        inline for ((i + 1)..blocks.len) |j| {
-            if (block == blocks[j]) count += weight;
+    fn getBestBlock(blocks: @Vector(scale_factor * scale_factor * scale_factor, @typeInfo(Block).@"enum".tag_type)) Block {
+        var best: Block = undefined;
+        var best_count: f32 = -1.0;
+        inline for (0..scale_factor * scale_factor * scale_factor) |i| {
+            const block_int = blocks[i];
+            const block: Block = @enumFromInt(block_int);
+            const weight = block.getPropagationWeight();
+            const count = std.simd.countElementsWithValue(blocks, block_int);
+            if (count * weight > best_count) {
+                best = @enumFromInt(block_int);
+                best_count = count * weight;
+            }
         }
-        if (count > best_count) {
-            best = blocks[i];
-            best_count = count;
-        }
+        return best;
     }
-    return best;
-}
+};
 
 pub fn saveAll(self: *@This(), io: std.Io) void {
     var group: std.Io.Group = .init;

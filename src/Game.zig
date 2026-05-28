@@ -721,7 +721,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     }
     const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
     defer mark.end();
-    
+
     var was_covering = false;
     var is_covering = false;
     {
