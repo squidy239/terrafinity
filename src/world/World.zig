@@ -429,7 +429,7 @@ pub const Editor = struct {
             const toRemeshPos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
             try remesh_queue_mutex.lock(io);
             defer remesh_queue_mutex.unlock(io);
-            remesh_neghbors_queue.put(toRemeshPos, {}) catch @panic("TODO handle");
+            remesh_neghbors_queue.put(toRemeshPos, {}) catch |err| return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst);
         }
         if (self.propagate_changes) {
             const pr = tracy.Zone.begin(.{ .src = @src(), .name = "propagate" });
@@ -446,11 +446,11 @@ pub const Editor = struct {
                 if (!changed) break;
                 coords = coords.parent();
                 i += 1;
+                propagation_editor.flush(io, allocator) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+                };
             }
-            propagation_editor.flush(io, allocator) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => return edit_err.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
-            };
         }
     }
 
