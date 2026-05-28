@@ -86,14 +86,14 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     _ = io;
     if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
         .grid => return,
-        .one_block => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
+        .uniform => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
     };
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     const data: ChunkData = .{
         .encoding = chunk.encoding,
         .structures_generated = chunk.structures_generated.load(.seq_cst),
-        .one_block = if (chunk.encoding == .one_block) chunk.encoding.one_block else undefined,
+        .one_block = if (chunk.encoding == .uniform) chunk.encoding.uniform else undefined,
     };
     var err_str: ?rocksdb.Data = null;
     defer if (err_str) |s| {
@@ -108,7 +108,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
             write.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
             try self.database.write(write, &err_str);
         },
-        .one_block => {
+        .uniform => {
             try self.database.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data), &err_str);
         },
     }
@@ -148,7 +148,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
             };
             break :gr .{ .grid = @ptrCast(@alignCast(@constCast(grid_bytes.?.data))) };
         },
-        .one_block => .{ .one_block = data.one_block },
+        .uniform => .{ .uniform = data.one_block },
     };
 
     blocks.merge(mergeblocks, grid_buffer);

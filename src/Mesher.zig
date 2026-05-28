@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const tracy = @import("tracy");
 
 const Block = @import("world/Block.zig").Block;
@@ -26,20 +27,20 @@ pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, neighbor_f
         try meshChunkFace(allocator, mainblocks.extractFace(rotation), neighbor_faces[@intFromEnum(rotation)], rotation, opaque_faces, transparent_faces);
     }
     switch (mainblocks) {
-        .one_block => {}, // Done meshing, blocks wont make mesh if they are the same type
+        .uniform => {}, // Done meshing, blocks wont make mesh if they are the same type
         .grid => |grid| try meshBlockGrid(allocator, grid, opaque_faces, transparent_faces),
     }
 }
 
 fn meshChunkFace(allocator: std.mem.Allocator, one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
-    if (one == .one_block and two == .one_block and one.one_block == two.one_block) return;
+    if (one == .uniform and two == .uniform and one.uniform == two.uniform) return;
     const grid_one: [ChunkSize][ChunkSize]Block = switch (one) {
         .blocks => |grid| grid,
-        .one_block => |block| @splat(@splat(block)),
+        .uniform => |block| @splat(@splat(block)),
     };
     const grid_two: [ChunkSize][ChunkSize]Block = switch (two) {
         .blocks => |grid| grid,
-        .one_block => |block| @splat(@splat(block)),
+        .uniform => |block| @splat(@splat(block)),
     };
     try meshChunkFaceGrid(allocator, &grid_one, &grid_two, rotation, opaque_faces, transparent_faces);
 }
@@ -84,8 +85,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
     defer ms.end();
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
-            @setEvalBranchQuota(100000);
-            inline for (0..ChunkSize) |z| {
+            for (0..ChunkSize) |z| {
                 const block = grid[x][y][z];
                 if (block.isVisible()) {
                     inline for (std.enums.values(FaceRotation)) |rotation| {
@@ -154,7 +154,7 @@ test "MeshBenchmark" {
     const test_amount = 1000;
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
     for (0..test_amount) |_| {
-        try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .one_block = .air }), &alist, &alist);
+        try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .uniform = .air }), &alist, &alist);
         alist.clearRetainingCapacity();
     }
     const et = std.Io.Timestamp.now(std.testing.io, .awake);

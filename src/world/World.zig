@@ -243,7 +243,7 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
 }
 
 fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
-    var encoding: Chunk.Encoding = .{ .one_block = .null };
+    var encoding: Chunk.Encoding = .{ .uniform = .null };
     for (self.chunk_sources) |source| {
         if (source) |s| {
             if (s.getBlocks) |getBlocksFn| {
@@ -335,7 +335,7 @@ pub const Reader = struct {
         }
         return switch (self.lastChunkReadCache.?.chunk.encoding) {
             .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
-            .one_block => |b| b,
+            .uniform => |b| b,
         };
     }
 
@@ -347,7 +347,7 @@ pub const Reader = struct {
         defer chunk.releaseAndUnlockShared(io);
         return switch (chunk.encoding) {
             .grid => |b| b[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]],
-            .one_block => |b| b,
+            .uniform => |b| b,
         };
     }
 
@@ -533,13 +533,13 @@ pub const Editor = struct {
 
         const parent_pos = chunk_pos.parent();
         var simplified_blocks: [simplified_size][simplified_size][simplified_size]Block = undefined;
-        var isoneblock: bool = false;
+        var isuniform: bool = false;
         try chunk.lockShared(io);
         switch (chunk.encoding) {
             .grid => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
-            .one_block => |block| {
+            .uniform => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
-                isoneblock = true;
+                isuniform = true;
             },
         }
         chunk.unlockShared(io);
@@ -550,7 +550,7 @@ pub const Editor = struct {
         var changed_parent = false;
         try parent.lockShared(io);
         defer parent.unlockShared(io);
-        if (isoneblock and parent.encoding == .one_block and parent.encoding.one_block == simplified_blocks[0][0][0]) return false;
+        if (isuniform and parent.encoding == .uniform and parent.encoding.uniform == simplified_blocks[0][0][0]) return false;
 
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
@@ -562,7 +562,7 @@ pub const Editor = struct {
                     };
                     const current_block = switch (parent.encoding) {
                         .grid => parent.encoding.grid[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
-                        .one_block => parent.encoding.one_block,
+                        .uniform => parent.encoding.uniform,
                     };
                     const correct_block = simplified_blocks[x][y][z];
                     if (current_block == correct_block) continue;

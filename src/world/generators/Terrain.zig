@@ -378,13 +378,13 @@ pub const DefaultGenerator = struct {
         defer gen.end();
         _ = world;
         if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmax, 0 }, chunk_pos.level).position[1]) {
-            blocks.merge(.{ .one_block = .air }, grid_buffer);
+            blocks.merge(.{ .uniform = .air }, grid_buffer);
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, chunk_pos.level).position[1]) {
-            blocks.merge(.{ .one_block = .stone }, grid_buffer);
+            blocks.merge(.{ .uniform = .stone }, grid_buffer);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
@@ -392,16 +392,16 @@ pub const DefaultGenerator = struct {
             const genterra = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
             generateTerrain(&blockgrid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunkscale));
             genterra.end();
-            const oneblock = Chunk.isOneBlock(&blockgrid);
+            const oneblock = Chunk.getUniform(&blockgrid);
             if (oneblock != null and oneblock.? == .air) {
-                blocks.merge(.{ .one_block = .air }, grid_buffer);
+                blocks.merge(.{ .uniform = .air }, grid_buffer);
                 return;
             }
         }
         generateCavesInterpolate(&blockgrid, chunk_pos, heights, @floatCast(chunkscale), self.params);
-        const oneblock = Chunk.isOneBlock(&blockgrid);
+        const oneblock = Chunk.getUniform(&blockgrid);
         if (oneblock) |block| {
-            blocks.merge(.{ .one_block = block }, grid_buffer);
+            blocks.merge(.{ .uniform = block }, grid_buffer);
         } else blocks.merge(.{ .grid = &blockgrid }, grid_buffer);
     }
 
@@ -587,7 +587,7 @@ pub const DefaultGenerator = struct {
                     const y: usize = @intCast(@mod(height, ChunkSize));
                     const block = switch (chunk.encoding) {
                         .grid => chunk.encoding.grid[x][y][z],
-                        .one_block => chunk.encoding.one_block,
+                        .uniform => chunk.encoding.uniform,
                     };
                     if (!block.plantsCanGrow()) continue;
 

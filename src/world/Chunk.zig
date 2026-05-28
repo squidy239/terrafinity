@@ -18,21 +18,21 @@ saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum(u1)) {
     grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
-    one_block: Block,
+    uniform: Block,
 
     pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
-        return if (isOneBlock(blocks)) |one_block| .{ .one_block = one_block } else .{ .grid = blocks };
+        return if (getUniform(blocks)) |one_block| .{ .uniform = one_block } else .{ .grid = blocks };
     }
 
     pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
         const m = tracy.Zone.begin(.{ .src = @src() });
         defer m.end();
         switch (mergeBlocks) {
-            .one_block => {
-                if (mergeBlocks.one_block == .null) return;
+            .uniform => {
+                if (mergeBlocks.uniform == .null) return;
                 switch (blocks.*) {
-                    .one_block => blocks.* = mergeBlocks,
-                    .grid => blocks.* = .{ .one_block = mergeBlocks.one_block },
+                    .uniform => blocks.* = mergeBlocks,
+                    .grid => blocks.* = .{ .uniform = mergeBlocks.uniform },
                 }
             },
             .grid => {
@@ -42,7 +42,7 @@ pub const Encoding = union(enum(u1)) {
                 const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
 
                 selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
-                if (isOneBlock(blocks.grid)) |block| blocks.* = .{ .one_block = block };
+                if (getUniform(blocks.grid)) |block| blocks.* = .{ .uniform = block };
             },
         }
     }
@@ -76,7 +76,7 @@ pub const Encoding = union(enum(u1)) {
     pub fn toBlocks(blocks: *Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
         if (blocks.* == .grid) return;
         switch (blocks.*) {
-            .one_block => |block| {
+            .uniform => |block| {
                 grid_buffer.* = @splat(@splat(@splat(block)));
                 blocks.* = .{ .grid = grid_buffer };
             },
@@ -132,9 +132,9 @@ pub const Encoding = union(enum(u1)) {
                         }
                     },
                 }
-                return .{ .blocks = result };
+                return if (getFaceUniform(&result)) |block| .{ .uniform = block } else .{ .blocks = result };
             },
-            .one_block => |block| return .{ .one_block = block },
+            .uniform => |block| return .{ .uniform = block },
         }
     }
 
@@ -148,8 +148,15 @@ pub const Encoding = union(enum(u1)) {
 
     pub const Face = union(enum) {
         blocks: [ChunkSize][ChunkSize]Block,
-        one_block: Block,
+        uniform: Block,
     };
+
+    pub fn getFaceUniform(self: *const [ChunkSize][ChunkSize]Block) ?Block {
+        const flat_blocks: *const [ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self);
+        const block_vector: @Vector(ChunkSize * ChunkSize, @typeInfo(Block).@"enum".tag_type) = flat_blocks.*;
+        const count = std.simd.countElementsWithValue(block_vector, block_vector[0]);
+        return if (count == ChunkSize * ChunkSize) @enumFromInt(block_vector[0]) else null;
+    }
 
     pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
         @disableInstrumentation();
@@ -159,7 +166,7 @@ pub const Encoding = union(enum(u1)) {
                 grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
                 break :blk Encoding{ .grid = grid };
             },
-            .one_block => .{ .one_block = smith.value(Block) },
+            .one_block => .{ .uniform = smith.value(Block) },
         };
     }
 };
@@ -174,12 +181,12 @@ pub fn from(blockEncoding: Encoding, chunk: *@This()) !*@This() {
 }
 
 ///checks if the block array is all the same block
-pub fn isOneBlock(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
+pub fn getUniform(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
     const firstBlockVec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(blockArray[0][0][0]));
-    var oneblock: @Vector(ChunkSize, bool) = comptime @splat(true);
+    var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
     const linearBlockArray: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
-    for (linearBlockArray) |blocks| oneblock &= (blocks == firstBlockVec);
-    return if (@reduce(.And, oneblock)) blockArray[0][0][0] else null;
+    for (linearBlockArray) |blocks| uniform &= (blocks == firstBlockVec);
+    return if (@reduce(.And, uniform)) blockArray[0][0][0] else null;
 }
 
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
@@ -190,7 +197,7 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceR
 }
 
 pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
-    std.debug.assert(self.encoding == .grid or self.encoding == .one_block);
+    std.debug.assert(self.encoding == .grid or self.encoding == .uniform);
     if (self.ref_count.load(.seq_cst) == amount) return true;
     const st = std.Io.Timestamp.now(io, .awake);
     while (self.ref_count.load(.seq_cst) != amount) {
@@ -253,15 +260,30 @@ pub fn releaseAndUnlockShared(self: *@This(), io: std.Io) void {
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
-test "IsOneBlock" {
+test "getUniform" {
     const testing = std.testing;
-    var one_block_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
-    one_block_chunk[0][0][0] = .stone;
-    try testing.expect(isOneBlock(&one_block_chunk) == null);
 
-    var all_stone_chunk: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
-    try testing.expect(isOneBlock(&all_stone_chunk) != null);
-    try testing.expect(isOneBlock(&all_stone_chunk).? == .stone);
+    var all_stone: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
+    try testing.expectEqual(Block.stone, getUniform(&all_stone));
+
+    var all_air: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    try testing.expectEqual(Block.air, getUniform(&all_air));
+
+    var diff_first: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    diff_first[0][0][0] = .stone;
+    try testing.expectEqual(@as(?Block, null), getUniform(&diff_first));
+
+    var diff_last: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    diff_last[ChunkSize - 1][ChunkSize - 1][ChunkSize - 1] = .stone;
+    try testing.expectEqual(@as(?Block, null), getUniform(&diff_last));
+
+    var diff_middle: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
+    diff_middle[ChunkSize / 2][ChunkSize / 2][ChunkSize / 2] = .air;
+    try testing.expectEqual(@as(?Block, null), getUniform(&diff_middle));
+
+    var diff_row_end: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
+    diff_row_end[0][0][ChunkSize - 1] = .air;
+    try testing.expectEqual(@as(?Block, null), getUniform(&diff_row_end));
 }
 
 test {
