@@ -42,14 +42,17 @@ fn meshChunkFace(allocator: std.mem.Allocator, one: Chunk.Encoding.Face, two: Ch
 }
 
 fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *const [ChunkSize][ChunkSize]Block, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
+    try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
+    try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
+
     for (grid_one, grid_two, 0..) |row_one, row_two, i| {
-        const one_tag: [row_one.len]Block.Tag = @bitCast(row_one);
-        const two_tag: [row_two.len]Block.Tag = @bitCast(row_two);
-        const result = meshMany(row_one.len, one_tag, two_tag);
-        const none_vec: @Vector(row_one.len, u8) = @splat(@intFromEnum(MeshResult.none));
-        if (@reduce(.And, result == none_vec)) continue;
-        for (result, 0.., row_one) |res, j, one| {
-            if (res == @intFromEnum(MeshResult.none)) continue;
+        const one_tag: [ChunkSize]Block.Tag = @bitCast(row_one);
+        const two_tag: [ChunkSize]Block.Tag = @bitCast(row_two);
+        const result = meshMany(ChunkSize, one_tag, two_tag);
+        var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != MeshResult.none_vec);
+        while (active_mask != 0) {
+            const j = @ctz(active_mask);
+            const res = result[j];
             const face: Face = .{
                 .x = @intCast(switch (comptime rotation) {
                     .xminus => 0,
@@ -61,22 +64,23 @@ fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][
                     .xminus, .xplus => i,
                     .yminus => 0,
                     .yplus => ChunkSize - 1,
-                    .zminus, .zplus => j,
+                    .zminus, .zplus => j, // Here is where 'j' maps to Y!
                 }),
                 .z = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => j,
+                    .xminus, .xplus => j, // Here is where 'j' maps to Z!
                     .yminus, .yplus => j,
                     .zminus => 0,
                     .zplus => ChunkSize - 1,
                 }),
                 .rotation = comptime rotation,
-                .block_type = @intFromEnum(one),
+                .block_type = one_tag[j],
             };
-            if (res == @intFromEnum(MeshResult.transparent)) {
-                try transparent_faces.append(allocator, face);
-            } else {
-                try opaque_faces.append(allocator, face);
+            switch (res) {
+                @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
+                @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
+                else => unreachable,
             }
+            active_mask &= (active_mask - 1);
         }
     }
 }
@@ -88,7 +92,6 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
         for (0..ChunkSize) |y| {
             const center_row: [ChunkSize]Block.Tag = @bitCast(grid[x][y]);
             const center_vec: @Vector(ChunkSize, Block.Tag) = center_row;
-            const none_vec: @Vector(ChunkSize, u8) = comptime @splat(@intFromEnum(MeshResult.none));
 
             inline for (std.enums.values(FaceRotation)) |rotation| {
                 const at_boundary = switch (comptime rotation) {
@@ -109,30 +112,34 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
                         .zminus => std.simd.shiftElementsRight(center_vec, 1, @intFromEnum(Block.null)),
                         .zplus => std.simd.shiftElementsLeft(center_vec, 1, @intFromEnum(Block.null)),
                     };
-                    const result = meshMany(ChunkSize, center_vec, neighbor_vec);
-                    var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != none_vec);
-                    if (comptime rotation == .zminus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1);
-                    if (comptime rotation == .zplus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1 << 31);
-                    while (active_mask != 0) {
-                        const z = @ctz(active_mask); 
-                        const res = result[z];
-                        const face = Face{
-                            .block_type = center_row[z],
-                            .rotation = rotation,
-                            .x = @intCast(x),
-                            .y = @intCast(y),
-                            .z = @intCast(z),
-                        };
-                        if (res == @intFromEnum(MeshResult.transparent)) {
-                            transparent_faces.appendAssumeCapacity(face);
-                        } else {
-                            opaque_faces.appendAssumeCapacity(face);
-                        }
-                        active_mask &= (active_mask - 1); 
-                    }
+                    computeRow(center_row, neighbor_vec, center_vec, rotation, x, y, transparent_faces, opaque_faces);
                 }
             }
         }
+    }
+}
+
+inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(ChunkSize, Block.Tag), center_vec: @Vector(ChunkSize, Block.Tag), comptime rotation: FaceRotation, x: usize, y: usize, transparent_faces: *std.ArrayList(Face), opaque_faces: *std.ArrayList(Face)) void {
+    const result = meshMany(ChunkSize, center_vec, neighbor_vec);
+    var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != MeshResult.none_vec);
+    if (comptime rotation == .zminus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1);
+    if (comptime rotation == .zplus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1 << 31);
+    while (active_mask != 0) {
+        const z = @ctz(active_mask);
+        const res = result[z];
+        const face = Face{
+            .block_type = center_row[z],
+            .rotation = rotation,
+            .x = @intCast(x),
+            .y = @intCast(y),
+            .z = @intCast(z),
+        };
+        switch (res) {
+            @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
+            @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
+            else => unreachable,
+        }
+        active_mask &= (active_mask - 1);
     }
 }
 
@@ -142,23 +149,26 @@ inline fn meshOne(one: Block, two: Block) MeshResult {
     return if (one.isTransparent()) .transparent else .@"opaque";
 }
 
-pub const MeshResult = enum(u8) {
-    none = 0,
-    transparent = 1,
-    @"opaque" = 2,
+pub const MeshResult = enum(Tag) {
+    pub const Tag = u8;
+    pub const none_vec: @Vector(ChunkSize, MeshResult.Tag) = @splat(@intFromEnum(MeshResult.none));
+
+    none,
+    transparent,
+    @"opaque",
 };
 ///returns false if the face is opaque, true if transparent, null if it should not be meshed
-inline fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) [len]u8 {
+inline fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) [len]MeshResult.Tag {
     const is_same = one == two;
     const ones_invisible = one < @as(@Vector(len, Block.Tag), @splat(Block.invis_end));
     const twos_opaque = two >= @as(@Vector(len, Block.Tag), @splat(Block.transparent_end));
     const abort_mask = is_same | ones_invisible | twos_opaque;
     const ones_transparent = one < @as(@Vector(len, Block.Tag), @splat(Block.transparent_end));
-    const result_none: @Vector(len, u8) = @splat(@intFromEnum(MeshResult.none));
-    const result_trans: @Vector(len, u8) = @splat(@intFromEnum(MeshResult.transparent));
-    const result_opaque: @Vector(len, u8) = @splat(@intFromEnum(MeshResult.@"opaque"));
-    const valid_faces = @select(u8, ones_transparent, result_trans, result_opaque);
-    const final_int_result = @select(u8, abort_mask, result_none, valid_faces);
+    const result_none: @Vector(len, MeshResult.Tag) = @splat(@intFromEnum(MeshResult.none));
+    const result_trans: @Vector(len, MeshResult.Tag) = @splat(@intFromEnum(MeshResult.transparent));
+    const result_opaque: @Vector(len, MeshResult.Tag) = @splat(@intFromEnum(MeshResult.@"opaque"));
+    const valid_faces = @select(MeshResult.Tag, ones_transparent, result_trans, result_opaque);
+    const final_int_result = @select(MeshResult.Tag, abort_mask, result_none, valid_faces);
     return final_int_result;
 }
 
