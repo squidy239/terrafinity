@@ -9,11 +9,9 @@ pub const Block = enum(Tag) {
     wood = normal_start + 3,
     snow = normal_start + 4,
 
-    //transparent blocks, >50,000
-    water = transparent_end - 1, //id is 7 hardcoded for waves, TODO make this a property
+    water = transparent_end - 1, //position is 7 hardcoded for waves, TODO make this a property
     leaves = transparent_end - 2,
 
-    //invisible blocks, > 60,000
     air = invis_end - 1,
     null = invis_end - 2,
     pub const invis_end = 2 << 10;
@@ -29,11 +27,11 @@ pub const Block = enum(Tag) {
     }
 
     pub inline fn isTransparentVector(comptime len: usize, vector: @Vector(len, @typeInfo(Block).@"enum".tag_type)) @Vector(len, bool) {
-        return vector < transparent_end;
+        return vector < comptime @as(@Vector(len, @typeInfo(Block).@"enum".tag_type), @splat(transparent_end));
     }
 
     pub inline fn isVisibleVector(comptime len: usize, vector: @Vector(len, @typeInfo(Block).@"enum".tag_type)) @Vector(len, bool) {
-        return vector >= invis_end;
+        return vector >= comptime @as(@Vector(len, @typeInfo(Block).@"enum".tag_type), @splat(invis_end));
     }
 
     pub inline fn isSolid(self: Block) bool {
