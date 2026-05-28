@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const Block = enum(u16) {
+pub const Block = enum(Tag) {
+    pub const Tag = u16;
     stone = normal_start,
     grass = normal_start + 1,
     dirt = normal_start + 2,
@@ -15,9 +16,9 @@ pub const Block = enum(u16) {
     //invisible blocks, > 60,000
     air = invis_end - 1,
     null = invis_end - 2,
-    const invis_end = 2 << 10;
-    const transparent_end = 2 << 11;
-    const normal_start = transparent_end;
+    pub const invis_end = 2 << 10;
+    pub const transparent_end = 2 << 11;
+    pub const normal_start = transparent_end;
 
     pub inline fn isTransparent(self: Block) bool {
         return @intFromEnum(self) < transparent_end;
@@ -25,6 +26,14 @@ pub const Block = enum(u16) {
 
     pub inline fn isVisible(self: Block) bool {
         return @intFromEnum(self) >= invis_end;
+    }
+
+    pub inline fn isTransparentVector(comptime len: usize, vector: @Vector(len, @typeInfo(Block).@"enum".tag_type)) @Vector(len, bool) {
+        return vector < transparent_end;
+    }
+
+    pub inline fn isVisibleVector(comptime len: usize, vector: @Vector(len, @typeInfo(Block).@"enum".tag_type)) @Vector(len, bool) {
+        return vector >= invis_end;
     }
 
     pub inline fn isSolid(self: Block) bool {

@@ -166,7 +166,7 @@ pub const Encoding = union(enum(u1)) {
                 grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
                 break :blk Encoding{ .grid = grid };
             },
-            .one_block => .{ .uniform = smith.value(Block) },
+            .uniform => .{ .uniform = smith.value(Block) },
         };
     }
 };
