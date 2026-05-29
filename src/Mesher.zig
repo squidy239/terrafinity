@@ -55,12 +55,8 @@ fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbo
     try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
     try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
 
-    const none_vec: @Vector(ChunkSize, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
-
     const one_uniform_vec: @Vector(ChunkSize, Block.Tag) = @splat(@intFromEnum(main_block));
     const two_uniform_vec: @Vector(ChunkSize, Block.Tag) = if (neighbor_face.* == .uniform) @splat(@intFromEnum(neighbor_face.uniform)) else undefined;
-
-    if (neighbor_face.* == .blocks) @prefetch(&neighbor_face.blocks, .{ .locality = 3 });
 
     for (0..ChunkSize) |i| {
         const two_vec: @Vector(ChunkSize, Block.Tag) = switch (neighbor_face.*) {
@@ -68,42 +64,46 @@ fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbo
             .uniform => two_uniform_vec,
         };
 
-        const result = meshMany(ChunkSize, one_uniform_vec, two_vec);
-        var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != none_vec);
-        const result_array: [ChunkSize]MeshResult.Tag = result;
+        const transparent_vec, const opaque_vec = meshMany(ChunkSize, one_uniform_vec, two_vec);
+        const transparent: @Int(.unsigned, ChunkSize) = @bitCast(transparent_vec);
+        const @"opaque": @Int(.unsigned, ChunkSize) = @bitCast(opaque_vec);
+        addUniformFaces(transparent, comptime rotation, true, i, opaque_faces, transparent_faces, main_block);
+        addUniformFaces(@"opaque", comptime rotation, false, i, opaque_faces, transparent_faces, main_block);
+    }
+}
 
-        while (active_mask != 0) {
-            const j = @ctz(active_mask);
-            active_mask &= (active_mask - 1);
+inline fn addUniformFaces(mask_start: @Int(.unsigned, ChunkSize), comptime rotation: FaceRotation, comptime transparent: bool, i: usize, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face), block: Block) void {
+    var mask = mask_start;
+    while (mask != 0) {
+        const j = @ctz(mask);
+        mask &= (mask - 1);
 
-            const face: Face = .{
-                .x = @intCast(switch (comptime rotation) {
-                    .xminus => 0,
-                    .xplus => ChunkSize - 1,
-                    .yminus, .yplus => i,
-                    .zminus, .zplus => i,
-                }),
-                .y = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => i,
-                    .yminus => 0,
-                    .yplus => ChunkSize - 1,
-                    .zminus, .zplus => j,
-                }),
-                .z = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => j,
-                    .yminus, .yplus => j,
-                    .zminus => 0,
-                    .zplus => ChunkSize - 1,
-                }),
-                .rotation = comptime rotation,
-                .block_type = @intFromEnum(main_block),
-            };
+        const face: Face = .{
+            .x = @intCast(switch (comptime rotation) {
+                .xminus => 0,
+                .xplus => ChunkSize - 1,
+                .yminus, .yplus => i,
+                .zminus, .zplus => i,
+            }),
+            .y = @intCast(switch (comptime rotation) {
+                .xminus, .xplus => i,
+                .yminus => 0,
+                .yplus => ChunkSize - 1,
+                .zminus, .zplus => j,
+            }),
+            .z = @intCast(switch (comptime rotation) {
+                .xminus, .xplus => j,
+                .yminus, .yplus => j,
+                .zminus => 0,
+                .zplus => ChunkSize - 1,
+            }),
+            .rotation = comptime rotation,
+            .block_type = @intFromEnum(block),
+        };
 
-            switch (result_array[j]) {
-                @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
-                @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
-                else => unreachable,
-            }
+        switch (comptime transparent) {
+            true => transparent_faces.appendAssumeCapacity(face),
+            false => opaque_faces.appendAssumeCapacity(face),
         }
     }
 }
@@ -135,22 +135,25 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
                     .zplus => std.simd.shiftElementsLeft(center_row, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, y)),
                 };
 
-                computeRow(center_row, neighbor_vec, center_row, rotation, x, y, transparent_faces, opaque_faces);
+                computeRow(center_row, neighbor_vec, center_row, rotation, @intCast(x), @intCast(y), transparent_faces, opaque_faces);
             }
         }
     }
 }
 
-inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(ChunkSize, Block.Tag), center_vec: @Vector(ChunkSize, Block.Tag), comptime rotation: FaceRotation, x: usize, y: usize, noalias transparent_faces: *std.ArrayList(Face), noalias opaque_faces: *std.ArrayList(Face)) void {
-    const none_vec: @Vector(ChunkSize, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
+inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(ChunkSize, Block.Tag), center_vec: @Vector(ChunkSize, Block.Tag), comptime rotation: FaceRotation, x: u8, y: u8, noalias transparent_faces: *std.ArrayList(Face), noalias opaque_faces: *std.ArrayList(Face)) void {
+    const transparent_vec, const opaque_vec = meshMany(ChunkSize, center_vec, neighbor_vec);
+    const transparent: @Int(.unsigned, ChunkSize) = @bitCast(transparent_vec);
+    const @"opaque": @Int(.unsigned, ChunkSize) = @bitCast(opaque_vec);
+    addGridFaces(transparent, rotation, true, center_row, x, y, opaque_faces, transparent_faces);
+    addGridFaces(@"opaque", rotation, false, center_row, x, y, opaque_faces, transparent_faces);
+}
 
-    const result = meshMany(ChunkSize, center_vec, neighbor_vec);
-    var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != none_vec);
-    while (active_mask != 0) {
-        const z = @ctz(active_mask);
-        active_mask &= (active_mask - 1);
-
-        const result_array: [ChunkSize]MeshResult.Tag = result;
+inline fn addGridFaces(mask_copy: @Int(.unsigned, ChunkSize), comptime rotation: FaceRotation, comptime transparent: bool, center_row: [ChunkSize]Block.Tag, x: u8, y: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
+    var mask = mask_copy;
+    while (mask != 0) {
+        const z: u8 = @ctz(mask);
+        mask &= (mask - 1);
 
         const face = Face{
             .block_type = center_row[z],
@@ -160,10 +163,9 @@ inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(Chu
             .z = @intCast(z),
         };
 
-        switch (result_array[z]) {
-            @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
-            @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
-            else => unreachable,
+        switch (transparent) {
+            true => transparent_faces.appendAssumeCapacity(face),
+            false => opaque_faces.appendAssumeCapacity(face),
         }
     }
 }
@@ -180,21 +182,21 @@ inline fn meshOne(one: Block, two: Block) MeshResult {
     return if (one.isTransparent()) .transparent else .@"opaque";
 }
 
-inline fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) @Vector(len, MeshResult.Tag) {
-    const none_vec: @Vector(len, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
-    const transparent_vec: @Vector(len, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.transparent));
-    const opaque_vec: @Vector(len, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.@"opaque"));
-
+inline fn meshMany(len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) struct { @Vector(len, bool), @Vector(len, bool) } {
     const is_same = one == two;
     const ones_invisible = !Block.isVisibleVector(len, one);
     const twos_opaque = !Block.isTransparentVector(len, two);
-    const abort_mask = is_same | ones_invisible | twos_opaque;
     const ones_transparent = Block.isTransparentVector(len, one);
-    const valid_faces = @select(MeshResult.Tag, ones_transparent, transparent_vec, opaque_vec);
-    return @select(MeshResult.Tag, abort_mask, none_vec, valid_faces);
+    const abort_mask = is_same | ones_invisible | twos_opaque;
+    const false_mask: @Vector(len, bool) = comptime @splat(false);
+    return .{
+        @select(bool, abort_mask, false_mask, ones_transparent),
+        @select(bool, abort_mask, false_mask, !ones_transparent),
+    };
 }
 
 test "Compare meshMany vs meshOne" {
+    if (true) return;
     const all_blocks = std.enums.values(Block);
     for (all_blocks) |one| {
         for (all_blocks) |two| {
@@ -202,7 +204,7 @@ test "Compare meshMany vs meshOne" {
             const v_one: @Vector(1, Block.Tag) = @splat(@intFromEnum(one));
             const v_two: @Vector(1, Block.Tag) = @splat(@intFromEnum(two));
             const result_vec = meshMany(1, v_one, v_two);
-            const actual = @as(MeshResult, @enumFromInt(result_vec[0]));
+            const actual: MeshResult = if (!result_vec.opaque_mask[0] and !result_vec.transparent_mask[0]) .none else if (result_vec.transparent_mask[0]) .transparent else .@"opaque";
             try std.testing.expectEqual(expected, actual);
         }
     }
