@@ -84,7 +84,6 @@ pub const DefaultGenerator = struct {
     pub const Params = struct {
         terrainblockRandomness: f32,
         terrain_noise: Noise.Noise(f32),
-        tree_jitter: JitteredGrid,
         terrain_noise_balance: f32,
         large_terrain_noise: Noise.Noise(f32),
         large_terrain_noise_warp: Noise.Noise(f32),
@@ -132,7 +131,6 @@ pub const DefaultGenerator = struct {
                 .domain_warp_type = .simplex,
                 .domain_warp_amp = 10,
             },
-            .tree_jitter = .{},
             .terrain_noise_balance = 0.9,
             .large_terrain_noise = .{
                 .frequency = 0.0008,
@@ -192,12 +190,13 @@ pub const DefaultGenerator = struct {
             .gen_structures = true,
             .trees = &.{
                 .{
+                    .placer = .{ .box_size = 2048, .inner_box_size = 1800 },
                     .baseRadius = 15,
                     .baseRadiusVariation = 0.5,
                     .trunkHeight = 100,
                     .trunkHeightVariation = 0.5,
                     .leafDensity = 0.5,
-                    .enabled = false,
+                    .enabled = true,
                     .leafSize = 6,
                     .steps = &.{
                         .{
@@ -283,6 +282,7 @@ pub const DefaultGenerator = struct {
                     },
                 },
                 .{
+                    .placer = .{ .box_size = 128, .inner_box_size = 110 },
                     .baseRadius = 1.3,
                     .baseRadiusVariation = 0.5,
                     .trunkHeight = 15,
@@ -362,6 +362,7 @@ pub const DefaultGenerator = struct {
     };
 
     pub const TreeConfig = struct {
+        placer: JitteredGrid = .{},
         enabled: bool = true,
         steps: []const World.Editor.Tree.StepConfig,
         baseRadius: f32,
@@ -594,11 +595,10 @@ pub const DefaultGenerator = struct {
                     const lvlx: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize)))));
                     const lvlz: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize)))));
 
-                    const istree = self.params.tree_jitter.isStructure(.{ @intFromFloat(lvlx), @intFromFloat(lvlz) }, @intCast(chunk_pos.level));
-
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
-                        if (istree) { //TODO per tree type jitter
+                        const istree = tree_conf.placer.isStructure(.{ @intFromFloat(lvlx), @intFromFloat(lvlz) }, @intCast(chunk_pos.level));
+                        if (istree) {
                             const centerPos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                             if (chunk_pos.level > 2) {
                                 try placeLowResTree(&worldEditor, centerPos, scale, tree_conf.trunkHeight, chunk_pos.level);

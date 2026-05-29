@@ -132,7 +132,7 @@ pub const Encoding = union(enum(u1)) {
                         }
                     },
                 }
-                return if (getFaceUniform(&result)) |block| .{ .uniform = block } else .{ .blocks = result };
+                return if (getFaceUniform(&result)) |block| .{ .uniform = block } else .{ .grid = result };
             },
             .uniform => |block| return .{ .uniform = block },
         }
@@ -147,7 +147,7 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub const Face = union(enum) {
-        blocks: [ChunkSize][ChunkSize]Block,
+        grid: [ChunkSize][ChunkSize]Block,
         uniform: Block,
     };
 

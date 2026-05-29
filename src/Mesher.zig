@@ -20,8 +20,8 @@ pub const Face = packed struct(u64) {
 
 /// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
 /// neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
-    switch (mainblocks) {
+pub fn mesh(allocator: std.mem.Allocator, maingrid: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    switch (maingrid) {
         .uniform => |main_block| {
             inline for (std.enums.values(FaceRotation)) |rotation| {
                 const neighbor = &neighbor_faces[@intFromEnum(rotation)];
@@ -36,7 +36,7 @@ pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, noalias ne
 inline fn getNeighborVec(comptime rotation: FaceRotation, neighbor_face: *const Chunk.Encoding.Face, x: usize, y: usize) @Vector(ChunkSize, Block.Tag) {
     switch (neighbor_face.*) {
         .uniform => |block| return @splat(@intFromEnum(block)),
-        .blocks => |*face_grid| switch (comptime rotation) {
+        .grid => |*face_grid| switch (comptime rotation) {
             .xminus, .xplus => return @bitCast(face_grid[y]),
             .yminus, .yplus => return @bitCast(face_grid[x]),
             .zminus, .zplus => unreachable,
@@ -47,7 +47,7 @@ inline fn getNeighborVec(comptime rotation: FaceRotation, neighbor_face: *const 
 inline fn getNeighborBlockZ(neighbor_face: *const Chunk.Encoding.Face, x: usize, y: usize) Block.Tag {
     switch (neighbor_face.*) {
         .uniform => |block| return @intFromEnum(block),
-        .blocks => |*face_grid| return @intFromEnum(face_grid[x][y]),
+        .grid => |*grid| return @intFromEnum(grid[x][y]),
     }
 }
 
@@ -60,7 +60,7 @@ fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbo
 
     for (0..ChunkSize) |i| {
         const two_vec: @Vector(ChunkSize, Block.Tag) = switch (neighbor_face.*) {
-            .blocks => |*grid| @bitCast(grid[i]),
+            .grid => |*grid| @bitCast(grid[i]),
             .uniform => two_uniform_vec,
         };
 
@@ -219,19 +219,19 @@ test "MeshBehavior - Uniform Air Chunk" {
     var transparent_faces = std.ArrayList(Face).empty;
     defer transparent_faces.deinit(std.testing.allocator);
 
-    const mainblocks: Chunk.Encoding = .{ .uniform = .air };
+    const maingrid: Chunk.Encoding = .{ .uniform = .air };
     const neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
 
-    try mesh(std.testing.allocator, mainblocks, &neighbor_faces, &opaque_faces, &transparent_faces);
+    try mesh(std.testing.allocator, maingrid, &neighbor_faces, &opaque_faces, &transparent_faces);
 
     try std.testing.expectEqual(@as(usize, 0), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
 
 test "MeshBehavior - Single Isolated Block" {
-    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
-    blocks[1][1][1] = .stone;
+    grid[1][1][1] = .stone;
 
     var opaque_faces = std.ArrayList(Face).empty;
     defer opaque_faces.deinit(std.testing.allocator);
@@ -240,7 +240,7 @@ test "MeshBehavior - Single Isolated Block" {
 
     const neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
 
-    try mesh(std.testing.allocator, .{ .grid = &blocks }, &neighbor_faces, &opaque_faces, &transparent_faces);
+    try mesh(std.testing.allocator, .{ .grid = &grid }, &neighbor_faces, &opaque_faces, &transparent_faces);
 
     try std.testing.expectEqual(@as(usize, 6), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
@@ -253,11 +253,11 @@ test "MeshBehavior - Single Isolated Block" {
     }
 }
 
-test "MeshBehavior - Adjacent Blocks Culling" {
-    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+test "MeshBehavior - Adjacent grid Culling" {
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
-    blocks[1][1][1] = .stone;
-    blocks[2][1][1] = .stone;
+    grid[1][1][1] = .stone;
+    grid[2][1][1] = .stone;
 
     var opaque_faces = std.ArrayList(Face).empty;
     defer opaque_faces.deinit(std.testing.allocator);
@@ -266,18 +266,18 @@ test "MeshBehavior - Adjacent Blocks Culling" {
 
     const neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
 
-    try mesh(std.testing.allocator, .{ .grid = &blocks }, &neighbor_faces, &opaque_faces, &transparent_faces);
+    try mesh(std.testing.allocator, .{ .grid = &grid }, &neighbor_faces, &opaque_faces, &transparent_faces);
 
     try std.testing.expectEqual(@as(usize, 10), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
 
 test "MeshBenchmark" {
-    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
-                blocks[x][y][z] = switch (y) {
+                grid[x][y][z] = switch (y) {
                     0...16 => .stone,
                     17 => .grass,
                     else => .air,
@@ -292,7 +292,7 @@ test "MeshBenchmark" {
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
 
     for (0..test_amount) |_| {
-        try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .uniform = .air }), &alist, &alist);
+        try mesh(std.testing.allocator, .{ .grid = &grid }, &@splat(Chunk.Encoding.Face{ .uniform = .air }), &alist, &alist);
         alist.clearRetainingCapacity();
     }
 
@@ -307,12 +307,12 @@ test "FuzzMesh" {
 }
 
 fn testOne(_: void, smith: *std.testing.Smith) !void {
-    var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
-    const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    const maingrid: Chunk.Encoding = .fuzzerMakeEncoding(&grid, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
 
     var alist: std.ArrayList(Face) = .empty;
     defer alist.deinit(std.testing.allocator);
 
-    try Mesher.mesh(std.testing.allocator, mainblocks, &neighbor_faces, &alist, &alist);
+    try Mesher.mesh(std.testing.allocator, maingrid, &neighbor_faces, &alist, &alist);
 }
