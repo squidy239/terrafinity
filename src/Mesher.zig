@@ -9,13 +9,13 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 const Mesher = @This();
 
 pub const Face = packed struct(u64) {
-    const CoordInChunk = @Int(.unsigned, std.math.log2(ChunkSize));
+    const CoordInChunk = @Int(.unsigned, std.math.log2_int_ceil(usize, ChunkSize));
     z: CoordInChunk,
     y: CoordInChunk,
     x: CoordInChunk,
     rotation: FaceRotation,
     block_type: Block.Tag,
-    _: u29 = undefined,
+    _: @Int(.unsigned, @bitSizeOf(u64) - (3 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
 /// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
@@ -288,7 +288,7 @@ test "MeshBenchmark" {
     var alist: std.ArrayList(Face) = try .initCapacity(std.testing.allocator, 65536);
     defer alist.deinit(std.testing.allocator);
 
-    const test_amount = if (@import("builtin").mode == .Debug) 100 else 10000000;
+    const test_amount = if (@import("builtin").mode == .Debug) 100 else 100000;
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
 
     for (0..test_amount) |_| {
@@ -298,8 +298,8 @@ test "MeshBenchmark" {
 
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
-    std.log.warn("Mesh benchmark: {d} meshes in {d} ms", .{ test_amount, dt.toMilliseconds() });
-    std.log.warn("completed with an avg time of {d} us per mesh", .{(@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount)});
+    const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
+    std.log.warn("Mesh benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize)});
 }
 
 test "FuzzMesh" {
