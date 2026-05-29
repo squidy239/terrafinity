@@ -10,9 +10,9 @@ const Mesher = @This();
 
 pub const Face = packed struct(u64) {
     const CoordInChunk = @Int(.unsigned, std.math.log2(ChunkSize));
-    x: CoordInChunk,
-    y: CoordInChunk,
     z: CoordInChunk,
+    y: CoordInChunk,
+    x: CoordInChunk,
     rotation: FaceRotation,
     block_type: Block.Tag,
     _: u29 = undefined,
@@ -74,11 +74,14 @@ fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbo
 
 inline fn addUniformFaces(mask_start: @Int(.unsigned, ChunkSize), comptime rotation: FaceRotation, comptime transparent: bool, i: usize, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face), block: Block) void {
     var mask = mask_start;
+    const faces = switch (comptime transparent) {
+        true => transparent_faces,
+        false => opaque_faces,
+    };
     while (mask != 0) {
         const j = @ctz(mask);
         mask &= (mask - 1);
-
-        const face: Face = .{
+        faces.addOneAssumeCapacity().* = .{
             .x = @intCast(switch (comptime rotation) {
                 .xminus => 0,
                 .xplus => ChunkSize - 1,
@@ -100,11 +103,6 @@ inline fn addUniformFaces(mask_start: @Int(.unsigned, ChunkSize), comptime rotat
             .rotation = comptime rotation,
             .block_type = @intFromEnum(block),
         };
-
-        switch (comptime transparent) {
-            true => transparent_faces.appendAssumeCapacity(face),
-            false => opaque_faces.appendAssumeCapacity(face),
-        }
     }
 }
 
@@ -113,6 +111,8 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         @prefetch(&grid[x], .{ .locality = 3, .rw = .read, .cache = .data });
+        @prefetch(opaque_faces.items.ptr[opaque_faces.items.len .. opaque_faces.items.len + 1024], .{ .locality = 3, .rw = .write });
+        @prefetch(transparent_faces.items.ptr[transparent_faces.items.len .. transparent_faces.items.len + 512], .{ .locality = 3, .rw = .write });
 
         for (0..ChunkSize) |y| {
             const center_row: [ChunkSize]Block.Tag = @bitCast(grid[x][y]);
@@ -145,28 +145,31 @@ inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(Chu
     const transparent_vec, const opaque_vec = meshMany(ChunkSize, center_vec, neighbor_vec);
     const transparent: @Int(.unsigned, ChunkSize) = @bitCast(transparent_vec);
     const @"opaque": @Int(.unsigned, ChunkSize) = @bitCast(opaque_vec);
-    addGridFaces(transparent, rotation, true, center_row, x, y, opaque_faces, transparent_faces);
-    addGridFaces(@"opaque", rotation, false, center_row, x, y, opaque_faces, transparent_faces);
+    if (transparent != 0) addGridFaces(transparent, rotation, true, center_row, x, y, opaque_faces, transparent_faces);
+    if (@"opaque" != 0) addGridFaces(@"opaque", rotation, false, center_row, x, y, opaque_faces, transparent_faces);
 }
 
 inline fn addGridFaces(mask_copy: @Int(.unsigned, ChunkSize), comptime rotation: FaceRotation, comptime transparent: bool, center_row: [ChunkSize]Block.Tag, x: u8, y: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
     var mask = mask_copy;
+    std.debug.assert(mask != 0);
+    const faces_list = switch (comptime transparent) {
+        true => transparent_faces,
+        false => opaque_faces,
+    };
+    const face = Face{
+        .rotation = rotation,
+        .z = undefined,
+        .y = @intCast(y),
+        .x = @intCast(x),
+        .block_type = undefined,
+    };
     while (mask != 0) {
-        const z: u8 = @ctz(mask);
+        const z = @ctz(mask);
         mask &= (mask - 1);
-
-        const face = Face{
-            .block_type = center_row[z],
-            .rotation = rotation,
-            .x = @intCast(x),
-            .y = @intCast(y),
-            .z = @intCast(z),
-        };
-
-        switch (transparent) {
-            true => transparent_faces.appendAssumeCapacity(face),
-            false => opaque_faces.appendAssumeCapacity(face),
-        }
+        faces_list.items.ptr[faces_list.items.len] = face;
+        faces_list.items.ptr[faces_list.items.len].z = @intCast(z);
+        faces_list.items.ptr[faces_list.items.len].block_type = center_row[z];
+        faces_list.items.len += 1;
     }
 }
 
@@ -183,12 +186,13 @@ inline fn meshOne(one: Block, two: Block) MeshResult {
 }
 
 inline fn meshMany(len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) struct { @Vector(len, bool), @Vector(len, bool) } {
+    const false_mask: @Vector(len, bool) = comptime @splat(false);
     const is_same = one == two;
+    if (@reduce(.And, is_same)) return .{ false_mask, false_mask };
     const ones_invisible = !Block.isVisibleVector(len, one);
     const twos_opaque = !Block.isTransparentVector(len, two);
     const ones_transparent = Block.isTransparentVector(len, one);
     const abort_mask = is_same | ones_invisible | twos_opaque;
-    const false_mask: @Vector(len, bool) = comptime @splat(false);
     return .{
         @select(bool, abort_mask, false_mask, ones_transparent),
         @select(bool, abort_mask, false_mask, !ones_transparent),
@@ -196,15 +200,14 @@ inline fn meshMany(len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, B
 }
 
 test "Compare meshMany vs meshOne" {
-    if (true) return;
     const all_blocks = std.enums.values(Block);
     for (all_blocks) |one| {
         for (all_blocks) |two| {
             const expected = meshOne(one, two);
             const v_one: @Vector(1, Block.Tag) = @splat(@intFromEnum(one));
             const v_two: @Vector(1, Block.Tag) = @splat(@intFromEnum(two));
-            const result_vec = meshMany(1, v_one, v_two);
-            const actual: MeshResult = if (!result_vec.opaque_mask[0] and !result_vec.transparent_mask[0]) .none else if (result_vec.transparent_mask[0]) .transparent else .@"opaque";
+            const transparent, const @"opaque" = meshMany(1, v_one, v_two);
+            const actual: MeshResult = if (!@"opaque"[0] and !transparent[0]) .none else if (transparent[0]) .transparent else .@"opaque";
             try std.testing.expectEqual(expected, actual);
         }
     }
@@ -285,8 +288,7 @@ test "MeshBenchmark" {
     var alist: std.ArrayList(Face) = try .initCapacity(std.testing.allocator, 65536);
     defer alist.deinit(std.testing.allocator);
 
-    // Kept to the exact sizing you had for poop benchmarking
-    const test_amount = if (@import("builtin").mode == .Debug) 100 else 200000;
+    const test_amount = if (@import("builtin").mode == .Debug) 100 else 10000000;
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
 
     for (0..test_amount) |_| {

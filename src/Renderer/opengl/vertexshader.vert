@@ -32,9 +32,9 @@ const uint BITS_IN_WORD1 = 16u - BITS_IN_WORD0;       //  3  bits of BlockType i
 
 uvec3 DecodePosition(uvec2 d) {
     return uvec3(
-         d[0]                     & COORD_MASK,
-        (d[0] >> COORD_BITS)      & COORD_MASK,
-        (d[0] >> (COORD_BITS*2u)) & COORD_MASK
+    ((d[0] >> (COORD_BITS*2u)) & COORD_MASK),
+        ((d[0] >> COORD_BITS) & COORD_MASK),
+        (d[0] & COORD_MASK)
     );
 }
 
