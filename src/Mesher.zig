@@ -30,7 +30,7 @@ pub fn mesh(allocator: std.mem.Allocator, maingrid: Chunk.Encoding, noalias neig
                     try meshUniformChunkFace(allocator, main_block, neighbor, rotation, opaque_faces, transparent_faces);
             }
         },
-        .grid => |grid| try meshBlockGrid(allocator, grid, neighbor_faces, opaque_faces, transparent_faces),
+        .grid => |grid| try meshBlockGrid(allocator, @ptrCast(grid), neighbor_faces, opaque_faces, transparent_faces),
     }
 }
 
@@ -106,8 +106,15 @@ inline fn addUniformFaces(comptime len: usize, mask_start: @Int(.unsigned, len),
     }
 }
 
-fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
-    @setEvalBranchQuota(10000);
+fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    @setEvalBranchQuota(20000);
+
+    comptime {
+        if (64 % ChunkSize != 0) @compileError("ChunkSize must be a divisor of 64 (e.g., 16, 32, 64)");
+    }
+
+    const rows_per_batch = 64 / ChunkSize;
+
     for (0..ChunkSize) |x| {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
@@ -116,32 +123,42 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
         @prefetch(opaque_faces.items.ptr[opaque_faces.items.len .. opaque_faces.items.len + 1024], .{ .locality = 3, .rw = .write });
         @prefetch(transparent_faces.items.ptr[transparent_faces.items.len .. transparent_faces.items.len + 512], .{ .locality = 3, .rw = .write });
 
-        for (0..ChunkSize) |y| {
-            const center_row: [ChunkSize]Block.Tag = @bitCast(grid[x][y]);
+        var y: usize = 0;
+        while (y < ChunkSize) : (y += rows_per_batch) {
             inline for (std.enums.values(FaceRotation)) |rotation| {
-                const neighbor_vec: @Vector(ChunkSize, Block.Tag) = switch (comptime rotation) {
-                    .xminus => if (x == 0) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x - 1][y]),
-                    .xplus => if (x == comptime ChunkSize - 1) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x + 1][y]),
-                    .yminus => if (y == 0) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x][y - 1]),
-                    .yplus => if (y == comptime ChunkSize - 1) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x][y + 1]),
-                    .zminus => std.simd.shiftElementsRight(center_row, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, y)),
-                    .zplus => std.simd.shiftElementsLeft(center_row, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, y)),
-                };
-                computeRow(ChunkSize, center_row, neighbor_vec, rotation, @intCast(x), @intCast(y), transparent_faces, opaque_faces);
+                var center_virtual: [64]Block.Tag = @bitCast(grid[x][y .. y + rows_per_batch][0..2].*);
+                var neighbor_virtual: [64]Block.Tag = undefined;
+                const small: bool = true;
+                if (small) {
+                    inline for (0..rows_per_batch) |r| {
+                        const local_y = y + r;
+                        const offset = r * ChunkSize;
+
+                        neighbor_virtual[offset .. offset + ChunkSize].* = switch (comptime rotation) {
+                            .xminus => if (x == 0) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, local_y) else @bitCast(grid[x - 1][local_y]),
+                            .xplus => if (x == comptime ChunkSize - 1) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, local_y) else @bitCast(grid[x + 1][local_y]),
+                            .yminus => if (local_y == 0) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, local_y) else @bitCast(grid[x][local_y - 1]),
+                            .yplus => if (local_y == comptime ChunkSize - 1) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, local_y) else @bitCast(grid[x][local_y + 1]),
+                            .zminus => std.simd.shiftElementsRight(center_virtual[offset .. offset + ChunkSize].*, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, local_y)),
+                            .zplus => std.simd.shiftElementsLeft(center_virtual[offset .. offset + ChunkSize].*, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, local_y)),
+                        };
+                    }
+                }
+                computeRow64(center_virtual, neighbor_virtual, rotation, @intCast(x), @intCast(y), transparent_faces, opaque_faces);
             }
         }
     }
 }
 
-inline fn computeRow(comptime len: usize, center_row: [len]Block.Tag, neighbor_vec: @Vector(len, Block.Tag), comptime rotation: FaceRotation, x: u8, y: u8, noalias transparent_faces: *std.ArrayList(Face), noalias opaque_faces: *std.ArrayList(Face)) void {
-    const transparent_vec, const opaque_vec = meshMany(len, center_row, neighbor_vec);
-    const transparent: @Int(.unsigned, len) = @bitCast(transparent_vec);
-    const @"opaque": @Int(.unsigned, len) = @bitCast(opaque_vec);
-    if (transparent != 0) addGridFaces(len, transparent, rotation, true, center_row, x, y, opaque_faces, transparent_faces);
-    if (@"opaque" != 0) addGridFaces(len, @"opaque", rotation, false, center_row, x, y, opaque_faces, transparent_faces);
+inline fn computeRow64(center_virtual: [64]Block.Tag, neighbor_virtual: @Vector(64, Block.Tag), comptime rotation: FaceRotation, x: u8, y_base: u8, noalias transparent_faces: *std.ArrayList(Face), noalias opaque_faces: *std.ArrayList(Face)) void {
+    const transparent_vec, const opaque_vec = meshMany(64, center_virtual, neighbor_virtual);
+    const transparent: u64 = @bitCast(transparent_vec);
+    const @"opaque": u64 = @bitCast(opaque_vec);
+    if (transparent != 0) addGridFaces64(transparent, rotation, true, center_virtual, x, y_base, opaque_faces, transparent_faces);
+    if (@"opaque" != 0) addGridFaces64(@"opaque", rotation, false, center_virtual, x, y_base, opaque_faces, transparent_faces);
 }
 
-inline fn addGridFaces(comptime len: usize, mask_copy: @Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, center_row: [len]Block.Tag, x: u8, y: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
+inline fn addGridFaces64(mask_copy: u64, comptime rotation: FaceRotation, comptime transparent: bool, center_virtual: [64]Block.Tag, x: u8, y_base: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
     var mask = mask_copy;
     std.debug.assert(mask != 0);
     const faces_list = switch (comptime transparent) {
@@ -151,16 +168,18 @@ inline fn addGridFaces(comptime len: usize, mask_copy: @Int(.unsigned, len), com
     const face = Face{
         .rotation = rotation,
         .z = undefined,
-        .y = @intCast(y),
+        .y = undefined,
         .x = @intCast(x),
         .block_type = undefined,
     };
     while (mask != 0) {
-        const z = @ctz(mask);
+        const bit_idx = @ctz(mask);
         mask &= (mask - 1);
+
         faces_list.items.ptr[faces_list.items.len] = face;
-        faces_list.items.ptr[faces_list.items.len].z = @intCast(z);
-        faces_list.items.ptr[faces_list.items.len].block_type = center_row[z];
+        faces_list.items.ptr[faces_list.items.len].z = @intCast(bit_idx % ChunkSize);
+        faces_list.items.ptr[faces_list.items.len].y = @intCast(y_base + (bit_idx / ChunkSize));
+        faces_list.items.ptr[faces_list.items.len].block_type = center_virtual[bit_idx];
         faces_list.items.len += 1;
     }
 }

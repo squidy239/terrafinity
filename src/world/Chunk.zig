@@ -3,7 +3,7 @@ const std = @import("std");
 const Block = @import("Block.zig").Block;
 const tracy = @import("tracy");
 
-pub const ChunkSize = 64;
+pub const ChunkSize = 32;
 encoding: Encoding,
 encoding_lock: std.Io.RwLock = .init,
 ref_count: std.atomic.Value(u32) = .init(1),
@@ -171,7 +171,7 @@ pub const Encoding = union(enum(u1)) {
     }
     const simplified_size = ChunkSize / 2;
     const scale_factor = 2;
-    fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
+    pub fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
         var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var unique_blocks: [scale_factor][scale_factor][scale_factor]Block.Tag = undefined;
         for (0..simplified_size) |sx| {
