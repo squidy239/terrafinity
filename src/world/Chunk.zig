@@ -3,7 +3,7 @@ const std = @import("std");
 const Block = @import("Block.zig").Block;
 const tracy = @import("tracy");
 
-pub const ChunkSize = 32;
+pub const ChunkSize = 64;
 encoding: Encoding,
 encoding_lock: std.Io.RwLock = .init,
 ref_count: std.atomic.Value(u32) = .init(1),
