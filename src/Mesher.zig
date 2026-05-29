@@ -7,53 +7,75 @@ pub const FaceRotation = Chunk.Encoding.FaceRotation;
 const ChunkPos = @import("world/World.zig").ChunkPos;
 
 const Mesher = @This();
+
 pub const Face = packed struct(u64) {
     const CoordInChunk = @Int(.unsigned, std.math.log2(ChunkSize));
     x: CoordInChunk,
     y: CoordInChunk,
     z: CoordInChunk,
     rotation: FaceRotation,
-    block_type: @typeInfo(Block).@"enum".tag_type,
+    block_type: Block.Tag,
     _: u29 = undefined,
 };
 
-///neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
-pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
-    inline for (std.enums.values(FaceRotation)) |rotation| {
-        try meshChunkFace(allocator, mainblocks.extractFace(rotation), neighbor_faces[@intFromEnum(rotation)], rotation, opaque_faces, transparent_faces);
-    }
+/// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
+/// neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
+pub fn mesh(allocator: std.mem.Allocator, mainblocks: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     switch (mainblocks) {
-        .uniform => {}, // Done meshing, blocks wont make mesh if they are the same type
-        .grid => |grid| try meshBlockGrid(allocator, grid, opaque_faces, transparent_faces),
+        .uniform => |main_block| {
+            inline for (std.enums.values(FaceRotation)) |rotation| {
+                const neighbor = &neighbor_faces[@intFromEnum(rotation)];
+                if (!(neighbor.* == .uniform and main_block == neighbor.uniform))
+                    try meshUniformChunkFace(allocator, main_block, neighbor, rotation, opaque_faces, transparent_faces);
+            }
+        },
+        .grid => |grid| try meshBlockGrid(allocator, grid, neighbor_faces, opaque_faces, transparent_faces),
     }
 }
 
-fn meshChunkFace(allocator: std.mem.Allocator, one: Chunk.Encoding.Face, two: Chunk.Encoding.Face, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
-    if (one == .uniform and two == .uniform and one.uniform == two.uniform) return;
-    const grid_one: [ChunkSize][ChunkSize]Block = switch (one) {
-        .blocks => |grid| grid,
-        .uniform => |block| @splat(@splat(block)),
-    };
-    const grid_two: [ChunkSize][ChunkSize]Block = switch (two) {
-        .blocks => |grid| grid,
-        .uniform => |block| @splat(@splat(block)),
-    };
-    try meshChunkFaceGrid(allocator, &grid_one, &grid_two, rotation, opaque_faces, transparent_faces);
+inline fn getNeighborVec(comptime rotation: FaceRotation, neighbor_face: *const Chunk.Encoding.Face, x: usize, y: usize) @Vector(ChunkSize, Block.Tag) {
+    switch (neighbor_face.*) {
+        .uniform => |block| return @splat(@intFromEnum(block)),
+        .blocks => |*face_grid| switch (comptime rotation) {
+            .xminus, .xplus => return @bitCast(face_grid[y]),
+            .yminus, .yplus => return @bitCast(face_grid[x]),
+            .zminus, .zplus => unreachable,
+        },
+    }
 }
 
-fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][ChunkSize]Block, grid_two: *const [ChunkSize][ChunkSize]Block, comptime rotation: Chunk.Encoding.FaceRotation, opaque_faces: *std.ArrayList(Face), transparent_faces: *std.ArrayList(Face)) !void {
+inline fn getNeighborBlockZ(neighbor_face: *const Chunk.Encoding.Face, x: usize, y: usize) Block.Tag {
+    switch (neighbor_face.*) {
+        .uniform => |block| return @intFromEnum(block),
+        .blocks => |*face_grid| return @intFromEnum(face_grid[x][y]),
+    }
+}
+
+fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbor_face: *const Chunk.Encoding.Face, comptime rotation: FaceRotation, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
     try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
+
     const none_vec: @Vector(ChunkSize, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
-    for (grid_one, grid_two, 0..) |row_one, row_two, i| {
-        const one_tag: [ChunkSize]Block.Tag = @bitCast(row_one);
-        const two_tag: [ChunkSize]Block.Tag = @bitCast(row_two);
-        const result = meshMany(ChunkSize, one_tag, two_tag);
+
+    const one_uniform_vec: @Vector(ChunkSize, Block.Tag) = @splat(@intFromEnum(main_block));
+    const two_uniform_vec: @Vector(ChunkSize, Block.Tag) = if (neighbor_face.* == .uniform) @splat(@intFromEnum(neighbor_face.uniform)) else undefined;
+
+    if (neighbor_face.* == .blocks) @prefetch(&neighbor_face.blocks, .{ .locality = 3 });
+
+    for (0..ChunkSize) |i| {
+        const two_vec: @Vector(ChunkSize, Block.Tag) = switch (neighbor_face.*) {
+            .blocks => |*grid| @bitCast(grid[i]),
+            .uniform => two_uniform_vec,
+        };
+
+        const result = meshMany(ChunkSize, one_uniform_vec, two_vec);
         var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != none_vec);
+        const result_array: [ChunkSize]MeshResult.Tag = result;
+
         while (active_mask != 0) {
             const j = @ctz(active_mask);
-            const result_array: [ChunkSize]MeshResult.Tag = result;
-            const res = result_array[j];
+            active_mask &= (active_mask - 1);
+
             const face: Face = .{
                 .x = @intCast(switch (comptime rotation) {
                     .xminus => 0,
@@ -65,34 +87,35 @@ fn meshChunkFaceGrid(allocator: std.mem.Allocator, grid_one: *const [ChunkSize][
                     .xminus, .xplus => i,
                     .yminus => 0,
                     .yplus => ChunkSize - 1,
-                    .zminus, .zplus => j, // Here is where 'j' maps to Y!
+                    .zminus, .zplus => j,
                 }),
                 .z = @intCast(switch (comptime rotation) {
-                    .xminus, .xplus => j, // Here is where 'j' maps to Z!
+                    .xminus, .xplus => j,
                     .yminus, .yplus => j,
                     .zminus => 0,
                     .zplus => ChunkSize - 1,
                 }),
                 .rotation = comptime rotation,
-                .block_type = one_tag[j],
+                .block_type = @intFromEnum(main_block),
             };
-            switch (res) {
+
+            switch (result_array[j]) {
                 @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
                 @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
                 else => unreachable,
             }
-            active_mask &= (active_mask - 1);
         }
     }
 }
 
-fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, opaque_faces: *std.ArrayListUnmanaged(Face), transparent_faces: *std.ArrayListUnmanaged(Face)) !void {
+fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     for (0..ChunkSize) |x| {
-        try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
-        try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
+        try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
+        try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
+        @prefetch(&grid[x], .{ .locality = 3, .rw = .read, .cache = .data });
+
         for (0..ChunkSize) |y| {
             const center_row: [ChunkSize]Block.Tag = @bitCast(grid[x][y]);
-            const center_vec: @Vector(ChunkSize, Block.Tag) = center_row;
 
             inline for (std.enums.values(FaceRotation)) |rotation| {
                 const at_boundary = switch (comptime rotation) {
@@ -103,33 +126,32 @@ fn meshBlockGrid(allocator: std.mem.Allocator, grid: *const [ChunkSize][ChunkSiz
                     .zplus, .zminus => false,
                 };
 
-                if (!at_boundary) {
-                    @branchHint(.likely);
-                    const neighbor_vec: @Vector(ChunkSize, Block.Tag) = switch (comptime rotation) {
-                        .xminus => @bitCast(grid[x - 1][y]),
-                        .xplus => @bitCast(grid[x + 1][y]),
-                        .yminus => @bitCast(grid[x][y - 1]),
-                        .yplus => @bitCast(grid[x][y + 1]),
-                        .zminus => std.simd.shiftElementsRight(center_vec, 1, comptime @intFromEnum(Block.null)),
-                        .zplus => std.simd.shiftElementsLeft(center_vec, 1, comptime @intFromEnum(Block.null)),
-                    };
-                    computeRow(center_row, neighbor_vec, center_vec, rotation, x, y, transparent_faces, opaque_faces);
-                }
+                const neighbor_vec: @Vector(ChunkSize, Block.Tag) = switch (comptime rotation) {
+                    .xminus => if (at_boundary) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x - 1][y]),
+                    .xplus => if (at_boundary) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x + 1][y]),
+                    .yminus => if (at_boundary) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x][y - 1]),
+                    .yplus => if (at_boundary) getNeighborVec(rotation, &neighbor_faces[@intFromEnum(rotation)], x, y) else @bitCast(grid[x][y + 1]),
+                    .zminus => std.simd.shiftElementsRight(center_row, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, y)),
+                    .zplus => std.simd.shiftElementsLeft(center_row, 1, getNeighborBlockZ(&neighbor_faces[@intFromEnum(rotation)], x, y)),
+                };
+
+                computeRow(center_row, neighbor_vec, center_row, rotation, x, y, transparent_faces, opaque_faces);
             }
         }
     }
 }
 
-inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(ChunkSize, Block.Tag), center_vec: @Vector(ChunkSize, Block.Tag), comptime rotation: FaceRotation, x: usize, y: usize, transparent_faces: *std.ArrayList(Face), opaque_faces: *std.ArrayList(Face)) void {
+inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(ChunkSize, Block.Tag), center_vec: @Vector(ChunkSize, Block.Tag), comptime rotation: FaceRotation, x: usize, y: usize, noalias transparent_faces: *std.ArrayList(Face), noalias opaque_faces: *std.ArrayList(Face)) void {
     const none_vec: @Vector(ChunkSize, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
+
     const result = meshMany(ChunkSize, center_vec, neighbor_vec);
     var active_mask: @Int(.unsigned, ChunkSize) = @bitCast(result != none_vec);
-    if (comptime rotation == .zminus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1);
-    if (comptime rotation == .zplus) active_mask &= comptime ~@as(@TypeOf(active_mask), 1 << 31);
     while (active_mask != 0) {
         const z = @ctz(active_mask);
+        active_mask &= (active_mask - 1);
+
         const result_array: [ChunkSize]MeshResult.Tag = result;
-        const res = result_array[z];
+
         const face = Face{
             .block_type = center_row[z],
             .rotation = rotation,
@@ -137,19 +159,13 @@ inline fn computeRow(center_row: [ChunkSize]Block.Tag, neighbor_vec: @Vector(Chu
             .y = @intCast(y),
             .z = @intCast(z),
         };
-        switch (res) {
+
+        switch (result_array[z]) {
             @intFromEnum(MeshResult.transparent) => transparent_faces.appendAssumeCapacity(face),
             @intFromEnum(MeshResult.@"opaque") => opaque_faces.appendAssumeCapacity(face),
             else => unreachable,
         }
-        active_mask &= (active_mask - 1);
     }
-}
-
-///returns false if the face is opaque, true if transparent, null if it should not be meshed
-inline fn meshOne(one: Block, two: Block) MeshResult {
-    if (one == two or !one.isVisible() or !two.isTransparent()) return .none;
-    return if (one.isTransparent()) .transparent else .@"opaque";
 }
 
 pub const MeshResult = enum(Tag) {
@@ -159,7 +175,11 @@ pub const MeshResult = enum(Tag) {
     @"opaque",
 };
 
-///returns false if the face is opaque, true if transparent, null if it should not be meshed
+inline fn meshOne(one: Block, two: Block) MeshResult {
+    if (one == two or !one.isVisible() or !two.isTransparent()) return .none;
+    return if (one.isTransparent()) .transparent else .@"opaque";
+}
+
 inline fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) @Vector(len, MeshResult.Tag) {
     const none_vec: @Vector(len, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.none));
     const transparent_vec: @Vector(len, MeshResult.Tag) = comptime @splat(@intFromEnum(MeshResult.transparent));
@@ -194,13 +214,11 @@ test "MeshBehavior - Uniform Air Chunk" {
     var transparent_faces = std.ArrayList(Face).empty;
     defer transparent_faces.deinit(std.testing.allocator);
 
-    // A completely uniform chunk of air surrounded by air
     const mainblocks: Chunk.Encoding = .{ .uniform = .air };
     const neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
 
     try mesh(std.testing.allocator, mainblocks, &neighbor_faces, &opaque_faces, &transparent_faces);
 
-    // Uniform air should not yield any faces
     try std.testing.expectEqual(@as(usize, 0), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
@@ -208,7 +226,6 @@ test "MeshBehavior - Uniform Air Chunk" {
 test "MeshBehavior - Single Isolated Block" {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
-    // Place a single opaque block inside the chunk (away from borders)
     blocks[1][1][1] = .stone;
 
     var opaque_faces = std.ArrayList(Face).empty;
@@ -220,11 +237,9 @@ test "MeshBehavior - Single Isolated Block" {
 
     try mesh(std.testing.allocator, .{ .grid = &blocks }, &neighbor_faces, &opaque_faces, &transparent_faces);
 
-    // One isolated block should generate exactly 6 opaque faces
     try std.testing.expectEqual(@as(usize, 6), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 
-    // Verify coordinate generation
     for (opaque_faces.items) |face| {
         try std.testing.expect(face.x == 1);
         try std.testing.expect(face.y == 1);
@@ -236,7 +251,6 @@ test "MeshBehavior - Single Isolated Block" {
 test "MeshBehavior - Adjacent Blocks Culling" {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
-    // Place two adjacent opaque blocks
     blocks[1][1][1] = .stone;
     blocks[2][1][1] = .stone;
 
@@ -249,8 +263,6 @@ test "MeshBehavior - Adjacent Blocks Culling" {
 
     try mesh(std.testing.allocator, .{ .grid = &blocks }, &neighbor_faces, &opaque_faces, &transparent_faces);
 
-    // Two independent blocks = 12 faces.
-    // Because they touch on one side, 2 faces should be culled. Total expected: 10.
     try std.testing.expectEqual(@as(usize, 10), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
@@ -270,12 +282,16 @@ test "MeshBenchmark" {
     }
     var alist: std.ArrayList(Face) = try .initCapacity(std.testing.allocator, 65536);
     defer alist.deinit(std.testing.allocator);
+
+    // Kept to the exact sizing you had for poop benchmarking
     const test_amount = if (@import("builtin").mode == .Debug) 100 else 200000;
     const st = std.Io.Timestamp.now(std.testing.io, .awake);
+
     for (0..test_amount) |_| {
         try mesh(std.testing.allocator, .{ .grid = &blocks }, &@splat(Chunk.Encoding.Face{ .uniform = .air }), &alist, &alist);
         alist.clearRetainingCapacity();
     }
+
     const et = std.Io.Timestamp.now(std.testing.io, .awake);
     const dt = st.durationTo(et);
     std.log.warn("Mesh benchmark: {d} meshes in {d} ms", .{ test_amount, dt.toMilliseconds() });
@@ -290,7 +306,9 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
     var blocks: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
     const mainblocks: Chunk.Encoding = .fuzzerMakeEncoding(&blocks, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
+
     var alist: std.ArrayList(Face) = .empty;
     defer alist.deinit(std.testing.allocator);
+
     try Mesher.mesh(std.testing.allocator, mainblocks, &neighbor_faces, &alist, &alist);
 }
