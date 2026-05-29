@@ -536,7 +536,7 @@ pub const Editor = struct {
         var isuniform: bool = false;
         try chunk.lockShared(io);
         switch (chunk.encoding) {
-            .grid => |blocks| simplified_blocks = simplifyBlocksAvg(blocks),
+            .grid => |blocks| simplified_blocks = Chunk.Encoding.simplifyBlocksAvg(blocks),
             .uniform => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
                 isuniform = true;
@@ -578,42 +578,6 @@ pub const Editor = struct {
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
         defer chunk.release();
         return try self.propagateToParent(io, allocator, chunk, chunk_pos);
-    }
-
-    fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
-        var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
-        var unique_blocks: [scale_factor][scale_factor][scale_factor]Block = undefined;
-        for (0..simplified_size) |sx| {
-            for (0..simplified_size) |sy| {
-                for (0..simplified_size) |sz| {
-                    inline for (0..scale_factor) |dx| {
-                        inline for (0..scale_factor) |dy| {
-                            inline for (0..scale_factor) |dz| {
-                                unique_blocks[dx][dy][dz] = blocks[sx * scale_factor + dx][sy * scale_factor + dy][sz * scale_factor + dz];
-                            }
-                        }
-                    }
-                    simplified[sx][sy][sz] = getBestBlock(@bitCast(unique_blocks));
-                }
-            }
-        }
-        return simplified;
-    }
-
-    fn getBestBlock(blocks: @Vector(scale_factor * scale_factor * scale_factor, @typeInfo(Block).@"enum".tag_type)) Block {
-        var best: Block = undefined;
-        var best_count: f32 = -1.0;
-        inline for (0..scale_factor * scale_factor * scale_factor) |i| {
-            const block_int = blocks[i];
-            const block: Block = @enumFromInt(block_int);
-            const weight = block.getPropagationWeight();
-            const count = std.simd.countElementsWithValue(blocks, block_int);
-            if (count * weight > best_count) {
-                best = @enumFromInt(block_int);
-                best_count = count * weight;
-            }
-        }
-        return best;
     }
 };
 

@@ -169,6 +169,72 @@ pub const Encoding = union(enum(u1)) {
             .uniform => .{ .uniform = smith.value(Block) },
         };
     }
+    const simplified_size = ChunkSize / 2;
+    const scale_factor = 2;
+    fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
+        var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
+        var unique_blocks: [scale_factor][scale_factor][scale_factor]Block.Tag = undefined;
+        for (0..simplified_size) |sx| {
+            for (0..simplified_size) |sy| {
+                for (0..simplified_size) |sz| {
+                    inline for (0..scale_factor) |dx| {
+                        inline for (0..scale_factor) |dy| {
+                            inline for (0..scale_factor) |dz| {
+                                unique_blocks[dx][dy][dz] = @intFromEnum(blocks[sx * scale_factor + dx][sy * scale_factor + dy][sz * scale_factor + dz]);
+                            }
+                        }
+                    }
+                    const unique_vector: @Vector(scale_factor * scale_factor * scale_factor, Block.Tag) = @bitCast(unique_blocks);
+                    if (std.simd.countElementsWithValue(unique_vector, unique_blocks[0][0][0]) == scale_factor * scale_factor * scale_factor) continue;
+                    simplified[sx][sy][sz] = getBestBlock(unique_vector);
+                }
+            }
+        }
+        return simplified;
+    }
+
+    fn getBestBlock(blocks: @Vector(scale_factor * scale_factor * scale_factor, @typeInfo(Block).@"enum".tag_type)) Block {
+        var best: Block = undefined;
+        var best_count: f32 = -1.0;
+        inline for (0..scale_factor * scale_factor * scale_factor) |i| {
+            const block_int = blocks[i];
+            const block: Block = @enumFromInt(block_int);
+            const weight = block.getPropagationWeight();
+            const count = std.simd.countElementsWithValue(blocks, block_int);
+            if (count * weight > best_count) {
+                best = @enumFromInt(block_int);
+                best_count = count * weight;
+            }
+        }
+        return best;
+    }
+
+    test "SimplifyBlocksAvgBenchmark" {
+        var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |y| {
+                for (0..ChunkSize) |z| {
+                    grid[x][y][z] = switch (y) {
+                        0...16 => .stone,
+                        17 => .grass,
+                        else => .air,
+                    };
+                }
+            }
+        }
+        const test_amount = if (@import("builtin").mode == .Debug) 100 else 100000;
+        const st = std.Io.Timestamp.now(std.testing.io, .awake);
+
+        for (0..test_amount) |_| {
+            const res = simplifyBlocksAvg(&grid);
+            std.mem.doNotOptimizeAway(res);
+        }
+
+        const et = std.Io.Timestamp.now(std.testing.io, .awake);
+        const dt = st.durationTo(et);
+        const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
+        std.log.warn("Simplify benchmark: completed with an avg time of {d} us per chunk, {d} ns per block", .{ us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
+    }
 };
 
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
