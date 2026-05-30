@@ -160,21 +160,3 @@ pub const NaturalCubicInterpolator3D = struct {
         return a_v * values[i] + localT_v * values[i + 1] + ((comptime (a_v * a_v * a_v - a_v)) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
     }
 };
-
-test "Interpolation Fuzz" {
-    if (true) return error.SkipZigTest;
-    try std.testing.fuzz({}, testInterpolation, .{});
-}
-
-fn testInterpolation(_: void, smith: *std.testing.Smith) !void {
-    const grid = smith.value([4][4][4]f32);
-    const interp = NaturalCubicInterpolator3D.init(grid);
-
-    const x = @abs(smith.value(f32));
-    const y = @abs(smith.value(f32));
-    const z = @abs(smith.value(f32));
-
-    const val = interp.sample(x - @floor(x), y - @floor(y), z - @floor(z));
-    // basic sanity check: result should not be NaN or Inf if input isn't
-    if (!std.math.isFinite(val)) return error.TestFailed;
-}

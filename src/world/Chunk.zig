@@ -17,19 +17,20 @@ modified: std.atomic.Value(bool) = .init(false),
 saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum(u1)) {
-    grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
+    pub const GridAlignment = 64;
+    grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
     uniform: Block,
 
-    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
+    pub fn fromBlocks(blocks: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
         return if (getUniform(blocks)) |one_block| .{ .uniform = one_block } else .{ .grid = blocks };
     }
 
-    pub fn merge(blocks: *Encoding, merge_encoding: Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         const m = tracy.Zone.begin(.{ .src = @src() });
         defer m.end();
-        switch (merge_encoding) {
+        switch (mergeBlocks) {
             .uniform => |uniform| mergeUniform(blocks, uniform),
-            .grid => |merge_grid| mergeGrid(blocks, merge_grid, grid_buffer),
+            .grid => |grid| mergeGrid(blocks, grid, grid_buffer),
         }
     }
 
@@ -38,7 +39,7 @@ pub const Encoding = union(enum(u1)) {
         blocks.* = .{ .uniform = uniform };
     }
 
-    pub inline fn mergeGrid(blocks: *Encoding, merge_grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn mergeGrid(blocks: *Encoding, merge_grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         toGrid(blocks, grid_buffer);
         const tag = @typeInfo(Block).@"enum".tag_type;
         const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
@@ -74,7 +75,7 @@ pub const Encoding = union(enum(u1)) {
         }
     }
 
-    pub fn toGrid(blocks: *Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn toGrid(blocks: *Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         if (blocks.* == .grid) return;
         switch (blocks.*) {
             .uniform => |block| {
@@ -108,7 +109,7 @@ pub const Encoding = union(enum(u1)) {
     pub fn extractFace(self: Encoding, comptime rotation: FaceRotation) Face {
         switch (self) {
             .grid => |grid| {
-                var result: [ChunkSize][ChunkSize]Block = undefined;
+                var result: [ChunkSize][ChunkSize]Block align(GridAlignment) = undefined;
                 switch (comptime rotation) {
                     .xplus => result = grid[ChunkSize - 1],
                     .xminus => result = grid[0],
@@ -148,18 +149,18 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub const Face = union(enum) {
-        grid: [ChunkSize][ChunkSize]Block,
+        grid: [ChunkSize][ChunkSize]Block align(GridAlignment),
         uniform: Block,
     };
 
-    pub fn getFaceUniform(self: *const [ChunkSize][ChunkSize]Block) ?Block {
+    pub fn getFaceUniform(self: *const align(GridAlignment) [ChunkSize][ChunkSize]Block) ?Block {
         const flat_blocks: *const [ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self);
         const block_vector: @Vector(ChunkSize * ChunkSize, @typeInfo(Block).@"enum".tag_type) = flat_blocks.*;
         const count = std.simd.countElementsWithValue(block_vector, block_vector[0]);
         return if (count == ChunkSize * ChunkSize) self[0][0] else null;
     }
 
-    pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
+    pub fn fuzzerMakeEncoding(grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
         @disableInstrumentation();
         @setRuntimeSafety(false);
         return switch (smith.value(@typeInfo(Encoding).@"union".tag_type.?)) {
@@ -172,7 +173,7 @@ pub const Encoding = union(enum(u1)) {
     }
     const simplified_size = ChunkSize / 2;
     const scale_factor = 2;
-    pub fn simplifyBlocksAvg(blocks: *const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
+    pub fn simplifyBlocksAvg(blocks: *const align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
         var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var unique_blocks: [scale_factor][scale_factor][scale_factor]Block.Tag = undefined;
         for (0..simplified_size) |sx| {
@@ -214,7 +215,7 @@ pub const Encoding = union(enum(u1)) {
     }
 
     test "SimplifyBlocksAvgBenchmark" {
-        var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+        var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(GridAlignment) = @splat(@splat(@splat(.air)));
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |y| {
                 for (0..ChunkSize) |z| {

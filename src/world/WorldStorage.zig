@@ -116,7 +116,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     chunk.saved.store(true, .unordered);
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
     const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
     _ = io;

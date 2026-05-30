@@ -9,10 +9,11 @@ const Interpolation = @import("../Interpolation.zig");
 const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
 const JitteredGrid = @import("../structures/JitteredGrid.zig");
+const builtin = @import("builtin");
 
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise.zig");
-    const thc_fragments = 8;
+    const thc_fragments = if(builtin.is_test) 1 else 8;
 
     params: Params,
     terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, thc_fragments),
@@ -59,7 +60,7 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
         const self: *DefaultGenerator = @ptrCast(@alignCast(source.data));
         try self.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
         return .{ .from_disk = false, .structures = false };
@@ -373,7 +374,7 @@ pub const DefaultGenerator = struct {
         leafSize: f32,
     };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         const chunkscale = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
@@ -383,7 +384,7 @@ pub const DefaultGenerator = struct {
             return;
         }
         var heights: ?[ChunkSize][ChunkSize]i32 = null;
-        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block = comptime @splat(@splat(@splat(.null)));
+        var blockgrid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrainmin, 0 }, chunk_pos.level).position[1]) {
             blocks.merge(.{ .uniform = .stone }, grid_buffer);
         } else {

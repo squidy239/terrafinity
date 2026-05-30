@@ -9,6 +9,7 @@ const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("generators/Terrain.zig").DefaultGenerator;
 pub const WorldStorage = @import("WorldStorage.zig");
+const builtin = @import("builtin");
 
 const World = @This();
 
@@ -22,7 +23,7 @@ pub const ChunkValue = struct {
 };
 
 pub const GridValue = struct {
-    grid: [ChunkSize][ChunkSize][ChunkSize]Block,
+    grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment),
     chunk: *Chunk,
     pos: ChunkPos,
 
@@ -36,9 +37,9 @@ inline fn hash(item: anytype) u64 {
     std.hash.autoHash(&hasher, item);
     return hasher.final();
 }
-const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32);
+const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, if(builtin.is_test) 1 else 32);
 
-grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32),
+grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, if(builtin.is_test) 1 else 32),
 chunks: ChunkMapType,
 config: WorldConfig,
 
@@ -147,7 +148,7 @@ pub const ChunkSource = struct {
 
     data: *anyopaque,
 
-    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
+    getBlocks: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
     /// May be called on the same chunk multiple times and must result in the same state each time
     placeStructures: ?*const fn (self: ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void,
@@ -242,7 +243,7 @@ fn ownGrid(self: *@This(), io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     chunk_ptr.encoding.grid = &grid_shard.get(chunk_pos).?.grid;
 }
 
-fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
+fn getBlocks(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .uniform = .null };
     for (self.chunk_sources) |source| {
         if (source) |s| {
@@ -283,7 +284,7 @@ pub fn loadChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk
     defer lc.end();
     const chunk = try self.fetchChunk(io, chunk_pos);
     if (chunk == null) {
-        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         const chunkencoding, const metadata = try self.getBlocks(io, allocator, chunk_pos, &grid_buffer);
         const newchunk: Chunk = .{
             .encoding = chunkencoding,
@@ -364,9 +365,9 @@ pub const Editor = struct {
     pub const Tree = @import("structures/Tree.zig").Tree;
     pub const TexturedSphere = @import("structures/TexturedSphere.zig");
     world: *World,
-    last_chunk_cache: ?struct { chunk_pos: ChunkPos, blocks: *[ChunkSize][ChunkSize][ChunkSize]Block } = null,
+    last_chunk_cache: ?struct { chunk_pos: ChunkPos, grid: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block } = null,
     propagate_changes: bool = true,
-    edit_buffer: std.HashMapUnmanaged(ChunkPos, [ChunkSize][ChunkSize][ChunkSize]Block, std.hash_map.AutoContext(ChunkPos), 80) = .empty,
+    edit_buffer: std.HashMapUnmanaged(ChunkPos, struct { grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) }, std.hash_map.AutoContext(ChunkPos), 80) = .empty,
     tempallocator: std.mem.Allocator,
 
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -384,7 +385,7 @@ pub const Editor = struct {
         var edit_err: std.atomic.Value(EditErrorStruct) = .init(.{});
         while (it.next()) |diffChunk| {
             const chunk_pos = diffChunk.key_ptr.*;
-            const encoding: Chunk.Encoding = .fromBlocks(diffChunk.value_ptr);
+            const encoding: Chunk.Encoding = .fromBlocks(&diffChunk.value_ptr.grid);
             group.async(io, editChunk, .{ self, io, allocator, chunk_pos, encoding, &remesh_neghbors_queue, &remesh_queue_mutex, &edit_err });
         }
         try group.await(io);
@@ -455,7 +456,7 @@ pub const Editor = struct {
     }
 
     pub fn mergeChunk(world: *World, io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
-        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+        var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         var sides_changed: [6]bool = @splat(false);
 
         try chunk.lockExclusive(io);
@@ -494,12 +495,12 @@ pub const Editor = struct {
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
         if (self.last_chunk_cache != null and std.meta.eql(self.last_chunk_cache.?.chunk_pos, chunkPos)) {
             @branchHint(.likely);
-            self.last_chunk_cache.?.blocks[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
+            self.last_chunk_cache.?.grid[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
             return;
         }
-        const chunk = (try self.edit_buffer.getOrPutValue(self.tempallocator, chunkPos, comptime @splat(@splat(@splat(.null))))).value_ptr;
-        self.last_chunk_cache = .{ .chunk_pos = chunkPos, .blocks = chunk };
-        chunk[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
+        const chunk = (try self.edit_buffer.getOrPutValue(self.tempallocator, chunkPos, .{ .grid = comptime @splat(@splat(@splat(.null))) })).value_ptr;
+        self.last_chunk_cache = .{ .chunk_pos = chunkPos, .grid = &chunk.grid };
+        chunk.grid[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
@@ -661,13 +662,13 @@ test "cube benchmark" {
     errdefer generator.terrain_height_cache.deinit(allocator);
     generator.params.setSeeds(io);
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32).init(allocator, 131072, .{ .name = "benchmark chunk cache" });
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 1).init(allocator, 131072, .{ .name = "benchmark chunk cache" });
     errdefer {
         var c = chunk_cache;
         c.deinit(allocator);
     }
 
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32).init(allocator, 8192, .{ .name = "benchmark grid cache" });
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 1).init(allocator, 8192, .{ .name = "benchmark grid cache" });
     errdefer {
         var g = grid_cache;
         g.deinit(allocator);
@@ -717,16 +718,16 @@ fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.
     generator.* = gen;
     generator.params.seed = 0;
 
-    const chunk_count = @max(std.mem.alignForward(usize, chunks, 8192), 8192);
-    const grid_count = @max(std.mem.alignForward(usize, grids, 8192), 8192);
+    const chunk_count = @max(std.mem.alignForward(usize, chunks, 256), 256);
+    const grid_count = @max(std.mem.alignForward(usize, grids, 256), 256);
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 32).init(allocator, chunk_count, .{ .name = "test chunk cache" });
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, 1).init(allocator, chunk_count, .{ .name = "test chunk cache" });
     errdefer {
         var c = chunk_cache;
         c.deinit(allocator);
     }
 
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 32).init(allocator, grid_count, .{ .name = "test grid cache" });
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, 1).init(allocator, grid_count, .{ .name = "test grid cache" });
     errdefer {
         var g = grid_cache;
         g.deinit(allocator);
@@ -743,11 +744,17 @@ fn makeTestingWorld(world: *World, generator: *DefaultGenerator, allocator: std.
 fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, allocator, 2, 2);
+    try makeTestingWorld(&world, &generator, allocator, 256, 256);
     defer world.deinit(io, allocator);
-
-    const chunk = try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true);
-    chunk.release();
+    
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 970, 0, -655 }, .level = 2 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 432234, 0, 0 }, .level = 3 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 54, 0 }, .level = 4 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 54, 0, 54 }, .level = 5 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 23, -4323 }, .level = 6 }, true)).release();
 }
 
 test "loadChunk allocation failure" {

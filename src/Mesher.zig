@@ -109,7 +109,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
     for (0..ChunkSize) |x| {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
-        @prefetch(&grid[x-1..x+1], .{ .locality = 3, .rw = .read, .cache = .data });
+        @prefetch(&grid[x], .{ .locality = 3, .rw = .read, .cache = .data });
         @prefetch(neighbor_faces, .{ .locality = 3, .rw = .read, .cache = .data });
         @prefetch(opaque_faces.items.ptr[opaque_faces.items.len .. opaque_faces.items.len + 256], .{ .locality = 3, .rw = .write });
         @prefetch(transparent_faces.items.ptr[transparent_faces.items.len .. transparent_faces.items.len + 256], .{ .locality = 3, .rw = .write });
@@ -219,7 +219,7 @@ test "MeshBehavior - Uniform Air Chunk" {
 }
 
 test "MeshBehavior - Single Isolated Block" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     grid[1][1][1] = .stone;
 
@@ -244,7 +244,7 @@ test "MeshBehavior - Single Isolated Block" {
 }
 
 test "MeshBehavior - Adjacent grid Culling" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     grid[1][1][1] = .stone;
     grid[2][1][1] = .stone;
@@ -263,7 +263,7 @@ test "MeshBehavior - Adjacent grid Culling" {
 }
 
 test "MeshBehavior - Completely Enclosed Block" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     // Create a 3x3x3 solid cube of stone
     for (1..4) |x| {
@@ -290,7 +290,7 @@ test "MeshBehavior - Completely Enclosed Block" {
 }
 
 test "MeshBehavior - Chunk Boundary Culling" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     // Place a single block on the X=0 boundary
     grid[0][1][1] = .stone;
@@ -350,7 +350,7 @@ test "MeshBehavior - Uniform Solid Chunk Culled By Neighbor" {
 }
 
 test "MeshBehavior - Transparent Block Routing" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     // Place an opaque block and a transparent block
     grid[1][1][1] = .stone;
@@ -371,7 +371,7 @@ test "MeshBehavior - Transparent Block Routing" {
 }
 
 test "MeshBehavior - Transparent to Opaque Interaction" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
 
     // Place stone at X=1, glass at X=2
     grid[1][1][1] = .stone;
@@ -396,7 +396,7 @@ test "MeshBehavior - Transparent to Opaque Interaction" {
 }
 
 test "MeshBehavior - Grid to Grid Boundary Alignment" {
-    var main_grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var main_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
     // Main chunk has a block right on the X- boundary at (0, 5, 5)
     main_grid[0][5][5] = .stone;
 
@@ -421,7 +421,7 @@ test "MeshBehavior - Grid to Grid Boundary Alignment" {
 }
 
 test "MeshBehavior - Exact Rotation Generation" {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
     grid[1][1][1] = .stone;
 
     var opaque_faces = std.ArrayList(Face).empty;
@@ -451,7 +451,7 @@ test "MeshBehavior - Exact Rotation Generation" {
 
 test "MeshBenchmark" {
     for (0..3) |i| {
-        var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
+        var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
         if (i == 1) {
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
@@ -488,7 +488,7 @@ test "FuzzMesh" {
 }
 
 fn testOne(_: void, smith: *std.testing.Smith) !void {
-    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = undefined;
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
     const maingrid: Chunk.Encoding = .fuzzerMakeEncoding(&grid, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
 
