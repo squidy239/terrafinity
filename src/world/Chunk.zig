@@ -17,34 +17,36 @@ modified: std.atomic.Value(bool) = .init(false),
 saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum(u1)) {
-    grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
+    pub const GridAlignment = 64;
+    grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
     uniform: Block,
 
-    pub fn fromBlocks(blocks: *[ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
+    pub fn fromBlocks(blocks: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) Encoding {
         return if (getUniform(blocks)) |one_block| .{ .uniform = one_block } else .{ .grid = blocks };
     }
 
-    pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         const m = tracy.Zone.begin(.{ .src = @src() });
         defer m.end();
         switch (mergeBlocks) {
-            .uniform => {
-                if (mergeBlocks.uniform == .null) return;
-                switch (blocks.*) {
-                    .uniform => blocks.* = mergeBlocks,
-                    .grid => blocks.* = .{ .uniform = mergeBlocks.uniform },
-                }
-            },
-            .grid => {
-                toBlocks(blocks, grid_buffer);
-                const tag = @typeInfo(Block).@"enum".tag_type;
-                const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
-                const flatMergeArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(mergeBlocks.grid);
-
-                selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
-                if (getUniform(blocks.grid)) |block| blocks.* = .{ .uniform = block };
-            },
+            .uniform => |uniform| mergeUniform(blocks, uniform),
+            .grid => |grid| mergeGrid(blocks, grid, grid_buffer),
         }
+    }
+
+    pub fn mergeUniform(blocks: *Encoding, uniform: Block) void {
+        if (uniform == .null) return;
+        blocks.* = .{ .uniform = uniform };
+    }
+
+    pub fn mergeGrid(blocks: *Encoding, merge_grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
+        toGrid(blocks, grid_buffer);
+        const tag = @typeInfo(Block).@"enum".tag_type;
+        const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks);
+        const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(merge_grid);
+
+        selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
+        if (getUniform(blocks.grid)) |block| blocks.* = .{ .uniform = block };
     }
 
     // Workaround for https://codeberg.org/ziglang/zig/issues/35254
@@ -73,7 +75,7 @@ pub const Encoding = union(enum(u1)) {
         }
     }
 
-    pub fn toBlocks(blocks: *Encoding, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn toGrid(blocks: *Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         if (blocks.* == .grid) return;
         switch (blocks.*) {
             .uniform => |block| {
@@ -158,7 +160,7 @@ pub const Encoding = union(enum(u1)) {
         return if (count == ChunkSize * ChunkSize) self[0][0] else null;
     }
 
-    pub fn fuzzerMakeEncoding(grid: *[ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
+    pub fn fuzzerMakeEncoding(grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
         @disableInstrumentation();
         @setRuntimeSafety(false);
         return switch (smith.value(@typeInfo(Encoding).@"union".tag_type.?)) {
@@ -185,7 +187,7 @@ pub const Encoding = union(enum(u1)) {
                         }
                     }
                     const unique_vector: @Vector(scale_factor * scale_factor * scale_factor, Block.Tag) = @bitCast(unique_blocks);
-                    if (std.simd.countElementsWithValue(unique_vector, unique_blocks[0][0][0]) == scale_factor * scale_factor * scale_factor){
+                    if (std.simd.countElementsWithValue(unique_vector, unique_blocks[0][0][0]) == scale_factor * scale_factor * scale_factor) {
                         simplified[sx][sy][sz] = @enumFromInt(unique_blocks[0][0][0]);
                     } else {
                         simplified[sx][sy][sz] = getBestBlock(unique_vector);

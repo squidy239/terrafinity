@@ -116,7 +116,7 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     chunk.saved.store(true, .unordered);
 }
 
-pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *[ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
     const load = tracy.Zone.begin(.{ .src = @src() });
     defer load.end();
     _ = io;
@@ -137,7 +137,7 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
-    const mergeblocks: Chunk.Encoding = get: switch (data.encoding) {
+    get: switch (data.encoding) {
         .grid => gr: {
             grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse {
                 // Retry since the grid was removed between the time we loaded the chunk data and now
@@ -146,12 +146,12 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
                 new_data_bytes.deinit();
                 continue :get data.encoding;
             };
-            break :gr .{ .grid = @ptrCast(@alignCast(@constCast(grid_bytes.?.data))) };
+            blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
+            break :gr;
         },
-        .uniform => .{ .uniform = data.one_block },
-    };
+        .uniform => blocks.mergeUniform(data.one_block),
+    }
 
-    blocks.merge(mergeblocks, grid_buffer);
     return .{ .from_disk = true, .structures = data.structures_generated };
 }
 
