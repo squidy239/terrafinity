@@ -176,13 +176,13 @@ inline fn meshOne(one: Block, two: Block) MeshResult {
 
 inline fn meshMany(len: usize, one: @Vector(len, Block.Tag), two: @Vector(len, Block.Tag)) struct { @Int(.unsigned, len), @Int(.unsigned, len) } {
     const LenInt = @Int(.unsigned, len);
-    const not_same:LenInt= @bitCast(one != two);
+    const not_same: LenInt = @bitCast(one != two);
     if (not_same == 0) return .{ 0, 0 };
     const ones_visible: LenInt = @bitCast(Block.isVisibleVector(len, one));
     const twos_transparent: LenInt = @bitCast(Block.isTransparentVector(len, two));
     const valid_face = not_same & ones_visible & twos_transparent;
     const ones_transparent: LenInt = @bitCast(Block.isTransparentVector(len, one));
-    
+
     return .{
         (valid_face & ones_transparent),
         (valid_face & ~ones_transparent),
@@ -293,7 +293,7 @@ test "MeshBehavior - Chunk Boundary Culling" {
     var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
     // Place a single block on the X=0 boundary
-    grid[0][1][1] = .stone; 
+    grid[0][1][1] = .stone;
 
     var opaque_faces = std.ArrayList(Face).empty;
     defer opaque_faces.deinit(std.testing.allocator);
@@ -337,7 +337,7 @@ test "MeshBehavior - Uniform Solid Chunk Culled By Neighbor" {
 
     const maingrid: Chunk.Encoding = .{ .uniform = .stone };
     var neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
-    
+
     // Solid chunk directly below this one (culling the yminus face)
     neighbor_faces[@intFromEnum(FaceRotation.yminus)] = .{ .uniform = .stone };
 
@@ -352,9 +352,9 @@ test "MeshBehavior - Uniform Solid Chunk Culled By Neighbor" {
 test "MeshBehavior - Transparent Block Routing" {
     var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
 
-    // Place an opaque block and a transparent block 
+    // Place an opaque block and a transparent block
     grid[1][1][1] = .stone;
-    grid[3][3][3] = .water; 
+    grid[3][3][3] = .water;
 
     var opaque_faces = std.ArrayList(Face).empty;
     defer opaque_faces.deinit(std.testing.allocator);
@@ -399,7 +399,7 @@ test "MeshBehavior - Grid to Grid Boundary Alignment" {
     var main_grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     // Main chunk has a block right on the X- boundary at (0, 5, 5)
     main_grid[0][5][5] = .stone;
-    
+
     // Create the 2D boundary face for the neighbor
     var neighbor_face_grid: [ChunkSize][ChunkSize]Block = @splat(@splat(.air));
     // Since it's a 2D face, we just set Y=5, Z=5
