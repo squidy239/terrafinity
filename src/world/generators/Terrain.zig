@@ -419,7 +419,7 @@ pub const DefaultGenerator = struct {
         for (heights, 0..) |row, x| {
             for (0..ChunkSize) |c| {
                 for (row, 0..) |terrain_height, z| {
-                    chunkBlocks[x][c][z] = getSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness, oneDterrainScale);
+                    chunkBlocks[x][c][z] = getSurfaceBlock(block_height_vec[c], terrain_height, terrainScales, gen_params.SeaLevel, rand, gen_params.terrainblockRandomness, oneDterrainScale, scale);
                 }
             }
         }
@@ -498,8 +498,8 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    fn getSurfaceBlock(block_height: i64, terrain_height: i64, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32, oneDterrainScale: f32) Block {
-        if (block_height < terrain_height - 5) {
+    fn getSurfaceBlock(block_height: i64, terrain_height: i64, thamount: [2]f32, SeaLevel: i32, rand: *std.Random, blockRandomness: f32, oneDterrainScale: f32, terrain_scale: f32) Block {
+        if (block_height < terrain_height - @as(i64, @ceil(5.0 * terrain_scale))) {
             return Block.stone;
         } else if (block_height < terrain_height) {
             return Block.dirt;

@@ -254,7 +254,7 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub fn simplifyBlocks(grid: *align(GridAlignment) const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
-        var simplified_grid: [simplified_size][simplified_size][simplified_size]Block.Tag align(GridAlignment) = undefined;
+        var simplified_grid: [simplified_size][simplified_size][simplified_size]Block align(GridAlignment) = undefined;
         for (0..simplified_size) |nx| {
             const x = nx * scale_factor;
 
@@ -268,12 +268,12 @@ pub const Encoding = union(enum(u1)) {
                 inline for (0..scale_factor) |dx| {
                     inline for (0..scale_factor) |dy| {
                         const idx = dx * scale_factor + dy;
-                        rows[idx] = grid[x + dx][y + dy];
-                        exposures[idx] = getExposureMask(x + dx, y + dy, grid, rows[idx]);
+                        rows[idx] = @bitCast(grid[x + dx][y + dy]);
+                        exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), rows[idx]);
                     }
                 }
 
-                simplified_grid[nx][ny] = findBestBlock(ChunkSize, rows, exposures);
+                simplified_grid[nx][ny] = @bitCast(findBestBlock(ChunkSize, rows, exposures));
             }
         }
         return simplified_grid;
