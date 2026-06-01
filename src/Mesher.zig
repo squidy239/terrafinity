@@ -66,8 +66,8 @@ fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbo
         };
 
         const transparent, const @"opaque" = meshMany(ChunkSize, one_uniform_vec, two_vec);
-         if (transparent != 0) addSideFaces(ChunkSize, transparent, comptime rotation, true, i, opaque_faces, transparent_faces, main_block);
-         if (@"opaque" != 0) addSideFaces(ChunkSize, @"opaque", comptime rotation, false, i, opaque_faces, transparent_faces, main_block);
+        if (transparent != 0) addSideFaces(ChunkSize, transparent, comptime rotation, true, i, opaque_faces, transparent_faces, main_block);
+        if (@"opaque" != 0) addSideFaces(ChunkSize, @"opaque", comptime rotation, false, i, opaque_faces, transparent_faces, main_block);
     }
 }
 
@@ -479,7 +479,7 @@ test "MeshBenchmark" {
         const et = std.Io.Timestamp.now(std.testing.io, .awake);
         const dt = st.durationTo(et);
         const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
-        std.log.warn("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (i == 0) "uniform" else if(i == 1) "grid" else "grid air", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
+        std.log.warn("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (i == 0) "uniform" else if (i == 1) "grid" else "grid air", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
     }
 }
 

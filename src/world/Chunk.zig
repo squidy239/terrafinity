@@ -1,7 +1,8 @@
 const std = @import("std");
 
-const Block = @import("Block.zig").Block;
 const tracy = @import("tracy");
+
+const Block = @import("Block.zig").Block;
 
 pub const ChunkSize = 32;
 encoding: Encoding,
@@ -153,7 +154,7 @@ pub const Encoding = union(enum(u1)) {
         uniform: Block,
     };
 
-    pub fn getFaceUniform(self: *const align(GridAlignment) [ChunkSize][ChunkSize]Block) ?Block {
+    pub fn getFaceUniform(self: *align(GridAlignment) const [ChunkSize][ChunkSize]Block) ?Block {
         const flat_blocks: *const [ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self);
         const block_vector: @Vector(ChunkSize * ChunkSize, @typeInfo(Block).@"enum".tag_type) = flat_blocks.*;
         const count = std.simd.countElementsWithValue(block_vector, block_vector[0]);
@@ -171,47 +172,111 @@ pub const Encoding = union(enum(u1)) {
             .uniform => .{ .uniform = smith.value(Block) },
         };
     }
-    const simplified_size = ChunkSize / 2;
+
     const scale_factor = 2;
-    pub fn simplifyBlocksAvg(blocks: *const align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
-        var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
-        var unique_blocks: [scale_factor][scale_factor][scale_factor]Block.Tag = undefined;
-        for (0..simplified_size) |sx| {
-            for (0..simplified_size) |sy| {
-                for (0..simplified_size) |sz| {
-                    inline for (0..scale_factor) |dx| {
-                        inline for (0..scale_factor) |dy| {
-                            inline for (0..scale_factor) |dz| {
-                                unique_blocks[dx][dy][dz] = @intFromEnum(blocks[sx * scale_factor + dx][sy * scale_factor + dy][sz * scale_factor + dz]);
-                            }
-                        }
-                    }
-                    const unique_vector: @Vector(scale_factor * scale_factor * scale_factor, Block.Tag) = @bitCast(unique_blocks);
-                    if (std.simd.countElementsWithValue(unique_vector, unique_blocks[0][0][0]) == scale_factor * scale_factor * scale_factor) {
-                        simplified[sx][sy][sz] = @enumFromInt(unique_blocks[0][0][0]);
-                    } else {
-                        simplified[sx][sy][sz] = getBestBlock(unique_vector);
-                    }
-                }
-            }
-        }
-        return simplified;
+    const simplified_size = ChunkSize / scale_factor;
+
+    const area_factor = scale_factor * scale_factor;
+    const volume_factor = scale_factor * scale_factor * scale_factor;
+
+    inline fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, center: @Vector(ChunkSize, Block.Tag)) @Vector(ChunkSize, bool) {
+        const center_trans = Block.isTransparentVector(ChunkSize, center);
+        var exposure_mask: @Vector(ChunkSize, bool) = @splat(false);
+
+        // Z-Axis
+        exposure_mask |= std.simd.shiftElementsRight(center_trans, 1, true);
+        exposure_mask |= std.simd.shiftElementsLeft(center_trans, 1, true);
+
+        // X-Axis
+        exposure_mask |= if (x == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x - 1][y]));
+        exposure_mask |= if (x == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x + 1][y]));
+
+        // Y-Axis
+        exposure_mask |= if (y == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y - 1]));
+        exposure_mask |= if (y == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y + 1]));
+
+        return exposure_mask;
     }
 
-    fn getBestBlock(blocks: @Vector(scale_factor * scale_factor * scale_factor, @typeInfo(Block).@"enum".tag_type)) Block {
-        var best: Block = undefined;
-        var best_count: f32 = -1.0;
-        inline for (0..scale_factor * scale_factor * scale_factor) |i| {
-            const block_int = blocks[i];
-            const block: Block = @enumFromInt(block_int);
-            const weight = block.getPropagationWeight();
-            const count = std.simd.countElementsWithValue(blocks, block_int);
-            if (count * weight > best_count) {
-                best = @enumFromInt(block_int);
-                best_count = count * weight;
+
+    pub inline fn findBestBlock(
+        comptime len: usize,
+        rows: [area_factor]@Vector(len, Block.Tag),
+        exposures: [area_factor]@Vector(len, bool),
+    ) @Vector(len / scale_factor, Block.Tag) {
+        var v: [volume_factor]@Vector(len, Block.Tag) = undefined;
+        var exp: [volume_factor]@Vector(len, bool) = undefined;
+
+        inline for (0..area_factor) |i| {
+            inline for (0..scale_factor) |dz| {
+                v[i * scale_factor + dz] = rows[i];
+                exp[i * scale_factor + dz] = exposures[i];
             }
         }
-        return best;
+
+        var total_counts: [volume_factor]@Vector(len, u8) = undefined;
+        var exp_counts: [volume_factor]@Vector(len, u8) = undefined;
+
+        inline for (0..volume_factor) |i| {
+            total_counts[i] = @splat(0);
+            exp_counts[i] = @splat(0);
+
+            inline for (0..volume_factor) |j| {
+                const match = v[i] == v[j];
+                total_counts[i] += @intFromBool(match);
+                exp_counts[i] += @intFromBool(match & exp[j]);
+            }
+        }
+
+        var best_v = v[0];
+        var best_tot = total_counts[0];
+        var best_exp = exp_counts[0];
+
+        inline for (1..volume_factor) |i| {
+            const exp_differs = best_exp != exp_counts[i];
+            const exp_wins = best_exp >= exp_counts[i];
+            const total_wins = best_tot >= total_counts[i];
+            const a_wins = @select(bool, exp_differs, exp_wins, total_wins);
+
+            best_v = @select(Block.Tag, a_wins, best_v, v[i]);
+            best_tot = @select(u8, a_wins, best_tot, total_counts[i]);
+            best_exp = @select(u8, a_wins, best_exp, exp_counts[i]);
+        }
+
+        const stride_mask = comptime blk: {
+            const downsampled_len = len / scale_factor;
+            var m: @Vector(downsampled_len, i32) = undefined;
+            for (0..downsampled_len) |i| m[i] = @intCast(i * scale_factor);
+            break :blk m;
+        };
+
+        return @shuffle(Block.Tag, best_v, undefined, stride_mask);
+    }
+
+    pub fn simplifyBlocks(grid: *align(GridAlignment) const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
+        var simplified_grid: [simplified_size][simplified_size][simplified_size]Block.Tag align(GridAlignment) = undefined;
+        for (0..simplified_size) |nx| {
+            const x = nx * scale_factor;
+
+            for (0..simplified_size) |ny| {
+                const y = ny * scale_factor;
+
+                var rows: [area_factor]@Vector(ChunkSize, Block.Tag) = undefined;
+                var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
+
+                // Dynamically build the 2D area arrays based on scale_factor
+                inline for (0..scale_factor) |dx| {
+                    inline for (0..scale_factor) |dy| {
+                        const idx = dx * scale_factor + dy;
+                        rows[idx] = grid[x + dx][y + dy];
+                        exposures[idx] = getExposureMask(x + dx, y + dy, grid, rows[idx]);
+                    }
+                }
+
+                simplified_grid[nx][ny] = findBestBlock(ChunkSize, rows, exposures);
+            }
+        }
+        return simplified_grid;
     }
 
     test "SimplifyBlocksAvgBenchmark" {
@@ -231,7 +296,7 @@ pub const Encoding = union(enum(u1)) {
         const st = std.Io.Timestamp.now(std.testing.io, .awake);
 
         for (0..test_amount) |_| {
-            const res = simplifyBlocksAvg(&grid);
+            const res = simplifyBlocks(&grid);
             std.mem.doNotOptimizeAway(res);
         }
 

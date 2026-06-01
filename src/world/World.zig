@@ -37,9 +37,9 @@ inline fn hash(item: anytype) u64 {
     std.hash.autoHash(&hasher, item);
     return hasher.final();
 }
-const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, if(builtin.is_test) 1 else 32);
+const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, hash, .{}, if (builtin.is_test) 1 else 32);
 
-grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, if(builtin.is_test) 1 else 32),
+grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, hash, .{}, if (builtin.is_test) 1 else 32),
 chunks: ChunkMapType,
 config: WorldConfig,
 
@@ -537,7 +537,7 @@ pub const Editor = struct {
         var isuniform: bool = false;
         try chunk.lockShared(io);
         switch (chunk.encoding) {
-            .grid => |blocks| simplified_blocks = Chunk.Encoding.simplifyBlocksAvg(blocks),
+            .grid => |blocks| simplified_blocks = Chunk.Encoding.simplifyBlocks(blocks),
             .uniform => |block| {
                 simplified_blocks = @splat(@splat(@splat(block)));
                 isuniform = true;
@@ -746,7 +746,7 @@ fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     var generator: DefaultGenerator = undefined;
     try makeTestingWorld(&world, &generator, allocator, 256, 256);
     defer world.deinit(io, allocator);
-    
+
     (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, true)).release();
     (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true)).release();
     (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, true)).release();

@@ -44,16 +44,6 @@ pub const Block = enum(Tag) {
         };
     }
 
-    pub inline fn getPropagationWeight(self: Block) f32 {
-        return switch (self) {
-            .null => unreachable,
-            .snow => 2.0,
-            .grass => 2.0,
-            .dirt => 0.3,
-            else => 1,
-        };
-    }
-
     pub inline fn plantsCanGrow(self: Block) bool {
         return switch (self) {
             .null => unreachable,
