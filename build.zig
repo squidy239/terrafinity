@@ -68,7 +68,7 @@ fn setupDependencies(
     b: *std.Build,
     root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.lang.OptimizeMode,
+    optimize: std.builtin.OptimizeMode,
     sanitize: ThreadSanitizeMode,
 ) void {
     const dep_rocksdb = b.dependency("rocksdb", .{
@@ -76,9 +76,9 @@ fn setupDependencies(
         .enable_lz4 = true,
         .target = target,
         .optimize = switch (optimize) {
-            .Debug, .ReleaseSafe => std.lang.OptimizeMode.ReleaseSafe,
-            .ReleaseFast => std.lang.OptimizeMode.ReleaseFast,
-            .ReleaseSmall => std.lang.OptimizeMode.ReleaseSmall,
+            .Debug, .ReleaseSafe => std.builtin.OptimizeMode.ReleaseSafe,
+            .ReleaseFast => std.builtin.OptimizeMode.ReleaseFast,
+            .ReleaseSmall => std.builtin.OptimizeMode.ReleaseSmall,
         },
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");

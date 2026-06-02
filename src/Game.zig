@@ -674,6 +674,7 @@ fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
+const BFA = @import("world/BufferFirstAllocator.zig");
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
@@ -698,7 +699,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     };
 
     var buffer: [65536]u8 = undefined;
-    var bfa: std.heap.BufferFirstAllocator = .init(&buffer, self.allocator);
+    var bfa: BFA = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
     defer opaque_faces.deinit(bfa.allocator());
     var transparent_faces: std.ArrayList(Mesher.Face) = .empty;

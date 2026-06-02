@@ -371,8 +371,8 @@ pub const Editor = struct {
     tempallocator: std.mem.Allocator,
 
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-        const flushh = tracy.Zone.begin(.{ .src = @src() });
-        defer flushh.end();
+        const z: tracy.Zone = .begin(.{ .src = @src() });
+        defer z.end();
         defer self.clear();
         self.edit_buffer.lockPointers();
         defer self.edit_buffer.unlockPointers();
@@ -504,8 +504,8 @@ pub const Editor = struct {
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
-        const place = tracy.Zone.begin(.{ .src = @src() });
-        defer place.end();
+        const z: tracy.Zone = .begin(.{ .src = @src() });
+        defer z.end();
         const boundingBox = shape.boundingBox;
         var y = boundingBox[2];
         while (y <= boundingBox[3]) : (y += 1) {
@@ -583,6 +583,8 @@ pub const Editor = struct {
 };
 
 pub fn saveAll(self: *@This(), io: std.Io) void {
+    const z: tracy.Zone = .begin(.{ .src = @src() });
+    defer z.end();
     var group: std.Io.Group = .init;
     defer group.cancel(io);
     const prev = io.swapCancelProtection(.blocked);
@@ -594,6 +596,8 @@ pub fn saveAll(self: *@This(), io: std.Io) void {
 }
 
 pub fn saveShard(self: *@This(), shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
+    const z: tracy.Zone = .begin(.{ .src = @src() });
+    defer z.end();
     lock.lockUncancelable(io);
     defer lock.unlock(io);
     var it = shard.iterator();
@@ -605,6 +609,9 @@ pub fn saveShard(self: *@This(), shard: *ChunkMapType.Shard, lock: *std.Io.Mutex
 }
 
 pub fn trySaveAll(self: *@This(), io: std.Io) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src() });
+    defer z.end();
+    
     var group: std.Io.Group = .init;
     defer group.cancel(io);
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
@@ -614,6 +621,8 @@ pub fn trySaveAll(self: *@This(), io: std.Io) !void {
 }
 
 fn trySaveShard(self: *World, shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
+    const z: tracy.Zone = .begin(.{ .src = @src() });
+    defer z.end();
     if (!lock.tryLock()) return;
     defer lock.unlock(io);
     var it = shard.iterator();

@@ -564,13 +564,14 @@ pub const DefaultGenerator = struct {
         }
         return height;
     }
-
+    const BFA = @import("../BufferFirstAllocator.zig");
+    
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
         const genstructures = tracy.Zone.begin(.{ .src = @src() });
         defer genstructures.end();
         if (chunk_pos.level < 0) return; // Does not work for < 0 level
         var editorBuffer: [100_000]u8 = undefined;
-        var bfa: std.heap.BufferFirstAllocator = .init(&editorBuffer, allocator);
+        var bfa: BFA = .init(&editorBuffer, allocator);
         var worldEditor = World.Editor{ .world = world, .tempallocator = bfa.allocator(), .propagate_changes = false };
         defer worldEditor.clear();
 
