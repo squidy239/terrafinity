@@ -611,7 +611,7 @@ pub fn saveShard(self: *@This(), shard: *ChunkMapType.Shard, lock: *std.Io.Mutex
 pub fn trySaveAll(self: *@This(), io: std.Io) !void {
     const z: tracy.Zone = .begin(.{ .src = @src() });
     defer z.end();
-    
+
     var group: std.Io.Group = .init;
     defer group.cancel(io);
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
@@ -756,19 +756,18 @@ fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     try makeTestingWorld(&world, &generator, allocator, 256, 256);
     defer world.deinit(io, allocator);
 
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 970, 0, -655 }, .level = 2 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 432234, 0, 0 }, .level = 3 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 54, 0 }, .level = 4 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 54, 0, 54 }, .level = 5 }, true)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 23, -4323 }, .level = 6 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 970, 0, -655 }, .level = 2 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 432234, 0, 0 }, .level = 3 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 54, 0 }, .level = 4 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 54, 0, 54 }, .level = 5 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 23, -4323 }, .level = 6 }, false)).release();
 }
 
 test "loadChunk allocation failure" {
-    const io = std.testing.io;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, testLoadChunkAllocation, .{io});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testLoadChunkAllocation, .{std.Io.Threaded.global_single_threaded.io()});
 }
 
 test "fuzz world" {

@@ -565,7 +565,7 @@ pub const DefaultGenerator = struct {
         return height;
     }
     const BFA = @import("../BufferFirstAllocator.zig");
-    
+
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
         const genstructures = tracy.Zone.begin(.{ .src = @src() });
         defer genstructures.end();

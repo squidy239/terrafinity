@@ -50,7 +50,12 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
     var image = try zigimg.Image.fromMemory(allocator, menu_background_image);
     defer image.deinit(allocator);
     try image.convert(allocator, .rgba32);
-    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), @intCast(image.width), @intCast(image.height), .linear, .rgba_32);
+    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), .{
+        .width = @intCast(image.width),
+        .height = @intCast(image.height),
+        .format = .rgba_32,
+        .interpolation = .linear,
+    });
 }
 
 pub fn deinit(self: *@This()) void {

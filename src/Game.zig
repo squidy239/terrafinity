@@ -1,23 +1,24 @@
 const std = @import("std");
 
-const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const dvui = @import("dvui");
 const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
 
+const Entity = @import("entity/Entity.zig");
+const EntityRegistry = @import("entity/EntityRegistry.zig");
+const EntityTypes = @import("entity/EntityTypes.zig");
 const Key = @import("Key.zig");
+const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const utils = @import("libs/utils.zig");
 const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
+const BFA = @import("world/BufferFirstAllocator.zig");
 const Chunk = @import("world/Chunk.zig");
-const Entity = @import("entity/Entity.zig");
-const EntityTypes = @import("entity/EntityTypes.zig");
-const World = @import("world/World.zig");
-const EntityRegistry = @import("entity/EntityRegistry.zig");
 const Geometry = @import("world/structures/Geometry.zig");
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
+const World = @import("world/World.zig");
 
 const Game = @This();
 
@@ -674,7 +675,6 @@ fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
-const BFA = @import("world/BufferFirstAllocator.zig");
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
@@ -715,10 +715,15 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
             &transparent_faces,
         );
     }
-    if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
-        try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
-    } else {
-        self.renderer.removeChunk(io, chunk_pos);
+
+    {
+        const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
+        defer chunk_add.end();
+        if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
+            try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+        } else {
+            self.renderer.removeChunk(io, chunk_pos);
+        }
     }
     const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
     defer mark.end();
@@ -746,13 +751,11 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 }
 
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
-    var was_active = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = genStructures });
-        was_active = entry.value_ptr.is_active;
         entry.value_ptr.is_queued = true;
     }
 

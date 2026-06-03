@@ -1,4 +1,5 @@
 const std = @import("std");
+const tracy = @import("tracy");
 
 const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
@@ -18,10 +19,11 @@ pub const Face = packed struct(u64) {
     _: @Int(.unsigned, @bitSizeOf(u64) - (3 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
-const batch_size = 64;
 /// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
 /// neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn mesh(allocator: std.mem.Allocator, maingrid: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer tracy.Zone.end(zone);
     switch (maingrid) {
         .uniform => |main_block| {
             inline for (std.enums.values(FaceRotation)) |rotation| {
@@ -53,6 +55,8 @@ inline fn getNeighborBlockZ(neighbor_face: *const Chunk.Encoding.Face, x: usize,
 }
 
 fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbor_face: *const Chunk.Encoding.Face, comptime rotation: FaceRotation, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer tracy.Zone.end(zone);
     if (neighbor_face.* == .uniform and meshOne(main_block, neighbor_face.uniform) == .none) return;
     try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
     try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
@@ -106,6 +110,8 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
 }
 
 fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer tracy.Zone.end(zone);
     for (0..ChunkSize) |x| {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);

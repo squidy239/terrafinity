@@ -198,7 +198,6 @@ pub const Encoding = union(enum(u1)) {
         return exposure_mask;
     }
 
-
     pub inline fn findBestBlock(
         comptime len: usize,
         rows: [area_factor]@Vector(len, Block.Tag),
