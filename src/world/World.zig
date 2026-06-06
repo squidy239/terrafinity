@@ -367,8 +367,20 @@ pub const Editor = struct {
     world: *World,
     last_chunk_cache: ?struct { chunk_pos: ChunkPos, grid: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block } = null,
     propagate_changes: bool = true,
-    edit_buffer: std.HashMapUnmanaged(ChunkPos, struct { grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) }, std.hash_map.AutoContext(ChunkPos), 80) = .empty,
+    edit_buffer: std.HashMapUnmanaged(ChunkPos, struct { grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) }, hash_context, 80) = .empty,
     tempallocator: std.mem.Allocator,
+
+    const hash_context = struct {
+        pub const hash = hashFn;
+
+        inline fn hashFn(ctx: @This(), chunk_pos: ChunkPos) u64 {
+            _ = ctx;
+            const first: u64 = @bitCast([2]i32{ chunk_pos.level, chunk_pos.position[0] });
+            const second: u64 = @bitCast([2]i32{ chunk_pos.position[1], chunk_pos.position[2] });
+            return first ^ second;
+        }
+        pub const eql = std.hash_map.getAutoEqlFn(ChunkPos, @This());
+    };
 
     pub fn flush(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         const z: tracy.Zone = .begin(.{ .src = @src() });
