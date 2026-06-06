@@ -184,189 +184,23 @@ pub const DefaultGenerator = struct {
             .terrain_min = -4096,
             .terrain_max = 8196,
             .sea_level = 0,
-            .cave_threshold = -0.8,
+            .cave_threshold = -10000.0,
             .cave_expansion_max = 8192,
             .cave_expansion_start = 0,
             .seed = null,
             .terrain_scale = 1,
             .gen_structures = true,
-            .trees = &.{
-                .{
-                    .placer = .{ .box_size = 2048, .inner_box_size = 1800 },
-                    .enabled = true,
-                    .size_variation = 0.5,
-                    .tree = .{
-                        .base_radius = 15,
-                        .base_radius_variation = 0.5,
-                        .trunk_height = 100,
-                        .trunk_height_variation = 0.5,
-                        .leaf_density = 0.5,
-                        .leaf_size = 6,
-                        .steps = &.{
-                            .{
-                                .lengthPercent = 1.0,
-                                .radiusPercent = 1.0,
-                                .branchCountMax = 1,
-                                .branchCountMin = 1,
-                                .branchRange = .{ 0, 0, 0 },
-                                .lengthPercentRandomness = 0.5,
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.5,
-                                .branchRandomness = 0.3,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .lengthPercentRandomness = 0.4,
-                                .branchRange = .{ 0.4, 0.4, 0.4 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.5,
-                                .branchRandomness = 0.3,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .lengthPercentRandomness = 0.4,
-                                .branchRange = .{ 0.4, 0.4, 0.4 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.4, 0.4, 0.4 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.4, 0.4, 0.4 },
-                            },
-                            .{
-                                .lengthPercent = 0.7,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.4, 0.4, 0.4 },
-                            },
-                        },
-                    },
-                },
-                .{
-                    .placer = .{ .box_size = 32, .inner_box_size = 25 },
-                    .enabled = true,
-                    .size_variation = 0.5,
-                    .tree = .{
-                        .max_recursion_depth = 6,
-                        .base_radius = 1.3,
-                        .base_radius_variation = 0.9,
-                        .trunk_height = 15,
-                        .trunk_height_variation = 0.8,
-                        .leaf_density = 0.5,
-                        .leaf_size = 4,
-                        .steps = &.{
-                            .{
-                                .lengthPercent = 1.0,
-                                .radiusPercent = 1.0,
-                                .branchCountMax = 1,
-                                .branchCountMin = 1,
-                                .branchRange = .{ 0, 0, 0 },
-                                .lengthPercentRandomness = 0.5,
-                            },
-                            .{
-                                .lengthPercent = 0.6,
-                                .radiusPercent = 0.4,
-                                .branchRandomness = 0.3,
-                                .branchCountMax = 8,
-                                .branchCountMin = 5,
-                                .lengthPercentRandomness = 0.4,
-                                .baseRadiusPercent = 0.75,
-                                .branchRange = .{ 1, 1, 1 },
-                            },
-                            .{
-                                .lengthPercent = 0.6,
-                                .radiusPercent = 0.8,
-                                .branchRandomness = 0.3,
-                                .branchCountMax = 8,
-                                .branchCountMin = 5,
-                                .lengthPercentRandomness = 0.4,
-                                .baseRadiusPercent = 0.75,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.6,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.0,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.7, 0.7, 0.7 },
-                            },
-                            .{
-                                .lengthPercent = 0.0,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                            .{
-                                .lengthPercent = 0.0,
-                                .radiusPercent = 0.7,
-                                .branchCountMax = 4,
-                                .branchCountMin = 3,
-                                .branchRandomness = 0.3,
-                                .lengthPercentRandomness = 0.3,
-                                .branchRange = .{ 0.6, 0.6, 0.6 },
-                            },
-                        },
-                    },
-                },
-            },
+            .trees = &.{ .{
+                .placer = .{ .box_size = 2048, .inner_box_size = 1800 },
+                .enabled = true,
+                .size_variation = 0.5,
+                .tree = .huge,
+            }, .{
+                .placer = .{ .box_size = 32, .inner_box_size = 25 },
+                .enabled = true,
+                .size_variation = 0.5,
+                .tree = .small,
+            } },
         };
     };
 
@@ -578,10 +412,14 @@ pub const DefaultGenerator = struct {
                         const is_tree = tree_conf.placer.getStructure(.{ @intFromFloat(lvl_x), @intFromFloat(lvl_z) }, @intCast(chunk_pos.level));
                         if (is_tree) |seed| {
                             const center_pos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                            if (-chunk_pos.level + std.math.log2_int(u32, @trunc(tree_conf.tree.trunk_height)) < 1) {
-                                try placeLowResTree(&world_editor, center_pos, scale, tree_conf.tree.trunk_height, chunk_pos.level);
+                            const tree_seeed = self.params.seed.? ^ @as(u64, @bitCast(seed));
+                            var random = std.Random.DefaultPrng.init(@bitCast(tree_seeed));
+                            const rand = random.random();
+                            const factor = ((rand.float(f32) + 0.5) * tree_conf.size_variation);
+                            if (-chunk_pos.level + std.math.log2_int(u32, @trunc(tree_conf.tree.trunk_height)) < 2) {
+                                try placeLowResTree(&world_editor, center_pos, scale * factor, tree_conf.tree.trunk_height, chunk_pos.level);
                             } else {
-                                try placeTree(&world_editor, center_pos, scale, tree_conf, self.params.seed.? ^ @as(u64, @bitCast(seed)), chunk_pos.level);
+                                try placeTree(&world_editor, center_pos, scale * factor, tree_conf, tree_seeed, chunk_pos.level);
                             }
                         }
                     }
@@ -594,10 +432,9 @@ pub const DefaultGenerator = struct {
     fn placeTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, config: TreeConfig, seed: u64, level: i32) !void {
         var random = std.Random.DefaultPrng.init(seed);
         const rand = random.random();
-        const factor = ((rand.float(f32) + 0.5) * config.size_variation);
         var place_tree: World.Editor.Tree = .{
             .pos = @intCast(pos),
-            .scale = scale * factor,
+            .scale = scale,
             .config = config.tree,
             .rand = rand,
         };
@@ -605,13 +442,13 @@ pub const DefaultGenerator = struct {
     }
 
     fn placeLowResTree(editor: *World.Editor, pos: World.BlockPos, scale: f32, height: f32, level: i32) !void {
-        const radius: f32 = height * scale * 1.5;
-        if (radius < 0.25) return;
-        if (radius < 1.5) {
+        const diameter: f32 = height * scale;
+        if (diameter < 0.25) return;
+        if (diameter < 1.0) {
             try editor.placeBlock(.leaves, pos + @Vector(3, i64){ 0, 1, 0 }, level);
             return;
         }
-        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @trunc(radius / 1.5), 0 }), radius);
+        const sphere = World.Editor.Geometry.Sphere(f32).init(@floatFromInt(pos + @Vector(3, i64){ 0, @ceil(diameter / 2.0), 0 }), diameter);
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 };

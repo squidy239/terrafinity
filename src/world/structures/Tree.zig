@@ -27,6 +27,9 @@ pub const Tree = struct {
         endBlock: Block = Block.leaves,
     };
     pub const Config = struct {
+        pub const small: Config = @import("Trees/small.zon");
+        pub const huge: Config = @import("Trees/huge.zon");
+
         base_radius: f32,
         base_radius_variation: f32,
         trunk_height: f32,
@@ -41,8 +44,6 @@ pub const Tree = struct {
         steps: []const StepConfig,
         min_radius: f32 = 0.5,
         min_length: f32 = 2.0,
-
-        // pub const Medium: Config = @import("Trees/Medium.zon");
     };
     const StepGenData = struct {
         pos: @Vector(3, f64),
@@ -54,6 +55,7 @@ pub const Tree = struct {
 
     threadlocal var index: usize = 0;
     pub fn place(self: *const @This(), seed: u64, editor: *WorldEditor, level: i32) !u64 {
+        @setFloatMode(.optimized);
         var step_buffer: [64]StepGenData = undefined;
         std.debug.assert(step_buffer.len > self.config.steps.len);
         std.debug.assert(self.config.steps.len > self.config.max_recursion_depth);
@@ -73,7 +75,7 @@ pub const Tree = struct {
             .recursionDepth = 0,
         });
 
-        const halfLeaf = self.config.leaf_size * 0.5;
+        const halfLeaf = self.config.leaf_size * self.scale * 0.5;
 
         while (stack.pop()) |data| {
             const pstep = tracy.Zone.begin(.{ .src = @src(), .name = "placeStep" });
@@ -83,23 +85,27 @@ pub const Tree = struct {
             const firstBranches = self.rand.intRangeAtMost(usize, step.branchCountMin, step.branchCountMax);
 
             for (0..firstBranches) |i| {
-                const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, -step.branchRandomness, step.branchRandomness);
                 const length = data.lastLength * step.lengthPercent + getRand(&index) * step.lengthPercentRandomness;
-                const radius = data.lastRadius * step.radiusPercent + getRand(&index) * step.radiusPercentRandomness;
                 if (length < self.config.min_length * self.scale or data.recursionDepth >= self.config.max_recursion_depth) {
+                    const l = tracy.Zone.begin(.{ .src = @src(), .name = "leaves" });
+                    defer l.end();
                     var y = -halfLeaf;
                     while (y < halfLeaf) : (y += 1) {
                         var x = -halfLeaf;
-                        while (x <= halfLeaf) : (x += 1) {
+                        while (x < halfLeaf) : (x += 1) {
                             var z = -halfLeaf;
-                            while (z <= halfLeaf) : (z += 1) {
-                                const block: Block = if (getRand(&index) < self.config.leaf_density) step.endBlock else .air;
-                                try editor.placeBlock(block, @round(data.pos + @Vector(3, f64){ @floor(x - 0.0001), @floor(y - 0.0001), @floor(z - 0.0001) }), level);
+                            while (z < halfLeaf) : (z += 1) {
+                                const block: Block = if (getRand(&index) < self.config.leaf_density) step.endBlock else .null; // Places null to keep whatever block is currently in the world
+                                try editor.placeBlock(block, @round(data.pos + @Vector(3, f32){ x, y, z }), level);
                             }
                         }
                     }
                 } else {
+                    const b = tracy.Zone.begin(.{ .src = @src(), .name = "branch" });
+                    defer b.end();
                     branches += 1;
+                    const branchVec = branchDirection(i, data.direction, step.branchRange, firstBranches) + rand3Vec(f32, -step.branchRandomness, step.branchRandomness);
+                    const radius = data.lastRadius * step.radiusPercent + getRand(&index) * step.radiusPercentRandomness;
                     const branch = WorldEditor.Geometry.Cone(f64).init(data.pos, branchVec, @floatCast(length), @floatCast(@max(self.config.min_radius, data.lastRadius * step.baseRadiusPercent)), @floatCast(@max(self.config.min_radius, radius)));
                     try editor.placeSamplerShape(step.block, branch, level);
                     const newPos = data.pos + (utils.vecNormalize(branchVec) * @as(@Vector(3, f64), @splat(length - radius)));
@@ -127,6 +133,7 @@ pub const Tree = struct {
 
     ///range is per-axis angular range: 0–2 mapped to 0–360° each
     pub fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
+        @setFloatMode(.optimized);
         const pi = std.math.pi;
         const n = @as(f64, @floatFromInt(branch_count));
         const i = @as(f64, @floatFromInt(iteration));

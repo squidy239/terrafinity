@@ -502,17 +502,18 @@ pub const Editor = struct {
         self.edit_buffer.clearAndFree(self.tempallocator);
     }
 
-    pub fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
+    pub inline fn placeBlock(self: *@This(), block: Block, pos: @Vector(3, i64), level: i32) !void {
         const chunkPos: ChunkPos = .fromLocalBlockPos(pos, level);
         const chunkBlockPos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-        if (self.last_chunk_cache != null and std.meta.eql(self.last_chunk_cache.?.chunk_pos, chunkPos)) {
-            @branchHint(.likely);
-            self.last_chunk_cache.?.grid[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
-            return;
+        if (self.last_chunk_cache == null or !std.meta.eql(self.last_chunk_cache.?.chunk_pos, chunkPos)) {
+            const gop = try self.edit_buffer.getOrPut(self.tempallocator, chunkPos);
+            if (!gop.found_existing) {
+                const ptr: *[ChunkSize * ChunkSize][ChunkSize]Block = @ptrCast(gop.value_ptr);
+                for (ptr) |*row| row.* = @splat(.null);
+            }
+            self.last_chunk_cache = .{ .chunk_pos = chunkPos, .grid = &gop.value_ptr.grid };
         }
-        const chunk = (try self.edit_buffer.getOrPutValue(self.tempallocator, chunkPos, .{ .grid = comptime @splat(@splat(@splat(.null))) })).value_ptr;
-        self.last_chunk_cache = .{ .chunk_pos = chunkPos, .grid = &chunk.grid };
-        chunk.grid[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
+        self.last_chunk_cache.?.grid[chunkBlockPos[0]][chunkBlockPos[1]][chunkBlockPos[2]] = block;
     }
 
     pub fn placeSamplerShape(self: *@This(), block: Block, shape: anytype, level: i32) !void {
