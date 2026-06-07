@@ -32,7 +32,7 @@ pub const DefaultGenerator = struct {
 
     const ChunkHeightsKey = packed struct {
         x: i32,
-        y: i32,
+        z: i32,
         level: i32,
 
         pub inline fn hash(key: ChunkHeightsKey) u64 {
@@ -333,9 +333,9 @@ pub const DefaultGenerator = struct {
         _ = allocator;
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level })) |cached_height| return cached_height.value;
+        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level })) |cached_height| return cached_height.value;
         const generated_heights = genTerrainHeight(self.params, level, chunk_pos);
-        _ = self.terrain_height_cache.upsert(io, &.{ .key = .{ .x = chunk_pos[0], .y = chunk_pos[1], .level = level }, .value = generated_heights });
+        _ = self.terrain_height_cache.upsert(io, &.{ .key = .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level }, .value = generated_heights });
         return generated_heights;
     }
 

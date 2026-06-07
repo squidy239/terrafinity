@@ -8,6 +8,7 @@ pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("generators/Terrain.zig").DefaultGenerator;
+pub const OldGenerator = @import("generators/Voxelgame.zig").Generator;
 pub const WorldStorage = @import("WorldStorage.zig");
 const builtin = @import("builtin");
 
