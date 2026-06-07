@@ -226,6 +226,10 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
         defer world_name_widget.deinit();
         if (create) {
             const world_name = world_name_widget.textGet();
+            if (world_name.len == 0) return error.WorldNameMissing;
+            if (!std.unicode.utf8ValidateSlice(world_name)) return error.InvalidName;
+            if (std.mem.findScalar(u8, world_name, '/') != null) return error.InvalidName;
+
             std.log.info("Creating world: {any}\n", .{world_name});
             var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
             defer worlds_dir.close(io);
@@ -240,7 +244,9 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             return true;
         }
     }
-    dvui.structUI(@src(), "World Options", &new_world_options, 32, .{}, .{});
+    const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
+    defer scroll.deinit();
+    dvui.structUI(@src(), "World Options", &new_world_options, 32, .{}, .{ .background = false, .color_fill = .transparent });
 
     return menuchanged;
 }

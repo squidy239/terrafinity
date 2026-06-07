@@ -181,7 +181,19 @@ pub fn main(init: std.process.Init) !void {
                     break :err false;
                 };
                 if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-                if (ui.menu_state.newgame and !menuchanged) menuchanged = try ui.newGameMenu(io, gpa);
+                if (ui.menu_state.newgame and !menuchanged) menuchanged = ui.newGameMenu(io, gpa) catch |err| err: {
+                    var error_buffer: [65536]u8 = undefined;
+                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                    switch (err) {
+                        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                        else => error_writer.print("{any}", .{err}) catch unreachable,
+                    }
+
+                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
+                    break :err false;
+                };
             }
             _ = try ui_window.end(.{});
         }
