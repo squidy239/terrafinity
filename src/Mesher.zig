@@ -9,7 +9,7 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 const Mesher = @This();
 
 pub const Face = packed struct(u64) {
-    const CoordInChunk = @Int(.unsigned, std.math.log2_int_ceil(usize, ChunkSize));
+    const CoordInChunk = Chunk.Int;
     z: CoordInChunk,
     y: CoordInChunk,
     x: CoordInChunk,

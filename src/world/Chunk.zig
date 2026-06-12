@@ -5,6 +5,8 @@ const tracy = @import("tracy");
 const Block = @import("Block.zig").Block;
 
 pub const ChunkSize = 32;
+pub const Int = @Int(.unsigned, std.math.log2_int_ceil(usize, ChunkSize));
+
 encoding: Encoding,
 encoding_lock: std.Io.RwLock = .init,
 ref_count: std.atomic.Value(u32) = .init(1),
@@ -179,7 +181,7 @@ pub const Encoding = union(enum(u1)) {
     const area_factor = scale_factor * scale_factor;
     const volume_factor = scale_factor * scale_factor * scale_factor;
 
-    inline fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, center: @Vector(ChunkSize, Block.Tag)) @Vector(ChunkSize, bool) {
+    fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, center: @Vector(ChunkSize, Block.Tag)) @Vector(ChunkSize, bool) {
         const center_trans = Block.isTransparentVector(ChunkSize, center);
         var exposure_mask: @Vector(ChunkSize, bool) = @splat(false);
 
@@ -198,7 +200,7 @@ pub const Encoding = union(enum(u1)) {
         return exposure_mask;
     }
 
-    pub inline fn findBestBlock(
+    pub fn findBestBlock(
         comptime len: usize,
         rows: [area_factor]@Vector(len, Block.Tag),
         exposures: [area_factor]@Vector(len, bool),
@@ -206,8 +208,8 @@ pub const Encoding = union(enum(u1)) {
         var v: [volume_factor]@Vector(len, Block.Tag) = undefined;
         var exp: [volume_factor]@Vector(len, bool) = undefined;
 
-        inline for (0..area_factor) |i| {
-            inline for (0..scale_factor) |dz| {
+        for (0..area_factor) |i| {
+            for (0..scale_factor) |dz| {
                 v[i * scale_factor + dz] = rows[i];
                 exp[i * scale_factor + dz] = exposures[i];
             }
@@ -216,11 +218,11 @@ pub const Encoding = union(enum(u1)) {
         var total_counts: [volume_factor]@Vector(len, u8) = undefined;
         var exp_counts: [volume_factor]@Vector(len, u8) = undefined;
 
-        inline for (0..volume_factor) |i| {
+        for (0..volume_factor) |i| {
             total_counts[i] = @splat(0);
             exp_counts[i] = @splat(0);
 
-            inline for (0..volume_factor) |j| {
+            for (0..volume_factor) |j| {
                 const match = v[i] == v[j];
                 total_counts[i] += @intFromBool(match);
                 exp_counts[i] += @intFromBool(match & exp[j]);
@@ -231,7 +233,7 @@ pub const Encoding = union(enum(u1)) {
         var best_tot = total_counts[0];
         var best_exp = exp_counts[0];
 
-        inline for (1..volume_factor) |i| {
+        for (1..volume_factor) |i| {
             const exp_differs = best_exp != exp_counts[i];
             const exp_wins = best_exp >= exp_counts[i];
             const total_wins = best_tot >= total_counts[i];
@@ -261,13 +263,24 @@ pub const Encoding = union(enum(u1)) {
                 const y = ny * scale_factor;
 
                 var rows: [area_factor]@Vector(ChunkSize, Block.Tag) = undefined;
-                var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
-
-                // Dynamically build the 2D area arrays based on scale_factor
+                var rows_all_eql: bool = true;
                 inline for (0..scale_factor) |dx| {
                     inline for (0..scale_factor) |dy| {
                         const idx = dx * scale_factor + dy;
                         rows[idx] = @bitCast(grid[x + dx][y + dy]);
+                        rows_all_eql &= @reduce(.And, @as(@Vector(ChunkSize, Block.Tag), @splat(rows[0][0])) == rows[idx]);
+                    }
+                }
+                if (rows_all_eql) {
+                    simplified_grid[nx][ny] = @splat(@enumFromInt(rows[0][0]));
+                    continue;
+                }
+
+                var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
+
+                inline for (0..scale_factor) |dx| {
+                    inline for (0..scale_factor) |dy| {
+                        const idx = dx * scale_factor + dy;
                         exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), rows[idx]);
                     }
                 }
