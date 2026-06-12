@@ -19,7 +19,7 @@ const Chunk = @import("world/Chunk.zig");
 const Geometry = @import("world/structures/Geometry.zig");
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const World = @import("world/World.zig");
-
+const Io = std.Io;
 const Game = @This();
 
 allocator: std.mem.Allocator,
@@ -49,8 +49,9 @@ last_save: std.Io.Timestamp = .zero,
 save_is_running: std.atomic.Value(bool) = .init(false),
 save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) = null,
 
-select: std.Io.Select(SelectUnion),
-select_buffer: [65536]SelectUnion = undefined,
+group: std.Io.Group = .init,
+/// This error is handeled on the next frame and will close the game
+defered_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError)),
 
 options: *Options,
 options_lock: *std.Io.RwLock,
@@ -216,10 +217,6 @@ fn tryRemoveChunkFromLoaded(
     }
 }
 
-const SelectUnion = union(enum) {
-    addChunkToRender: @typeInfo(@TypeOf(addChunkToRender)).@"fn".return_type.?,
-};
-
 pub const Options = struct {
     mouse_sensitivity: f32 = 0.5,
     scroll_sensitivity: f32 = 0.1,
@@ -237,6 +234,9 @@ pub const Options = struct {
     terrain_height_cache_bytes: u64 = 268435456,
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
+
+    sphere_size: u32 = 100,
+    sphere_block: World.Block = .air,
 
     render_options: Renderer.OpenGl.RenderOptions = .{},
 
@@ -346,7 +346,6 @@ pub fn init(
         .game_arena = .init(allocator),
         .options = game_options,
         .options_lock = game_options_lock,
-        .select = .init(io, &game.select_buffer),
         .running = .init(true),
         .allocator = undefined,
         .opengl_renderer = undefined,
@@ -410,11 +409,10 @@ pub fn init(
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
-    self.select.cancelDiscard(); // This must be called first to close the queue or it could hang
     if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
     if (self.save_future) |*future| future.cancel(io) catch {};
     if (self.load_future) |*future| future.cancel(io) catch {};
-    self.select.cancelDiscard(); // I dont think this will be needed once https://codeberg.org/ziglang/zig/issues/35250 is fixed
+    self.group.cancel(io);
 
     self.opengl_renderer.deinit(io);
     self.entity_registry.deinit(io, self.allocator, &self.world);
@@ -449,7 +447,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     self.player.physics.mutex.unlock(io);
 
     try self.renderer.drawChunks(io, player_pos_updated);
-    try self.handleSelectFutures();
+    try self.handleErrors();
     try entitys_future.await(io);
 }
 
@@ -465,9 +463,6 @@ fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 
         self.chunk_load_is_running.store(true, .seq_cst);
         self.last_chunk_load = .now(io, .awake);
-        //this requires concurrency incase the Select buffer is full.
-        //it catches becuase that is unlikely and I want it to work in single threaded mode.
-        //TODO find a way to make it safely async
         self.load_future = io.concurrent(loadChunks, .{ self, io, allocator }) catch io.async(loadChunks, .{ self, io, allocator });
     }
 
@@ -493,17 +488,28 @@ fn saveFuture(self: *@This(), io: std.Io) !void {
     try self.world.trySaveAll(io);
 }
 
-fn handleSelectFutures(self: *@This()) !void {
-    var select_completion_buffer: [1024]SelectUnion = undefined;
-    while (true) {
-        const completed = try self.select.awaitMany(&select_completion_buffer, 0);
-        if (completed == 0) break;
-        for (select_completion_buffer[0..completed]) |completed_union| {
-            switch (completed_union) {
-                .addChunkToRender => |f| try f,
-            }
-        }
+fn handleErrors(self: *@This()) !void {
+    const err = @errorFromInt(self.defered_error.swap(@intFromError(error.NoError), .seq_cst));
+    switch (err) {
+        error.Canceled => unreachable, // This should not be here
+        error.NoError => {},
+        else => |e| return e,
     }
+}
+
+pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
+    const wrapper = struct {
+        pub fn handeler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
+            @call(.always_inline, function, fn_args) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => |e| {
+                    const existing_error = game.defered_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(e), .seq_cst, .seq_cst);
+                    if (existing_error) |er| std.log.err("{s}", .{@errorName(@errorFromInt(er))});
+                },
+            };
+        }
+    };
+    self.group.async(io, wrapper.handeler, .{ self, args });
 }
 
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
@@ -538,7 +544,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     }
 }
 
-pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
+pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
     switch (self.player.gameMode.load(.unordered)) {
@@ -546,7 +552,7 @@ pub fn handleButtonActions(self: *@This(), io: std.Io, actions: *const Key.Actio
         .Survival => try self.walkMove(io, actions, delta_time_seconds),
     }
     self.setSelectedSlot(actions);
-    try self.itemAction(io, actions);
+    groupAsync(self, io, itemAction, .{ self, io, actions.* });
 }
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
@@ -564,11 +570,17 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
 }
 
-fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
+fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     self.player.physics.mutex.lockUncancelable(io);
     const ppos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
     const looking = self.renderer.getCameraFront();
+
+    try self.options_lock.lockShared(io);
+    const sphere_size = self.options.sphere_size;
+    const sphere_block = self.options.sphere_block;
+    self.options_lock.unlockShared(io);
+    
     var editor: World.Editor = .{ .world = &self.world, .tempallocator = self.allocator };
     defer editor.clear();
     if (actions.contains(.use_item_primary)) {
@@ -580,7 +592,7 @@ fn itemAction(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
         try editor.placeSamplerShape(.stone, cone, 0);
     }
     if (actions.contains(.use_item_tertiary)) {
-        try TexturedSphere.NoiseSphere(&editor, @floatCast(ppos), 100, 10, .{}, .air, 0);
+        try editor.placeSamplerShape(sphere_block, Geometry.Sphere(f32).init(@floatCast(ppos), @floatFromInt(sphere_size)), 0);
     }
     try editor.flush(io, self.allocator);
 }
@@ -692,7 +704,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
     inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
         face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
-        
+
     var buffer: [65536]u8 = undefined;
     var bfa: BFA = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
@@ -754,7 +766,7 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
         entry.value_ptr.is_queued = true;
     }
 
-    self.select.async(.addChunkToRender, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
+    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
 }
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
