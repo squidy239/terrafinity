@@ -689,15 +689,10 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
-    const neighbor_faces = [6]Chunk.Encoding.Face{
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 1, 0, 0 }), false)).extractFace(io, .xminus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ -1, 0, 0 }), false)).extractFace(io, .xplus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 1, 0 }), false)).extractFace(io, .yminus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, -1, 0 }), false)).extractFace(io, .yplus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, 1 }), false)).extractFace(io, .zminus, true),
-        try (try self.world.loadChunk(io, allocator, chunk_pos.add(.{ 0, 0, -1 }), false)).extractFace(io, .zplus, true),
-    };
-
+    var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
+    inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
+        face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
+        
     var buffer: [65536]u8 = undefined;
     var bfa: BFA = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;

@@ -107,6 +107,17 @@ pub const Encoding = union(enum(u1)) {
                 .zminus => @Vector(3, i32){ 0, 0, -1 },
             };
         }
+
+        pub fn invert(self: FaceRotation) FaceRotation {
+            return switch (self) {
+                .xplus => .xminus,
+                .xminus => .xplus,
+                .yplus => .yminus,
+                .yminus => .yplus,
+                .zplus => .zminus,
+                .zminus => .zplus,
+            };
+        }
     };
 
     pub fn extractFace(self: Encoding, comptime rotation: FaceRotation) Face {

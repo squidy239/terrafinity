@@ -73,6 +73,10 @@ pub const ChunkPos = struct {
         };
     }
 
+    pub fn offset(self: ChunkPos, rotation: Chunk.Encoding.FaceRotation) ChunkPos {
+        return .{ .level = self.level, .position = self.position + rotation.direction() };
+    }
+
     pub inline fn levelToBlockRatioFloat(level: i32) f32 {
         return std.math.pow(f32, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
     }
