@@ -101,7 +101,8 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
 }
 
 fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
-    for (0..ChunkSize) |x| {
+    var x: u8 = 0;
+    while (x < ChunkSize - 1) :(x += 1) {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
 
@@ -115,8 +116,9 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
             .grid => |*g| @bitCast(g[x]),
         };
 
-        for (0..ChunkSize) |y| {
-            const center_row: @Vector(ChunkSize, Block.Tag) = grid[x][y];
+        var y: u8 = 0;
+        while (y < ChunkSize - 1) :(y += 1) {
+            const center_row: @Vector(ChunkSize, Block.Tag) = @bitCast(grid[x][y]); // bitCast is MUCH faster than coerceing for some reason
             const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(Block.isVisibleVector(ChunkSize, center_row));
             if (ones_visible == 0) continue;
             const ones_transparent: @Int(.unsigned, ChunkSize) = @bitCast(Block.isTransparentVector(ChunkSize, center_row));
@@ -140,31 +142,36 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
                     break :sh t;
                 },
             };
-            inline for (neighbor_vecs, std.enums.values(FaceRotation)) |neighbor_vec, rot| {
+            inline for (neighbor_vecs, std.enums.values(FaceRotation)) |neighbor_vec, rotation| {
                 var transparent, var @"opaque" = meshMany(ChunkSize, center_row, ones_visible, ones_transparent, neighbor_vec);
-                if (@"opaque" != 0) addGridFaces(ChunkSize, &@"opaque", rot, false, center_row, @intCast(x), @intCast(y), opaque_faces, transparent_faces);
-                if (transparent != 0) addGridFaces(ChunkSize, &transparent, rot, true, center_row, @intCast(x), @intCast(y), opaque_faces, transparent_faces);
+                if (@"opaque" != 0) addGridFaces(ChunkSize, &@"opaque", rotation, false, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
+                if (transparent != 0) addGridFaces(ChunkSize, &transparent, rotation, true, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
             }
         }
     }
 }
 
-fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), rotation: FaceRotation, comptime transparent: bool, center_row: [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
-    std.debug.assert(mask.* != 0);
+fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
     const faces_list = switch (comptime transparent) {
         true => transparent_faces,
         false => opaque_faces,
     };
-    while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
-        const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
-        faces_list.addOneAssumeCapacity().* = .{
-            .rotation = rotation,
-            .z = z,
-            .y = y,
-            .x = x,
-            .block_type = center_row[z],
-        };
-    }
+    const face = Face{
+        .z = undefined,
+         .rotation = rotation,
+         .y = y,
+         .x = x,
+         .block_type = undefined,
+     };
+     
+     while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
+         const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
+         
+         var local_face: Face = face; 
+         local_face.z = z;
+         local_face.block_type = center_row[z];
+         faces_list.appendAssumeCapacity(local_face);
+     }
 }
 
 pub const MeshResult = enum(Tag) {
@@ -181,10 +188,10 @@ inline fn meshOne(one: Block, two: Block) MeshResult {
 
 fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), ones_visible: @Int(.unsigned, len), ones_transparent: @Int(.unsigned, len), two: @Vector(len, Block.Tag)) struct { @Int(.unsigned, len), @Int(.unsigned, len) } {
     const LenInt = @Int(.unsigned, len);
-    const not_same = one != two;
-    if (!@reduce(.Or, not_same)) return .{ 0, 0 };
+    const not_same: LenInt = @bitCast(one != two);
+    if (not_same == 0) return .{ 0, 0 };
     const twos_transparent: LenInt = @bitCast(Block.isTransparentVector(len, two));
-    const valid_face = @as(LenInt, @bitCast(not_same)) & ones_visible & twos_transparent;
+    const valid_face = not_same & ones_visible & twos_transparent;
 
     return .{
         (valid_face & ones_transparent),
