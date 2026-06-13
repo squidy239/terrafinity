@@ -10,12 +10,13 @@ const Mesher = @This();
 
 pub const Face = packed struct(u64) {
     const CoordInChunk = Chunk.Int;
+    block_type: Block.Tag,
+    zlength: CoordInChunk = 0, // 0 = 1 in length, etc
     z: CoordInChunk,
     y: CoordInChunk,
     x: CoordInChunk,
     rotation: FaceRotation,
-    block_type: Block.Tag,
-    _: @Int(.unsigned, @bitSizeOf(u64) - (3 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
+    _: @Int(.unsigned, 64 - (4 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
 /// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
@@ -102,7 +103,7 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
 
 fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     var x: u8 = 0;
-    while (x < ChunkSize - 1) :(x += 1) {
+    while (x < ChunkSize - 1) : (x += 1) {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
 
@@ -117,7 +118,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
         };
 
         var y: u8 = 0;
-        while (y < ChunkSize - 1) :(y += 1) {
+        while (y < ChunkSize - 1) : (y += 1) {
             const center_row: @Vector(ChunkSize, Block.Tag) = @bitCast(grid[x][y]); // bitCast is MUCH faster than coerceing for some reason
             const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(Block.isVisibleVector(ChunkSize, center_row));
             if (ones_visible == 0) continue;
@@ -151,27 +152,46 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
     }
 }
 
-fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
+fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
     const faces_list = switch (comptime transparent) {
         true => transparent_faces,
         false => opaque_faces,
     };
     const face = Face{
         .z = undefined,
-         .rotation = rotation,
-         .y = y,
-         .x = x,
-         .block_type = undefined,
-     };
-     
-     while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
-         const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
-         
-         var local_face: Face = face; 
-         local_face.z = z;
-         local_face.block_type = center_row[z];
-         faces_list.appendAssumeCapacity(local_face);
-     }
+        .rotation = rotation,
+        .y = y,
+        .x = x,
+        .block_type = undefined,
+    };
+    const greedyz = comptime switch (rotation) {
+        .zminus, .zplus => false,
+        else => true,
+    };
+
+    var last: Face = face;
+    var last_exists: bool = false;
+    var last_zlen: u8 = undefined;
+    while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
+        const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
+        const block = center_row[z];
+        if (last_exists) {
+            if (comptime greedyz) if (last.block_type == block) {
+                @branchHint(.unpredictable);
+                last_zlen += 1;
+                continue;
+            };
+            last.zlength = @intCast(last_zlen);
+            faces_list.appendAssumeCapacity(last);
+        }
+        last_zlen = 0;
+        last_exists = true;
+        last.block_type = block;
+        last.z = z;
+    }
+    std.debug.assert(last_exists);
+    last.zlength = @intCast(last_zlen);
+    faces_list.appendAssumeCapacity(last);
 }
 
 pub const MeshResult = enum(Tag) {
@@ -297,7 +317,8 @@ test "MeshBehavior - Completely Enclosed Block" {
 
     // A 3x3x3 cube has 27 blocks. The center block (2,2,2) is completely enclosed.
     // The surface area is exactly 3 * 3 blocks per face * 6 faces = 54 faces.
-    try std.testing.expectEqual(@as(usize, 54), opaque_faces.items.len);
+    // It becomes 30 with z axis greedy meshing
+    try std.testing.expectEqual(@as(usize, 30), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
 
