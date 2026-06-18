@@ -11,7 +11,7 @@ out vec3 fragpos;
 flat out vec3 sunpos;
 flat out uint blocktype;
 flat out float scale;
-
+flat out vec2 faceSize;   // face extents in blocks (u, v); use for texture tiling
 struct Chunk {
     vec3 absolute_position;
     vec3 relative_position;
@@ -21,34 +21,37 @@ layout(std430, binding = 0) buffer ChunkData {
     Chunk chunks[];
 };
 
-const uint CHUNK_SIZE   = 32;
-const uint COORD_BITS   = uint(log2(float(CHUNK_SIZE)));
+const uint CHUNK_SIZE = 32u;
+const uint COORD_BITS = 5u;              // log2(CHUNK_SIZE)
+const uint COORD_MASK = CHUNK_SIZE - 1u; // 0x1F
 
-const uint COORD_MASK    = CHUNK_SIZE - 1u;           // e.g. 0x1F
-const uint ROT_OFFSET    = COORD_BITS * 3u;           // 15
-const uint BLOCK_OFFSET  = ROT_OFFSET + 4u;           // 19  (crosses u32 word boundary)
-const uint BITS_IN_WORD0 = 32u - BLOCK_OFFSET;        // 13  bits of BlockType in data[0]
-const uint BITS_IN_WORD1 = 16u - BITS_IN_WORD0;       //  3  bits of BlockType in data[1]
+uint DecodeBlockType(uvec2 d) {
+    return d[0] & 0xFFFFu;
+}
 
-uvec3 DecodePosition(uvec2 d) {
+// Returns (xlength, ylength, zlength). Add 1 for the actual block span.
+uvec3 DecodeLengths(uvec2 d) {
     return uvec3(
-    ((d[0] >> (COORD_BITS*2u)) & COORD_MASK),
-        ((d[0] >> COORD_BITS) & COORD_MASK),
-        (d[0] & COORD_MASK)
+        (d[0] >> 26u) & COORD_MASK,   // xlength: bits 26-30
+        (d[0] >> 21u) & COORD_MASK,   // ylength: bits 21-25
+        (d[0] >> 16u) & COORD_MASK    // zlength: bits 16-20
     );
 }
 
+// z straddles the word boundary: bit 31 of d[0] is z's LSB;
+// bits 0-3 of d[1] are z's upper four bits.
+uvec3 DecodePosition(uvec2 d) {
+    uint z = ((d[0] >> 31u) & 1u) | ((d[1] & 0xFu) << 1u);
+    uint y =  (d[1] >>  4u) & COORD_MASK;
+    uint x =  (d[1] >>  9u) & COORD_MASK;
+    return uvec3(x, y, z);
+}
+
 uint DecodeSide(uvec2 d) {
-    return (d[0] >> ROT_OFFSET) & 0xFu;
+    return (d[1] >> 14u) & 0xFu;
 }
 
-uint DecodeBlockType(uvec2 d) {
-    uint low  =  d[0] >> BLOCK_OFFSET;
-    uint high = (d[1] & ((1u << BITS_IN_WORD1) - 1u)) << BITS_IN_WORD0;
-    return low | high;
-}
-
-// ── Geometry helpers ────────────────────────────────────────────────────────
+// ── Geometry helpers ─────────────────────────────────────────────────────────
 const vec3 offset[6] = vec3[6](
     vec3( 0.5, 0.0, 0.0),   // +X
     vec3(-0.5, 0.0, 0.0),   // -X
@@ -66,6 +69,22 @@ const vec3 offsetmul[6] = vec3[6](
     vec3(1.0, 1.0, 0.0)     // -Z
 );
 
+// Returns (u-scale, v-scale) in blocks for a given face direction.
+// Matches how rotateVertex maps incoords axes onto world axes:
+//   ±X : incoords.x → Z,  incoords.y → Y
+//   ±Y : incoords.x → X,  incoords.y → Z
+//   ±Z : incoords.x → X,  incoords.y → Y
+vec2 computeFaceSize(uint s, uvec3 lengths) {
+    float xl = float(lengths.x + 1u);
+    float yl = float(lengths.y + 1u);
+    float zl = float(lengths.z + 1u);
+    switch (s) {
+        case 0: case 1: return vec2(zl, yl);   // ±X
+        case 2: case 3: return vec2(xl, zl);   // ±Y
+        default:        return vec2(xl, yl);   // ±Z (4, 5)
+    }
+}
+
 float bouncingMod(float x, float n) {
     x = abs(x);
     float cycle     = floor(x / n);
@@ -76,12 +95,12 @@ float bouncingMod(float x, float n) {
 vec3 rotateVertex(uint s, vec3 coords) {
     coords -= vec3(0.5);
     switch (s) {
-        case 1: coords = vec3(0.0,  coords.y,          coords.x      ); break; // -X
-        case 0: coords = vec3(0.0,  coords.y,         -coords.x - 1.0); break; // +X
-        case 3: coords = vec3(coords.x, 0.0,           coords.y      ); break; // -Y
-        case 2: coords = vec3(coords.x, 0.0,          -coords.y - 1.0); break; // +Y
-        case 5: coords = vec3(coords.x, -coords.y - 1.0, 0.0         ); break; // -Z
-        case 4: break;                                                          // +Z
+        case 1: coords = vec3(0.0,  coords.y,            coords.x      ); break; // -X
+        case 0: coords = vec3(0.0,  coords.y,           -coords.x - 1.0); break; // +X
+        case 3: coords = vec3(coords.x, 0.0,             coords.y      ); break; // -Y
+        case 2: coords = vec3(coords.x, 0.0,            -coords.y - 1.0); break; // +Y
+        case 5: coords = vec3(coords.x, -coords.y - 1.0, 0.0           ); break; // -Z
+        case 4: break;                                                             // +Z
     }
     coords += vec3(0.5);
     coords *= offsetmul[s];
@@ -94,12 +113,18 @@ void main() {
     vec3 absolute_position = chunks[gl_DrawID].absolute_position;
     scale = chunks[gl_DrawID].scale;
 
-    uvec3 pos  = DecodePosition(data);
-    blocktype  = DecodeBlockType(data);
-    side       = DecodeSide(data);
+    uvec3 pos     = DecodePosition(data);
+    uvec3 lengths = DecodeLengths(data);
+    blocktype     = DecodeBlockType(data);
+    side          = DecodeSide(data);
     blockArrayLayer = blocktype;
 
-    vec3 coords = rotateVertex(side, incoords);
+    // Expand the unit quad into face-local block units before rotating so the
+    // geometry covers all (xlength+1) × (ylength+1) × (zlength+1) blocks.
+    faceSize  = computeFaceSize(side, lengths);
+    vec3 scaled    = vec3(incoords.xy * faceSize, incoords.z);
+    vec3 coords    = rotateVertex(side, scaled);
+
     fragpos = (vec3(pos) * scale) + (coords * scale) + absolute_position;
     sunpos  = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
 

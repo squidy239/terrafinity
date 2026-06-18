@@ -11,16 +11,22 @@ const Mesher = @This();
 pub const Face = packed struct(u64) {
     const CoordInChunk = Chunk.Int;
     block_type: Block.Tag,
-    zlength: CoordInChunk = 0, // 0 = 1 in length, etc
+
+    // Length in faces is these numbers +1
+    // This extends the face toward higher coords
+    zlength: CoordInChunk = 0,
+    ylength: CoordInChunk = 0,
+    xlength: CoordInChunk = 0,
+
     z: CoordInChunk,
     y: CoordInChunk,
     x: CoordInChunk,
+
     rotation: FaceRotation,
-    _: @Int(.unsigned, 64 - (4 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
+
+    _: @Int(.unsigned, 64 - (6 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
-/// Entry point. Routes to 0-allocation uniform meshing or fully vectorized grid meshing.
-/// neighbor_faces format: x+,x-,y+,y-,z+,z-, caller handles refs
 pub fn mesh(allocator: std.mem.Allocator, maingrid: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     switch (maingrid) {
         .uniform => |main_block| {
