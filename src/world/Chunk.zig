@@ -89,7 +89,7 @@ pub const Encoding = union(enum(u1)) {
         }
     }
 
-    pub const FaceRotation = enum(u4) {
+    pub const FaceRotation = enum(u3) {
         xplus,
         xminus,
         yplus,

@@ -580,7 +580,7 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     const sphere_size = self.options.sphere_size;
     const sphere_block = self.options.sphere_block;
     self.options_lock.unlockShared(io);
-    
+
     var editor: World.Editor = .{ .world = &self.world, .tempallocator = self.allocator };
     defer editor.clear();
     if (actions.contains(.use_item_primary)) {
