@@ -390,12 +390,7 @@ fn compileShaders(self: *@This()) !void {
 }
 
 fn loadFacebuffer(self: *@This()) !void {
-    const vertices = [_]f32{
-        -0.5, -0.5, 0.0, // bottom left corner
-        -0.5, 0.5, 0.0, // top left corner
-        0.5, 0.5,  0.0, // top right corner
-        0.5, -0.5, 0.0,
-    }; // bottom right corner
+    const vertices: [12]f32 = undefined; // set in shader
 
     const indices = [_]u32{
         0, 1, 2, // first triangle (bottom left - top left - top right)
@@ -411,8 +406,6 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
 
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, 0, 3 * @sizeOf(f32), 0);
-    gl.EnableVertexAttribArray(0);
 }
 
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
@@ -472,9 +465,9 @@ fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustr
     gl.Finish();
     gl.BindVertexArray(self.vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, self.render_buffer.buffer.buffer orelse return);
-    gl.VertexAttribPointer(1, 2, gl.FLOAT, gl.FALSE, 2 * @sizeOf(u32), 0);
-    gl.EnableVertexAttribArray(1);
-    gl.VertexAttribDivisor(1, 1);
+    gl.VertexAttribIPointer(0, 2, gl.UNSIGNED_INT, 2 * @sizeOf(u32), 0);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribDivisor(0, 1);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 

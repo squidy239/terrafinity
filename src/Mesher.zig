@@ -109,7 +109,7 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
 
 fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     var x: u8 = 0;
-    while (x < ChunkSize - 1) : (x += 1) {
+    while (x < ChunkSize) : (x += 1) {
         try opaque_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
         try transparent_faces.ensureUnusedCapacity(allocator, 6 * ChunkSize * ChunkSize);
 
@@ -124,7 +124,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
         };
 
         var y: u8 = 0;
-        while (y < ChunkSize - 1) : (y += 1) {
+        while (y < ChunkSize) : (y += 1) {
             const center_row: @Vector(ChunkSize, Block.Tag) = @bitCast(grid[x][y]); // bitCast is MUCH faster than coerceing for some reason
             const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(Block.isVisibleVector(ChunkSize, center_row));
             if (ones_visible == 0) continue;
@@ -159,6 +159,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
 }
 
 fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
+    std.debug.assert(mask.* != 0);
     const faces_list = switch (comptime transparent) {
         true => transparent_faces,
         false => opaque_faces,
@@ -195,7 +196,7 @@ fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), compti
         last.block_type = block;
         last.z = z;
     }
-    std.debug.assert(last_exists);
+    std.debug.assert(last_exists); //mask can't be 0
     last.zlength = @intCast(last_zlen);
     faces_list.appendAssumeCapacity(last);
 }
