@@ -87,7 +87,7 @@ void main() {
     blockArrayLayer = blocktype;
 
     vec3 coords = CUBE_FACES[side][gl_VertexID];
-
+    coords = coords + (ceil(coords) * lengths);
     coords *= scale;
     fragpos = (vec3(pos) * scale) + coords + absolute_position;
     sunpos  = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;

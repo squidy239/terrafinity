@@ -183,11 +183,12 @@ fn addGridFaces(comptime len: usize, noalias mask: *@Int(.unsigned, len), compti
         const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
         const block = center_row[z];
         if (last_exists) {
-            if (comptime greedyz) if (last.block_type == block) {
+            const extend: bool = greedyz and last.block_type == block and z == last.z + last_zlen + 1 and block != @intFromEnum(Block.water);
+            if (extend) {
                 @branchHint(.unpredictable);
                 last_zlen += 1;
                 continue;
-            };
+            }
             last.zlength = @intCast(last_zlen);
             faces_list.appendAssumeCapacity(last);
         }
