@@ -361,10 +361,6 @@ pub fn Noise(comptime Float: type) type {
 
         // Utilities
 
-        inline fn fastFloor(f: Float) i32 {
-            return @floor(f);
-        }
-
         inline fn fastRound(f: Float) i32 {
             return @round(f);
         }
@@ -762,8 +758,8 @@ pub fn Noise(comptime Float: type) type {
             const xf = x * frequency;
             const yf = y * frequency;
 
-            var x0 = fastFloor(xf);
-            var y0 = fastFloor(yf);
+            var x0: i32 = @floor(xf);
+            var y0: i32 = @floor(yf);
 
             const xs = interpHermite(xf - @as(Float, @floatFromInt(x0)));
             const ys = interpHermite(yf - @as(Float, @floatFromInt(y0)));
@@ -794,9 +790,9 @@ pub fn Noise(comptime Float: type) type {
             const yf = y * frequency;
             const zf = z * frequency;
 
-            var x0 = fastFloor(xf);
-            var y0 = fastFloor(yf);
-            var z0 = fastFloor(zf);
+            var x0: i32 = @floor(xf);
+            var y0: i32 = @floor(yf);
+            var z0: i32 = @floor(zf);
 
             const xs = interpHermite(xf - @as(Float, @floatFromInt(x0)));
             const ys = interpHermite(yf - @as(Float, @floatFromInt(y0)));
@@ -852,8 +848,8 @@ pub fn Noise(comptime Float: type) type {
             const xx = x * frequency;
             const yy = y * frequency;
 
-            var i = fastFloor(xx);
-            var j = fastFloor(yy);
+            var i: i32 = @floor(xx);
+            var j: i32 = @floor(yy);
             const xi = xx - @as(Float, @floatFromInt(i));
             const yi = yy - @as(Float, @floatFromInt(j));
 
@@ -1044,8 +1040,8 @@ pub fn Noise(comptime Float: type) type {
         // Perlin Noise
 
         pub fn singlePerlin2D(seed: i32, x: Float, y: Float) Float {
-            var x0 = fastFloor(x);
-            var y0 = fastFloor(y);
+            var x0: i32 = @floor(x);
+            var y0: i32 = @floor(y);
 
             const xd0: Float = x - @as(Float, @floatFromInt(x0));
             const yd0: Float = y - @as(Float, @floatFromInt(y0));
@@ -1067,9 +1063,9 @@ pub fn Noise(comptime Float: type) type {
         }
 
         fn singlePerlin3D(seed: i32, x: Float, y: Float, z: Float) Float {
-            var x0 = fastFloor(x);
-            var y0 = fastFloor(y);
-            var z0 = fastFloor(z);
+            var x0: i32 = @floor(x);
+            var y0: i32 = @floor(y);
+            var z0: i32 = @floor(z);
 
             const xd0: Float = x - @as(Float, @floatFromInt(x0));
             const yd0: Float = y - @as(Float, @floatFromInt(y0));
@@ -1103,8 +1099,8 @@ pub fn Noise(comptime Float: type) type {
 
         fn singleSimplex2D(seed: i32, x: Float, y: Float) Float {
             // 2D OpenSimplex2 case uses the same algorithm as ordinary Simplex.
-            var i: i32 = fastFloor(x);
-            var j: i32 = fastFloor(y);
+            var i: i32 = @floor(x);
+            var j: i32 = @floor(y);
             const xi: Float = x - @as(Float, @floatFromInt(i));
             const yi: Float = y - @as(Float, @floatFromInt(j));
 
@@ -1227,8 +1223,8 @@ pub fn Noise(comptime Float: type) type {
         // Value noise
 
         fn singleValue2D(seed: i32, x: Float, y: Float) Float {
-            var x0: i32 = fastFloor(x);
-            var y0: i32 = fastFloor(y);
+            var x0: i32 = @floor(x);
+            var y0: i32 = @floor(y);
 
             const xs: Float = interpHermite(x - @as(Float, @floatFromInt(x0)));
             const ys: Float = interpHermite(y - @as(Float, @floatFromInt(y0)));
@@ -1245,9 +1241,9 @@ pub fn Noise(comptime Float: type) type {
         }
 
         fn singleValue3D(seed: i32, x: Float, y: Float, z: Float) Float {
-            var x0: i32 = fastFloor(x);
-            var y0: i32 = fastFloor(y);
-            var z0: i32 = fastFloor(z);
+            var x0: i32 = @floor(x);
+            var y0: i32 = @floor(y);
+            var z0: i32 = @floor(z);
 
             const xs: Float = interpHermite(x - @as(Float, @floatFromInt(x0)));
             const ys: Float = interpHermite(y - @as(Float, @floatFromInt(y0)));
@@ -1274,8 +1270,8 @@ pub fn Noise(comptime Float: type) type {
         // Value Cubic
 
         fn singleValueCubic2D(seed: i32, x: Float, y: Float) Float {
-            var x1: i32 = fastFloor(x);
-            var y1: i32 = fastFloor(y);
+            var x1: i32 = @floor(x);
+            var y1: i32 = @floor(y);
 
             const xs: Float = x - @as(Float, @floatFromInt(x1));
             const ys: Float = y - @as(Float, @floatFromInt(y1));
@@ -1293,9 +1289,9 @@ pub fn Noise(comptime Float: type) type {
         }
 
         fn singleValueCubic3D(seed: i32, x: Float, y: Float, z: Float) Float {
-            var x1: i32 = fastFloor(x);
-            var y1: i32 = fastFloor(y);
-            var z1: i32 = fastFloor(z);
+            var x1: i32 = @floor(x);
+            var y1: i32 = @floor(y);
+            var z1: i32 = @floor(z);
 
             const xs: Float = x - @as(Float, @floatFromInt(x1));
             const ys: Float = y - @as(Float, @floatFromInt(y1));
@@ -1324,8 +1320,8 @@ pub fn Noise(comptime Float: type) type {
         fn singleSimplexS2D(seed: i32, x: Float, y: Float) Float {
             // 2D OpenSimplex2S case is a modified 2D simplex noise.
 
-            var i: i32 = fastFloor(x);
-            var j: i32 = fastFloor(y);
+            var i: i32 = @floor(x);
+            var j: i32 = @floor(y);
             const xi: Float = x - @as(Float, @floatFromInt(i));
             const yi: Float = y - @as(Float, @floatFromInt(j));
 
@@ -1420,9 +1416,9 @@ pub fn Noise(comptime Float: type) type {
         fn singleSimplexS3D(seed: i32, x: Float, y: Float, z: Float) Float {
             // 3D OpenSimplex2S case uses two offset rotated cube grids.
 
-            var i: i32 = fastFloor(x);
-            var j: i32 = fastFloor(y);
-            var k: i32 = fastFloor(z);
+            var i: i32 = @floor(x);
+            var j: i32 = @floor(y);
+            var k: i32 = @floor(z);
             const xi: Float = x - @as(Float, @floatFromInt(i));
             const yi: Float = y - @as(Float, @floatFromInt(j));
             const zi: Float = z - @as(Float, @floatFromInt(k));

@@ -16,7 +16,7 @@ const Ui = @This();
 proc_table: *const gl.ProcTable,
 window: *wio.Window,
 ui_context: *wio.GlContext,
-gloptions: wio.GlOptions,
+gl_options: wio.GlOptions,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -371,7 +371,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gloptions, self.ui_context, self.proc_table);
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gl_options, self.ui_context, self.proc_table);
     std.log.info("opening game\n", .{});
 }
 

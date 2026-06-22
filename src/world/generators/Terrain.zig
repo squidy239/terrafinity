@@ -229,9 +229,9 @@ pub const DefaultGenerator = struct {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
             heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
-            const genterra = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
+            const gen_terra = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
             generateTerrain(&block_grid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunk_scale));
-            genterra.end();
+            gen_terra.end();
             const one_block = Chunk.getUniform(&block_grid);
             if (one_block != null and one_block.? == .air) {
                 blocks.merge(.{ .uniform = .air }, grid_buffer);
@@ -285,13 +285,13 @@ pub const DefaultGenerator = struct {
 
         const inter = tracy.Zone.begin(.{ .src = @src() });
         defer inter.end();
-        const initinterp = tracy.Zone.begin(.{ .src = @src(), .name = "initinterp" });
-        var int = Interpolation.NaturalCubicInterpolator3D.init(grid);
-        initinterp.end();
-        const oneD32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
+        const init_interp = tracy.Zone.begin(.{ .src = @src(), .name = "init_interp" });
+        var interpolator = Interpolation.NaturalCubicInterpolator3D.init(grid);
+        init_interp.end();
+        const one_d_32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
         comptime var zs: @Vector(ChunkSize, f32) = undefined;
         comptime for (0..ChunkSize) |i| {
-            zs[i] = @as(f32, @floatFromInt(i)) * oneD32;
+            zs[i] = @as(f32, @floatFromInt(i)) * one_d_32;
         };
         const xs: @Vector(ChunkSize, f32) = comptime zs;
         const ys: @Vector(ChunkSize, f32) = comptime zs;
@@ -303,7 +303,7 @@ pub const DefaultGenerator = struct {
                 const m: f32 = 1 - (1 / -@min(-1, (real_y / gen_params.cave_expansion_max) - 1));
                 const cave_threshold: f32 = gen_params.cave_threshold + (m * 2);
                 inline for (0..ChunkSize) |z| {
-                    if (int.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cave_threshold) {
+                    if (interpolator.sampleComptimeXZ(xs[x], ys[y], zs[z]) < cave_threshold) {
                         chunk_blocks[x][y][z] = .air;
                     }
                 }
@@ -383,7 +383,7 @@ pub const DefaultGenerator = struct {
         if (chunk_pos.level < 0) return;
         var editor_buffer: [100_000]u8 = undefined;
         var bfa: BFA = .init(&editor_buffer, allocator);
-        var world_editor = World.Editor{ .world = world, .tempallocator = bfa.allocator(), .propagate_changes = false };
+        var world_editor = World.Editor{ .world = world, .temp_allocator = bfa.allocator(), .propagate_changes = false };
         defer world_editor.clear();
 
         {
@@ -413,14 +413,14 @@ pub const DefaultGenerator = struct {
                         const is_tree = tree_conf.placer.getStructure(.{ @intFromFloat(lvl_x), @intFromFloat(lvl_z) }, @intCast(chunk_pos.level));
                         if (is_tree) |seed| {
                             const center_pos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
-                            const tree_seeed = self.params.seed.? ^ @as(u64, @bitCast(seed));
-                            var random = std.Random.DefaultPrng.init(@bitCast(tree_seeed));
+                            const tree_seed = self.params.seed.? ^ @as(u64, @bitCast(seed));
+                            var random = std.Random.DefaultPrng.init(@bitCast(tree_seed));
                             const rand = random.random();
                             const factor = ((rand.float(f32) + 0.5) * tree_conf.size_variation);
                             if (-chunk_pos.level + std.math.log2_int(u32, @trunc(tree_conf.tree.trunk_height)) < 2) {
                                 try placeLowResTree(&world_editor, center_pos, scale * factor, tree_conf.tree.trunk_height, chunk_pos.level);
                             } else {
-                                try placeTree(&world_editor, center_pos, scale * factor, tree_conf, tree_seeed, chunk_pos.level);
+                                try placeTree(&world_editor, center_pos, scale * factor, tree_conf, tree_seed, chunk_pos.level);
                             }
                         }
                     }

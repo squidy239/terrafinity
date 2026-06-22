@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     var events: wio.EventQueue = .empty;
     defer events.deinit();
 
-    const gloptions: wio.GlOptions = .{
+    const gl_options: wio.GlOptions = .{
         .major_version = 4,
         .minor_version = 5,
         .profile = .core,
@@ -73,12 +73,12 @@ pub fn main(init: std.process.Init) !void {
         .alpha_bits = 0,
     };
 
-    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gloptions, .event_fn_data = &events });
+    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gl_options, .event_fn_data = &events });
     defer window.destroy();
 
     if (!options.test_play) window.setMode(.maximized);
 
-    var ui_context = try window.glCreateContext(.{ .options = gloptions });
+    var ui_context = try window.glCreateContext(.{ .options = gl_options });
     defer ui_context.destroy();
     window.glMakeContextCurrent(ui_context);
 
@@ -102,12 +102,12 @@ pub fn main(init: std.process.Init) !void {
     var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();
 
-    var singlepress = Key.Singlepress.empty;
+    var single_press = Key.Singlepress.empty;
     //TODO load keymap from file
     try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
 
-    singlepress.insert(.escape_menu);
+    single_press.insert(.escape_menu);
 
     try keymap.setActionKey(io, .{ .key = .w }, .forward);
     try keymap.setActionKey(io, .{ .key = .s }, .backward);
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
 
     var game: Game = undefined;
     if (options.test_play) {
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window, gloptions, &ui_context, &proc_table);
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window, gl_options, &ui_context, &proc_table);
     }
     var ui: Ui = .{
         .proc_table = &proc_table,
@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
         .config_path = config_path,
         .worlds_path = worlds_path,
         .ui_context = &ui_context,
-        .gloptions = gloptions,
+        .gl_options = gl_options,
         .running = &running,
         .ui_window = &ui_window,
         .menu_background = undefined,
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     var action_set = Key.ActionSet.empty;
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, singlepress, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
@@ -158,15 +158,15 @@ pub fn main(init: std.process.Init) !void {
             defer dw.end();
             window.glMakeContextCurrent(ui_context);
             try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-            var menuchanged: bool = false;
+            var menu_changed: bool = false;
             {
                 const ov = dvui.overlay(@src(), .{ .expand = .both });
                 defer ov.deinit();
 
-                if (ui.menu_state.debug_info and ui.menu_state.ingame and !menuchanged) try ui.debugInfo(io);
-                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menuchanged) ui.crosshair();
-                if (ui.menu_state.esc and !menuchanged) menuchanged = try ui.escMenu(io);
-                if (ui.menu_state.main and !menuchanged) menuchanged = ui.mainPage(io, gpa) catch |err| err: {
+                if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
+                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crosshair();
+                if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
+                if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
                     var error_buffer: [65536]u8 = undefined;
                     var error_writer: std.Io.Writer = .fixed(&error_buffer);
 
@@ -180,8 +180,8 @@ pub fn main(init: std.process.Init) !void {
                     dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
                     break :err false;
                 };
-                if (ui.menu_state.settings and !menuchanged) menuchanged = try ui.settingsMenu(io);
-                if (ui.menu_state.newgame and !menuchanged) menuchanged = ui.newGameMenu(io, gpa) catch |err| err: {
+                if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
+                if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
                     var error_buffer: [65536]u8 = undefined;
                     var error_writer: std.Io.Writer = .fixed(&error_buffer);
 
@@ -214,31 +214,31 @@ pub const Config = struct {
     game_config: Game.Options = .{},
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
-        const configFile: ?std.Io.File = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
+        const config_file: ?std.Io.File = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| sw: switch (err) {
             error.FileNotFound => {
                 std.log.info("Config file not found, creating default config file", .{});
                 break :sw null;
             },
             else => return err,
         };
-        defer if (configFile) |file| file.close(io);
+        defer if (config_file) |file| file.close(io);
         var config: Config = undefined;
-        config = if (configFile) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
+        config = if (config_file) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
 
         return config;
     }
 
     pub fn save(self: *const Config, io: std.Io, path: []const u8, config_lock: ?*std.Io.RwLock) !void {
-        const configFile = try std.Io.Dir.cwd().createFile(io, path, .{ .lock = .exclusive });
-        defer configFile.close(io);
+        const config_file = try std.Io.Dir.cwd().createFile(io, path, .{ .lock = .exclusive });
+        defer config_file.close(io);
         var buffer: [512]u8 = undefined;
-        var filewriter = configFile.writer(io, &buffer);
+        var file_writer = config_file.writer(io, &buffer);
         {
             if (config_lock) |lock| lock.lockSharedUncancelable(io);
             defer if (config_lock) |lock| lock.unlockShared(io);
-            try std.zon.stringify.serialize(self, .{}, &filewriter.interface);
+            try std.zon.stringify.serialize(self, .{}, &file_writer.interface);
         }
-        try filewriter.end();
+        try file_writer.end();
     }
 
     pub fn deinit(self: *const Config, allocator: std.mem.Allocator) void {
@@ -252,7 +252,7 @@ var window_size: wio.Size = .{ .height = 480, .width = 640 };
 fn handleEvents(
     io: std.Io,
     key_map: *Key.Map,
-    singlepress: Key.Singlepress,
+    single_press: Key.Singlepress,
     action_set: *Key.ActionSet,
     running: *std.atomic.Value(bool),
     ui_backend: *wio_backend,
@@ -273,7 +273,7 @@ fn handleEvents(
     //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
-        if (singlepress.contains(action)) action_set.remove(action);
+        if (single_press.contains(action)) action_set.remove(action);
     }
     {
         while (events.pop()) |event| {
@@ -317,10 +317,10 @@ pub fn setCallback() void {
     gl.DebugMessageCallback(glCallback, null);
 }
 
-fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, userParam: ?*const anyopaque) callconv(.c) void {
+fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, user_param: ?*const anyopaque) callconv(.c) void {
     _ = kind;
     _ = id;
-    _ = userParam;
+    _ = user_param;
     switch (severity) {
         gl.DEBUG_SEVERITY_NOTIFICATION => return,
         gl.DEBUG_SEVERITY_HIGH => std.log.err("{d}: {s}", .{ source, message[0..@intCast(length)] }),

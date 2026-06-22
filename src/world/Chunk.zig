@@ -13,7 +13,7 @@ ref_count: std.atomic.Value(u32) = .init(1),
 
 structures_generated: std.atomic.Value(bool) = .init(false),
 
-///if this false negitive it means the chunk has not been modified after its load, otherwise it has
+/// if this is false it means the chunk has not been modified after its load, otherwise it has
 modified: std.atomic.Value(bool) = .init(false),
 ///if this is false, the chunk has not been saved ever, if it is true a version of this chunk has been saved.
 ///This may not be the current version and modified should be used to check this
@@ -28,10 +28,10 @@ pub const Encoding = union(enum(u1)) {
         return if (getUniform(blocks)) |one_block| .{ .uniform = one_block } else .{ .grid = blocks };
     }
 
-    pub fn merge(blocks: *Encoding, mergeBlocks: Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
+    pub fn merge(blocks: *Encoding, merge_blocks: Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         const m = tracy.Zone.begin(.{ .src = @src() });
         defer m.end();
-        switch (mergeBlocks) {
+        switch (merge_blocks) {
             .uniform => |uniform| mergeUniform(blocks, uniform),
             .grid => |grid| mergeGrid(blocks, grid, grid_buffer),
         }
@@ -45,34 +45,34 @@ pub const Encoding = union(enum(u1)) {
     pub fn mergeGrid(blocks: *Encoding, merge_grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         toGrid(blocks, grid_buffer);
         const tag = @typeInfo(Block).@"enum".tag_type;
-        const flatArray: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
-        const flatMergeArray: *const [ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(merge_grid);
+        const flat_array: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
+        const flat_merge_array: *const [ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(merge_grid);
 
-        selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flatArray, flatMergeArray);
+        selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flat_array, flat_merge_array);
         if (getUniform(blocks.grid)) |block| blocks.* = .{ .uniform = block };
     }
 
     // Workaround for https://codeberg.org/ziglang/zig/issues/35254
-    fn selectBlocks(comptime T: type, comptime len: usize, flatArray: *[len]T, flatMergeArray: *const [len]T) void {
+    fn selectBlocks(comptime T: type, comptime len: usize, flat_array: *[len]T, flat_merge_array: *const [len]T) void {
         if (comptime std.simd.suggestVectorLength(T)) |vlen| {
             const VT = @Vector(vlen, T);
             var i: usize = 0;
             while (i + vlen <= len) : (i += vlen) {
-                const a: VT = flatArray.*[i..][0..vlen].*;
-                const b: VT = flatMergeArray[i..][0..vlen].*;
+                const a: VT = flat_array.*[i..][0..vlen].*;
+                const b: VT = flat_merge_array[i..][0..vlen].*;
                 const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
                 const result = @select(T, pred, a, b);
-                flatArray.*[i..][0..vlen].* = result;
+                flat_array.*[i..][0..vlen].* = result;
             }
             while (i < len) : (i += 1) {
-                if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                    flatArray.*[i] = flatMergeArray[i];
+                if (flat_merge_array[i] != comptime @intFromEnum(Block.null)) {
+                    flat_array.*[i] = flat_merge_array[i];
                 }
             }
         } else {
             for (0..len) |i| {
-                if (flatMergeArray[i] != comptime @intFromEnum(Block.null)) {
-                    flatArray.*[i] = flatMergeArray[i];
+                if (flat_merge_array[i] != comptime @intFromEnum(Block.null)) {
+                    flat_array.*[i] = flat_merge_array[i];
                 }
             }
         }
@@ -331,37 +331,37 @@ pub const Encoding = union(enum(u1)) {
 };
 
 /// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
-pub fn from(blockEncoding: Encoding, chunk: *@This()) !*@This() {
+pub fn from(block_encoding: Encoding, chunk: *@This()) !*@This() {
     chunk.* = .{
-        .encoding = blockEncoding,
+        .encoding = block_encoding,
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return chunk;
 }
 
 ///checks if the block array is all the same block
-pub fn getUniform(blockArray: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
-    const firstBlockVec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(blockArray[0][0][0]));
+pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
+    const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(block_array[0][0][0]));
     var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
-    const linearBlockArray: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(blockArray);
-    for (linearBlockArray) |blocks| uniform &= (blocks == firstBlockVec);
-    return if (@reduce(.And, uniform)) blockArray[0][0][0] else null;
+    const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(block_array);
+    for (linear_block_array) |blocks| uniform &= (blocks == first_block_vec);
+    return if (@reduce(.And, uniform)) block_array[0][0][0] else null;
 }
 
-pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime removeRef: bool) !Encoding.Face {
-    defer if (removeRef) self.release();
+pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime remove_ref: bool) !Encoding.Face {
+    defer if (remove_ref) self.release();
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
     return self.encoding.extractFace(rotation);
 }
 
-pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
+pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, max_micro_time: ?u64) error{Canceled}!bool {
     std.debug.assert(self.encoding == .grid or self.encoding == .uniform);
     if (self.ref_count.load(.seq_cst) == amount) return true;
     const st = std.Io.Timestamp.now(io, .awake);
     while (self.ref_count.load(.seq_cst) != amount) {
         @branchHint(.unlikely);
-        if (maxMicroTime != null and st.untilNow(io, .awake).toMicroseconds() > maxMicroTime.?) return false;
+        if (max_micro_time != null and st.untilNow(io, .awake).toMicroseconds() > max_micro_time.?) return false;
         try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     return true;

@@ -8,7 +8,7 @@ const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
 
-isinit: bool,
+is_init: bool,
 database: rocksdb.database.DB,
 options: rocksdb.DBOptions,
 chunkdata_column: rocksdb.ColumnFamily,
@@ -28,7 +28,7 @@ pub fn getSource(self: *@This()) World.ChunkSource {
 ////opens the database, creates it if it doesnt exist
 pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
     var storage: @This() = undefined;
-    storage.isinit = true;
+    storage.is_init = true;
     storage.options = .{
         .create_if_missing = true,
         .create_missing_column_families = true,
@@ -163,8 +163,8 @@ fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloca
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    std.debug.assert(self.isinit);
-    self.isinit = false;
+    std.debug.assert(self.is_init);
+    self.is_init = false;
     var es1: ?rocksdb.Data = null;
     defer if (es1) |s| s.deinit();
     self.database.flush(self.chunk_grid_column.handle, &es1) catch |err| std.log.warn("Flush failed: {any}\n", .{err});

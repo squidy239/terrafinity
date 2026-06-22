@@ -234,7 +234,7 @@ pub const Explosive = struct {
             g.end();
             var worldEditor = World.Editor{
                 .world = world,
-                .tempallocator = allocator,
+                .temp_allocator = allocator,
             };
             const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(pos), 8);
             try worldEditor.placeSamplerShape(.grass, sphere, World.standard_level);

@@ -51,7 +51,7 @@ save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) 
 
 group: std.Io.Group = .init,
 /// This error is handeled on the next frame and will close the game
-defered_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError)),
+deferred_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError)),
 
 options: *Options,
 options_lock: *std.Io.RwLock,
@@ -160,10 +160,10 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     {
         // Check if the highest level parent is out of render distance.
         self.player.physics.mutex.lockUncancelable(io);
-        const playerpos = self.player.physics.pos;
+        const player_pos = self.player.physics.pos;
         self.player.physics.mutex.unlock(io);
         const render_distance = self.getRenderDistance(io);
-        const inside_range = keepLoaded(null, null, playerpos, parent, null, render_distance);
+        const inside_range = keepLoaded(null, null, player_pos, parent, null, render_distance);
         if (!inside_range) return true;
     }
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
@@ -309,18 +309,18 @@ pub const WorldOptions = struct {
         const world_config_file = try world_folder.createFile(io, "config/World.zon", .{ .lock = .exclusive });
         defer world_config_file.close(io);
 
-        var worldconfwriter = world_config_file.writer(io, &wbuffer);
+        var world_config_writer = world_config_file.writer(io, &wbuffer);
 
         const generator_config_file = try world_folder.createFile(io, "config/DefaultGenerator.zon", .{ .lock = .exclusive });
         defer generator_config_file.close(io);
 
-        var generatorconfwriter = generator_config_file.writer(io, &gbuffer);
+        var generator_config_writer = generator_config_file.writer(io, &gbuffer);
 
-        try std.zon.stringify.serialize(self.world_config, .{}, &worldconfwriter.interface);
-        try std.zon.stringify.serialize(self.generator_config, .{}, &generatorconfwriter.interface);
+        try std.zon.stringify.serialize(self.world_config, .{}, &world_config_writer.interface);
+        try std.zon.stringify.serialize(self.generator_config, .{}, &generator_config_writer.interface);
 
-        try worldconfwriter.end();
-        try generatorconfwriter.end();
+        try world_config_writer.end();
+        try generator_config_writer.end();
     }
 
     pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
@@ -398,7 +398,7 @@ pub fn init(
         .edit_callback = .{
             .function = editorCallback,
             .context = @ptrCast(game),
-            .on_neghbor_face_change = true,
+            .on_neighbor_face_change = true,
         },
     };
     errdefer game.world.deinit(io, allocator);
@@ -431,8 +431,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const fps = self.debug_menu.fps.load(.unordered);
     self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
 
-    var entitys_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
-    defer entitys_future.cancel(io) catch {};
+    var entities_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
+    defer entities_future.cancel(io) catch {};
     try restartFutures(self, io, allocator);
 
     self.player.physics.mutex.lockUncancelable(io);
@@ -448,7 +448,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 
     try self.renderer.drawChunks(io, player_pos_updated);
     try self.handleErrors();
-    try entitys_future.await(io);
+    try entities_future.await(io);
 }
 
 fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -489,7 +489,7 @@ fn saveFuture(self: *@This(), io: std.Io) !void {
 }
 
 fn handleErrors(self: *@This()) !void {
-    const err = @errorFromInt(self.defered_error.swap(@intFromError(error.NoError), .seq_cst));
+    const err = @errorFromInt(self.deferred_error.swap(@intFromError(error.NoError), .seq_cst));
     switch (err) {
         error.Canceled => unreachable, // This should not be here
         error.NoError => {},
@@ -499,17 +499,17 @@ fn handleErrors(self: *@This()) !void {
 
 pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
     const wrapper = struct {
-        pub fn handeler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
+        pub fn handler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
             @call(.always_inline, function, fn_args) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => |e| {
-                    const existing_error = game.defered_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(e), .seq_cst, .seq_cst);
+                    const existing_error = game.deferred_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(e), .seq_cst, .seq_cst);
                     if (existing_error) |er| std.log.err("{s}", .{@errorName(@errorFromInt(er))});
                 },
             };
         }
     };
-    self.group.async(io, wrapper.handeler, .{ self, args });
+    self.group.async(io, wrapper.handler, .{ self, args });
 }
 
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
@@ -519,16 +519,16 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativeP
     view_dir_diff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
     view_dir_diff *= @splat(sensitivity);
 
-    const smallf32 = 0.00001;
+    const small_f32 = 0.00001;
 
     self.player.viewDirection_mutex.lockUncancelable(io);
     defer self.player.viewDirection_mutex.unlock(io);
-    var currentViewDir = self.player.viewDirection;
-    currentViewDir -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
-    currentViewDir[0] = std.math.clamp(currentViewDir[0], -90 + smallf32, 90 - smallf32);
-    self.player.viewDirection = currentViewDir;
+    var current_view_dir = self.player.viewDirection;
+    current_view_dir -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
+    current_view_dir[0] = std.math.clamp(current_view_dir[0], -90 + small_f32, 90 - small_f32);
+    self.player.viewDirection = current_view_dir;
 
-    self.renderer.updateCameraDirection(currentViewDir);
+    self.renderer.updateCameraDirection(current_view_dir);
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
@@ -537,8 +537,8 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.unlockShared(io);
     switch (self.player.gameMode.load(.seq_cst)) {
         .Creative, .Spectator => {
-            const fsl = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
-            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fsl)), .seq_cst);
+            const fly_speed_linear_old = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
+            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fly_speed_linear_old)), .seq_cst);
         },
         .Survival => {},
     }
@@ -572,7 +572,7 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
 
 fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     self.player.physics.mutex.lockUncancelable(io);
-    const ppos = self.player.physics.pos;
+    const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
     const looking = self.renderer.getCameraFront();
 
@@ -581,18 +581,18 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     const sphere_block = self.options.sphere_block;
     self.options_lock.unlockShared(io);
 
-    var editor: World.Editor = .{ .world = &self.world, .tempallocator = self.allocator };
+    var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
     if (actions.contains(.use_item_primary)) {
-        const cone: Geometry.Cone(f32) = .init(@floatCast(ppos), looking, 100, 10, 10);
+        const cone: Geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.air, cone, 0);
     }
     if (actions.contains(.use_item_secondary)) {
-        const cone: Geometry.Cone(f32) = .init(@floatCast(ppos), looking, 100, 10, 10);
+        const cone: Geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.stone, cone, 0);
     }
     if (actions.contains(.use_item_tertiary)) {
-        try editor.placeSamplerShape(sphere_block, Geometry.Sphere(f32).init(@floatCast(ppos), @floatFromInt(sphere_size)), 0);
+        try editor.placeSamplerShape(sphere_block, Geometry.Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
     }
     try editor.flush(io, self.allocator);
 }
@@ -608,19 +608,19 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
     self.player.viewDirection_mutex.lockUncancelable(io);
     const camera_front = moveCameraFront(self.player.viewDirection);
     self.player.viewDirection_mutex.unlock(io);
-    const veldiff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
-    const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
-    const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
+    const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
+    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
+    const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
 
     {
         self.player.physics.mutex.lockUncancelable(io);
         defer self.player.physics.mutex.unlock(io);
-        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * camera_front));
-        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * camera_front));
-        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(veldiff[1]), 0 };
-        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-veldiff[1]), 0 };
-        if (actions.contains(.right) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(veldiff * cross.?.data));
-        if (actions.contains(.left) and cross != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-veldiff * cross.?.data));
+        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * camera_front));
+        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * camera_front));
+        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(vel_diff[1]), 0 };
+        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-vel_diff[1]), 0 };
+        if (actions.contains(.right) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * cross_norm.?.data));
+        if (actions.contains(.left) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * cross_norm.?.data));
     }
     try self.player.physics.update(&self.world, io, self.allocator);
 }
@@ -630,8 +630,8 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
     const camera_front = moveCameraFront(self.player.viewDirection);
     self.player.viewDirection_mutex.unlock(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
-    const c = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
-    const cross = if (std.meta.eql(c.data, @Vector(3, f64){ 0, 0, 0 })) null else c.norm();
+    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
+    const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
 
@@ -649,8 +649,8 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
         var vel_diff: @Vector(3, f64) = @splat(0.0);
         if (actions.contains(.forward)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * camera_front));
         if (actions.contains(.backward)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
-        if (actions.contains(.right) and cross != null) vel_diff += @as(@Vector(3, f64), @floatCast(speed * cross.?.data));
-        if (actions.contains(.left) and cross != null) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * cross.?.data));
+        if (actions.contains(.right) and cross_norm != null) vel_diff += @as(@Vector(3, f64), @floatCast(speed * cross_norm.?.data));
+        if (actions.contains(.left) and cross_norm != null) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * cross_norm.?.data));
         vel_diff = vel_diff * speed_multiplier;
         if (on_ground) {
             self.player.physics.velocity[0] = vel_diff[0];
@@ -675,9 +675,9 @@ fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     return .{ self.options.render_distance_x, self.options.render_distance_y };
 }
 
-fn getInnerGenRadius(self: *@This(), io: std.Io, gendistance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+fn getInnerGenRadius(self: *@This(), io: std.Io, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
     if (level <= (self.getLevels(io))[0]) return @splat(0);
-    const inner_radius = gendistance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+    const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
@@ -757,35 +757,35 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     }
 }
 
-fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, genStructures: bool) !void {
+fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool) !void {
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
-        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = genStructures });
+        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = gen_structures });
         entry.value_ptr.is_queued = true;
     }
 
-    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, genStructures });
+    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, gen_structures });
 }
 
-fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunkPos: World.ChunkPos, args: *anyopaque) !void {
+fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    game.addChunkToRender(io, allocator, chunkPos, false) catch return error.OnEditFailed;
+    game.addChunkToRender(io, allocator, chunk_pos, false) catch return error.OnEditFailed;
 }
 
 fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const lowest_level, const highest_level = self.getLevels(io);
     self.player.physics.mutex.lockUncancelable(io);
-    const playerpos = self.player.physics.pos;
+    const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
-    const gendistance = self.getRenderDistance(io);
-    const innergenradius = self.getInnerGenRadius(io, gendistance, chunk_pos.level);
-    const inside_range = keepLoaded(lowest_level, highest_level, playerpos, chunk_pos, innergenradius, gendistance);
+    const gen_distance = self.getRenderDistance(io);
+    const inner_gen_radius = self.getInnerGenRadius(io, gen_distance, chunk_pos.level);
+    const inside_range = keepLoaded(lowest_level, highest_level, player_pos, chunk_pos, inner_gen_radius, gen_distance);
     return inside_range;
 }
 
-fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64), chunk_pos: World.ChunkPos, innerChunkRange: ?@Vector(2, u32), outerChunkRange: ?@Vector(2, u32)) bool {
+fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
     if (lowest_level) |l| {
         if (chunk_pos.level < l) return false;
     }
@@ -793,10 +793,10 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64
         if (chunk_pos.level > h) return false;
     }
 
-    const player_chunk_pos = @trunc(playerPos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(chunk_pos.level))));
+    const player_chunk_pos = @trunc(player_pos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(chunk_pos.level))));
     const chunk_center: @Vector(3, f64) = chunk_pos.position;
 
-    if (innerChunkRange) |icr| {
+    if (inner_chunk_range) |icr| {
         const inner: @Vector(3, f64) = .{ icr[0], icr[1], icr[0] };
         const inside_inner =
             @reduce(.And, player_chunk_pos > (chunk_center - inner)) and
@@ -804,7 +804,7 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, playerPos: @Vector(3, f64
         if (inside_inner) return false;
     }
 
-    if (outerChunkRange) |ocr| {
+    if (outer_chunk_range) |ocr| {
         const outer: @Vector(3, f64) = .{ ocr[0], ocr[1], ocr[0] };
         const outside_outer =
             @reduce(.Or, player_chunk_pos < chunk_center - outer) or
@@ -832,8 +832,8 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), level: i32) !u64 {
-    const player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(playerPos), level);
+fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, player_pos: @Vector(3, f64), level: i32) !u64 {
+    const player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(player_pos), level);
 
     var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
@@ -864,7 +864,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
                 defer y += 1;
                 const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
 
-                const in_range = keepLoaded(null, null, playerPos, chunk_pos, inner_radius, outer_radius);
+                const in_range = keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius);
                 if (!in_range)
                     continue;
 
@@ -934,7 +934,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
 }
 
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const playerentity = try game.entity_registry.spawn(io, allocator, EntityTypes.Player{
+    const player_entity = try game.entity_registry.spawn(io, allocator, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
             .elements = .{
@@ -957,8 +957,8 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
     }, true);
-    playerentity.release();
-    game.player = @ptrCast(@alignCast(playerentity.ptr));
+    player_entity.release();
+    game.player = @ptrCast(@alignCast(player_entity.ptr));
     game.player.main_inventory = .initBuffer(
         10,
         16,
@@ -971,10 +971,10 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     game.renderer.updateCameraDirection(view_direction);
 }
 
-fn move(xzin: [2]i32, c: *usize) [2]i32 {
-    const movf: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
-    const mov: i32 = @ceil(movf + 0.01);
-    var xz = xzin;
+fn move(xz_in: [2]i32, c: *usize) [2]i32 {
+    const mov_f: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
+    const mov: i32 = @ceil(mov_f + 0.01);
+    var xz = xz_in;
     switch (@mod(c.*, 4)) {
         0 => xz[1] += mov,
         1 => xz[0] += mov,
