@@ -821,19 +821,22 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer self.chunk_load_is_running.store(false, .seq_cst);
     var levels = self.getLevels(io);
     var level = levels[0];
-    var amount_loaded: u64 = 0;
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    var error_int: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError));
     while (level <= levels[1]) : (level += 1) {
         levels = self.getLevels(io);
-        try self.player.physics.mutex.lock(io);
-        const player_pos = self.player.physics.pos;
-        self.player.physics.mutex.unlock(io);
-        amount_loaded += try loadChunksSpiral(self, io, allocator, player_pos, level);
+        group.async(io, loadChunksSpiral, .{self, io, allocator, level, &error_int});
     }
+    try group.await(io);
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level
-fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, player_pos: @Vector(3, f64), level: i32) !u64 {
-    const player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(player_pos), level);
+fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, level: i32, error_int: *std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)))) Io.Cancelable!void {
+    try game.player.physics.mutex.lock(io);
+    var player_pos = game.player.physics.pos;
+    game.player.physics.mutex.unlock(io);
+    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(player_pos), level);
 
     var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
@@ -849,17 +852,30 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
             break;
         }
 
+        if(game.player.physics.mutex.tryLock()){
+            defer game.player.physics.mutex.unlock(io);
+            const new_player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(game.player.physics.pos), level);
+            if(!std.meta.eql(player_chunk_pos, new_player_chunk_pos)) {
+                player_chunk_pos = new_player_chunk_pos;
+                player_pos = game.player.physics.pos;
+                c = 0;
+                xz = .{ 0, 0 };
+                amount_tested = 0;
+                continue;
+            }
+        }
+        
+        try io.checkCancel();
+        //update radiuses more frequently incase they are set way too high
+        outer_radius = game.getRenderDistance(io);
+        inner_radius = game.getInnerGenRadius(io, outer_radius, level);
+        
         const m = move(xz, &c);
-
         var cc: i32 = 0;
         while (line(&xz, &cc, m)) {
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
-            try io.checkCancel();
-            //update radiuses more frequently incase they are set way too high
-            outer_radius = game.getRenderDistance(io);
-            inner_radius = game.getInnerGenRadius(io, outer_radius, level);
             while (y < outer_radius[1]) {
                 defer y += 1;
                 const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
@@ -872,12 +888,14 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, pl
 
                 if (node_data == null or (!node_data.?.is_active and !node_data.?.is_queued) or !node_data.?.structures_generated) {
                     amount_loaded += 1;
-                    try game.addChunkToRenderAsync(io, allocator, chunk_pos, true);
+                    game.addChunkToRenderAsync(io, allocator, chunk_pos, true) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => |e| error_int.store(@intFromError(e), .unordered),
+                    };
                 }
             }
         }
     }
-    return amount_loaded;
 }
 
 fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
