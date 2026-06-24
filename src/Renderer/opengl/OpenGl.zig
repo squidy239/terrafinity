@@ -17,7 +17,7 @@ const Frustum = @import("Frustum.zig").Frustum;
 const Textures = @import("textures.zig");
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
-const OpenGlRenderer = @This();
+const OpenGLRenderer = @This();
 
 const RenderBufferKey = union(enum) {
     @"opaque": ChunkPos,
@@ -33,13 +33,13 @@ const RenderBufferKey = union(enum) {
 
 allocator: std.mem.Allocator,
 facebuffer: c_uint,
-indecies: c_uint,
+indices: c_uint,
 entityshaderprogram: c_uint,
 shaderprogram: c_uint,
-blockAtlasTextureId: c_uint,
+block_atlas_texture_id: c_uint,
 vao: c_uint,
 uniforms: UniformLocations,
-cameraFront: @Vector(3, f32),
+camera_front: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(RenderBufferKey),
 interface: Renderer,
 viewport_pixels: @Vector(2, u32),
@@ -73,16 +73,16 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .allocator = allocator,
         .gl_options = gl_options,
         .facebuffer = undefined,
-        .indecies = undefined,
+        .indices = undefined,
         .shaderprogram = undefined,
         .proc_table = proc_table,
         .render_buffer = .{ .allocator = allocator },
         .entityshaderprogram = undefined,
-        .cameraFront = undefined,
+        .camera_front = undefined,
         .vao = undefined,
         .window = window,
         .draw_context = try window.glCreateContext(.{ .options = gl_options, .share = share_context.* }),
-        .blockAtlasTextureId = undefined,
+        .block_atlas_texture_id = undefined,
         .uniforms = undefined,
         .viewport_pixels = .{ 0, 0 },
         .contexts = try .initCapacity(allocator, cpu_count + 8),
@@ -124,7 +124,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         try dir.writeFile(io, .{ .data = @embedFile("Blocks/wood.png"), .sub_path = "wood.png" });
         try dir.writeFile(io, .{ .data = @embedFile("Blocks/leaves.png"), .sub_path = "leaves.png" });
 
-        self.blockAtlasTextureId = try Textures.loadTextureArray(io, dir, allocator);
+        self.block_atlas_texture_id = try Textures.loadTextureArray(io, dir, allocator);
     }
 
     //+1 for main thread, TODO threadlocal
@@ -166,8 +166,8 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.window.glMakeContextCurrent(self.draw_context);
     self.render_buffer.deinit(io, self.allocator);
     gl.DeleteVertexArrays(1, @ptrCast(&self.vao));
-    gl.DeleteTextures(1, @ptrCast(&self.blockAtlasTextureId));
-    gl.DeleteBuffers(1, @ptrCast(&self.indecies));
+    gl.DeleteTextures(1, @ptrCast(&self.block_atlas_texture_id));
+    gl.DeleteBuffers(1, @ptrCast(&self.indices));
     gl.DeleteBuffers(1, @ptrCast(&self.facebuffer));
 
     gl.DeleteFramebuffers(1, @ptrCast(&self.fbo));
@@ -188,7 +188,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     std.log.info("renderer deinit", .{});
 }
 
-fn setupFbo(self: *OpenGlRenderer, width: u32, height: u32) void {
+fn setupFbo(self: *OpenGLRenderer, width: u32, height: u32) void {
     gl.CreateFramebuffers(1, @ptrCast(&self.fbo));
     const samples = @max(1, self.gl_options.samples);
 
@@ -208,25 +208,25 @@ fn setupFbo(self: *OpenGlRenderer, width: u32, height: u32) void {
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
-    self.cameraFront[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    self.cameraFront[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    self.cameraFront[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    self.cameraFront = zm.Vec3f.norm(.{ .data = self.cameraFront }).data;
+    self.camera_front[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
 }
 
 fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     return self.updateCameraDirection(viewDir);
 }
 
 fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
-    return self.cameraFront;
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
+    return self.camera_front;
 }
 
 const indexer = std.enums.EnumIndexer(World.Block);
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     self.ensureContext() catch return error.Unexpected;
 
     if (opaque_mesh.len > 0) {
@@ -256,7 +256,7 @@ pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
 }
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     return self.remove(io, chunk_pos);
 }
 
@@ -271,7 +271,7 @@ fn ensureContext(self: *@This()) !void {
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
@@ -295,7 +295,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 }
 
 fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
@@ -311,7 +311,7 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 }
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.Viewport(0, 0, @intCast(viewport_pixels[0]), @intCast(viewport_pixels[1]));
@@ -320,7 +320,7 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
 }
 
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
-    const self: *OpenGlRenderer = @ptrCast(@alignCast(userdata));
+    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     var it = self.render_buffer.map.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
@@ -397,8 +397,8 @@ fn loadFacebuffer(self: *@This()) !void {
         0, 2, 3,
     };
 
-    gl.GenBuffers(1, @ptrCast(&self.indecies));
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.GenBuffers(1, @ptrCast(&self.indices));
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indices);
 
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
 
@@ -420,12 +420,12 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.makeProcTableCurrent(self.proc_table);
     gl.FrontFace(gl.CW);
     gl.UseProgram(self.shaderprogram);
-    gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.blockAtlasTextureId);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.block_atlas_texture_id);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indices);
     const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
     const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
 
-    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.cameraFront }, .{ .data = @This().cameraUp });
+    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.camera_front }, .{ .data = @This().cameraUp });
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
     const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
@@ -468,7 +468,7 @@ fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustr
     gl.VertexAttribIPointer(0, 2, gl.UNSIGNED_INT, 2 * @sizeOf(u32), 0);
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribDivisor(0, 1);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indecies);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indices);
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, self.render_buffer.ssbo.buffer.?);
 
     gl.BindBuffer(gl.DRAW_INDIRECT_BUFFER, self.render_buffer.indirect_buffer.buffer.?);
