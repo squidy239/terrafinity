@@ -1,15 +1,17 @@
 #version 410 core
 
 layout(location = 0) in vec3 aPos;
-uniform vec3 RelativePos;
-uniform mat4 ProjView;
-uniform mat4 Rotation;
+
+uniform vec3 relative_pos;
+uniform mat4 proj_view;
+uniform mat4 rotation;
+
 out vec3 pos;
-out vec3 WorldPosRelative;
+out vec3 world_pos_relative;
 
 void main()
 {
     pos = aPos;
-    WorldPosRelative = RelativePos;
-    gl_Position = ProjView * vec4(RelativePos + (aPos), 1);
+    world_pos_relative = relative_pos;
+    gl_Position = proj_view * vec4(relative_pos + aPos, 1.0);
 }

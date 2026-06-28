@@ -5,9 +5,9 @@ const zigimg = @import("zigimg");
 
 const Block = @import("../../main.zig").Block;
 
-//TODO redo this
+// TODO: redo this
 
-///must be run in a valid opengl context
+/// Must be run in a valid OpenGL context.
 pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.mem.Allocator) !c_uint {
     var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
     const keyword = ".png";
@@ -25,36 +25,36 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
         }
     }
     std.log.info("texture resolution: {any}\n", .{resolution});
-    var it = std.Io.Dir.iterate(textures_path);
-    var i: usize = 0;
-    while (try it.next(io)) |image| {
-        switch (image.kind) {
+    var dir_it = std.Io.Dir.iterate(textures_path);
+    var texture_index: usize = 0;
+    while (try dir_it.next(io)) |entry| {
+        switch (entry.kind) {
             .file => {
-                if (image.kind == .file and ((std.mem.find(u8, image.name, keyword) != null))) {
-                    std.debug.assert(i < textures.values.len); //should never happen because invalid textures are skipped
-                    var loadedImg = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, image.name, .{}), &read_buffer);
-                    errdefer loadedImg.deinit(allocator);
-                    try loadedImg.convert(allocator, .rgba32);
-                    if (loadedImg.width != resolution[0] or loadedImg.height != resolution[1]) return error.InvalidTextureResolution;
-                    const blockName = image.name[0 .. std.mem.findScalar(u8, image.name, '.') orelse image.name.len];
-                    const blockType = std.meta.stringToEnum(Block, blockName);
-                    if (blockType == null) {
-                        std.log.warn("Invalid block type: {s}\n", .{blockName});
-                        loadedImg.deinit(allocator);
+                if (std.mem.find(u8, entry.name, keyword) != null) {
+                    std.debug.assert(texture_index < textures.values.len); // should never happen because invalid textures are skipped
+                    var loaded_img = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, entry.name, .{}), &read_buffer);
+                    errdefer loaded_img.deinit(allocator);
+                    try loaded_img.convert(allocator, .rgba32);
+                    if (loaded_img.width != resolution[0] or loaded_img.height != resolution[1]) return error.InvalidTextureResolution;
+                    const block_name = entry.name[0 .. std.mem.findScalar(u8, entry.name, '.') orelse entry.name.len];
+                    const block_type = std.meta.stringToEnum(Block, block_name);
+                    if (block_type == null) {
+                        std.log.warn("Invalid block type: {s}\n", .{block_name});
+                        loaded_img.deinit(allocator);
                         continue;
                     }
-                    std.log.debug("loaded texture: {any}\n", .{blockType.?});
-                    textures.put(blockType.?, loadedImg);
-                    i += 1;
+                    std.log.debug("loaded texture: {any}\n", .{block_type.?});
+                    textures.put(block_type.?, loaded_img);
+                    texture_index += 1;
                 }
             },
             else => {},
         }
     }
-    var gltexarrayid: c_uint = undefined;
-    gl.GenTextures(1, @ptrCast(&gltexarrayid));
+    var gl_tex_array_id: c_uint = undefined;
+    gl.GenTextures(1, @ptrCast(&gl_tex_array_id));
     gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D_ARRAY, gltexarrayid);
+    gl.BindTexture(gl.TEXTURE_2D_ARRAY, gl_tex_array_id);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
@@ -62,15 +62,15 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     gl.TexParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     gl.TexImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, @intCast(resolution[0]), @intCast(resolution[1]), @intCast(textures.values.len), 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     const indexer = std.enums.EnumIndexer(Block);
-    for (0..textures.values.len) |itt| {
-        const blockType = indexer.keyForIndex(itt);
-        const texture = textures.get(blockType) orelse missing_texture;
+    for (0..textures.values.len) |tex_idx| {
+        const block_type = indexer.keyForIndex(tex_idx);
+        const texture = textures.get(block_type) orelse missing_texture;
         gl.TexSubImage3D(
             gl.TEXTURE_2D_ARRAY,
             0,
             0,
             0,
-            @intCast(itt),
+            @intCast(tex_idx),
             @intCast(resolution[0]),
             @intCast(resolution[1]),
             1,
@@ -81,15 +81,15 @@ pub fn loadTextureArray(io: std.Io, textures_path: std.Io.Dir, allocator: std.me
     }
     gl.GenerateMipmap(gl.TEXTURE_2D_ARRAY);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, 0);
-    return gltexarrayid;
+    return gl_tex_array_id;
 }
 
 fn allSquares(io: std.Io, allocator: std.mem.Allocator, textures_path: std.Io.Dir, keyword: ?[]const u8) ![2]usize {
-    var it1 = std.Io.Dir.iterate(textures_path);
+    var dir_it = std.Io.Dir.iterate(textures_path);
     var resolution: ?[2]usize = null;
-    while (try it1.next(io)) |image| {
-        if (image.kind == .file and (keyword == null or (std.mem.find(u8, image.name, keyword.?) != null))) {
-            const cres = try getResolution(io, allocator, try textures_path.openFile(io, image.name, .{}));
+    while (try dir_it.next(io)) |entry| {
+        if (entry.kind == .file and (keyword == null or (std.mem.find(u8, entry.name, keyword.?) != null))) {
+            const cres = try getResolution(io, allocator, try textures_path.openFile(io, entry.name, .{}));
             if (resolution == null) {
                 resolution = cres;
             } else {
@@ -104,10 +104,10 @@ fn allSquares(io: std.Io, allocator: std.mem.Allocator, textures_path: std.Io.Di
 }
 
 fn countFiles(textures_path: std.fs.Dir, keyword: ?[]const u8) !u32 {
-    var it = std.fs.Dir.iterate(textures_path);
+    var dir_it = std.fs.Dir.iterate(textures_path);
     var count: u32 = 0;
-    while (try it.next()) |image| {
-        if (image.kind == .file and (keyword == null or (std.mem.find(u8, image.name, keyword.?) != null))) count += 1;
+    while (try dir_it.next()) |entry| {
+        if (entry.kind == .file and (keyword == null or (std.mem.find(u8, entry.name, keyword.?) != null))) count += 1;
     }
     return count;
 }

@@ -1,16 +1,19 @@
-const dvui = @import("dvui");
 const std = @import("std");
-const Game = @import("Game.zig");
-const wio = @import("wio");
-const Config = @import("main.zig").Config;
-const World = @import("world/World.zig");
-const EntityTypes = @import("entity/EntityTypes.zig");
-const utils = @import("libs/utils.zig");
+
+const dvui = @import("dvui");
 const gl = @import("gl");
+const wio = @import("wio");
+const zigimg = @import("zigimg");
+
+const Config = @import("main.zig").Config;
+const EntityTypes = @import("entity/EntityTypes.zig");
+const Game = @import("Game.zig");
+const utils = @import("libs/utils.zig");
+const World = @import("world/World.zig");
+
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
-const zigimg = @import("zigimg");
 const Ui = @This();
 
 proc_table: *const gl.ProcTable,
@@ -36,11 +39,11 @@ menu_state: struct {
     crosshair: bool = true,
 
     /// Returns true if the player is ingame without a menu open
-    pub fn playingGame(self: @This()) bool {
+    pub fn is_playing_game(self: @This()) bool {
         return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
     }
 
-    pub fn handleEsc(self: *@This()) void {
+    pub fn handle_esc(self: *@This()) void {
         if (self.ingame) self.*.esc = !self.*.esc;
         self.settings = false;
     }
@@ -182,7 +185,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     defer settings.deinit();
 
     if (self.menu_state.ingame) {
-        var gm: EntityTypes.Player.GameMode = self.game.player.gameMode.load(.monotonic);
+        var gm: EntityTypes.Player.GameMode = self.game.player.game_mode.load(.monotonic);
         _ = dvui.dropdownEnum(
             @src(),
             EntityTypes.Player.GameMode,
@@ -204,7 +207,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     return menuchanged;
 }
 
-pub fn crosshair(self: *@This()) void {
+pub fn crossHair(self: *@This()) void {
     _ = self;
     _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
 }

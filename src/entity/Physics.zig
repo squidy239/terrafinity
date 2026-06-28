@@ -24,67 +24,67 @@ pub fn Interface(physics_elements: anytype) type {
         }
 
         pub fn update(self: *@This(), world: *World, io: std.Io, allocator: std.mem.Allocator) !void {
-            //deltaT is seconds
-            const deltaT: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
+            //delta_t is seconds
+            const delta_t: f64 = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
 
             inline for (std.meta.fields(@TypeOf(self.elements))) |field| {
                 const fieldData = &@field(&self.elements, field.name);
-                try fieldData.update(io, self, deltaT, world, allocator);
+                try fieldData.update(io, self, delta_t, world, allocator);
             }
         }
     };
 }
 
-pub const simpleMover = struct {
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+pub const SimpleMover = struct {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = self;
         _ = world;
         _ = allocator;
         physics.mutex.lockUncancelable(io);
         defer physics.mutex.unlock(io);
-        const posOffset = physics.velocity * @as(@Vector(3, f64), @splat(deltaT));
-        physics.pos += posOffset;
+        const pos_offset = physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
+        physics.pos += pos_offset;
     }
 };
 
 pub const Mover = struct {
     collisions: std.atomic.Value(bool),
-    zeroVelocity: std.atomic.Value(bool),
-    boundingBox: zm.AABB(3, f64),
+    zero_velocity: std.atomic.Value(bool),
+    bounding_box: zm.AABB(3, f64),
     enabled: std.atomic.Value(bool),
 
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled.load(.monotonic)) return;
         defer {
-            if (self.zeroVelocity.load(.monotonic)) {
+            if (self.zero_velocity.load(.monotonic)) {
                 physics.mutex.lockUncancelable(io);
                 physics.velocity = .{ 0, 0, 0 };
                 physics.mutex.unlock(io);
             }
         }
         physics.mutex.lockUncancelable(io);
-        var posOffset = physics.velocity * @as(@Vector(3, f64), @splat(deltaT));
+        var pos_offset = physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
         physics.mutex.unlock(io);
 
         if (!self.collisions.load(.monotonic)) {
             physics.mutex.lockUncancelable(io);
-            physics.pos += posOffset;
+            physics.pos += pos_offset;
             physics.mutex.unlock(io);
             return;
         }
-        const maxMove: @Vector(3, f64) = @splat(0.4);
+        const max_move: @Vector(3, f64) = @splat(0.4);
         var reader = World.Reader{ .world = world };
         defer reader.clear(io);
         physics.mutex.lockUncancelable(io);
         defer physics.mutex.unlock(io);
-        while (!std.meta.eql(posOffset, @Vector(3, f64){ 0, 0, 0 })) {
-            const move = std.math.clamp(posOffset, -maxMove, maxMove);
-            posOffset -= move;
+        while (!std.meta.eql(pos_offset, @Vector(3, f64){ 0, 0, 0 })) {
+            const move = std.math.clamp(pos_offset, -max_move, max_move);
+            pos_offset -= move;
             physics.pos += move;
-            var currentPos = physics.pos;
-            while (try self.collision(io, allocator, currentPos, &reader)) |mtv| {
+            var current_pos = physics.pos;
+            while (try self.checkCollision(io, allocator, current_pos, &reader)) |mtv| {
                 physics.pos -= mtv;
-                currentPos = physics.pos;
+                current_pos = physics.pos;
                 if (mtv[0] != 0.0) physics.velocity[0] = 0.0;
                 if (mtv[1] != 0.0) physics.velocity[1] = 0.0;
                 if (mtv[2] != 0.0) physics.velocity[2] = 0.0;
@@ -92,21 +92,21 @@ pub const Mover = struct {
         }
     }
 
-    pub fn collision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
+    pub fn checkCollision(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !?@Vector(3, f64) {
         defer reader.clear(io);
 
         const base: World.BlockPos = @round(pos);
-        var bestMtv: @Vector(3, f64) = @splat(0.0);
-        var bestMagnitude: f64 = 0.0;
+        var best_mtv: @Vector(3, f64) = @splat(0.0);
+        var best_magnitude: f64 = 0.0;
         var found: bool = false;
-        const size = self.boundingBox.size();
-        const checkDistance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]) / 2);
-        var x: i16 = -checkDistance;
-        while (x <= checkDistance) : (x += 1) {
-            var y: i16 = -checkDistance;
-            while (y <= checkDistance) : (y += 1) {
-                var z: i16 = -checkDistance;
-                while (z <= checkDistance) : (z += 1) {
+        const size = self.bounding_box.size();
+        const check_distance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]) / 2);
+        var x: i16 = -check_distance;
+        while (x <= check_distance) : (x += 1) {
+            var y: i16 = -check_distance;
+            while (y <= check_distance) : (y += 1) {
+                var z: i16 = -check_distance;
+                while (z <= check_distance) : (z += 1) {
                     const block_pos = base + World.BlockPos{ x, y, z };
 
                     const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
@@ -114,21 +114,21 @@ pub const Mover = struct {
 
                     const float_block_pos: @Vector(3, f64) = @floatFromInt(block_pos);
 
-                    const blockAABB = zm.AABB(3, f64).init(.{ .data = float_block_pos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = float_block_pos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
+                    const block_aabb = zm.AABB(3, f64).init(.{ .data = float_block_pos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = float_block_pos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
 
-                    var selfAABB = self.boundingBox;
-                    selfAABB.min = selfAABB.min.add(.{ .data = pos });
-                    selfAABB.max = selfAABB.max.add(.{ .data = pos });
+                    var self_aabb = self.bounding_box;
+                    self_aabb.min = self_aabb.min.add(.{ .data = pos });
+                    self_aabb.max = self_aabb.max.add(.{ .data = pos });
 
-                    const mtv = getAABBpenetration(blockAABB, selfAABB); // single-axis MTV or zero
+                    const mtv = getAabbPenetration(block_aabb, self_aabb); // single-axis MTV or zero
 
                     if (mtv[0] == 0.0 and mtv[1] == 0.0 and mtv[2] == 0.0) continue;
 
                     const mag = @max(@abs(mtv[0]), @max(@abs(mtv[1]), @abs(mtv[2])));
 
-                    if (!found or mag > bestMagnitude) {
-                        bestMagnitude = mag;
-                        bestMtv = mtv;
+                    if (!found or mag > best_magnitude) {
+                        best_magnitude = mag;
+                        best_mtv = mtv;
                         found = true;
                     }
                 }
@@ -136,33 +136,33 @@ pub const Mover = struct {
         }
 
         if (!found) return null;
-        return bestMtv;
+        return best_mtv;
     }
 
-    pub fn shortestGroundDistance(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !f64 {
+    pub fn getShortestGroundDistance(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !f64 {
         defer reader.clear(io);
 
         const base = @round(pos); // floor entity pos once
         var best: f64 = 10000000000000.0;
-        const size = self.boundingBox.size();
-        const checkDistance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]));
-        var x: i16 = -checkDistance;
-        while (x <= checkDistance) : (x += 1) {
-            var y: i16 = -checkDistance;
-            while (y <= checkDistance) : (y += 1) {
-                var z: i16 = -checkDistance;
-                while (z <= checkDistance) : (z += 1) {
+        const size = self.bounding_box.size();
+        const check_distance: i16 = @ceil(@max(size.data[0], size.data[1], size.data[2]));
+        var x: i16 = -check_distance;
+        while (x <= check_distance) : (x += 1) {
+            var y: i16 = -check_distance;
+            while (y <= check_distance) : (y += 1) {
+                var z: i16 = -check_distance;
+                while (z <= check_distance) : (z += 1) {
                     const offset = @Vector(3, f64){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
-                    const blockPos = base + offset;
+                    const block_pos = base + offset;
 
-                    const block = try reader.getBlock(io, allocator, @trunc(blockPos), World.standard_level);
+                    const block = try reader.getBlock(io, allocator, @trunc(block_pos), World.standard_level);
                     if (!block.isSolid()) continue;
-                    const blockAABB = zm.AABB(3, f64).init(.{ .data = blockPos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = blockPos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
+                    const block_aabb = zm.AABB(3, f64).init(.{ .data = block_pos + @Vector(3, f64){ -0.5, -0.5, -0.5 } }, .{ .data = block_pos + @Vector(3, f64){ 0.5, 0.5, 0.5 } });
 
-                    var selfAABB = self.boundingBox;
-                    selfAABB.min = selfAABB.min.add(.{ .data = pos });
-                    selfAABB.max = selfAABB.max.add(.{ .data = pos });
-                    if (getAABBpenetration(blockAABB, selfAABB)[1] != 0) best = @min(getAABBintersect(blockAABB, selfAABB)[1], best);
+                    var self_aabb = self.bounding_box;
+                    self_aabb.min = self_aabb.min.add(.{ .data = pos });
+                    self_aabb.max = self_aabb.max.add(.{ .data = pos });
+                    if (getAabbPenetration(block_aabb, self_aabb)[1] != 0) best = @min(getAabbIntersect(block_aabb, self_aabb)[1], best);
                 }
             }
         }
@@ -170,7 +170,7 @@ pub const Mover = struct {
     }
 
     // Return signed per-axis intersection vector (zero if no overlap)
-    fn getAABBintersect(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
+    fn getAabbIntersect(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
         if (a.max.data[0] <= b.min.data[0] or a.min.data[0] >= b.max.data[0] or
             a.max.data[1] <= b.min.data[1] or a.min.data[1] >= b.max.data[1] or
             a.max.data[2] <= b.min.data[2] or a.min.data[2] >= b.max.data[2])
@@ -194,8 +194,8 @@ pub const Mover = struct {
     }
 
     // Choose the smallest absolute axis to form the minimum translation vector.
-    fn getAABBpenetration(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
-        const i = getAABBintersect(a, b);
+    fn getAabbPenetration(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
+        const i = getAabbIntersect(a, b);
         const ax = @abs(i[0]);
         const ay = @abs(i[1]);
         const az = @abs(i[2]);
@@ -214,14 +214,14 @@ pub const Gravity = struct {
     ///the strength of the gravity in blocks per second squared
     strength: std.atomic.Value(f64) = .init(20.0),
 
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
         if (!self.enabled.load(.monotonic)) return;
         _ = world;
         _ = allocator;
-        const velOffset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic))) * self.up * @as(@Vector(3, f64), @splat(deltaT));
+        const vel_offset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic))) * self.up * @as(@Vector(3, f64), @splat(delta_t));
         physics.mutex.lockUncancelable(io);
         defer physics.mutex.unlock(io);
-        physics.velocity -= velOffset;
+        physics.velocity -= vel_offset;
     }
 };
 
@@ -230,15 +230,15 @@ pub const Resistance = struct {
     ///after one second the velocity will be this fraction of the original velocity
     fraction_per_second: std.atomic.Value(f64) = .init(0.1),
 
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, deltaT: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
         _ = world;
         _ = allocator;
         if (!self.enabled.load(.monotonic)) return;
         physics.mutex.lockUncancelable(io);
         defer physics.mutex.unlock(io);
-        const oldVel: @Vector(3, f64) = physics.velocity;
-        const newVel = std.math.lerp(oldVel, @Vector(3, f64){ 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * deltaT)));
-        physics.velocity = newVel;
+        const old_vel: @Vector(3, f64) = physics.velocity;
+        const new_vel = std.math.lerp(old_vel, @Vector(3, f64){ 0, 0, 0 }, @as(@Vector(3, f64), @splat(self.fraction_per_second.load(.monotonic) * delta_t)));
+        physics.velocity = new_vel;
     }
 };
 
@@ -249,10 +249,10 @@ test "AABB intersection" {
     const aabb2 = zm.AABB(3, f64).init(.{ .data = .{ 0.5, 0.5, 0.5 } }, .{ .data = .{ 1.5, 1.5, 1.5 } });
     const aabb3 = zm.AABB(3, f64).init(.{ .data = .{ 2, 2, 2 } }, .{ .data = .{ 3, 3, 3 } });
 
-    const intersect12 = Mover.getAABBintersect(aabb1, aabb2);
+    const intersect12 = Mover.getAabbIntersect(aabb1, aabb2);
     try testing.expect(intersect12[0] != 0 and intersect12[1] != 0 and intersect12[2] != 0);
 
-    const intersect13 = Mover.getAABBintersect(aabb1, aabb3);
+    const intersect13 = Mover.getAabbIntersect(aabb1, aabb3);
     try testing.expect(std.meta.eql(intersect13, .{ 0, 0, 0 }));
 }
 
@@ -262,7 +262,7 @@ test "AABB penetration" {
     const aabb1 = zm.AABB(3, f64).init(.{ .data = .{ 0, 0, 0 } }, .{ .data = .{ 1, 1, 1 } });
     const aabb2 = zm.AABB(3, f64).init(.{ .data = .{ 0.8, 0.9, 0.7 } }, .{ .data = .{ 1.8, 1.9, 1.7 } });
 
-    const penetration = Mover.getAABBpenetration(aabb1, aabb2);
+    const penetration = Mover.getAabbPenetration(aabb1, aabb2);
     try testing.expect(penetration[0] == 0 and penetration[1] != 0 and penetration[2] == 0);
 }
 
@@ -285,7 +285,7 @@ test "Gravity" {
 
 test "simpleMover" {
     const testing = std.testing;
-    const physics_interface = Interface(struct { mover: simpleMover });
+    const physics_interface = Interface(struct { mover: SimpleMover });
     var physics_object = physics_interface{
         .elements = .{ .mover = .{} },
         .last_update = .now(testing.io, .awake),

@@ -1,44 +1,44 @@
-const utils = @import("utils.zig");
-
 const std = @import("std");
 
 const Block = @import("../World.zig").Block;
 const World = @import("../World.zig");
+const Sphere = @import("Sphere.zig").Sphere;
+const utils = @import("utils.zig");
 
-pub fn TexturedSphere(comptime T: type, samplerFn: fn (x: T, y: T, args: anytype) T, samplerArgsType: type) type {
+pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytype) t, sampler_args_type: type) type {
     return struct {
-        sphere: World.Editor.Geometry.Sphere(T),
-        innerSphere: World.Editor.Geometry.Sphere(T),
-        boundingBox: @Vector(6, T),
-        samplerArgs: samplerArgsType,
+        sphere: Sphere(t),
+        inner_sphere: Sphere(t),
+        bounding_box: @Vector(6, t),
+        sampler_args: sampler_args_type,
 
-        pub fn init(pos: @Vector(3, T), radius: T, samplerArgs: samplerArgsType, minRadiusFraction: T) @This() {
-            const sphere: World.Editor.Geometry.Sphere(T) = .init(pos, radius);
-            const innersphere: World.Editor.Geometry.Sphere(T) = .init(pos, radius * minRadiusFraction);
+        pub fn init(pos: @Vector(3, t), radius: t, sampler_args: sampler_args_type, min_radius_fraction: t) @This() {
+            const sphere: Sphere(t) = .init(pos, radius);
+            const inner_sphere: Sphere(t) = .init(pos, radius * min_radius_fraction);
 
             return .{
                 .sphere = sphere,
-                .innerSphere = innersphere,
-                .samplerArgs = samplerArgs,
-                .boundingBox = sphere.boundingBox,
+                .inner_sphere = inner_sphere,
+                .sampler_args = sampler_args,
+                .bounding_box = sphere.bounding_box,
             };
         }
 
-        pub fn isPointInside(self: *const @This(), P: @Vector(3, T)) bool {
-            if (!self.sphere.isPointInside(P)) return false;
-            if (self.innerSphere.isPointInside(P)) return true;
-            const shapeP = P - self.sphere.position;
-            const coords = projectEquirectangular(shapeP, self.sphere.radius);
-            const sampleAmount = samplerFn(coords[0], coords[1], self.samplerArgs);
-            const sampleBlockPos = self.sphere.position + (shapeP / @as(@Vector(3, T), @splat(sampleAmount)));
-            return self.sphere.isPointInside(sampleBlockPos);
+        pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
+            if (!self.sphere.isPointInside(p)) return false;
+            if (self.inner_sphere.isPointInside(p)) return true;
+            const shape_p = p - self.sphere.position;
+            const coords = projectEquirectangular(shape_p, self.sphere.radius);
+            const sample_amount = sampler_fn(coords[0], coords[1], self.sampler_args);
+            const sample_block_pos = self.sphere.position + (shape_p / @as(@Vector(3, t), @splat(sample_amount)));
+            return self.sphere.isPointInside(sample_block_pos);
         }
     };
 }
 
-pub fn NoiseSphere(editor: *World.Editor, centerPos: @Vector(3, f64), radius: f64, minRadiusFactor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block, level: i32) !void {
-    const explosionSphere = TexturedSphere(f64, noiseTexture, NoiseParams).init(centerPos, radius, NoiseParams{ .noise = noise, .minRadius = minRadiusFactor }, minRadiusFactor);
-    try editor.placeSamplerShape(block, explosionSphere, level);
+pub fn noiseSphere(editor: *World.Editor, center_pos: @Vector(3, f64), radius: f64, min_radius_factor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block, level: i32) !void {
+    const explosion_sphere = TexturedSphere(f64, noiseTexture, NoiseParams).init(center_pos, radius, NoiseParams{ .noise = noise, .min_radius = min_radius_factor }, min_radius_factor);
+    try editor.placeSamplerShape(block, explosion_sphere, level);
 }
 const NoiseParams = struct {
     noise: World.DefaultGenerator.Noise.Noise(f32),

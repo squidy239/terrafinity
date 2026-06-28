@@ -1,18 +1,25 @@
-const std = @import("std");
-const math = std.math;
-const print = std.debug.print;
-
-// 3D Monotone Cubic Interpolator for 4x4x4 grid
+// 3D natural cubic spline interpolator for a 4×4×4 grid.
+//
+// Uses a transposed grid layout so that each SIMD vector holds values along
+// the fast-varying dimension, enabling vectorised interpolation along X.
 pub const NaturalCubicInterpolator3D = struct {
-    // Precomputed cubic coefficients for all directions
-    coeffs_x_vectorized: [4][16]f32, // X-direction coefficients for each (y,z)
-    coeffs_y_vectorized: [4][4]f32, // Y-direction coefficients for each (x,z)
-    coeffs_z_vectorized: [4]f32, // Z-direction coefficients for each (x,y)
+    // X-direction cubic coefficients, transposed: coeffs_x_vec[z * 4 + y] is a
+    // vector of 4 coefficients for the X spline along the (y, z) slice.
+    coeffs_x_vec: [4][16]f32,
 
-    //transposed vectorized grid data
-    tvgrid: [4][16]f32,
+    // Y-direction cubic coefficients: coeffs_y_vec[z * 4 + x] is a vector of
+    // 4 coefficients for the Y spline along the (x, z) column.
+    coeffs_y_vec: [4][4]f32,
+
+    // Z-direction cubic coefficients for the single (x=0, y=0) column.
+    coeffs_z_vec: [4]f32,
+
+    // Grid data stored in transposed form so that each SIMD lane holds values
+    // along the X axis for a fixed (y, z).
+    transposed_grid: [4][16]f32,
 
     const Self = @This();
+    const one_over_six: f32 = 1.0 / 6.0;
 
     pub fn init(grid: [4][4][4]f32) Self {
         var vgrid: [16][4]f32 = undefined;
@@ -30,133 +37,198 @@ pub const NaturalCubicInterpolator3D = struct {
         }
 
         var self = Self{
-            .coeffs_x_vectorized = undefined,
-            .coeffs_y_vectorized = undefined,
-            .coeffs_z_vectorized = undefined,
-            .tvgrid = transpose(f32, 16, 4, vgrid),
+            .coeffs_x_vec = undefined,
+            .coeffs_y_vec = undefined,
+            .coeffs_z_vec = undefined,
+            .transposed_grid = transpose(f32, 16, 4, vgrid),
         };
 
-        // Precompute ALL cubic coefficients
-        self.precomputeCoeffs(grid);
+        self.precomputeCoefficients(grid);
         return self;
     }
 
-    fn precomputeCoeffs(self: *Self, grid: [4][4][4]f32) void {
-        var coeffs_x: [4][4][4][4]f32 = undefined;
-        var coeffs_x_vec: [16][4]f32 = undefined;
+    fn precomputeCoefficients(self: *Self, grid: [4][4][4]f32) void {
+        var raw_coeffs_x: [4][4][4][4]f32 = undefined;
+        var raw_coeffs_x_vec: [16][4]f32 = undefined;
 
-        // Precompute X-direction coefficients
+        // X-direction: one spline per (y, z) slice.
         for (0..4) |y| {
             for (0..4) |z| {
-                const values = [4]f32{ grid[0][y][z], grid[1][y][z], grid[2][y][z], grid[3][y][z] };
-                coeffs_x[0][y][z] = computeNaturalCubicCoeffs(f32, values);
+                const values = [4]f32{
+                    grid[0][y][z],
+                    grid[1][y][z],
+                    grid[2][y][z],
+                    grid[3][y][z],
+                };
+                raw_coeffs_x[0][y][z] = computeCubicCoefficients(f32, values);
             }
         }
         for (0..4) |yi| {
             for (0..4) |zi| {
                 const idx = yi * 4 + zi;
-                coeffs_x_vec[idx] = coeffs_x[0][yi][zi];
+                raw_coeffs_x_vec[idx] = raw_coeffs_x[0][yi][zi];
             }
         }
-        self.coeffs_x_vectorized = transpose(f32, 16, 4, coeffs_x_vec);
-        var coeffs_y: [4][4]f32 = undefined;
-        // Precompute Y-direction coefficients
+        self.coeffs_x_vec = transpose(f32, 16, 4, raw_coeffs_x_vec);
+
+        // Y-direction: one spline per (x, z) column, stored with x fixed at 0.
+        var raw_coeffs_y: [4][4]f32 = undefined;
         for (0..4) |z| {
-            const values = [4]f32{ grid[0][0][z], grid[0][1][z], grid[0][2][z], grid[0][3][z] };
-            coeffs_y[z] = computeNaturalCubicCoeffs(f32, values);
+            const values = [4]f32{
+                grid[0][0][z],
+                grid[0][1][z],
+                grid[0][2][z],
+                grid[0][3][z],
+            };
+            raw_coeffs_y[z] = computeCubicCoefficients(f32, values);
         }
-        self.coeffs_y_vectorized = transpose(f32, 4, 4, coeffs_y);
+        self.coeffs_y_vec = transpose(f32, 4, 4, raw_coeffs_y);
 
-        // Precompute Z-direction coefficients
-        const values = [4]f32{ grid[0][0][0], grid[0][0][1], grid[0][0][2], grid[0][0][3] };
-        const coeffs_z = computeNaturalCubicCoeffs(f32, values);
-        self.coeffs_z_vectorized = coeffs_z;
+        // Z-direction: one spline along the (0, 0) row.
+        const values = [4]f32{
+            grid[0][0][0],
+            grid[0][0][1],
+            grid[0][0][2],
+            grid[0][0][3],
+        };
+        self.coeffs_z_vec = computeCubicCoefficients(f32, values);
     }
 
+    /// Sample the interpolated value at the given (x, y, z) coordinates.
     pub fn sample(interp: *const Self, x: f32, y: f32, z: f32) f32 {
-        // Step 1: X interpolation
-        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimd(f32, 16, @bitCast(interp.tvgrid), interp.coeffs_x_vectorized, x));
-        // Step 2: Y interpolation
-        const yresult = splineEvalSimd(f32, 4, xresult, interp.coeffs_y_vectorized, y);
-        // Step 3: Z interpolation
-        return splineEval(f32, yresult, interp.coeffs_z_vectorized, z);
+        // Step 1: interpolate along X.
+        const x_result: [4]@Vector(4, f32) = @bitCast(splineEvalSimd(
+            f32,
+            16,
+            @bitCast(interp.transposed_grid),
+            interp.coeffs_x_vec,
+            x,
+        ));
+        // Step 2: interpolate along Y.
+        const y_result = splineEvalSimd(f32, 4, x_result, interp.coeffs_y_vec, y);
+        // Step 3: interpolate along Z.
+        return splineEval(f32, y_result, interp.coeffs_z_vec, z);
     }
 
-    pub fn sampleComptimeXZ(interp: *const Self, comptime x: f32, y: f32, comptime z: f32) f32 {
-        // Step 1: X interpolation
-        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x)); //this bitcast might be unsafe
-        // Step 2: Y interpolation
-        const yresult = splineEvalSimd(f32, 4, xresult, interp.coeffs_y_vectorized, y);
-        // Step 3: Z interpolation
-        return splineEvalComptimeT(f32, yresult, interp.coeffs_z_vectorized, z);
+    /// Sample with comptime x and z so those dimensions can be partially
+    /// constant-folded at compile time.
+    pub fn sampleComptimeXz(interp: *const Self, comptime x: f32, y: f32, comptime z: f32) f32 {
+        const x_result: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(
+            f32,
+            16,
+            interp.transposed_grid,
+            interp.coeffs_x_vec,
+            x,
+        ));
+        const y_result = splineEvalSimd(f32, 4, x_result, interp.coeffs_y_vec, y);
+        return splineEvalComptimeT(f32, y_result, interp.coeffs_z_vec, z);
     }
 
+    /// Full comptime sample — the result is a compile-time constant when
+    /// called with comptime arguments.
     pub fn sampleComptime(interp: *const Self, comptime x: f32, comptime y: f32, comptime z: f32) f32 {
-        // Step 1: X interpolation
-        const xresult: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(f32, 16, interp.tvgrid, interp.coeffs_x_vectorized, x)); //this bitcast might be unsafe
-        // Step 2: Y interpolation
-        const yresult = splineEvalSimdComptimeT(f32, 4, xresult, interp.coeffs_y_vectorized, y);
-        // Step 3: Z interpolation
-        return splineEvalComptimeT(f32, yresult, interp.coeffs_z_vectorized, z);
+        const x_result: [4]@Vector(4, f32) = @bitCast(splineEvalSimdComptimeT(
+            f32,
+            16,
+            interp.transposed_grid,
+            interp.coeffs_x_vec,
+            x,
+        ));
+        const y_result = splineEvalSimdComptimeT(f32, 4, x_result, interp.coeffs_y_vec, y);
+        return splineEvalComptimeT(f32, y_result, interp.coeffs_z_vec, z);
     }
 
-    pub fn computeNaturalCubicCoeffs(Type: type, values: [4]Type) [4]Type {
-        var m: [4]Type = .{ 0, 0, 0, 0 }; // second derivatives, m0 = m3 = 0 (natural boundary)
-        const delta0 = (values[1] - values[0]);
-        const delta1 = (values[2] - values[1]);
-        const delta2 = (values[3] - values[2]);
+    /// Compute the second-derivative coefficients for a natural cubic spline
+    /// given four sample values.  The boundary conditions m₀ = m₃ = 0 are
+    /// enforced (natural spline).
+    fn computeCubicCoefficients(Type: type, values: [4]Type) [4]Type {
+        var m: [4]Type = .{ 0, 0, 0, 0 };
+        const delta0 = values[1] - values[0];
+        const delta1 = values[2] - values[1];
+        const delta2 = values[3] - values[2];
         const b1 = 6 * (delta1 - delta0);
         const b2 = 6 * (delta2 - delta1);
         m[1] = (b1 * 4 - b2) / 15;
-        m[2] = (4 * b2 - 1 * b1) / 15;
+        m[2] = (4 * b2 - b1) / 15;
         return m;
     }
 
-    const h2_6 = 1.0 / 6.0;
-    /// Evaluate a 1D natural cubic spline segment
-    pub fn splineEval(Type: type, values: [4]Type, m: [4]Type, t: Type) Type {
+    /// Evaluate a 1D natural cubic spline at parameter `t ∈ [0, 3)`.
+    fn splineEval(Type: type, values: [4]Type, m: [4]Type, t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
-        const i: usize = @trunc(@min(@floor(t / one_third), 2));
-        const localT: Type = t * 3.0 - @as(Type, @floatFromInt(i));
-        const a = 1.0 - localT;
-        return a * values[i] + localT * values[i + 1] + ((a * a * a - a) * m[i] + (localT * localT * localT - localT) * m[i + 1]) * h2_6;
+        const seg_idx: usize = @trunc(@min(@floor(t / one_third), 2));
+        const local_t: Type = t * 3.0 - @as(Type, @floatFromInt(seg_idx));
+        const a = 1.0 - local_t;
+        return (a * values[seg_idx]
+            + local_t * values[seg_idx + 1]
+            + ((a * a * a - a) * m[seg_idx]
+                + (local_t * local_t * local_t - local_t) * m[seg_idx + 1])
+            * one_over_six);
     }
 
-    pub fn splineEvalComptimeT(Type: type, values: [4]Type, m: [4]Type, comptime t: Type) Type {
+    /// Compile-time variant of [`splineEval`].
+    fn splineEvalComptimeT(Type: type, values: [4]Type, m: [4]Type, comptime t: Type) Type {
         const one_third: Type = comptime 1.0 / 3.0;
-        const i: usize = comptime @trunc(@min(@floor(t / one_third), 2));
-        const localT: Type = comptime t * 3.0 - @as(Type, @floatFromInt(i));
-        const a = comptime 1.0 - localT;
-        return a * values[i] + localT * values[i + 1] + ((comptime (a * a * a - a)) * m[i] + (comptime (localT * localT * localT - localT)) * m[i + 1]) * h2_6;
+        const seg_idx: usize = comptime @trunc(@min(@floor(t / one_third), 2));
+        const local_t: Type = comptime t * 3.0 - @as(Type, @floatFromInt(seg_idx));
+        const a = comptime 1.0 - local_t;
+        return (a * values[seg_idx]
+            + local_t * values[seg_idx + 1]
+            + ((comptime (a * a * a - a)) * m[seg_idx]
+                + (comptime (local_t * local_t * local_t - local_t)) * m[seg_idx + 1])
+            * one_over_six);
     }
 
-    pub fn transpose(comptime T: type, comptime N: usize, comptime M: usize, arr: [N][M]T) [M][N]T {
+    /// Transpose an N×M 2D array into an M×N array at compile time.
+    fn transpose(comptime T: type, comptime N: usize, comptime M: usize, arr: [N][M]T) [M][N]T {
         var result: [M][N]T = undefined;
-
         inline for (0..N) |i| {
             inline for (0..M) |j| {
                 result[j][i] = arr[i][j];
             }
         }
-
         return result;
     }
 
-    pub fn splineEvalSimd(comptime T: type, comptime len: usize, values: [4]@Vector(len, T), m: [4][len]T, t: T) @Vector(len, T) {
-        const i: usize = @trunc(@min(@floor(t * 3), 2));
-        const localT: T = t * 3.0 - @as(f32, @floatFromInt(i));
-        const localT_v: @Vector(len, T) = @splat(localT);
-        const a_v: @Vector(len, T) = @splat(1.0 - localT);
-        const h2_6_v: @Vector(len, T) = comptime @splat(2.0 / 6.0);
-        return a_v * values[i] + localT_v * values[i + 1] + ((a_v * a_v * a_v - a_v) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
+    /// SIMD-aware spline evaluation.  `values` holds the four control values
+    /// as a single SIMD vector; `m` holds the four second-derivative
+    /// coefficients (one per lane).
+    fn splineEvalSimd(
+        comptime T: type,
+        comptime len: usize,
+        values: [4]@Vector(len, T),
+        m: [4][len]T,
+        t: T,
+    ) @Vector(len, T) {
+        const seg_idx: usize = @trunc(@min(@floor(t * 3), 2));
+        const local_t: T = t * 3.0 - @as(T, @floatFromInt(seg_idx));
+        const local_t_vec: @Vector(len, T) = @splat(local_t);
+        const a_vec: @Vector(len, T) = @splat(1.0 - local_t);
+        const one_over_six_vec: @Vector(len, T) = comptime @splat(one_over_six);
+        return (a_vec * values[seg_idx]
+            + local_t_vec * values[seg_idx + 1]
+            + ((a_vec * a_vec * a_vec - a_vec) * m[seg_idx]
+                + (local_t_vec * local_t_vec * local_t_vec - local_t_vec) * m[seg_idx + 1])
+            * one_over_six_vec);
     }
 
-    pub fn splineEvalSimdComptimeT(comptime T: type, comptime len: usize, values: [4][len]T, m: [4][len]T, comptime t: T) @Vector(len, T) {
-        const i: usize = comptime @trunc(@min(@floor(t * 3), 2));
-        const localT: T = comptime t * 3.0 - @as(f32, @floatFromInt(i));
-        const localT_v: @Vector(len, T) = comptime @splat(localT);
-        const a_v: @Vector(len, T) = comptime @splat(1.0 - localT);
-        const h2_6_v: @Vector(len, T) = comptime @splat(2.0 / 6.0);
-        return a_v * values[i] + localT_v * values[i + 1] + ((comptime (a_v * a_v * a_v - a_v)) * m[i] + (localT_v * localT_v * localT_v - localT_v) * m[i + 1]) * h2_6_v;
+    /// Compile-time SIMD variant of [`splineEvalSimd`].
+    fn splineEvalSimdComptimeT(
+        comptime T: type,
+        comptime len: usize,
+        values: [4][len]T,
+        m: [4][len]T,
+        comptime t: T,
+    ) @Vector(len, T) {
+        const seg_idx: usize = comptime @trunc(@min(@floor(t * 3), 2));
+        const local_t: T = comptime t * 3.0 - @as(T, @floatFromInt(seg_idx));
+        const local_t_vec: @Vector(len, T) = comptime @splat(local_t);
+        const a_vec: @Vector(len, T) = comptime @splat(1.0 - local_t);
+        const one_over_six_vec: @Vector(len, T) = comptime @splat(one_over_six);
+        return (a_vec * values[seg_idx]
+            + local_t_vec * values[seg_idx + 1]
+            + ((comptime (a_vec * a_vec * a_vec - a_vec)) * m[seg_idx]
+                + (comptime (local_t_vec * local_t_vec * local_t_vec - local_t_vec)) * m[seg_idx + 1])
+            * one_over_six_vec);
     }
 };

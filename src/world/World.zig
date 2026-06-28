@@ -354,7 +354,10 @@ pub const Reader = struct {
 };
 
 pub const Editor = struct {
-    pub const Geometry = @import("structures/Geometry.zig");
+    pub const geometry = struct {
+        pub const Cone = @import("structures/Cone.zig").Cone;
+        pub const Sphere = @import("structures/Sphere.zig").Sphere;
+    };
     pub const Tree = @import("structures/Tree.zig").Tree;
     pub const TexturedSphere = @import("structures/TexturedSphere.zig");
 
@@ -411,7 +414,7 @@ pub const Editor = struct {
         const zone: tracy.Zone = .begin(.{ .src = @src() });
         defer zone.end();
 
-        const bb = shape.boundingBox;
+        const bb = shape.bounding_box;
         var y = bb[2];
         while (y <= bb[3]) : (y += 1) {
             var dx = bb[0];

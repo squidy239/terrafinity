@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 const dvui = @import("dvui");
 const gl = @import("gl");
@@ -16,10 +17,13 @@ const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
 const BFA = @import("world/BufferFirstAllocator.zig");
 const Chunk = @import("world/Chunk.zig");
-const Geometry = @import("world/structures/Geometry.zig");
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const World = @import("world/World.zig");
-const Io = std.Io;
+
+const geometry = struct {
+    pub const Cone = @import("world/structures/Cone.zig").Cone;
+    pub const Sphere = @import("world/structures/Sphere.zig").Sphere;
+};
 const Game = @This();
 
 allocator: std.mem.Allocator,
@@ -521,12 +525,12 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativeP
 
     const small_f32 = 0.00001;
 
-    self.player.viewDirection_mutex.lockUncancelable(io);
-    defer self.player.viewDirection_mutex.unlock(io);
-    var current_view_dir = self.player.viewDirection;
+    self.player.view_direction_mutex.lockUncancelable(io);
+    defer self.player.view_direction_mutex.unlock(io);
+    var current_view_dir = self.player.view_direction;
     current_view_dir -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
     current_view_dir[0] = std.math.clamp(current_view_dir[0], -90 + small_f32, 90 - small_f32);
-    self.player.viewDirection = current_view_dir;
+    self.player.view_direction = current_view_dir;
 
     self.renderer.updateCameraDirection(current_view_dir);
 }
@@ -535,7 +539,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.lockSharedUncancelable(io);
     const scroll_sensitivity = self.options.scroll_sensitivity;
     self.options_lock.unlockShared(io);
-    switch (self.player.gameMode.load(.seq_cst)) {
+    switch (self.player.game_mode.load(.seq_cst)) {
         .Creative, .Spectator => {
             const fly_speed_linear_old = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
             _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fly_speed_linear_old)), .seq_cst);
@@ -547,7 +551,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
 pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
 
-    switch (self.player.gameMode.load(.unordered)) {
+    switch (self.player.game_mode.load(.unordered)) {
         .Creative, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
         .Survival => try self.walkMove(io, actions, delta_time_seconds),
     }
@@ -584,15 +588,15 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
     if (actions.contains(.use_item_primary)) {
-        const cone: Geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
+        const cone: geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.air, cone, 0);
     }
     if (actions.contains(.use_item_secondary)) {
-        const cone: Geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
+        const cone: geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.stone, cone, 0);
     }
     if (actions.contains(.use_item_tertiary)) {
-        try editor.placeSamplerShape(sphere_block, Geometry.Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
+        try editor.placeSamplerShape(sphere_block, geometry.Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
     }
     try editor.flush(io, self.allocator);
 }
@@ -605,9 +609,9 @@ fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {
     };
 }
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    self.player.viewDirection_mutex.lockUncancelable(io);
-    const camera_front = moveCameraFront(self.player.viewDirection);
-    self.player.viewDirection_mutex.unlock(io);
+    self.player.view_direction_mutex.lockUncancelable(io);
+    const camera_front = moveCameraFront(self.player.view_direction);
+    self.player.view_direction_mutex.unlock(io);
     const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
@@ -626,9 +630,9 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
-    self.player.viewDirection_mutex.lockUncancelable(io);
-    const camera_front = moveCameraFront(self.player.viewDirection);
-    self.player.viewDirection_mutex.unlock(io);
+    self.player.view_direction_mutex.lockUncancelable(io);
+    const camera_front = moveCameraFront(self.player.view_direction);
+    self.player.view_direction_mutex.unlock(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
@@ -639,7 +643,7 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
     const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
 
-    const ground_dist = try self.player.physics.elements.mover.shortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
+    const ground_dist = try self.player.physics.elements.mover.getShortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
     const on_ground = ground_dist <= 0;
     const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.35);
     {
@@ -864,12 +868,12 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
                 continue;
             }
         }
-        
+
         try io.checkCancel();
         //update radiuses more frequently incase they are set way too high
         outer_radius = game.getRenderDistance(io);
         inner_radius = game.getInnerGenRadius(io, outer_radius, level);
-        
+
         const m = move(xz, &c);
         var cc: i32 = 0;
         while (line(&xz, &cc, m)) {
@@ -958,9 +962,9 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
             .elements = .{
                 .mover = .{
                     .collisions = .init(false),
-                    .boundingBox = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
+                    .bounding_box = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
                     .enabled = .init(true),
-                    .zeroVelocity = .init(true),
+                    .zero_velocity = .init(true),
                 },
                 .gravity = .{
                     .enabled = .init(false),
@@ -971,8 +975,8 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
             .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },
-        .gameMode = .init(.Spectator),
-        .viewDirection = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
+        .game_mode = .init(.Spectator),
+        .view_direction = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
     }, true);
     player_entity.release();
@@ -983,9 +987,9 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         &game.player.inventory_buffer,
     );
     _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
-    game.player.viewDirection_mutex.lockUncancelable(io);
-    const view_direction = game.player.viewDirection;
-    game.player.viewDirection_mutex.unlock(io);
+    game.player.view_direction_mutex.lockUncancelable(io);
+    const view_direction = game.player.view_direction;
+    game.player.view_direction_mutex.unlock(io);
     game.renderer.updateCameraDirection(view_direction);
 }
 

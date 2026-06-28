@@ -3,7 +3,7 @@ const std = @import("std");
 const zm = @import("zm");
 
 pub const Frustum = struct {
-    frus: [6]@Vector(4, f32),
+    planes: [6]@Vector(4, f32),
 
     pub const Box = struct {
         min: @Vector(3, f32),
@@ -45,14 +45,14 @@ pub const Frustum = struct {
             planes[i] /= @splat(len);
         }
 
-        return Frustum{ .frus = planes };
+        return Frustum{ .planes = planes };
     }
 
     pub fn boxInFrustum(self: *const @This(), box: Box) bool {
         // Check box against each of the 6 frustum planes
         inline for (0..6) |i| {
             var out: u32 = 0;
-            const plane = self.frus[i];
+            const plane = self.planes[i];
 
             // Test all 8 corners of the box against this plane
             // Corner 1: min.x, min.y, min.z
@@ -80,7 +80,7 @@ pub const Frustum = struct {
     }
 
     pub fn sphereInFrustum(self: *const @This(), center: @Vector(3, f32), radius: f32) bool {
-        for (self.frus) |plane| {
+        for (self.planes) |plane| {
             const dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
             if (dist < -radius) return false;
         }

@@ -6,23 +6,24 @@ const tracy = @import("tracy");
 const zm = @import("zm");
 
 const Block = @import("../world/Block.zig").Block;
+const Sphere = @import("../world/structures/Sphere.zig").Sphere;
+const World = @import("../world/World.zig");
 const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
-const World = @import("../world/World.zig");
 
 const pack = "default";
 
-const EntityMeshBufferIDs = struct {
+const EntityMeshBufferIds = struct {
     vbo: c_uint,
     vao: c_uint,
     ebo: c_uint,
 };
 
-var entity_meshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIDs = @splat(null);
+var entity_meshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIds = @splat(null);
 var entity_meshes_len: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
 
-pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
+pub fn loadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
     var cwd = std.Io.Dir.cwd();
     var packs = try cwd.createDirPathOpen(io, "packs", .{});
     defer packs.close();
@@ -33,28 +34,28 @@ pub fn LoadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
     for (&entity_meshes, 0..) |*mesh, i| {
         const entity: Entity.Type = @enumFromInt(i);
         std.log.debug("reading: {s}\n", .{@tagName(entity)});
-        const fileContents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
+        const file_contents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
             std.log.err("failed to read: {s}\n", .{@tagName(entity)});
             continue;
         };
-        defer allocator.free(fileContents);
-        var parsedObj = try obj.parseObj(allocator, fileContents);
-        defer parsedObj.deinit(allocator);
-        mesh.* = try glLoadEntity(parsedObj, &entity_meshes_len[i], allocator);
+        defer allocator.free(file_contents);
+        var parsed_obj = try obj.parseObj(allocator, file_contents);
+        defer parsed_obj.deinit(allocator);
+        mesh.* = try glLoadEntity(parsed_obj, &entity_meshes_len[i], allocator);
     }
 }
 
-pub fn glLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIDs {
+pub fn glLoadEntity(entity: obj.ObjData, entity_mesh_len: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIds {
     if (entity.meshes.len == 0) return null;
-    var bufferids: EntityMeshBufferIDs = undefined;
-    gl.GenBuffers(1, @ptrCast(&bufferids.vbo));
-    gl.BindBuffer(gl.ARRAY_BUFFER, bufferids.vbo);
+    var buffer_ids: EntityMeshBufferIds = undefined;
+    gl.GenBuffers(1, @ptrCast(&buffer_ids.vbo));
+    gl.BindBuffer(gl.ARRAY_BUFFER, buffer_ids.vbo);
     gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(f32) * entity.vertices.len), @ptrCast(entity.vertices), gl.STATIC_DRAW);
-    gl.GenVertexArrays(1, @ptrCast(&bufferids.vao));
-    gl.BindVertexArray(bufferids.vao);
+    gl.GenVertexArrays(1, @ptrCast(&buffer_ids.vao));
+    gl.BindVertexArray(buffer_ids.vao);
     gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-    gl.GenBuffers(1, @ptrCast(&bufferids.ebo));
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufferids.ebo);
+    gl.GenBuffers(1, @ptrCast(&buffer_ids.ebo));
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer_ids.ebo);
     gl.EnableVertexAttribArray(0);
     var indices = try allocator.alloc(u32, 4_000_000);
     defer allocator.free(indices);
@@ -65,9 +66,9 @@ pub fn glLoadEntity(entity: obj.ObjData, EntityMeshLen: *c_int, allocator: std.m
             pos += 1;
         }
     }
-    EntityMeshLen.* = @intCast(pos);
+    entity_mesh_len.* = @intCast(pos);
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(@sizeOf(u32) * pos), @ptrCast(indices[0..pos]), gl.STATIC_DRAW);
-    return bufferids;
+    return buffer_ids;
 }
 
 pub fn freeMeshes() void {
@@ -83,7 +84,7 @@ pub fn freeMeshes() void {
 pub const Player = struct {
     pub const Type = Entity.Type.Player;
     player_name: Name,
-    gameMode: std.atomic.Value(GameMode),
+    game_mode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32) = .init(100),
     walk_speed: std.atomic.Value(f32) = .init(8),
     jump_strength: std.atomic.Value(f32) = .init(8),
@@ -92,8 +93,8 @@ pub const Player = struct {
     /// Main inventory and hotbar.
     main_inventory: Item.Inventory,
     /// Pitch, yaw, roll, in degrees.
-    viewDirection: @Vector(3, f32),
-    viewDirection_mutex: std.Io.Mutex = .init,
+    view_direction: @Vector(3, f32),
+    view_direction_mutex: std.Io.Mutex = .init,
 
     physics: Physics.Interface(struct {
         gravity: Physics.Gravity,
@@ -145,26 +146,26 @@ pub const Player = struct {
     }
 
     pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
-        self.gameMode.store(gameMode, .monotonic);
+        self.game_mode.store(gameMode, .monotonic);
 
         switch (gameMode) {
             .Spectator => {
                 self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zeroVelocity.store(true, .monotonic);
+                self.physics.elements.mover.zero_velocity.store(true, .monotonic);
                 self.physics.elements.mover.collisions.store(false, .monotonic);
                 self.physics.elements.gravity.enabled.store(false, .monotonic);
                 self.physics.elements.resistance.enabled.store(false, .monotonic);
             },
             .Survival => {
                 self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zeroVelocity.store(false, .monotonic);
+                self.physics.elements.mover.zero_velocity.store(false, .monotonic);
                 self.physics.elements.mover.collisions.store(true, .monotonic);
                 self.physics.elements.gravity.enabled.store(true, .monotonic);
                 self.physics.elements.resistance.enabled.store(true, .monotonic);
             },
             .Creative => {
                 self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zeroVelocity.store(false, .monotonic);
+                self.physics.elements.mover.zero_velocity.store(false, .monotonic);
                 self.physics.elements.mover.collisions.store(true, .monotonic);
                 self.physics.elements.gravity.enabled.store(false, .monotonic);
                 self.physics.elements.resistance.enabled.store(true, .monotonic);
@@ -236,7 +237,7 @@ pub const Explosive = struct {
                 .world = world,
                 .temp_allocator = allocator,
             };
-            const sphere = World.Editor.Geometry.Sphere(f32).init(@floatCast(pos), 8);
+            const sphere = Sphere(f32).init(@floatCast(pos), 8);
             try worldEditor.placeSamplerShape(.grass, sphere, World.standard_level);
             worldEditor.flush(io, allocator) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,

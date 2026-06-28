@@ -4,41 +4,41 @@
 layout(location = 0) in uvec2 data;
 
 uniform mat4 projview;
-uniform mat4 sunrot;
-uniform double time;
+uniform vec3 sun_dir;
+uniform float time;
 
 out vec3 coordss;
-flat out uint blockArrayLayer;
+flat out uint block_array_layer;
 flat out uint side;
 out vec3 fragpos;
-flat out vec3 sunpos;
-flat out uint blocktype;
+flat out vec3 sun_dir_norm;
+flat out uint block_type;
 flat out float scale;
-flat out vec2 faceSize;
+flat out vec2 face_size;
 
-struct Chunk {
+struct ChunkData {
     vec3 absolute_position;
     vec3 relative_position;
     float scale;
 };
 
-layout(std430, binding = 0) buffer ChunkData {
-    Chunk chunks[];
+layout(std430, binding = 0) buffer chunks_buffer {
+    ChunkData chunks[];
 };
 
 const uint CHUNK_SIZE = 32u;
 const uint COORD_BITS = 5u;
 const uint COORD_MASK = CHUNK_SIZE - 1u;
 
-uint64_t GetPackedData() {
+uint64_t getPackedData() {
     return packUint2x32(data);
 }
 
-uint DecodeBlockType(uint64_t val) {
+uint decodeBlockType(uint64_t val) {
     return uint(val & 0xFFFFu);
 }
 
-uvec3 DecodeLengths(uint64_t val) {
+uvec3 decodeLengths(uint64_t val) {
     return uvec3(
         uint(val >> 26u) & COORD_MASK,
         uint(val >> 21u) & COORD_MASK,
@@ -46,7 +46,7 @@ uvec3 DecodeLengths(uint64_t val) {
     );
 }
 
-uvec3 DecodePosition(uint64_t val) {
+uvec3 decodePosition(uint64_t val) {
     return uvec3(
         uint(val >> 41u) & COORD_MASK,
         uint(val >> 36u) & COORD_MASK,
@@ -54,7 +54,7 @@ uvec3 DecodePosition(uint64_t val) {
     );
 }
 
-uint DecodeSide(uint64_t val) {
+uint decodeSide(uint64_t val) {
     return uint(val >> 46u) & 0x7u;
 }
 
@@ -79,21 +79,21 @@ void main() {
     vec3 absolute_position = chunks[gl_DrawID].absolute_position;
     scale = chunks[gl_DrawID].scale;
 
-    uint64_t val = GetPackedData();
-    uvec3 pos     = DecodePosition(val);
-    uvec3 lengths = DecodeLengths(val);
-    blocktype     = DecodeBlockType(val);
-    side          = DecodeSide(val);
-    blockArrayLayer = blocktype;
+    uint64_t val = getPackedData();
+    uvec3 pos     = decodePosition(val);
+    uvec3 lengths = decodeLengths(val);
+    block_type     = decodeBlockType(val);
+    side          = decodeSide(val);
+    block_array_layer = block_type;
 
     vec3 coords = CUBE_FACES[side][gl_VertexID];
     coords = coords + (ceil(coords) * lengths);
     coords *= scale;
     fragpos = (vec3(pos) * scale) + coords + absolute_position;
-    sunpos  = (sunrot * vec4(0.0, 1000000.0, 0.0, 1.0)).xyz;
+    sun_dir_norm  = normalize(sun_dir);
 
     // Waves
-    if (blocktype == 3u) {
+    if (block_type == 3u) {
         float speed = 2000.0;
         float t     = 1.0 + float(mod(time, 100000000.0)) / 10000000.0;
         vec3  vp    = coords + vec3(pos) * scale + absolute_position;

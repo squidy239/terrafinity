@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     while (running.load(.unordered)) {
         wio.update();
         try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
-        if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
+        if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
         frame_time = .now(io, .awake);
         if (ui.menu_state.ingame) {
             try game.frame(io, gpa);
@@ -164,7 +164,7 @@ pub fn main(init: std.process.Init) !void {
                 defer ov.deinit();
 
                 if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
-                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crosshair();
+                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
                 if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
                 if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
                     var error_buffer: [65536]u8 = undefined;
@@ -263,7 +263,7 @@ fn handleEvents(
     dt: std.Io.Duration,
 ) !void {
     ui_backend.textInputRect(ui_window.textInputRequested());
-    if (ui.menu_state.playingGame()) {
+    if (ui.menu_state.is_playing_game()) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();

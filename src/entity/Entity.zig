@@ -14,17 +14,17 @@ ref_count: std.atomic.Value(u32),
 vtable: Interface,
 
 pub const Interface = struct {
-    ///updates the entity, returns true if the entity was unloaded
+    /// Updates the entity, returns true if the entity was unloaded.
     update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool = null,
-    ///unloads the entity and frees all resorces allocated by it
-    ///the entity ptr is not valid after this
+    /// Unloads the entity and frees all resources allocated by it.
+    /// The entity ptr is not valid after this.
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
     getPos: ?*const fn (self: *anyopaque, io: std.Io) @Vector(3, f64) = null,
     draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };
 
-///this function removes a ref from entity when it returns
-///the entity may be unloaded by this function
+/// Removes a ref from entity when it returns.
+/// The entity may be unloaded by this function.
 pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World, uuid: u128) !void {
     if (self.vtable.update) |updateFn| {
         errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
@@ -38,6 +38,7 @@ pub fn draw(self: *@This(), playerPos: @Vector(3, f64), uuid: u128, world: *Worl
         return try drawFn(self.ptr, world, uuid, world.allocator, playerPos, r);
     }
 }
+
 pub fn getPos(self: *@This()) ?@Vector(3, f64) {
     if (self.vtable.getPos) |getPosFn| {
         return getPosFn(self.ptr);
@@ -45,8 +46,8 @@ pub fn getPos(self: *@This()) ?@Vector(3, f64) {
     return null;
 }
 
-///unloads the entity and frees all resorces allocated by it
-///the entity ptr is not valid after this
+/// Unloads the entity and frees all resources allocated by it.
+/// The entity ptr is not valid after this.
 pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, comptime save: bool) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
@@ -54,7 +55,7 @@ pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: 
     return self.vtable.unload(self, io, world, uuid, allocator, save);
 }
 
-//TODO better timeout with Io
+// TODO: better timeout with Io
 pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
     if (self.ref_count.load(.seq_cst) == amount) return true;
     const st = std.Io.Timestamp.now(io, .awake);

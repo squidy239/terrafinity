@@ -1,26 +1,25 @@
 #version 410 core
-out vec4 FragColor;
+out vec4 frag_color;
 
 in vec3 pos;
-in vec3 WorldPosRelative;
+in vec3 world_pos_relative;
 
 float bouncingMod(float x, float n) {
-    // Make x positive
     x = abs(x);
-
-    // Calculate the cycle number and remainder
     float cycle = floor(x / n);
     float remainder = mod(x, n);
-
-    // Reflect if the cycle is odd
     if (mod(cycle, 2.0) == 0.0) {
-        return remainder; // Normal case
+        return remainder;
     } else {
-        return n - remainder; // Reflection case
+        return n - remainder;
     }
 }
 
 void main()
 {
-    FragColor = vec4(((bouncingMod(pos[2] * 16 + bouncingMod(WorldPosRelative[2], 5), 1))), (bouncingMod(-pos[2] * 64 + bouncingMod(WorldPosRelative[1], 5), 1)), (bouncingMod(pos[2] * 64 + bouncingMod(WorldPosRelative[0], 5), 1)), 1.0); // set the output variable to a dark-red color
+    // Procedural pattern for entity visualization
+    float p = bouncingMod(pos.z * 16.0 + bouncingMod(world_pos_relative.z, 5.0), 1.0);
+    float q = bouncingMod(-pos.z * 64.0 + bouncingMod(world_pos_relative.y, 5.0), 1.0);
+    float r = bouncingMod(pos.z * 64.0 + bouncingMod(world_pos_relative.x, 5.0), 1.0);
+    frag_color = vec4(p, q, r, 1.0);
 }

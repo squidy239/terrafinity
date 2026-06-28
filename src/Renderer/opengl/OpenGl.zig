@@ -1,12 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
 
+const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const setCallback = @import("../../main.zig").setCallback;
 const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
@@ -38,7 +38,10 @@ entityshaderprogram: c_uint,
 shaderprogram: c_uint,
 block_atlas_texture_id: c_uint,
 vao: c_uint,
-uniforms: UniformLocations,
+uniforms: struct {
+        chunks: ChunkUniformLocations,
+        entity: EntityUniformLocations,
+    },
 camera_front: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(RenderBufferKey),
 interface: Renderer,
@@ -136,7 +139,10 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
 
     self.window.glMakeContextCurrent(self.draw_context);
     try self.compileShaders();
-    self.uniforms = UniformLocations.GetLocations(self.shaderprogram, self.entityshaderprogram);
+    self.uniforms = .{
+        .chunks = ChunkUniformLocations.getLocations(self.shaderprogram),
+        .entity = EntityUniformLocations.getLocations(self.entityshaderprogram),
+    };
     gl.GenVertexArrays(1, @ptrCast(&self.vao));
     gl.BindVertexArray(self.vao);
     try self.loadFacebuffer();
@@ -237,7 +243,9 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,
         };
-    } else self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
+    } else {
+        self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
+    }
 
     if (transparent_mesh.len > 0) {
         for (transparent_mesh) |*face| {
@@ -247,7 +255,9 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OutOfVideoMemory,
         };
-    } else self.render_buffer.remove(io, .{ .transparent = chunk_pos });
+    } else {
+        self.render_buffer.remove(io, .{ .transparent = chunk_pos });
+    }
 }
 
 pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
@@ -403,12 +413,14 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
 
     gl.GenBuffers(1, @ptrCast(&self.facebuffer));
-    gl.BindBuffer(gl.ARRAY_BUFFER, self.facebuffer);
+    gl.BindBuffer(gl.
+        ARRAY_BUFFER, self.facebuffer);
 
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
 }
 
 fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: @Vector(4, f32), viewport_pixels: @Vector(2, u32)) error{DrawFailed}!void {
+    _ = skyColor;
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
     self.render_options_lock.lockSharedUncancelable(io);
@@ -422,34 +434,36 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     gl.UseProgram(self.shaderprogram);
     gl.BindTexture(gl.TEXTURE_2D_ARRAY, self.block_atlas_texture_id);
     gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, self.indices);
+
+    // Sun direction (directional light, not position)
     const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
-    const sunrot = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
+    const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
+    const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
     const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = self.camera_front }, .{ .data = @This().cameraUp });
     const aspect = @as(f32, @floatFromInt(viewport_pixels[0])) / @as(f32, @floatFromInt(viewport_pixels[1]));
-    const reverse_z_matrix = makeInfReversedZProjRH(fov, aspect, 0.01).transpose();
+    const reverse_z_matrix = makeInfReversedZProjRh(fov, aspect, 0.01).transpose();
     const projection = reverse_z_matrix;
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
-    gl.Uniform4f(self.uniforms.skyColor, skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-    gl.Uniform1f(self.uniforms.fogDensity, 0);
-    gl.UniformMatrix4fv(self.uniforms.sunlocation, 1, gl.TRUE, @ptrCast(&(sunrot)));
-    gl.UniformMatrix4fv(self.uniforms.projviewlocation, 1, gl.TRUE, @ptrCast(&(projview)));
-    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
-    gl.Uniform1d(self.uniforms.timelocation, @floatFromInt(millitimestamp));
-    gl.Uniform3d(self.uniforms.playerposlocation, playerPos[0], playerPos[1], playerPos[2]);
-    gl.Uniform1i(self.uniforms.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
-    const frustrum = Frustum.extractFrustumPlanes(projview);
 
-    try drawChunksReal(self, io, playerPos, frustrum, false);
-    try drawChunksReal(self, io, playerPos, frustrum, true);
+    gl.UniformMatrix4fv(self.uniforms.chunks.projview, 1, gl.TRUE, @ptrCast(&(projview)));
+    gl.Uniform3f(self.uniforms.chunks.sun_dir, sun_dir[0], sun_dir[1], sun_dir[2]);
+    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    gl.Uniform1f(self.uniforms.chunks.time, @floatFromInt(millitimestamp));
+    gl.Uniform1i(self.uniforms.chunks.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
+
+    const frustum = Frustum.extractFrustumPlanes(projview);
+
+    try drawChunksReal(self, io, playerPos, frustum, false);
+    try drawChunksReal(self, io, playerPos, frustum, true);
 }
 
-fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustrum: Frustum, is_transparent: bool) !void {
+fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustum: Frustum, is_transparent: bool) !void {
     const opaque_draw_info = self.render_buffer.rebuild(
         io,
         @sizeOf(Mesher.Face),
         cullChunkPredicate,
-        .{ .frustrum = frustrum, .playerPos = playerPos, .is_transparent = is_transparent },
+        .{ .frustum = frustum, .playerPos = playerPos, .is_transparent = is_transparent },
         ChunkDrawData,
         getChunkData,
         .{ .playerpos = playerPos },
@@ -475,7 +489,7 @@ fn drawChunksReal(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), frustr
     gl.MultiDrawElementsIndirect(gl.TRIANGLES, gl.UNSIGNED_INT, 0, @intCast(opaque_draw_info.drawn), 0);
     const ff = tracy.Zone.begin(.{ .src = @src() });
     defer ff.end();
-    gl.Finish(); //TODO better syncronization
+    gl.Finish(); // TODO better synchronization
 }
 
 fn getChunkData(userdata: anytype, key: RenderBufferKey) ChunkDrawData {
@@ -495,17 +509,17 @@ fn getChunkData(userdata: anytype, key: RenderBufferKey) ChunkDrawData {
 fn cullChunkPredicate(userdata: anytype, chunkpos: RenderBufferKey) bool {
     const is_transparent = chunkpos == .transparent;
     if (userdata.is_transparent != is_transparent) return true;
-    return cullChunk(&userdata.frustrum, chunkpos.toPos(), userdata.playerPos);
+    return cullChunk(&userdata.frustum, chunkpos.toPos(), userdata.playerPos);
 }
 
-fn cullChunk(frustrum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
+fn cullChunk(fr: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
     const chunkSizeVec: @Vector(3, f32) = @splat(ChunkSize * scale);
     const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
-    return !frustrum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+    return !fr.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
-fn makeInfReversedZProjRH(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
+fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
     const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
     return .{
         .data = .{
@@ -551,32 +565,32 @@ const ChunkDrawData = extern struct {
     scale: f32,
 };
 
-const UniformLocations = struct {
-    projviewlocation: c_int,
-    entityprojviewlocation: c_int,
-    relativechunkposlocation: c_int,
-    relativeEntityposlocation: c_int,
-    EntityRotationlocation: c_int,
-    sunlocation: c_int,
-    playerposlocation: c_int,
-    fogDensity: c_int,
-    skyColor: c_int,
-    timelocation: c_int,
+const ChunkUniformLocations = struct {
+    projview: c_int,
+    sun_dir: c_int,
+    time: c_int,
     draw_over: c_int,
 
-    pub fn GetLocations(shaderprogram: c_uint, entityshaderprogram: c_uint) @This() {
+    pub fn getLocations(shaderprogram: c_uint) @This() {
         return @This(){
-            .projviewlocation = gl.GetUniformLocation(shaderprogram, "projview"),
-            .entityprojviewlocation = gl.GetUniformLocation(entityshaderprogram, "ProjView"),
-            .relativechunkposlocation = gl.GetUniformLocation(shaderprogram, "relativechunkpos"),
-            .relativeEntityposlocation = gl.GetUniformLocation(entityshaderprogram, "RelativePos"),
-            .EntityRotationlocation = gl.GetUniformLocation(entityshaderprogram, "Rotation"),
-            .playerposlocation = gl.GetUniformLocation(shaderprogram, "playerPos"),
-            .sunlocation = gl.GetUniformLocation(shaderprogram, "sunrot"),
-            .skyColor = gl.GetUniformLocation(shaderprogram, "skyColor"),
-            .fogDensity = gl.GetUniformLocation(shaderprogram, "fogDensity"),
-            .timelocation = gl.GetUniformLocation(shaderprogram, "time"),
+            .projview = gl.GetUniformLocation(shaderprogram, "projview"),
+            .sun_dir = gl.GetUniformLocation(shaderprogram, "sun_dir"),
+            .time = gl.GetUniformLocation(shaderprogram, "time"),
             .draw_over = gl.GetUniformLocation(shaderprogram, "draw_over"),
+        };
+    }
+};
+
+const EntityUniformLocations = struct {
+    proj_view: c_int,
+    relative_pos: c_int,
+    rotation: c_int,
+
+    pub fn getLocations(entityshaderprogram: c_uint) @This() {
+        return @This(){
+            .proj_view = gl.GetUniformLocation(entityshaderprogram, "proj_view"),
+            .relative_pos = gl.GetUniformLocation(entityshaderprogram, "relative_pos"),
+            .rotation = gl.GetUniformLocation(entityshaderprogram, "rotation"),
         };
     }
 };
