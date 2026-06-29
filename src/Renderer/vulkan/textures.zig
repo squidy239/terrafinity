@@ -7,10 +7,18 @@ const VulkanRenderer = @import("Vulkan.zig");
 
 pub const TextureArrayManager = struct {
     renderer: *VulkanRenderer,
+    texture_image: vk.Image,
+    texture_memory: vk.DeviceMemory,
+    texture_view: vk.ImageView,
+    sampler: vk.Sampler,
 
     pub fn init(renderer: *VulkanRenderer) TextureArrayManager {
         return TextureArrayManager{
             .renderer = renderer,
+            .texture_image = .null_handle,
+            .texture_memory = .null_handle,
+            .texture_view = .null_handle,
+            .sampler = .null_handle,
         };
     }
 
@@ -50,15 +58,21 @@ pub const TextureArrayManager = struct {
 
         // Second pass: load all textures into an array
         var texture_images = try allocator.alloc(zigimg.Image, texture_count);
-        errdefer for (texture_images) |*img| img.deinit(allocator);
 
         dir_it = std.Io.Dir.iterate(textures_path);
         var texture_idx: usize = 0;
 
+        errdefer {
+            for (texture_images[0..texture_idx]) |*img| img.deinit(allocator);
+            allocator.free(texture_images);
+        }
+
         while (try dir_it.next(io)) |entry| {
             if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
-                const loaded_img = try zigimg.Image.fromFile(allocator, io, try textures_path.openFile(io, entry.name, .{}), &read_buffer);
-                errdefer loaded_img.deinit(allocator);
+                const texture_file = try textures_path.openFile(io, entry.name, .{});
+                defer texture_file.close(io);
+
+                const loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
 
                 try loaded_img.convert(allocator, .rgba32);
                 if (loaded_img.width != res[0] or loaded_img.height != res[1]) {
@@ -157,12 +171,15 @@ pub const TextureArrayManager = struct {
         const memory = try self.renderer.dev.allocateMemory(self.renderer.dev_handle, &alloc_info, null);
         try self.renderer.dev.bindImageMemory(self.renderer.dev_handle, texture_image, memory, 0);
 
+        // Begin single command buffer for all layout transitions and copies
+        const cmd = try self.renderer.beginSingleTimeCommands();
+
         // Transition layout and copy data for each layer
         for (0..image_count) |layer_idx| {
             const layer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size;
 
             // Transition to transfer_dst_optimal for this layer
-            try self.transitionImageLayoutForLayer(texture_image, .undefined, .transfer_dst_optimal, @intCast(layer_idx));
+            try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, @intCast(layer_idx), 1);
 
             // Copy data for this layer
             const region = vk.BufferImageCopy{
@@ -179,18 +196,18 @@ pub const TextureArrayManager = struct {
                 .image_extent = .{ .width = @intCast(width), .height = @intCast(height), .depth = 1 },
             };
 
-            const cmd = try self.renderer.beginSingleTimeCommands();
-            defer self.renderer.endSingleTimeCommands(cmd) catch {};
-
             self.renderer.dev.cmdCopyBufferToImage(cmd, staging_buffer, texture_image, .transfer_dst_optimal, 1, @ptrCast(&region));
         }
 
-        // Transition to shader_read_only_optimal and generate mipmaps for all layers
-        try self.transitionImageLayoutForLayer(texture_image, .transfer_dst_optimal, .shader_read_only_optimal, 0);
+        // Transition to shader_read_only_optimal for all layers
+        try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .shader_read_only_optimal, 0, num_mip_levels, 0, @intCast(image_count));
+
+        // End single time commands (submits and waits)
+        try self.renderer.endSingleTimeCommands(cmd);
 
         // Generate mipmaps if the image has more than 1 mip level
         if (num_mip_levels > 1) {
-            try self.generateMipmaps(texture_image, @intCast(width), @intCast(height));
+            try self.generateMipmaps(texture_image, @intCast(width), @intCast(height), @intCast(image_count));
         }
 
         // Create image view for texture array
@@ -253,19 +270,26 @@ pub const TextureArrayManager = struct {
 
         self.renderer.dev.updateDescriptorSets(self.renderer.dev_handle, 1, @ptrCast(&descriptor_write), 0, undefined);
 
+        // Store Vulkan resources for cleanup
+        self.texture_image = texture_image;
+        self.texture_memory = memory;
+        self.texture_view = texture_view;
+        self.sampler = sampler;
+
         std.log.info("Created Vulkan texture array with {d} layers, {d} mip levels\n", .{ image_count, num_mip_levels });
     }
 
-    fn transitionImageLayoutForLayer(
+    fn transitionImageLayout(
         self: *TextureArrayManager,
+        cmd: vk.CommandBuffer,
         image: vk.Image,
         old_layout: vk.ImageLayout,
         new_layout: vk.ImageLayout,
-        layer_idx: u32,
+        base_mip_level: u32,
+        mip_level_count: u32,
+        base_array_layer: u32,
+        array_layer_count: u32,
     ) !void {
-        const cmd = try self.renderer.beginSingleTimeCommands();
-        defer self.renderer.endSingleTimeCommands(cmd) catch {};
-
         var barrier = vk.ImageMemoryBarrier{
             .flags = .{},
             .old_layout = old_layout,
@@ -275,10 +299,10 @@ pub const TextureArrayManager = struct {
             .image = image,
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = layer_idx,
-                .layer_count = 1,
+                .base_mip_level = base_mip_level,
+                .level_count = mip_level_count,
+                .base_array_layer = base_array_layer,
+                .layer_count = array_layer_count,
             },
             .src_access_mask = .{},
             .dst_access_mask = .{},
@@ -297,6 +321,21 @@ pub const TextureArrayManager = struct {
             barrier.dst_access_mask = .{ .shader_read_bit = true };
             source_stage = .{ .transfer_bit = true };
             dest_stage = .{ .fragment_shader_bit = true };
+        } else if (old_layout == .shader_read_only_optimal and new_layout == .transfer_src_optimal) {
+            barrier.src_access_mask = .{ .shader_read_bit = true };
+            barrier.dst_access_mask = .{ .transfer_read_bit = true };
+            source_stage = .{ .fragment_shader_bit = true };
+            dest_stage = .{ .transfer_bit = true };
+        } else if (old_layout == .transfer_src_optimal and new_layout == .shader_read_only_optimal) {
+            barrier.src_access_mask = .{ .transfer_read_bit = true };
+            barrier.dst_access_mask = .{ .shader_read_bit = true };
+            source_stage = .{ .transfer_bit = true };
+            dest_stage = .{ .fragment_shader_bit = true };
+        } else if (old_layout == .undefined and new_layout == .transfer_src_optimal) {
+            barrier.src_access_mask = .{};
+            barrier.dst_access_mask = .{ .transfer_read_bit = true };
+            source_stage = .{ .top_of_pipe_bit = true };
+            dest_stage = .{ .transfer_bit = true };
         } else {
             @panic("Unsupported layout transition");
         }
@@ -304,64 +343,100 @@ pub const TextureArrayManager = struct {
         self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, 0, undefined, 0, undefined, 1, @ptrCast(&barrier));
     }
 
-    fn generateMipmaps(self: *TextureArrayManager, image: vk.Image, width: u32, height: u32) !void {
-        _ = width; // autofix
-        _ = height; // autofix
+    fn generateMipmaps(self: *TextureArrayManager, image: vk.Image, width: u32, height: u32, image_count: u32) !void {
         const cmd = try self.renderer.beginSingleTimeCommands();
-        defer self.renderer.endSingleTimeCommands(cmd) catch {};
 
-        // VK_REMAINING_MIP_LEVELS and VK_REMAINING_ARRAY_LAYERS are ~0u in Vulkan
-        const remaining_mip_levels: u32 = ~@as(u32, 0);
-        const remaining_array_layers: u32 = ~@as(u32, 0);
+        // Calculate num_mip_levels
+        const max_dim: u32 = @max(width, height);
+        const num_mip_levels: u32 = std.math.max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim)))))) + 1;
 
-        var barrier = vk.ImageMemoryBarrier{
-            .flags = .{},
-            .old_layout = .shader_read_only_optimal,
-            .new_layout = .transfer_dst_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = remaining_mip_levels,
-                .base_array_layer = 0,
-                .layer_count = remaining_array_layers,
-            },
-            .src_access_mask = .{ .shader_read_bit = true },
-            .dst_access_mask = .{ .transfer_write_bit = true },
-        };
+        var src_layout: vk.ImageLayout = .shader_read_only_optimal;
+        var dst_layout: vk.ImageLayout = .transfer_dst_optimal;
 
-        self.renderer.dev.cmdPipelineBarrier(
-            cmd,
-            .{ .fragment_shader_bit = true },
-            .{ .transfer_bit = true },
-            .{},
-            1, @ptrCast(&barrier),
-            0, undefined,
-            0, undefined,
-        );
+        // For each mip level from 1 to num_mip_levels-1
+        var mip_level: u32 = 1;
+        while (mip_level < num_mip_levels) : (mip_level += 1) {
+            const prev_mip_level = mip_level - 1;
 
-        // Transition back to shader_read_only_optimal
-        barrier.old_layout = .transfer_dst_optimal;
-        barrier.new_layout = .shader_read_only_optimal;
-        barrier.src_access_mask = .{ .transfer_write_bit = true };
-        barrier.dst_access_mask = .{ .shader_read_bit = true };
+            // Calculate dimensions for previous and current mip levels
+            const prev_width = @max(1, width >> prev_mip_level);
+            const prev_height = @max(1, height >> prev_mip_level);
+            const curr_width = @max(1, width >> mip_level);
+            const curr_height = @max(1, height >> mip_level);
 
-        self.renderer.dev.cmdPipelineBarrier(
-            cmd,
-            .{ .transfer_bit = true },
-            .{ .fragment_shader_bit = true },
-            .{},
-            1, @ptrCast(&barrier),
-            0, undefined,
-            0, undefined,
-        );
+            // Transition previous mip level to transfer_src_optimal
+            try self.transitionImageLayout(cmd, image, src_layout, .transfer_src_optimal, prev_mip_level, 1, 0, image_count);
+
+            // Transition current mip level to transfer_dst_optimal
+            try self.transitionImageLayout(cmd, image, dst_layout, .transfer_dst_optimal, mip_level, 1, 0, image_count);
+
+            // Create blit region
+            const blit_region = vk.ImageBlit{
+                .src_subresource = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .mip_level = prev_mip_level,
+                    .base_array_layer = 0,
+                    .layer_count = image_count,
+                },
+                .src_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @as(i32, @intCast(prev_width)), .y = @as(i32, @intCast(prev_height)), .z = 1 },
+                },
+                .dst_subresource = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .mip_level = mip_level,
+                    .base_array_layer = 0,
+                    .layer_count = image_count,
+                },
+                .dst_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @as(i32, @intCast(curr_width)), .y = @as(i32, @intCast(curr_height)), .z = 1 },
+                },
+            };
+
+            // Blit from previous mip level to current mip level
+            self.renderer.dev.cmdBlitImage(
+                cmd,
+                image,
+                .transfer_src_optimal,
+                image,
+                .transfer_dst_optimal,
+                1,
+                @ptrCast(&blit_region),
+                .linear,
+            );
+
+            // Transition previous mip level back to shader_read_only_optimal
+            try self.transitionImageLayout(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, prev_mip_level, 1, 0, image_count);
+
+            // Update layouts for next iteration
+            src_layout = .shader_read_only_optimal;
+            dst_layout = .transfer_dst_optimal;
+        }
+
+        // Transition the last mip level to shader_read_only_optimal
+        try self.transitionImageLayout(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
+
+        try self.renderer.endSingleTimeCommands(cmd);
     }
 
     pub fn destroyTextureArray(self: *TextureArrayManager) void {
-        _ = self; // autofix
-        // Texture array is managed by the renderer's descriptor set cleanup
+        if (self.sampler != .null_handle) {
+            self.renderer.dev.destroySampler(self.renderer.dev_handle, self.sampler, null);
+            self.sampler = .null_handle;
+        }
+        if (self.texture_view != .null_handle) {
+            self.renderer.dev.destroyImageView(self.renderer.dev_handle, self.texture_view, null);
+            self.texture_view = .null_handle;
+        }
+        if (self.texture_image != .null_handle) {
+            self.renderer.dev.destroyImage(self.renderer.dev_handle, self.texture_image, null);
+            self.texture_image = .null_handle;
+        }
+        if (self.texture_memory != .null_handle) {
+            self.renderer.dev.freeMemory(self.renderer.dev_handle, self.texture_memory, null);
+            self.texture_memory = .null_handle;
+        }
     }
 };
 

@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const fragment_shader_spv_data = @import("fragment_shader").data;
 const tracy = @import("tracy");
-const vertex_shader_spv_data = @import("vertex_shader").data;
 const vk = @import("vulkan");
 const BaseWrapper = vk.BaseWrapper;
 const InstanceWrapper = vk.InstanceWrapper;
@@ -85,18 +83,27 @@ queue_family_index: u32,
 present_queue_family_index: u32,
 
 command_pool: vk.CommandPool,
-cmd_buffer: vk.CommandBuffer,
+cmd_buffers: []vk.CommandBuffer = &.{},
 
 swapchain: vk.SwapchainKHR = .null_handle,
+swapchain_format: vk.Format = .b8g8r8a8_srgb,
 swapchain_images: []vk.Image = &.{},
 swapchain_views: []vk.ImageView = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 
 // Render target images for dynamic rendering (color + depth)
 render_color_image: vk.Image = .null_handle,
+render_color_memory: vk.DeviceMemory = .null_handle,
 render_color_view: vk.ImageView = .null_handle,
 render_depth_image: vk.Image = .null_handle,
+render_depth_memory: vk.DeviceMemory = .null_handle,
 render_depth_view: vk.ImageView = .null_handle,
+
+// Dummy texture resources
+dummy_image: vk.Image = .null_handle,
+dummy_memory: vk.DeviceMemory = .null_handle,
+dummy_view: vk.ImageView = .null_handle,
+dummy_sampler: vk.Sampler = .null_handle,
 
 // Swapchain synchronization primitives
 image_acquired_semaphores: []vk.Semaphore = &.{},
@@ -114,10 +121,10 @@ global_descriptor_set: vk.DescriptorSet = .null_handle,
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
 meshes_lock: std.Io.Mutex = .init,
 
-indirect_draw_buffer: vk.Buffer,
-indirect_draw_memory: vk.DeviceMemory,
-chunk_data_buffer: vk.Buffer,
-chunk_data_memory: vk.DeviceMemory,
+indirect_draw_buffers: []vk.Buffer = &.{},
+indirect_draw_memories: []vk.DeviceMemory = &.{},
+chunk_data_buffers: []vk.Buffer = &.{},
+chunk_data_memories: []vk.DeviceMemory = &.{},
 max_draw_count: u32 = 100_000,
 
 camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
@@ -165,10 +172,48 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     _ = io; // autofix
 
     const self = try allocator.create(VulkanRenderer);
+    errdefer allocator.destroy(self);
 
     // Initialize basic fields early so they are available for subsequent calls
     self.allocator = allocator;
     self.window = window;
+
+    // Explicitly initialize all Vulkan handle fields to safe default values to prevent
+    // garbage memory crashes in deinit() if init() fails partway through, and in
+    // createSwapchain / destroyOldSwapchainResources
+    self.surface = .null_handle;
+    self.instance_handle = .null_handle;
+    self.pdev = .null_handle;
+    self.dev_handle = .null_handle;
+    self.command_pool = .null_handle;
+    self.cmd_buffers = &.{};
+    self.swapchain = .null_handle;
+    self.swapchain_format = .b8g8r8a8_srgb;
+    self.swapchain_images = &.{};
+    self.swapchain_views = &.{};
+    self.render_color_image = .null_handle;
+    self.render_color_memory = .null_handle;
+    self.render_color_view = .null_handle;
+    self.render_depth_image = .null_handle;
+    self.render_depth_memory = .null_handle;
+    self.render_depth_view = .null_handle;
+    self.dummy_image = .null_handle;
+    self.dummy_memory = .null_handle;
+    self.dummy_view = .null_handle;
+    self.dummy_sampler = .null_handle;
+    self.image_acquired_semaphores = &.{};
+    self.render_complete_semaphores = &.{};
+    self.in_flight_fences = &.{};
+    self.descriptor_set_layout = .null_handle;
+    self.pipeline_layout = .null_handle;
+    self.pipeline = .null_handle;
+    self.transparent_pipeline = .null_handle;
+    self.descriptor_pool = .null_handle;
+    self.global_descriptor_set = .null_handle;
+    self.indirect_draw_buffers = &.{};
+    self.indirect_draw_memories = &.{};
+    self.chunk_data_buffers = &.{};
+    self.chunk_data_memories = &.{};
 
     // 1. Load Base Wrapper using getProcAddr helper (ptrcasts the result, not the function pointer)
     self.vkb = BaseWrapper.load(getProcAddr);
@@ -184,7 +229,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     // Check for validation layers
     var enabled_layers: std.ArrayList([*:0]const u8) = .empty;
-    errdefer enabled_layers.deinit(allocator);
+    defer enabled_layers.deinit(allocator);
 
     const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
     defer allocator.free(layers);
@@ -197,7 +242,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     // Get required Vulkan instance extensions from wio and check for portability enumeration
     var extension_names: std.ArrayList([*:0]const u8) = .empty;
-    errdefer extension_names.deinit(allocator);
+    defer extension_names.deinit(allocator);
 
     // Add wio's required Vulkan instance extensions
     const wio_extensions = wio.getRequiredVulkanInstanceExtensions();
@@ -294,12 +339,13 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
             if (has_graphics and has_present) {
                 // Now check for surface formats and present modes
-                var format_count: u32 = 0;
-                _ = try self.instance.getPhysicalDeviceSurfaceFormatsKHR(pdev, self.surface, &format_count, null);
-                var present_mode_count: u32 = 0;
-                _ = try self.instance.getPhysicalDeviceSurfacePresentModesKHR(pdev, self.surface, &present_mode_count, null);
+                const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, allocator);
+                defer allocator.free(surface_formats);
 
-                if (format_count > 0 and present_mode_count > 0) {
+                const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, allocator);
+                defer allocator.free(present_modes);
+
+                if (surface_formats.len > 0 and present_modes.len > 0) {
                     selected_pdev = pdev;
                     break;
                 }
@@ -401,7 +447,72 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     dev_wrapper_ptr.* = DeviceWrapper.load(self.dev_handle, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     self.dev_wrapper = dev_wrapper_ptr;
     self.dev = DeviceProxy.init(self.dev_handle, dev_wrapper_ptr);
-    errdefer self.dev.destroyDevice(null);
+    errdefer {
+        // Destroy all child resources before destroying device to satisfy VUID-vkDestroyDevice-device-05137
+        if (self.command_pool != .null_handle) {
+            self.dev.destroyCommandPool(self.command_pool, null);
+        }
+        if (self.swapchain != .null_handle) {
+            for (self.swapchain_views) |view| {
+                if (view != .null_handle) self.dev.destroyImageView(view, null);
+            }
+            for (self.image_acquired_semaphores) |sem| {
+                if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+            }
+            for (self.render_complete_semaphores) |sem| {
+                if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+            }
+            for (self.in_flight_fences) |fence| {
+                if (fence != .null_handle) self.dev.destroyFence(fence, null);
+            }
+            self.allocator.free(self.image_acquired_semaphores);
+            self.allocator.free(self.render_complete_semaphores);
+            self.allocator.free(self.in_flight_fences);
+            self.allocator.free(self.swapchain_images);
+            self.allocator.free(self.swapchain_views);
+            self.dev.destroySwapchainKHR(self.swapchain, null);
+        }
+        if (self.render_color_view != .null_handle) {
+            self.dev.destroyImageView(self.render_color_view, null);
+        }
+        if (self.render_depth_view != .null_handle) {
+            self.dev.destroyImageView(self.render_depth_view, null);
+        }
+        if (self.render_color_image != .null_handle) {
+            self.dev.destroyImage(self.render_color_image, null);
+        }
+        if (self.render_depth_image != .null_handle) {
+            self.dev.destroyImage(self.render_depth_image, null);
+        }
+        if (self.pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.pipeline, null);
+        }
+        if (self.transparent_pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.transparent_pipeline, null);
+        }
+        if (self.pipeline_layout != .null_handle) {
+            self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        }
+        if (self.descriptor_set_layout != .null_handle) {
+            self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
+        }
+        if (self.descriptor_pool != .null_handle) {
+            self.dev.destroyDescriptorPool(self.descriptor_pool, null);
+        }
+        if (self.indirect_draw_buffer != .null_handle) {
+            self.dev.destroyBuffer(self.indirect_draw_buffer, null);
+        }
+        if (self.indirect_draw_memory != .null_handle) {
+            self.dev.freeMemory(self.indirect_draw_memory, null);
+        }
+        if (self.chunk_data_buffer != .null_handle) {
+            self.dev.destroyBuffer(self.chunk_data_buffer, null);
+        }
+        if (self.chunk_data_memory != .null_handle) {
+            self.dev.freeMemory(self.chunk_data_memory, null);
+        }
+        self.dev.destroyDevice(null);
+    }
 
     self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
     if (graphics_family == present_family) {
@@ -412,21 +523,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
-    // 6. Create Command Pool & Buffer
+    // 6. Create Command Pool
     const pool_info = vk.CommandPoolCreateInfo{
         .flags = .{ .reset_command_buffer_bit = true },
         .queue_family_index = graphics_family,
     };
     self.command_pool = try self.dev.createCommandPool( &pool_info, null);
-
-    const alloc_info = vk.CommandBufferAllocateInfo{
-        .command_pool = self.command_pool,
-        .level = .primary,
-        .command_buffer_count = 1,
-    };
-    var cmd_buffers: [1]vk.CommandBuffer = undefined;
-    try self.dev.allocateCommandBuffers( &alloc_info, &cmd_buffers);
-    self.cmd_buffer = cmd_buffers[0];
 
     // 7. Initialize Swapchain
     try self.createSwapchain();
@@ -440,56 +542,20 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     // 9. Initialize Buffers
     try self.allocateIndirectBuffers();
 
-    self.* = .{
-        .allocator = allocator,
-        .window = window,
-        .vkb = self.vkb,
-        .instance_handle = self.instance_handle,
-        .instance_wrapper = self.instance_wrapper,
-        .instance = self.instance,
-        .pdev = self.pdev,
-        .props = self.props,
-        .mem_props = self.mem_props,
-        .dev_handle = self.dev_handle,
-        .dev_wrapper = self.dev_wrapper,
-        .dev = self.dev,
-        .graphics_queue = self.graphics_queue,
-        .present_queue = self.present_queue,
-        .queue_family_index = graphics_family,
-        .present_queue_family_index = present_family,
-        .command_pool = self.command_pool,
-        .cmd_buffer = self.cmd_buffer,
-        .swapchain = self.swapchain,
-        .swapchain_images = self.swapchain_images,
-        .swapchain_views = self.swapchain_views,
-        .swapchain_extent = self.swapchain_extent,
-        .image_acquired_semaphores = self.image_acquired_semaphores,
-        .render_complete_semaphores = self.render_complete_semaphores,
-        .in_flight_fences = self.in_flight_fences,
-        .current_frame_idx = 0,
-        .descriptor_set_layout = self.descriptor_set_layout,
-        .pipeline_layout = self.pipeline_layout,
-        .pipeline = self.pipeline,
-        .transparent_pipeline = self.transparent_pipeline,
-        .descriptor_pool = self.descriptor_pool,
-        .global_descriptor_set = self.global_descriptor_set,
-        .meshes = .init,
-        .indirect_draw_buffer = self.indirect_draw_buffer,
-        .indirect_draw_memory = self.indirect_draw_memory,
-        .chunk_data_buffer = self.chunk_data_buffer,
-        .chunk_data_memory = self.chunk_data_memory,
-        .interface = .{
-            .userdata = @ptrCast(self),
-            .vtable = &.{
-                .addChunk = vtableAddChunk,
-                .removeChunk = vtableRemoveChunk,
-                .drawChunks = vtableDrawChunks,
-                .clear = vtableClear,
-                .setViewport = vtableSetViewport,
-                .updateCameraDirection = vtableUpdateCameraDirection,
-                .getCameraFront = vtableGetCameraFront,
-                .forEachChunk = vtableForEachChunk,
-            },
+    self.queue_family_index = graphics_family;
+    self.present_queue_family_index = present_family;
+    self.meshes = .init;
+    self.interface = .{
+        .userdata = @ptrCast(self),
+        .vtable = &.{
+            .addChunk = vtableAddChunk,
+            .removeChunk = vtableRemoveChunk,
+            .drawChunks = vtableDrawChunks,
+            .clear = vtableClear,
+            .setViewport = vtableSetViewport,
+            .updateCameraDirection = vtableUpdateCameraDirection,
+            .getCameraFront = vtableGetCameraFront,
+            .forEachChunk = vtableForEachChunk,
         },
     };
 
@@ -548,7 +614,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.destroySwapchainKHR( self.swapchain, null);
     }
 
-    // Destroy render target images and views
+    // Destroy render target images and views (dynamic rendering has no separate memory)
     if (self.render_color_view != .null_handle) {
         self.dev.destroyImageView( self.render_color_view, null);
     }
@@ -579,6 +645,20 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.destroyDescriptorPool( self.descriptor_pool, null);
     }
 
+    // Destroy dummy texture resources
+    if (self.dummy_sampler != .null_handle) {
+        self.dev.destroySampler(self.dummy_sampler, null);
+    }
+    if (self.dummy_view != .null_handle) {
+        self.dev.destroyImageView( self.dummy_view, null);
+    }
+    if (self.dummy_image != .null_handle) {
+        self.dev.destroyImage( self.dummy_image, null);
+    }
+    if (self.dummy_memory != .null_handle) {
+        self.dev.freeMemory( self.dummy_memory, null);
+    }
+
     // Destroy command pool last among device resources (destroys all allocated command buffers)
     if (self.command_pool != .null_handle) {
         self.dev.destroyCommandPool( self.command_pool, null);
@@ -598,31 +678,26 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
 
-    // Acquire lock before mutating the mesh map to prevent iterator invalidation
-    self.meshes_lock.lockUncancelable(io);
-    defer self.meshes_lock.unlock(io);
-
     if (opaque_mesh.len > 0) {
-        errdefer {} // autofix
-        _ = self.uploadMeshLocked(io, .{ .@"opaque" = chunk_pos }, opaque_mesh) catch |err| switch (err) {
+        self.uploadMesh(io, .{ .@"opaque" = chunk_pos }, opaque_mesh) catch |err| switch (err) {
             error.OutOfHostMemory, error.OutOfDeviceMemory => return error.OutOfVideoMemory,
             else => return error.Unexpected,
         };
     } else {
-        self.removeLocked(io, .{ .@"opaque" = chunk_pos });
+        self.remove(io, .{ .@"opaque" = chunk_pos });
     }
 
     if (transparent_mesh.len > 0) {
-        _ = self.uploadMeshLocked(io, .{ .transparent = chunk_pos }, transparent_mesh) catch |err| switch (err) {
+        self.uploadMesh(io, .{ .transparent = chunk_pos }, transparent_mesh) catch |err| switch (err) {
             error.OutOfHostMemory, error.OutOfDeviceMemory => return error.OutOfVideoMemory,
             else => return error.Unexpected,
         };
     } else {
-        self.removeLocked(io, .{ .transparent = chunk_pos });
+        self.remove(io, .{ .transparent = chunk_pos });
     }
 }
 
-fn uploadMeshLocked(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []Mesher.Face) !void {
+fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []Mesher.Face) !void {
     const buffer_size = @as(vk.DeviceSize, @intCast(faces.len)) * @sizeOf(Mesher.Face);
 
     // 1. Create Staging Buffer
@@ -650,6 +725,10 @@ fn uploadMeshLocked(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, fac
     // 3. Create Device Local Buffer with Shader Device Address bit
     var buffer: vk.Buffer = .null_handle;
     var memory: vk.DeviceMemory = .null_handle;
+    errdefer {
+        if (buffer != .null_handle) self.dev.destroyBuffer(buffer, null);
+        if (memory != .null_handle) self.dev.freeMemory(memory, null);
+    }
 
     const usage = vk.BufferUsageFlags{
         .transfer_dst_bit = true,
@@ -698,13 +777,19 @@ fn uploadMeshLocked(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, fac
         .face_count = @intCast(faces.len),
     };
 
+    self.meshes_lock.lockUncancelable(io);
+    defer self.meshes_lock.unlock(io);
+
     const existing = try self.meshes.fetchPut(io, self.allocator, key, mesh_buffer);
     if (existing) |e| {
         self.destroyChunkMesh(e);
     }
 }
 
-pub fn removeLocked(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) void {
+pub fn remove(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) void {
+    self.meshes_lock.lockUncancelable(io);
+    defer self.meshes_lock.unlock(io);
+
     if (self.meshes.fetchRemove(io, key)) |mesh| {
         self.destroyChunkMesh(mesh);
     }
@@ -712,13 +797,8 @@ pub fn removeLocked(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) voi
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-
-    // Acquire lock before mutating the mesh map to prevent iterator invalidation
-    self.meshes_lock.lockUncancelable(io);
-    defer self.meshes_lock.unlock(io);
-
-    self.removeLocked(io, .{ .@"opaque" = chunk_pos });
-    self.removeLocked(io, .{ .transparent = chunk_pos });
+    self.remove(io, .{ .@"opaque" = chunk_pos });
+    self.remove(io, .{ .transparent = chunk_pos });
 }
 
 fn destroyChunkMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer) void {
@@ -769,6 +849,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         image_index = acquire_result_res.image_index;
     }
 
+    const cmd_buffer = self.cmd_buffers[self.current_frame_idx];
+
     // Calculate projection/view math
     const aspect = @as(f32, @floatFromInt(self.viewport_pixels[0])) / @as(f32, @floatFromInt(self.viewport_pixels[1]));
 
@@ -777,8 +859,6 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
-
-    const proj = zm.Mat4f.perspectiveRH(fov, aspect, 0.01, 10000.0);
 
     // Create view matrix using lookAtRH
     const viewpos_f32: @Vector(3, f32) = @floatCast(viewpos);
@@ -792,18 +872,14 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 
     const view = zm.matrix.Mat4f.lookAtRH(eye_vec, target_vec, up_vec);
 
-    // Reverse Z projection matrix like OpenGL
-    var reverse_z_matrix = zm.matrix.Mat4f{
-        .data = .{
-            .{ proj.data[0][0], 0, 0, 0 },
-            .{ 0, proj.data[1][1], 0, 0 },
-            .{ 0, 0, 1, -0.01 },
-            .{ 0, 0, 1, 0 },
-        },
-    };
-    reverse_z_matrix = reverse_z_matrix.transpose();
-    const projection = reverse_z_matrix;
+    // Dynamic reverse-Z infinite projection matrix matching OpenGL's vertical gradient sky color
+    const projection = makeInfReversedZProjRh(fov, aspect, 0.01);
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
+
+    // Calculate dynamic sky color based on height/viewpos
+    const blueSky = @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 };
+    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0)))))));
 
     // Sun direction (directional light)
     const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
@@ -817,7 +893,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
     };
-    self.dev.beginCommandBuffer(self.cmd_buffer, &begin_info) catch |err| switch (err) {
+    self.dev.beginCommandBuffer(cmd_buffer, &begin_info) catch |err| switch (err) {
         else => return error.DrawFailed,
     };
 
@@ -831,7 +907,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .resolve_image_layout = .undefined,
         .load_op = .clear,
         .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ 0.53, 0.81, 0.92, 1.0 } } },
+        .clear_value = .{ .color = .{ .float_32 = .{ skyColor[0], skyColor[1], skyColor[2], skyColor[3] } } },
     };
 
     const depth_attachment = vk.RenderingAttachmentInfo{
@@ -856,10 +932,10 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .p_depth_attachment = &depth_attachment,
         .p_stencil_attachment = null,
     };
-    self.dev.cmdBeginRendering(self.cmd_buffer, &render_info);
+    self.dev.cmdBeginRendering(cmd_buffer, &render_info);
 
     // Bind Opaque Pipeline
-    self.dev.cmdBindPipeline(self.cmd_buffer, .graphics, self.pipeline);
+    self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
 
     // Set viewport and scissor (dynamic states)
     const viewport = vk.Viewport{
@@ -876,16 +952,16 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     };
     var viewport_arr: [1]vk.Viewport = undefined;
     viewport_arr[0] = viewport;
-    self.dev.cmdSetViewport(self.cmd_buffer, 0, &viewport_arr);
+    self.dev.cmdSetViewport(cmd_buffer, 0, &viewport_arr);
     var scissor_arr: [1]vk.Rect2D = undefined;
     scissor_arr[0] = scissor;
-    self.dev.cmdSetScissor(self.cmd_buffer, 0, &scissor_arr);
+    self.dev.cmdSetScissor(cmd_buffer, 0, &scissor_arr);
 
     // Bind Descriptor Sets
     var desc_set_arr: [1]vk.DescriptorSet = undefined;
     desc_set_arr[0] = self.global_descriptor_set;
     self.dev.cmdBindDescriptorSets(
-        self.cmd_buffer,
+        cmd_buffer,
         .graphics,
         self.pipeline_layout,
         0,
@@ -907,7 +983,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     }
 
     self.dev.cmdPushConstants(
-        self.cmd_buffer,
+        cmd_buffer,
         self.pipeline_layout,
         .{ .vertex_bit = true, .fragment_bit = true },
         0,
@@ -919,19 +995,19 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const frustum = Frustum.extractFrustumPlanes(projview);
 
     // Draw opaque chunks with opaque pipeline (already bound)
-    self.drawChunksReal(io, viewpos, frustum, false) catch |err| switch (err) {
+    self.drawChunksReal(io, cmd_buffer, viewpos, frustum, false) catch |err| switch (err) {
         else => return error.DrawFailed,
     };// Opaque
 
     // Bind transparent pipeline for transparent rendering (depth_write_enable = .false)
-    self.dev.cmdBindPipeline(self.cmd_buffer, .graphics, self.transparent_pipeline);
+    self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.transparent_pipeline);
 
     // Draw transparent chunks with transparent pipeline
-    self.drawChunksReal(io, viewpos, frustum, true) catch |err| switch (err) {
+    self.drawChunksReal(io, cmd_buffer, viewpos, frustum, true) catch |err| switch (err) {
         else => return error.DrawFailed,
     };  // Transparent
 
-    self.dev.cmdEndRendering(self.cmd_buffer);
+    self.dev.cmdEndRendering(cmd_buffer);
 
     // Copy render color image to swapchain image for presentation - include in main command buffer
     // Transition render_color_image to transfer_src_optimal
@@ -952,11 +1028,11 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{ .transfer_read_bit = true },
     };
 
-    self.dev.cmdPipelineBarrier(self.cmd_buffer, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_to_copy_barrier}));
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_to_copy_barrier}));
 
-    // Transition swapchain image to transfer_dst_optimal
+    // Transition swapchain image to transfer_dst_optimal (use old_layout = undefined to handle frame 1 safely)
     const swapchain_barrier = vk.ImageMemoryBarrier{
-        .old_layout = .present_src_khr,
+        .old_layout = .undefined,
         .new_layout = .transfer_dst_optimal,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -972,7 +1048,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{ .transfer_write_bit = true },
     };
 
-    self.dev.cmdPipelineBarrier(self.cmd_buffer, .{ .bottom_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{swapchain_barrier}));
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true, .transfer_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{swapchain_barrier}));
 
     // Copy from render color image to swapchain image
     const copy_region = vk.ImageCopy{
@@ -997,7 +1073,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     copy_region_arr[0] = copy_region;
 
     self.dev.cmdCopyImage(
-            self.cmd_buffer,
+            cmd_buffer,
             self.render_color_image,
             .transfer_src_optimal,
             self.swapchain_images[image_index],
@@ -1023,21 +1099,41 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{},
     };
 
-    self.dev.cmdPipelineBarrier(self.cmd_buffer, .{ .transfer_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{present_barrier}));
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{present_barrier}));
 
-    self.dev.endCommandBuffer(self.cmd_buffer) catch |err| switch (err) {
+    // Transition render_color_image back to color_attachment_optimal for next frame
+    const color_return_barrier = vk.ImageMemoryBarrier{
+        .old_layout = .transfer_src_optimal,
+        .new_layout = .color_attachment_optimal,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = self.render_color_image,
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        .src_access_mask = .{ .transfer_read_bit = true },
+        .dst_access_mask = .{ .color_attachment_write_bit = true },
+    };
+
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_return_barrier}));
+
+    self.dev.endCommandBuffer(cmd_buffer) catch |err| switch (err) {
         else => return error.DrawFailed,
     };
 
     // Submit to queue with synchronization primitives
-    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true, .transfer_bit = true }};
 
     const submit_info = vk.SubmitInfo{
         .wait_semaphore_count = 1,
         .p_wait_semaphores = @ptrCast(&self.image_acquired_semaphores[self.current_frame_idx]),
         .p_wait_dst_stage_mask = &wait_stages,
         .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&self.cmd_buffer),
+        .p_command_buffers = @ptrCast(&cmd_buffer),
         .signal_semaphore_count = 1,
         .p_signal_semaphores = @ptrCast(&self.render_complete_semaphores[self.current_frame_idx]),
     };
@@ -1060,8 +1156,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         else => return error.DrawFailed,
     };
 
-    // Advance to next frame
-    if (present_result == .success or present_result == .suboptimal_khr) {
+    // Advance to next frame or recreate swapchain if needed
+    if (present_result == .success) {
         self.current_frame_idx = (self.current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
     } else if (present_result == vk.Result.error_out_of_date_khr or present_result == vk.Result.suboptimal_khr) {
         // Swapchain is out of date - recreate it on next frame
@@ -1071,7 +1167,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     }
 }
 
-fn drawChunksReal(self: *VulkanRenderer, io: std.Io, playerPos: @Vector(3, f64), frustum: Frustum, is_transparent: bool) !void {
+fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffer, playerPos: @Vector(3, f64), frustum: Frustum, is_transparent: bool) !void {
 
     const indirect_mapped = try self.dev.mapMemory(self.indirect_draw_memory, 0, vk.WHOLE_SIZE, .{});
     defer self.dev.unmapMemory(self.indirect_draw_memory);
@@ -1097,7 +1193,8 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, playerPos: @Vector(3, f64),
             ratio: @Vector(3, f64),
             chunk_blockpos: @Vector(3, f64),
         };
-        var transparent_draws: [100_000]TransparentDraw = undefined;
+        const transparent_draws = try self.allocator.alloc(TransparentDraw, self.max_draw_count);
+        defer self.allocator.free(transparent_draws);
         var trans_count: usize = 0;
 
         var it = self.meshes.iterator();
@@ -1216,7 +1313,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, playerPos: @Vector(3, f64),
     memory_barrier_arr[0] = memory_barrier;
 
     self.dev.cmdPipelineBarrier(
-        self.cmd_buffer,
+        cmd_buffer,
         .{ .host_bit = true },
         .{ .draw_indirect_bit = true, .vertex_shader_bit = true },
         .{},
@@ -1227,7 +1324,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, playerPos: @Vector(3, f64),
 
     // Multi-Draw Indirect
     self.dev.cmdDrawIndirect(
-        self.cmd_buffer,
+        cmd_buffer,
         self.indirect_draw_buffer,
         0,
         draw_count,
@@ -1371,13 +1468,24 @@ fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
 // --- Swapchain Creation ---
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
+    // Wait for GPU to finish before destroying resources to avoid device lost
+    _ = self.dev.deviceWaitIdle() catch {};
+
     // Destroy old swapchain images and views
     for (self.swapchain_views) |view| {
         if (view != .null_handle) self.dev.destroyImageView( view, null);
     }
     self.allocator.free(self.swapchain_images);
     self.swapchain_images = &.{};
+    self.allocator.free(self.swapchain_views);
     self.swapchain_views = &.{};
+
+    // Free old command buffers
+    if (self.cmd_buffers.len > 0) {
+        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
+        self.allocator.free(self.cmd_buffers);
+        self.cmd_buffers = &.{};
+    }
 
     // Destroy synchronization primitives
     for (self.image_acquired_semaphores) |sem| {
@@ -1392,8 +1500,11 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
     self.allocator.free(self.image_acquired_semaphores);
     self.allocator.free(self.render_complete_semaphores);
     self.allocator.free(self.in_flight_fences);
+    self.image_acquired_semaphores = &.{};
+    self.render_complete_semaphores = &.{};
+    self.in_flight_fences = &.{};
 
-    // Destroy render target images and views
+    // Destroy render target images, views, and memory
     if (self.render_color_view != .null_handle) {
         self.dev.destroyImageView( self.render_color_view, null);
         self.render_color_view = .null_handle;
@@ -1406,23 +1517,27 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
         self.dev.destroyImage( self.render_color_image, null);
         self.render_color_image = .null_handle;
     }
+    if (self.render_color_memory != .null_handle) {
+        self.dev.freeMemory( self.render_color_memory, null);
+        self.render_color_memory = .null_handle;
+    }
     if (self.render_depth_image != .null_handle) {
         self.dev.destroyImage( self.render_depth_image, null);
         self.render_depth_image = .null_handle;
     }
-
-    // Destroy old swapchain
-    if (self.swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(self.swapchain, null);
-        self.swapchain = .null_handle;
+    if (self.render_depth_memory != .null_handle) {
+        self.dev.freeMemory( self.render_depth_memory, null);
+        self.render_depth_memory = .null_handle;
     }
 }
 
 fn createSwapchain(self: *VulkanRenderer) !void {
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
+    const old_swapchain = self.swapchain;
+
     // Clean up old swapchain resources before creating new ones
-    if (self.swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
+    if (old_swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
         self.destroyOldSwapchainResources();
     }
 
@@ -1439,8 +1554,6 @@ fn createSwapchain(self: *VulkanRenderer) !void {
     self.swapchain_extent = actual_extent;
 
     // Find surface format
-    var format_count: u32 = 0;
-    _ = try self.instance.getPhysicalDeviceSurfaceFormatsKHR(self.pdev, self.surface, &format_count, null);
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
 
@@ -1451,10 +1564,9 @@ fn createSwapchain(self: *VulkanRenderer) !void {
             break;
         }
     }
+    self.swapchain_format = surface_format.format;
 
     // Find present mode
-    var present_mode_count: u32 = 0;
-    _ = try self.instance.getPhysicalDeviceSurfacePresentModesKHR(self.pdev, self.surface, &present_mode_count, null);
     const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(present_modes);
 
@@ -1477,10 +1589,16 @@ fn createSwapchain(self: *VulkanRenderer) !void {
     else
         .exclusive;
 
+    errdefer {
+        if (old_swapchain != .null_handle) {
+            self.dev.destroySwapchainKHR(old_swapchain, null);
+        }
+    }
+
     self.swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
         .min_image_count = image_count,
-        .image_format = surface_format.format,
+        .image_format = self.swapchain_format,
         .image_color_space = surface_format.color_space,
         .image_extent = actual_extent,
         .image_array_layers = 1,
@@ -1492,8 +1610,12 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         .composite_alpha = .{ .opaque_bit_khr = true },
         .present_mode = present_mode,
         .clipped = .true,
-        .old_swapchain = self.swapchain,
+        .old_swapchain = old_swapchain,
     }, null);
+
+    if (old_swapchain != .null_handle) {
+        self.dev.destroySwapchainKHR(old_swapchain, null);
+    }
 
     // Create swapchain images and views
     const swap_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
@@ -1511,7 +1633,7 @@ fn createSwapchain(self: *VulkanRenderer) !void {
             .flags = .{},
             .image = image,
             .view_type = .@"2d",
-            .format = surface_format.format,
+            .format = self.swapchain_format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
@@ -1562,6 +1684,16 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         self.in_flight_fences[i] = try self.dev.createFence(&fence_create_info, null);
     }
 
+    // Create swapchain command buffers
+    const cmd_alloc_info = vk.CommandBufferAllocateInfo{
+        .command_pool = self.command_pool,
+        .level = .primary,
+        .command_buffer_count = @intCast(num_swapchain_images),
+    };
+    self.cmd_buffers = try self.allocator.alloc(vk.CommandBuffer, num_swapchain_images);
+    errdefer self.allocator.free(self.cmd_buffers);
+    try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
+
     // Create render target images for dynamic rendering with depth support
     try self.createRenderTargets(actual_extent);
 }
@@ -1580,9 +1712,17 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         self.dev.destroyImage( self.render_color_image, null);
         self.render_color_image = .null_handle;
     }
+    if (self.render_color_memory != .null_handle) {
+        self.dev.freeMemory( self.render_color_memory, null);
+        self.render_color_memory = .null_handle;
+    }
     if (self.render_depth_image != .null_handle) {
         self.dev.destroyImage( self.render_depth_image, null);
         self.render_depth_image = .null_handle;
+    }
+    if (self.render_depth_memory != .null_handle) {
+        self.dev.freeMemory( self.render_depth_memory, null);
+        self.render_depth_memory = .null_handle;
     }
 
     // Create color image
@@ -1592,7 +1732,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
         .mip_levels = 1,
         .array_layers = 1,
-        .format = .b8g8r8a8_srgb, // Match swapchain format
+        .format = self.swapchain_format, // Negotiated swapchain format
         .tiling = .optimal,
         .initial_layout = .undefined,
         .usage = .{ .color_attachment_bit = true, .transfer_src_bit = true },
@@ -1609,8 +1749,8 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .allocation_size = color_mem_reqs.size,
         .memory_type_index = self.findMemoryType(color_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    const color_memory = try self.dev.allocateMemory( &color_alloc_info, null);
-    try self.dev.bindImageMemory( self.render_color_image, color_memory, 0);
+    self.render_color_memory = try self.dev.allocateMemory( &color_alloc_info, null);
+    try self.dev.bindImageMemory( self.render_color_image, self.render_color_memory, 0);
 
     // Transition color image to color_attachment_optimal
     {
@@ -1642,7 +1782,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .flags = .{},
         .image = self.render_color_image,
         .view_type = .@"2d",
-        .format = .b8g8r8a8_srgb,
+        .format = self.swapchain_format,
         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
         .subresource_range = .{
             .aspect_mask = .{ .color_bit = true },
@@ -1680,8 +1820,8 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .allocation_size = depth_mem_reqs.size,
         .memory_type_index = self.findMemoryType(depth_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    const depth_memory = try self.dev.allocateMemory( &depth_alloc_info, null);
-    try self.dev.bindImageMemory( self.render_depth_image, depth_memory, 0);
+    self.render_depth_memory = try self.dev.allocateMemory( &depth_alloc_info, null);
+    try self.dev.bindImageMemory( self.render_depth_image, self.render_depth_memory, 0);
 
     // Transition depth image to depth_stencil_attachment_optimal
     {
@@ -1839,15 +1979,15 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         .p_queue_family_indices = undefined,
     };
 
-    const dummy_image = try self.dev.createImage(&dummy_image_info, null);
+    self.dummy_image = try self.dev.createImage(&dummy_image_info, null);
 
-    const dummy_mem_reqs = self.dev.getImageMemoryRequirements(dummy_image);
+    const dummy_mem_reqs = self.dev.getImageMemoryRequirements(self.dummy_image);
     const dummy_alloc_info = vk.MemoryAllocateInfo{
         .allocation_size = dummy_mem_reqs.size,
         .memory_type_index = self.findMemoryType(dummy_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    const dummy_memory = try self.dev.allocateMemory(&dummy_alloc_info, null);
-    try self.dev.bindImageMemory(dummy_image, dummy_memory, 0);
+    self.dummy_memory = try self.dev.allocateMemory(&dummy_alloc_info, null);
+    try self.dev.bindImageMemory(self.dummy_image, self.dummy_memory, 0);
 
     // Transition layout and copy data
     {
@@ -1859,7 +1999,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
             .new_layout = .transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = dummy_image,
+            .image = self.dummy_image,
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
@@ -1890,7 +2030,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         var copy_region_arr: [1]vk.BufferImageCopy = undefined;
         copy_region_arr[0] = copy_region;
 
-        self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, dummy_image, .transfer_dst_optimal, &copy_region_arr);
+        self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, self.dummy_image, .transfer_dst_optimal, &copy_region_arr);
 
 
         // Transition to shader_read_only_optimal
@@ -1898,13 +2038,14 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         barrier.new_layout = .shader_read_only_optimal;
         barrier.src_access_mask = .{ .transfer_write_bit = true };
         barrier.dst_access_mask = .{ .shader_read_bit = true };
+        barrier.image = self.dummy_image;
 
         self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
     }
 
     const dummy_view_info = vk.ImageViewCreateInfo{
         .flags = .{},
-        .image = dummy_image,
+        .image = self.dummy_image,
         .view_type = .@"2d",
         .format = .r8g8b8a8_unorm,
         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
@@ -1917,7 +2058,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         },
     };
 
-    const dummy_view = try self.dev.createImageView(&dummy_view_info, null);
+    self.dummy_view = try self.dev.createImageView(&dummy_view_info, null);
 
     const sampler_info = vk.SamplerCreateInfo{
         .flags = .{},
@@ -1938,12 +2079,12 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         .unnormalized_coordinates = .false,
     };
 
-    const dummy_sampler = try self.dev.createSampler(&sampler_info, null);
+    self.dummy_sampler = try self.dev.createSampler(&sampler_info, null);
 
     texture_image_info_descriptor = vk.DescriptorImageInfo{
         .image_layout = .shader_read_only_optimal,
-        .image_view = dummy_view,
-        .sampler = dummy_sampler,
+        .image_view = self.dummy_view,
+        .sampler = self.dummy_sampler,
     };
 
     // Clean up staging buffer and memory
@@ -2090,13 +2231,30 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .p_specialization_info = null,
     };
 
-    // Note: Vertex input state is empty for SSBO-based rendering - we use gl_VertexIndex and gl_DrawID
+    // Vertex input state: Vulkan 1.2 requires non-null p_vertex_input_state unless vertex input extension is active
+    const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+        .flags = .{},
+        .vertex_binding_description_count = 0,
+        .p_vertex_binding_descriptions = undefined,
+        .vertex_attribute_description_count = 0,
+        .p_vertex_attribute_descriptions = undefined,
+    };
+
+    // Dynamic rendering layout info
+    const rendering_info = vk.PipelineRenderingCreateInfo{
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachment_formats = @ptrCast(&self.swapchain_format),
+        .depth_attachment_format = .d32_sfloat_s8_uint,
+        .stencil_attachment_format = .undefined,
+    };
 
     const gpci = vk.GraphicsPipelineCreateInfo{
         .flags = .{},
+        .p_next = @ptrCast(&rendering_info),
         .stage_count = 2,
         .p_stages = &pssci,
-        .p_vertex_input_state = null, // Empty for SSBO
+        .p_vertex_input_state = &vertex_input_info,
         .p_input_assembly_state = &piasci,
         .p_tessellation_state = null,
         .p_viewport_state = &pvsci,
@@ -2241,11 +2399,30 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .p_specialization_info = null,
     };
 
+    // Vertex input state: Vulkan 1.2 requires non-null p_vertex_input_state unless vertex input extension is active
+    const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+        .flags = .{},
+        .vertex_binding_description_count = 0,
+        .p_vertex_binding_descriptions = undefined,
+        .vertex_attribute_description_count = 0,
+        .p_vertex_attribute_descriptions = undefined,
+    };
+
+    // Dynamic rendering layout info
+    const rendering_info = vk.PipelineRenderingCreateInfo{
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachment_formats = @ptrCast(&self.swapchain_format),
+        .depth_attachment_format = .d32_sfloat_s8_uint,
+        .stencil_attachment_format = .undefined,
+    };
+
     const gpci_transparent = vk.GraphicsPipelineCreateInfo{
         .flags = .{},
+        .p_next = @ptrCast(&rendering_info),
         .stage_count = 2,
         .p_stages = &pssci,
-        .p_vertex_input_state = null, // Empty for SSBO
+        .p_vertex_input_state = &vertex_input_info,
         .p_input_assembly_state = &piasci,
         .p_tessellation_state = null,
         .p_viewport_state = &pvsci,
