@@ -13,6 +13,25 @@ pub fn build(b: *std.Build) void {
     const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
     const test_play = b.option(bool, "test_play", "Run test play") orelse null;
 
+    // Compile shaders using glslc
+    const vert_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
+    });
+    const vert_spv = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
+    _ = vert_spv; // autofix
+    vert_cmd.addFileArg(b.path("src/Renderer/vulkan/vertexshader.vert"));
+
+    const frag_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
+    });
+    const frag_spv = frag_cmd.addOutputFileArg("src/Renderer/vulkan/fragshader.spv");
+    _ = frag_spv; // autofix
+    frag_cmd.addFileArg(b.path("src/Renderer/vulkan/fragshader.frag"));
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -27,6 +46,10 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
         .use_llvm = true,
     });
+
+    // Make the executable depend on the shader compilation steps
+    exe.step.dependOn(&vert_cmd.step);
+    exe.step.dependOn(&frag_cmd.step);
     var options: *std.Build.Step.Options = .create(b);
     options.addOption(bool, "test_play", test_play orelse false);
     exe.root_module.addOptions("options", options);
@@ -98,6 +121,7 @@ fn setupDependencies(
         .target = target,
         .optimize = optimize,
         .enable_opengl = true,
+        .enable_vulkan = true,
         .win32_manifest = false,
     });
     root_module.addImport("wio", wio.module("wio"));
@@ -131,4 +155,15 @@ fn setupDependencies(
         .optimize = optimize,
     });
     root_module.addImport("zm", zm.module("zm"));
+
+    // Vulkan bindings generation
+    const vulkan_headers = b.dependency("vulkan_headers", .{});
+    const registry = vulkan_headers.path("registry/vk.xml");
+    const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
+    const vk_generate_cmd = b.addRunArtifact(vk_gen);
+    vk_generate_cmd.addFileArg(registry);
+    const vulkan_zig = b.addModule("vulkan", .{
+        .root_source_file = vk_generate_cmd.addOutputFileArg("vk.zig"),
+    });
+    root_module.addImport("vulkan", vulkan_zig);
 }

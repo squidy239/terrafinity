@@ -1,8 +1,9 @@
 const std = @import("std");
-const Mesher = @import("Mesher.zig");
-const ChunkPos = @import("world/World.zig").ChunkPos;
 
+const Mesher = @import("Mesher.zig");
 pub const OpenGl = @import("Renderer/opengl/OpenGl.zig");
+pub const Vulkan = @import("Renderer/vulkan/Vulkan.zig");
+const ChunkPos = @import("world/World.zig").ChunkPos;
 
 vtable: *const VTable,
 userdata: *anyopaque,

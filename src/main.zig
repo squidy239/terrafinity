@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
 
     var game: Game = undefined;
     if (options.test_play) {
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window, gl_options, &ui_context, &proc_table);
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window);
     }
     var ui: Ui = .{
         .proc_table = &proc_table,

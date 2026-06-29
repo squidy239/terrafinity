@@ -29,7 +29,7 @@ const Game = @This();
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
-opengl_renderer: Renderer.OpenGl,
+vulkan_renderer: *Renderer.Vulkan,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
@@ -341,9 +341,6 @@ pub fn init(
     game_options_lock: *std.Io.RwLock,
     folder: []const u8,
     window: *wio.Window,
-    gl_options: wio.GlOptions,
-    share_context: *wio.GlContext,
-    proc_table: *const gl.ProcTable,
 ) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
@@ -352,7 +349,7 @@ pub fn init(
         .options_lock = game_options_lock,
         .running = .init(true),
         .allocator = undefined,
-        .opengl_renderer = undefined,
+        .vulkan_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
         .loaded_or_meshed = .init,
@@ -362,10 +359,10 @@ pub fn init(
         .entity_registry = .init(),
     };
 
-    try game.opengl_renderer.init(io, allocator, window, gl_options, share_context, proc_table, &game_options.render_options, game_options_lock);
-    errdefer game.opengl_renderer.deinit(io);
+    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, window);
+    errdefer game.vulkan_renderer.deinit(io);
 
-    game.renderer = game.opengl_renderer.interface;
+    game.renderer = game.vulkan_renderer.interface;
     game.allocator = allocator;
 
     const arena = game.game_arena.allocator();
@@ -418,7 +415,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     if (self.load_future) |*future| future.cancel(io) catch {};
     self.group.cancel(io);
 
-    self.opengl_renderer.deinit(io);
+    self.vulkan_renderer.deinit(io);
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
     self.loaded_or_meshed.deinit(io, self.allocator);
