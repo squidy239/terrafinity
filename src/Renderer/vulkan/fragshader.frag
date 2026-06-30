@@ -1,13 +1,14 @@
 #version 460 core
 
-layout(location = 0) in vec3 coordss;
-layout(location = 1) in vec3 fragpos;
-layout(location = 2) flat in vec3 sun_dir_norm;
-layout(location = 3) flat in uint side;
-layout(location = 4) flat in uint block_array_layer;
-layout(binding = 1) uniform sampler2DArray texture_array;
 layout(location = 0) out vec4 frag_color;
-layout(location = 5) flat in float scale;
+
+layout(location = 1) in vec3 coordss;
+layout(location = 2) in vec3 fragpos;
+layout(location = 3) flat in vec3 sun_dir_norm;
+layout(location = 4) flat in uint side;
+layout(location = 5) flat in uint block_array_layer;
+layout(binding = 1) uniform sampler2DArray texture_array;
+layout(location = 6) flat in float scale;
 
 struct PushConstants {
     mat4 projview;

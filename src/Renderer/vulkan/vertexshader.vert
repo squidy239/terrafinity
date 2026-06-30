@@ -1,7 +1,8 @@
 #version 460 core
 #extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_buffer_reference2 : require
 
-layout(location = 0) in uvec2 data;
+// Vertex data is computed from gl_DrawID and chunks buffer
 
 struct PushConstants {
     mat4 projview;
@@ -14,22 +15,27 @@ layout(push_constant) uniform PushConsts {
     PushConstants pc;
 } push_consts;
 
-layout(location = 0) out vec3 coordss;
-layout(location = 1) flat out uint block_array_layer;
-layout(location = 2) flat out uint side;
-layout(location = 3) out vec3 fragpos;
-layout(location = 4) flat out vec3 sun_dir_norm;
-layout(location = 5) flat out uint block_type;
+layout(location = 1) out vec3 coordss;
+layout(location = 2) out vec3 fragpos;
+layout(location = 3) flat out vec3 sun_dir_norm;
+layout(location = 4) flat out uint side;
+layout(location = 5) flat out uint block_array_layer;
 layout(location = 6) flat out float scale;
 
 struct ChunkData {
     vec3 absolute_position;
     vec3 relative_position;
     float scale;
+    uint64_t address;
 };
 
 layout(std430, binding = 0) buffer chunks_buffer {
     ChunkData chunks[];
+};
+
+// Mesh faces buffer reference
+layout(buffer_reference, std430) buffer MeshFaces {
+    uint64_t faces[];
 };
 
 const uint CHUNK_SIZE = 32u;
@@ -37,7 +43,10 @@ const uint COORD_BITS = 5u;
 const uint COORD_MASK = CHUNK_SIZE - 1u;
 
 uint64_t getPackedData() {
-    return packUint2x32(data);
+    // Get the mesh faces buffer address from chunks buffer
+    MeshFaces mesh_faces_buffer = MeshFaces(chunks[gl_DrawID].address);
+    // Each draw corresponds to one mesh/face, so we get the first face from the mesh buffer
+    return mesh_faces_buffer.faces[0];
 }
 
 uint decodeBlockType(uint64_t val) {
@@ -88,9 +97,9 @@ void main() {
     uint64_t val = getPackedData();
     uvec3 pos     = decodePosition(val);
     uvec3 lengths = decodeLengths(val);
-    block_type     = decodeBlockType(val);
+    uint block_type_local = decodeBlockType(val);
     side          = decodeSide(val);
-    block_array_layer = block_type;
+    block_array_layer = block_type_local;
 
     vec3 coords = CUBE_FACES[side][gl_VertexIndex];
     coords = coords + (ceil(coords) * lengths);
@@ -99,7 +108,7 @@ void main() {
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
     // Waves
-    if (block_type == 3u) {
+    if (block_type_local == 3u) {
         float speed = 2000.0;
         float t     = 1.0 + float(mod(push_consts.pc.time, 100000000.0)) / 10000000.0;
         vec3  vp    = coords + vec3(pos) * scale + absolute_position;
