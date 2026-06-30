@@ -114,20 +114,14 @@ pub const TextureArrayManager = struct {
         var staging_memory: vk.DeviceMemory = .null_handle;
 
         const total_staging_size = image_size * @as(vk.DeviceSize, @intCast(image_count));
-        try self.renderer.createBuffer(
-            total_staging_size,
-            .{ .transfer_src_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-            &staging_buffer,
-            &staging_memory
-        );
+        try self.renderer.createBuffer(total_staging_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer, &staging_memory);
         defer {
-            if (staging_buffer != .null_handle) self.renderer.dev.destroyBuffer(self.renderer.dev_handle, staging_buffer, null);
-            if (staging_memory != .null_handle) self.renderer.dev.freeMemory(self.renderer.dev_handle, staging_memory, null);
+            if (staging_buffer != .null_handle) self.renderer.dev.destroyBuffer(staging_buffer, null);
+            if (staging_memory != .null_handle) self.renderer.dev.freeMemory(staging_memory, null);
         }
 
         // Map and copy all texture data to staging buffer
-        const data = try self.renderer.dev.mapMemory(self.renderer.dev_handle, staging_memory, 0, total_staging_size, .{});
+        const data = try self.renderer.dev.mapMemory(staging_memory, 0, total_staging_size, .{});
         const mapped_slice = @as([*]u8, @ptrCast(data))[0..total_staging_size];
 
         var offset: vk.DeviceSize = 0;
@@ -137,7 +131,7 @@ pub const TextureArrayManager = struct {
             offset += @as(vk.DeviceSize, @intCast(rgba_data.len));
         }
 
-        self.renderer.dev.unmapMemory(self.renderer.dev_handle, staging_memory);
+        self.renderer.dev.unmapMemory(staging_memory);
 
         // Create vk.Image for texture array (with mipmaps)
         const max_dim = @max(width, height);
@@ -160,16 +154,16 @@ pub const TextureArrayManager = struct {
             .p_queue_family_indices = undefined,
         };
 
-        const texture_image = try self.renderer.dev.createImage(self.renderer.dev_handle, &image_info, null);
+        const texture_image = try self.renderer.dev.createImage(&image_info, null);
 
         // Allocate image memory
-        const mem_reqs = self.renderer.dev.getImageMemoryRequirements(self.renderer.dev_handle, texture_image);
+        const mem_reqs = self.renderer.dev.getImageMemoryRequirements(texture_image);
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_reqs.size,
             .memory_type_index = self.renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
         };
-        const memory = try self.renderer.dev.allocateMemory(self.renderer.dev_handle, &alloc_info, null);
-        try self.renderer.dev.bindImageMemory(self.renderer.dev_handle, texture_image, memory, 0);
+        const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
+        try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
         // Begin single command buffer for all layout transitions and copies
         const cmd = try self.renderer.beginSingleTimeCommands();
@@ -226,7 +220,7 @@ pub const TextureArrayManager = struct {
             },
         };
 
-        const texture_view = try self.renderer.dev.createImageView(self.renderer.dev_handle, &view_info, null);
+        const texture_view = try self.renderer.dev.createImageView(&view_info, null);
 
         // Create sampler for the texture array (linear filtering with mipmaps)
         const sampler_info = vk.SamplerCreateInfo{
@@ -248,7 +242,7 @@ pub const TextureArrayManager = struct {
             .unnormalized_coordinates = vk.FALSE,
         };
 
-        const sampler = try self.renderer.dev.createSampler(self.renderer.dev_handle, &sampler_info, null);
+        const sampler = try self.renderer.dev.createSampler(&sampler_info, null);
 
         // Update global descriptor set with the texture array (binding 1)
         const image_info_descriptor = vk.DescriptorImageInfo{
@@ -422,19 +416,19 @@ pub const TextureArrayManager = struct {
 
     pub fn destroyTextureArray(self: *TextureArrayManager) void {
         if (self.sampler != .null_handle) {
-            self.renderer.dev.destroySampler(self.renderer.dev_handle, self.sampler, null);
+            self.renderer.dev.destroySampler(self.sampler, null);
             self.sampler = .null_handle;
         }
         if (self.texture_view != .null_handle) {
-            self.renderer.dev.destroyImageView(self.renderer.dev_handle, self.texture_view, null);
+            self.renderer.dev.destroyImageView(self.texture_view, null);
             self.texture_view = .null_handle;
         }
         if (self.texture_image != .null_handle) {
-            self.renderer.dev.destroyImage(self.renderer.dev_handle, self.texture_image, null);
+            self.renderer.dev.destroyImage(self.texture_image, null);
             self.texture_image = .null_handle;
         }
         if (self.texture_memory != .null_handle) {
-            self.renderer.dev.freeMemory(self.renderer.dev_handle, self.texture_memory, null);
+            self.renderer.dev.freeMemory(self.texture_memory, null);
             self.texture_memory = .null_handle;
         }
     }

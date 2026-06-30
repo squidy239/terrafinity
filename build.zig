@@ -47,6 +47,11 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
+    // Link EGL and OpenGL libraries for OpenGL interoperability
+    root_module.link_libc = true;
+    root_module.linkSystemLibrary("EGL", .{});
+    root_module.linkSystemLibrary("gl", .{});
+
     // Make the executable depend on the shader compilation steps
     exe.step.dependOn(&vert_cmd.step);
     exe.step.dependOn(&frag_cmd.step);

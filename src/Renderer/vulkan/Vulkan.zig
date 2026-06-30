@@ -57,7 +57,6 @@ const PushConstants = extern struct {
     draw_over: i32,
 };
 
-// Dispatch tables provided by vulkan-zig
 pub const VulkanRenderer = @This();
 
 allocator: std.mem.Allocator,
@@ -66,7 +65,7 @@ surface: vk.SurfaceKHR = .null_handle,
 
 vkb: BaseWrapper,
 instance_handle: vk.Instance,
-instance_wrapper: *InstanceWrapper,
+instance_wrapper: ?*InstanceWrapper,
 instance: InstanceProxy,
 
 pdev: vk.PhysicalDevice,
@@ -74,7 +73,7 @@ props: vk.PhysicalDeviceProperties,
 mem_props: vk.PhysicalDeviceMemoryProperties,
 
 dev_handle: vk.Device,
-dev_wrapper: *DeviceWrapper,
+dev_wrapper: ?*DeviceWrapper,
 dev: DeviceProxy,
 
 graphics_queue: vk.Queue,
@@ -83,6 +82,7 @@ queue_family_index: u32,
 present_queue_family_index: u32,
 
 command_pool: vk.CommandPool,
+upload_command_pool: vk.CommandPool = .null_handle,
 cmd_buffers: []vk.CommandBuffer = &.{},
 
 swapchain: vk.SwapchainKHR = .null_handle,
@@ -91,7 +91,6 @@ swapchain_images: []vk.Image = &.{},
 swapchain_views: []vk.ImageView = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 
-// Render target images for dynamic rendering (color + depth)
 render_color_image: vk.Image = .null_handle,
 render_color_memory: vk.DeviceMemory = .null_handle,
 render_color_view: vk.ImageView = .null_handle,
@@ -99,33 +98,32 @@ render_depth_image: vk.Image = .null_handle,
 render_depth_memory: vk.DeviceMemory = .null_handle,
 render_depth_view: vk.ImageView = .null_handle,
 
-// Dummy texture resources
 dummy_image: vk.Image = .null_handle,
 dummy_memory: vk.DeviceMemory = .null_handle,
 dummy_view: vk.ImageView = .null_handle,
 dummy_sampler: vk.Sampler = .null_handle,
 
-// Swapchain synchronization primitives
 image_acquired_semaphores: []vk.Semaphore = &.{},
 render_complete_semaphores: []vk.Semaphore = &.{},
 in_flight_fences: []vk.Fence = &.{},
-current_frame_idx: u32 = 0,
+current_frame_idx: std.atomic.Value(u32) = .init(0),
 
 descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 pipeline_layout: vk.PipelineLayout = .null_handle,
 pipeline: vk.Pipeline = .null_handle,
-transparent_pipeline: vk.Pipeline = .null_handle, // For transparent rendering with depth_write_enable=false
+transparent_pipeline: vk.Pipeline = .null_handle,
 descriptor_pool: vk.DescriptorPool = .null_handle,
 global_descriptor_set: vk.DescriptorSet = .null_handle,
 
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
-meshes_lock: std.Io.Mutex = .init,
 
 indirect_draw_buffers: []vk.Buffer = &.{},
 indirect_draw_memories: []vk.DeviceMemory = &.{},
 chunk_data_buffers: []vk.Buffer = &.{},
 chunk_data_memories: []vk.DeviceMemory = &.{},
 max_draw_count: u32 = 100_000,
+
+deferred_deletions: [8]std.ArrayList(ChunkMeshBuffer) = undefined,
 
 camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
@@ -169,14 +167,22 @@ fn getDeviceProcAddrLoader(device: vk.Device, procname: [*:0]const u8, instance_
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*VulkanRenderer {
+    std.log.debug("VulkanRenderer.init: ENTER - Starting Vulkan initialization...", .{});
+    std.log.info("VulkanRenderer.init: Starting Vulkan initialization...", .{});
+
     _ = io; // autofix
 
+    std.log.debug("VulkanRenderer.init: Step 1 - Creating VulkanRenderer struct...", .{});
     const self = try allocator.create(VulkanRenderer);
     errdefer allocator.destroy(self);
+    std.log.debug("VulkanRenderer.init: Step 1 - Allocated VulkanRenderer struct at ptr={*}", .{self});
+    std.log.info("VulkanRenderer.init: Allocated VulkanRenderer struct", .{});
 
     // Initialize basic fields early so they are available for subsequent calls
     self.allocator = allocator;
     self.window = window;
+
+    std.log.debug("VulkanRenderer.init: Step 2 - Initializing Vulkan handle fields to safe defaults...", .{});
 
     // Explicitly initialize all Vulkan handle fields to safe default values to prevent
     // garbage memory crashes in deinit() if init() fails partway through, and in
@@ -191,6 +197,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     self.swapchain_format = .b8g8r8a8_srgb;
     self.swapchain_images = &.{};
     self.swapchain_views = &.{};
+    self.swapchain_extent = .{ .width = 1920, .height = 1080 };
     self.render_color_image = .null_handle;
     self.render_color_memory = .null_handle;
     self.render_color_view = .null_handle;
@@ -215,10 +222,16 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     self.chunk_data_buffers = &.{};
     self.chunk_data_memories = &.{};
 
-    // 1. Load Base Wrapper using getProcAddr helper (ptrcasts the result, not the function pointer)
+    inline for (0..8) |i| {
+        self.deferred_deletions[i] = .{
+            .items = &[_]ChunkMeshBuffer{},
+            .capacity = 0,
+        };
+    }
+
+    std.log.debug("VulkanRenderer.init: Step 3 - Loading Vulkan BaseWrapper...", .{});
     self.vkb = BaseWrapper.load(getProcAddr);
 
-    // 2. Create Instance with validation layers and portability enumeration
     const app_info = vk.ApplicationInfo{
         .p_application_name = "Terrafinity",
         .application_version = vk.makeApiVersion(0, 1, 0, 0).toU32(),
@@ -231,14 +244,19 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     var enabled_layers: std.ArrayList([*:0]const u8) = .empty;
     defer enabled_layers.deinit(allocator);
 
+    std.log.debug("VulkanRenderer.init: Step 4 - Enumerating Vulkan instance layer properties...", .{});
     const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
     defer allocator.free(layers);
+
+    var has_validation_layer: bool = false;
     for (layers) |layer| {
         const name = std.mem.sliceTo(&layer.layer_name, 0);
         if (std.mem.eql(u8, name, "VK_LAYER_KHRONOS_validation")) {
             try enabled_layers.append(allocator, "VK_LAYER_KHRONOS_validation");
+            has_validation_layer = true;
         }
     }
+    std.log.debug("VulkanRenderer.init: Step 4 - Validation layer available: {}", .{has_validation_layer});
 
     // Get required Vulkan instance extensions from wio and check for portability enumeration
     var extension_names: std.ArrayList([*:0]const u8) = .empty;
@@ -246,10 +264,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     // Add wio's required Vulkan instance extensions
     const wio_extensions = wio.getRequiredVulkanInstanceExtensions();
+    std.log.debug("VulkanRenderer.init: Step 5 - wio requires {} Vulkan instance extensions", .{wio_extensions.len});
     for (wio_extensions) |ext| {
         try extension_names.append(allocator, ext);
     }
 
+    std.log.debug("VulkanRenderer.init: Step 5 - Enumerating Vulkan instance extension properties...", .{});
     var has_portability = false;
     const extensions = try self.vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
     defer allocator.free(extensions);
@@ -260,6 +280,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
             has_portability = true;
         }
     }
+    std.log.debug("VulkanRenderer.init: Step 5 - Extension count after adding wio and portability: {}, has_portability={}", .{extension_names.items.len, has_portability});
 
     const instance_create_info = vk.InstanceCreateInfo{
         .s_type = .instance_create_info,
@@ -271,12 +292,16 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
         .pp_enabled_extension_names = if (extension_names.items.len > 0) @ptrCast(extension_names.items.ptr) else null,
     };
 
+    std.log.debug("VulkanRenderer.init: Step 6 - Creating Vulkan instance with createInfo...", .{});
     self.instance_handle = try self.vkb.createInstance(&instance_create_info, null);
+    std.log.debug("VulkanRenderer.init: Step 6 - Created Vulkan instance handle={any}", .{self.instance_handle});
+    std.log.info("VulkanRenderer.init: Created Vulkan instance successfully", .{});
+
+    std.log.debug("VulkanRenderer.init: Step 7 - Creating InstanceWrapper...", .{});
 
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
     errdefer allocator.destroy(instance_wrapper_ptr);
 
-    // Use getProcAddr to load InstanceWrapper (as in wio-vulkan example)
     instance_wrapper_ptr.* = InstanceWrapper.load(self.instance_handle, getProcAddr);
     self.instance_wrapper = instance_wrapper_ptr;
     self.instance = InstanceProxy.init(self.instance_handle, instance_wrapper_ptr);
@@ -284,23 +309,29 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     // 3. Create Surface from window using wio's vkCreateSurface
     var surface: vk.SurfaceKHR = .null_handle;
+    std.log.debug("VulkanRenderer.init: Step 8 - Creating Vulkan surface from window...", .{});
     const result: vk.Result = @enumFromInt(window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface)));
-    if (result != .success) return error.SurfaceCreationFailed;
+    if (result != .success) {
+        std.log.err("VulkanRenderer.init: Failed to create Vulkan surface with result: {any}", .{result});
+        return error.SurfaceCreationFailed;
+    }
     self.surface = surface;
     errdefer self.instance.destroySurfaceKHR(self.surface, null);
+    std.log.debug("VulkanRenderer.init: Step 8 - Created Vulkan surface handle={any}", .{self.surface});
+    std.log.info("VulkanRenderer.init: Created Vulkan surface successfully", .{});
 
-    // 4. Select Physical Device
+    std.log.debug("VulkanRenderer.init: Step 9 - Enumerating physical devices...", .{});
     var pdev_count: u32 = 0;
-    _ = try self.instance.enumeratePhysicalDevices( &pdev_count, null);
+    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
 
     const pdevs = try allocator.alloc(vk.PhysicalDevice, pdev_count);
     defer allocator.free(pdevs);
 
-    _ = try self.instance.enumeratePhysicalDevices( &pdev_count, pdevs.ptr);
+    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, pdevs.ptr);
 
+    std.log.debug("VulkanRenderer.init: Step 10 - Found {} physical devices, selecting best...", .{pdev_count});
     var selected_pdev: vk.PhysicalDevice = .null_handle;
     for (pdevs) |pdev| {
-        // Check if device supports required features
         var features12 = vk.PhysicalDeviceVulkan12Features{
             .buffer_device_address = .true,
             .descriptor_indexing = .true,
@@ -316,9 +347,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
         if (features2.features.multi_draw_indirect == .true and
             features12.buffer_device_address == .true and
-            features12.descriptor_indexing == .true) {
-
-            // Check for swapchain support - first verify surface is supported by this physical device's queue families
+            features12.descriptor_indexing == .true)
+        {
             var has_graphics = false;
             var has_present = false;
             const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
@@ -354,16 +384,25 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     }
 
     if (selected_pdev == .null_handle) {
+        std.log.err("VulkanRenderer.init: Step 10 - No suitable physical device found", .{});
         return error.NoSuitablePhysicalDevice;
     }
 
     self.pdev = selected_pdev;
-    self.props = self.instance.getPhysicalDeviceProperties(self.pdev);
+    std.log.debug("VulkanRenderer.init: Step 10 - Selected physical device handle={any}", .{self.pdev});
+
+    const props = self.instance.getPhysicalDeviceProperties(self.pdev);
+    self.props = props;
+
+    const device_name = std.mem.sliceTo(&props.device_name, 0);
+    std.log.debug("VulkanRenderer.init: Step 11 - Selected physical device name: '{s}'", .{device_name});
+    std.log.info("VulkanRenderer.init: Selected physical device: {s}", .{device_name});
 
     // 5. Create Logical Device with Required Features
     const queue_priorities = [_]f32{1.0};
 
     // Find graphics and present queue families
+    std.log.debug("VulkanRenderer.init: Step 12 - Enumerating queue family properties...", .{});
     var graphics_family: u32 = 0;
     var present_family: u32 = 0;
 
@@ -384,6 +423,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     self.queue_family_index = graphics_family;
     self.present_queue_family_index = present_family;
+
+    std.log.debug("VulkanRenderer.init: Step 12 - Graphics queue family index: {}, Present queue family index: {}", .{graphics_family, present_family});
 
     const device_extensions = [_][*:0]const u8{
         vk.extensions.khr_swapchain.name,
@@ -438,13 +479,19 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
         .p_next = @ptrCast(&features),
     };
 
-
+    std.log.debug("VulkanRenderer.init: Step 13 - Creating logical device with createInfo...", .{});
     self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
+    std.log.debug("VulkanRenderer.init: Step 13 - Created logical device handle={any}", .{self.dev_handle});
+    std.log.info("VulkanRenderer.init: Created logical device successfully", .{});
+
+    std.log.debug("VulkanRenderer.init: Step 14 - Creating DeviceWrapper...", .{});
 
     const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
     errdefer allocator.destroy(dev_wrapper_ptr);
 
-    dev_wrapper_ptr.* = DeviceWrapper.load(self.dev_handle, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+    // Get vkGetDeviceProcAddr via the instance wrapper's dispatch
+    const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
+    dev_wrapper_ptr.* = DeviceWrapper.load(self.dev_handle, gdpa);
     self.dev_wrapper = dev_wrapper_ptr;
     self.dev = DeviceProxy.init(self.dev_handle, dev_wrapper_ptr);
     errdefer {
@@ -456,6 +503,9 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
             for (self.swapchain_views) |view| {
                 if (view != .null_handle) self.dev.destroyImageView(view, null);
             }
+            if (self.upload_command_pool != .null_handle) {
+                self.dev.destroyCommandPool(self.upload_command_pool, null);
+            }
             for (self.image_acquired_semaphores) |sem| {
                 if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
             }
@@ -465,11 +515,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
             for (self.in_flight_fences) |fence| {
                 if (fence != .null_handle) self.dev.destroyFence(fence, null);
             }
-            self.allocator.free(self.image_acquired_semaphores);
-            self.allocator.free(self.render_complete_semaphores);
-            self.allocator.free(self.in_flight_fences);
-            self.allocator.free(self.swapchain_images);
-            self.allocator.free(self.swapchain_views);
             self.dev.destroySwapchainKHR(self.swapchain, null);
         }
         if (self.render_color_view != .null_handle) {
@@ -499,48 +544,82 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
         if (self.descriptor_pool != .null_handle) {
             self.dev.destroyDescriptorPool(self.descriptor_pool, null);
         }
-        if (self.indirect_draw_buffer != .null_handle) {
-            self.dev.destroyBuffer(self.indirect_draw_buffer, null);
+        if (self.indirect_draw_buffers.len > 0) {
+            for (self.indirect_draw_buffers) |buf| {
+                if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+            }
         }
-        if (self.indirect_draw_memory != .null_handle) {
-            self.dev.freeMemory(self.indirect_draw_memory, null);
+        if (self.indirect_draw_memories.len > 0) {
+            for (self.indirect_draw_memories) |mem| {
+                if (mem != .null_handle) self.dev.freeMemory(mem, null);
+            }
         }
-        if (self.chunk_data_buffer != .null_handle) {
-            self.dev.destroyBuffer(self.chunk_data_buffer, null);
+        if (self.chunk_data_buffers.len > 0) {
+            for (self.chunk_data_buffers) |buf| {
+                if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+            }
         }
-        if (self.chunk_data_memory != .null_handle) {
-            self.dev.freeMemory(self.chunk_data_memory, null);
+        if (self.chunk_data_memories.len > 0) {
+            for (self.chunk_data_memories) |mem| {
+                if (mem != .null_handle) self.dev.freeMemory(mem, null);
+            }
         }
         self.dev.destroyDevice(null);
     }
 
+    std.log.debug("VulkanRenderer.init: Step 15 - Getting graphics and present queues...", .{});
     self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
     if (graphics_family == present_family) {
         self.present_queue = self.graphics_queue;
+        std.log.debug("VulkanRenderer.init: Step 15 - Graphics and present queue are the same", .{});
     } else {
         self.present_queue = self.dev.getDeviceQueue(present_family, 0);
+        std.log.debug("VulkanRenderer.init: Step 15 - Graphics queue={any}, Present queue={any}", .{self.graphics_queue, self.present_queue});
     }
 
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
     // 6. Create Command Pool
+    std.log.debug("VulkanRenderer.init: Step 16 - Creating command pool...", .{});
     const pool_info = vk.CommandPoolCreateInfo{
         .flags = .{ .reset_command_buffer_bit = true },
         .queue_family_index = graphics_family,
     };
-    self.command_pool = try self.dev.createCommandPool( &pool_info, null);
+    self.command_pool = try self.dev.createCommandPool(&pool_info, null);
+    std.log.debug("VulkanRenderer.init: Step 16 - Created command pool handle={any}", .{self.command_pool});
+
+    // 6b. Create Upload Command Pool for thread-safe buffer uploads (transient + reset)
+    std.log.debug("VulkanRenderer.init: Step 17 - Creating upload command pool...", .{});
+    const upload_pool_info = vk.CommandPoolCreateInfo{
+        .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
+        .queue_family_index = graphics_family,
+    };
+    self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
+    std.log.debug("VulkanRenderer.init: Step 17 - Created upload command pool handle={any}", .{self.upload_command_pool});
 
     // 7. Initialize Swapchain
+    std.log.debug("VulkanRenderer.init: Step 18 - Initializing swapchain...", .{});
     try self.createSwapchain();
+    std.log.debug("VulkanRenderer.init: Step 18 - Swapchain created successfully", .{});
 
     // 8. Setup Descriptor Sets and Pipeline
+    std.log.debug("VulkanRenderer.init: Step 19 - Creating descriptor set layout...", .{});
     try self.createDescriptorSetLayout();
+    std.log.debug("VulkanRenderer.init: Step 19 - Descriptor set layout created successfully", .{});
+    std.log.debug("VulkanRenderer.init: Step 20 - Creating descriptor pool and sets...", .{});
     try self.createDescriptorPoolAndSets();
+    std.log.debug("VulkanRenderer.init: Step 20 - Descriptor pool and sets created successfully", .{});
+    std.log.debug("VulkanRenderer.init: Step 21 - Creating opaque pipeline...", .{});
     try self.createPipeline();
+    std.log.debug("VulkanRenderer.init: Step 21 - Opaque pipeline created successfully", .{});
+    std.log.debug("VulkanRenderer.init: Step 22 - Creating transparent pipeline...", .{});
     try self.createTransparentPipeline();
+    std.log.debug("VulkanRenderer.init: Step 22 - Transparent pipeline created successfully", .{});
 
     // 9. Initialize Buffers
+    std.log.debug("VulkanRenderer.init: Step 23 - Allocating indirect buffers...", .{});
     try self.allocateIndirectBuffers();
+    std.log.debug("VulkanRenderer.init: Step 23 - Indirect buffers allocated successfully", .{});
 
     self.queue_family_index = graphics_family;
     self.present_queue_family_index = present_family;
@@ -575,74 +654,91 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     self.meshes.deinit(io, self.allocator);
 
-    if (self.indirect_draw_buffer != .null_handle) {
-        self.dev.destroyBuffer( self.indirect_draw_buffer, null);
+    // Clean up deferred deletion queues
+    inline for (0..8) |i| {
+        var dq = &self.deferred_deletions[i];
+        for (dq.items) |mesh| {
+            if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
+            if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
+        }
+        dq.deinit(self.allocator);
     }
-    if (self.indirect_draw_memory != .null_handle) {
-        self.dev.freeMemory( self.indirect_draw_memory, null);
+
+    // Destroy per-frame indirect and chunk data buffers
+    for (self.indirect_draw_buffers) |buf| {
+        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
     }
-    if (self.chunk_data_buffer != .null_handle) {
-        self.dev.destroyBuffer( self.chunk_data_buffer, null);
+    self.allocator.free(self.indirect_draw_buffers);
+    for (self.indirect_draw_memories) |mem| {
+        if (mem != .null_handle) self.dev.freeMemory(mem, null);
     }
-    if (self.chunk_data_memory != .null_handle) {
-        self.dev.freeMemory( self.chunk_data_memory, null);
+    self.allocator.free(self.indirect_draw_memories);
+
+    for (self.chunk_data_buffers) |buf| {
+        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
     }
+    self.allocator.free(self.chunk_data_buffers);
+    for (self.chunk_data_memories) |mem| {
+        if (mem != .null_handle) self.dev.freeMemory(mem, null);
+    }
+    self.allocator.free(self.chunk_data_memories);
 
     // Destroy swapchain resources first (images, views, semaphores, fences, swapchain)
     if (self.swapchain != .null_handle) {
         for (self.swapchain_views) |view| {
-            self.dev.destroyImageView( view, null);
+            self.dev.destroyImageView(view, null);
         }
 
         // Destroy synchronization primitives
         for (self.image_acquired_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
         }
         for (self.render_complete_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
         }
         for (self.in_flight_fences) |fence| {
-            if (fence != .null_handle) self.dev.destroyFence( fence, null);
+            if (fence != .null_handle) self.dev.destroyFence(fence, null);
         }
 
-        self.allocator.free(self.image_acquired_semaphores);
-        self.allocator.free(self.render_complete_semaphores);
-        self.allocator.free(self.in_flight_fences);
+        if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
+        if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
+        if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
 
-        self.allocator.free(self.swapchain_images);
-        self.allocator.free(self.swapchain_views);
-        self.dev.destroySwapchainKHR( self.swapchain, null);
+        if (self.swapchain_images.len > 0) self.allocator.free(self.swapchain_images);
+        if (self.swapchain_views.len > 0) self.allocator.free(self.swapchain_views);
+        self.dev.destroySwapchainKHR(self.swapchain, null);
     }
 
     // Destroy render target images and views (dynamic rendering has no separate memory)
     if (self.render_color_view != .null_handle) {
-        self.dev.destroyImageView( self.render_color_view, null);
+        self.dev.destroyImageView(self.render_color_view, null);
     }
     if (self.render_depth_view != .null_handle) {
-        self.dev.destroyImageView( self.render_depth_view, null);
+        self.dev.destroyImageView(self.render_depth_view, null);
     }
     if (self.render_color_image != .null_handle) {
-        self.dev.destroyImage( self.render_color_image, null);
+        self.dev.destroyImage(self.render_color_image, null);
     }
     if (self.render_depth_image != .null_handle) {
-        self.dev.destroyImage( self.render_depth_image, null);
+        self.dev.destroyImage(self.render_depth_image, null);
     }
 
     // Destroy pipeline and descriptor resources
     if (self.pipeline != .null_handle) {
-        self.dev.destroyPipeline( self.pipeline, null);
+        self.dev.destroyPipeline(self.pipeline, null);
     }
     if (self.transparent_pipeline != .null_handle) {
-        self.dev.destroyPipeline( self.transparent_pipeline, null);
+        self.dev.destroyPipeline(self.transparent_pipeline, null);
     }
+
     if (self.pipeline_layout != .null_handle) {
-        self.dev.destroyPipelineLayout( self.pipeline_layout, null);
+        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
     }
     if (self.descriptor_set_layout != .null_handle) {
-        self.dev.destroyDescriptorSetLayout( self.descriptor_set_layout, null);
+        self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
     }
     if (self.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool( self.descriptor_pool, null);
+        self.dev.destroyDescriptorPool(self.descriptor_pool, null);
     }
 
     // Destroy dummy texture resources
@@ -650,25 +746,43 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.destroySampler(self.dummy_sampler, null);
     }
     if (self.dummy_view != .null_handle) {
-        self.dev.destroyImageView( self.dummy_view, null);
+        self.dev.destroyImageView(self.dummy_view, null);
     }
     if (self.dummy_image != .null_handle) {
-        self.dev.destroyImage( self.dummy_image, null);
+        self.dev.destroyImage(self.dummy_image, null);
     }
     if (self.dummy_memory != .null_handle) {
-        self.dev.freeMemory( self.dummy_memory, null);
+        self.dev.freeMemory(self.dummy_memory, null);
     }
 
-    // Destroy command pool last among device resources (destroys all allocated command buffers)
+    // Destroy command buffers first
+    if (self.cmd_buffers.len > 0) {
+        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
+    }
+
+    // Destroy command pools last among device resources (destroys all allocated command buffers)
     if (self.command_pool != .null_handle) {
-        self.dev.destroyCommandPool( self.command_pool, null);
+        self.dev.destroyCommandPool(self.command_pool, null);
+        self.command_pool = .null_handle;
+    }
+    if (self.upload_command_pool != .null_handle) {
+        self.dev.destroyCommandPool(self.upload_command_pool, null);
+        self.upload_command_pool = .null_handle;
     }
 
     self.dev.destroyDevice(null);
-    self.instance_wrapper = undefined;
-    self.dev_wrapper = undefined;
-    self.instance.destroySurfaceKHR(self.surface, null);
-    self.instance.destroyInstance(null);
+    if (self.instance_wrapper) |wrapper| {
+        self.instance.destroyInstance(null);
+        self.allocator.destroy(wrapper);
+        self.instance_wrapper = null;
+    }
+    if (self.dev_wrapper) |wrapper| {
+        self.allocator.destroy(wrapper);
+        self.dev_wrapper = null;
+    }
+    if (self.surface != .null_handle) {
+        self.instance.destroySurfaceKHR(self.surface, null);
+    }
 
     self.allocator.destroy(self);
 }
@@ -703,16 +817,10 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
     // 1. Create Staging Buffer
     var staging_buffer: vk.Buffer = .null_handle;
     var staging_memory: vk.DeviceMemory = .null_handle;
-    try self.createBuffer(
-        buffer_size,
-        .{ .transfer_src_bit = true },
-        .{ .host_visible_bit = true, .host_coherent_bit = true },
-        &staging_buffer,
-        &staging_memory
-    );
+    try self.createBuffer(buffer_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer, &staging_memory);
     defer {
-        if (staging_buffer != .null_handle) self.dev.destroyBuffer( staging_buffer, null);
-        if (staging_memory != .null_handle) self.dev.freeMemory( staging_memory, null);
+        if (staging_buffer != .null_handle) self.dev.destroyBuffer(staging_buffer, null);
+        if (staging_memory != .null_handle) self.dev.freeMemory(staging_memory, null);
     }
 
     // 2. Map & Copy
@@ -720,6 +828,16 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
     const mapped_slice = @as([*]u8, @ptrCast(data))[0..buffer_size];
     const src_slice = std.mem.sliceAsBytes(faces);
     @memcpy(mapped_slice, src_slice);
+
+    // Ensure host writes are visible to device even with host_coherent_bit
+    // for weaker drivers that may require explicit synchronization
+    const mapped_range = vk.MappedMemoryRange{
+        .memory = staging_memory,
+        .offset = 0,
+        .size = buffer_size,
+    };
+    _ = self.dev.flushMappedMemoryRanges(&[_]vk.MappedMemoryRange{mapped_range}) catch {};
+
     self.dev.unmapMemory(staging_memory);
 
     // 3. Create Device Local Buffer with Shader Device Address bit
@@ -758,7 +876,7 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
         .p_next = @ptrCast(&alloc_flags),
     };
 
-    memory = try self.dev.allocateMemory( &alloc_info, null);
+    memory = try self.dev.allocateMemory(&alloc_info, null);
     try self.dev.bindBufferMemory(buffer, memory, 0);
 
     // 4. Copy Staging -> Device
@@ -777,19 +895,17 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
         .face_count = @intCast(faces.len),
     };
 
-    self.meshes_lock.lockUncancelable(io);
-    defer self.meshes_lock.unlock(io);
-
     const existing = try self.meshes.fetchPut(io, self.allocator, key, mesh_buffer);
     if (existing) |e| {
-        self.destroyChunkMesh(e);
+        // Queue for deferred deletion to avoid GPU use-after-free
+        const frame_idx = self.current_frame_idx.load(.monotonic) % @as(u32, @intCast(self.deferred_deletions.len));
+        _ = self.deferred_deletions[frame_idx].append(self.allocator, e) catch |err| switch (err) {
+            error.OutOfMemory => std.log.err("uploadMesh: Out of memory appending to deferred deletion queue", .{}),
+        };
     }
 }
 
 pub fn remove(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) void {
-    self.meshes_lock.lockUncancelable(io);
-    defer self.meshes_lock.unlock(io);
-
     if (self.meshes.fetchRemove(io, key)) |mesh| {
         self.destroyChunkMesh(mesh);
     }
@@ -797,13 +913,25 @@ pub fn remove(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) void {
 
 fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    self.remove(io, .{ .@"opaque" = chunk_pos });
-    self.remove(io, .{ .transparent = chunk_pos });
+
+    // Fetch and queue for deferred deletion instead of immediate destroy
+    if (self.meshes.fetchRemove(io, .{ .@"opaque" = chunk_pos })) |mesh| {
+        const frame_idx = self.current_frame_idx.load(.monotonic) % @as(u32, @intCast(self.deferred_deletions.len));
+        _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
+            error.OutOfMemory => std.log.err("vtableRemoveChunk: Out of memory appending to deferred deletion queue", .{}),
+        };
+    }
+    if (self.meshes.fetchRemove(io, .{ .transparent = chunk_pos })) |mesh| {
+        const frame_idx = self.current_frame_idx.load(.monotonic) % @as(u32, @intCast(self.deferred_deletions.len));
+        _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
+            error.OutOfMemory => std.log.err("vtableRemoveChunk: Out of memory appending to deferred deletion queue", .{}),
+        };
+    }
 }
 
 fn destroyChunkMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer) void {
-    if (mesh.buffer != .null_handle) self.dev.destroyBuffer( mesh.buffer, null);
-    if (mesh.memory != .null_handle) self.dev.freeMemory( mesh.memory, null);
+    if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
+    if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
 }
 
 // --- Drawing & Multi-Draw Indirect ---
@@ -811,27 +939,47 @@ fn destroyChunkMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer) void {
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
 
+    std.log.debug("vtableDrawChunks: ENTER - Starting chunk drawing...", .{});
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
+    // Get current frame index atomically to prevent data races
+    std.log.debug("vtableDrawChunks: Step 1 - Loading current frame index...", .{});
+    const current_frame = self.current_frame_idx.load(.monotonic);
+
     // Wait for previous frame to complete
-    var fences_wait: [1]vk.Fence = .{self.in_flight_fences[self.current_frame_idx]};
+    std.log.debug("vtableDrawChunks: Step 2 - Waiting for previous frame fences to complete...", .{});
+    const prev_frame_idx = (current_frame + self.in_flight_fences.len - 1) % @as(u32, @intCast(self.in_flight_fences.len));
+    var fences_wait: [1]vk.Fence = .{self.in_flight_fences[prev_frame_idx]};
     if (self.dev.waitForFences(&fences_wait, .true, std.math.maxInt(u64))) |res| {
         if (res != .success) return error.DrawFailed;
     } else |_| return error.DrawFailed;
 
+    // Process deferred deletions from the previous frame
+    std.log.debug("vtableDrawChunks: Step 3 - Processing deferred deletions from previous frame queue...", .{});
+    const prev_deletion_queue_idx = prev_frame_idx % @as(u32, @intCast(self.deferred_deletions.len));
+
+    var deletion_queue = &self.deferred_deletions[prev_deletion_queue_idx];
+    for (deletion_queue.items) |mesh| {
+        if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
+        if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
+    }
+    deletion_queue.clearRetainingCapacity();
+
     // Reset fence for this frame
-    var fences_reset: [1]vk.Fence = .{self.in_flight_fences[self.current_frame_idx]};
+    std.log.debug("vtableDrawChunks: Step 4 - Resetting fences for current frame...", .{});
+    var fences_reset: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
     _ = self.dev.resetFences(&fences_reset) catch |err| switch (err) {
         else => {},
     };
 
     // Acquire next swapchain image
+    std.log.debug("vtableDrawChunks: Step 5 - Acquiring next swapchain image...", .{});
     var image_index: u32 = 0;
     const acquire_result_res = self.dev.acquireNextImageKHR(
         self.swapchain,
         std.math.maxInt(u64),
-        self.image_acquired_semaphores[self.current_frame_idx],
+        self.image_acquired_semaphores[current_frame],
         .null_handle, // Fence not used when semaphore is provided
     ) catch |err| switch (err) {
         else => return error.DrawFailed,
@@ -842,16 +990,17 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         self.createSwapchain() catch |err| switch (err) {
             else => {},
         };
-        image_index = self.current_frame_idx % @as(u32, @intCast(self.swapchain_images.len));
+        image_index = current_frame % @as(u32, @intCast(self.swapchain_images.len));
     } else if (acquire_result_res.result != .success) {
         return error.DrawFailed;
     } else {
         image_index = acquire_result_res.image_index;
     }
 
-    const cmd_buffer = self.cmd_buffers[self.current_frame_idx];
+    const cmd_buffer = self.cmd_buffers[current_frame];
 
     // Calculate projection/view math
+    std.log.debug("vtableDrawChunks: Step 6 - Calculating projection/view math...", .{});
     const aspect = @as(f32, @floatFromInt(self.viewport_pixels[0])) / @as(f32, @floatFromInt(self.viewport_pixels[1]));
 
     self.render_options_lock.lockSharedUncancelable(io);
@@ -863,11 +1012,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     // Create view matrix using lookAtRH
     const viewpos_f32: @Vector(3, f32) = @floatCast(viewpos);
     const eye_vec = zm.vec.Vec3f{ .data = [3]f32{ viewpos_f32[0], viewpos_f32[1], viewpos_f32[2] } };
-    const target_vec = zm.vec.Vec3f{ .data = [3]f32{
-        viewpos_f32[0] + self.camera_front[0],
-        viewpos_f32[1] + self.camera_front[1],
-        viewpos_f32[2] + self.camera_front[2]
-    } };
+    const target_vec = zm.vec.Vec3f{ .data = [3]f32{ viewpos_f32[0] + self.camera_front[0], viewpos_f32[1] + self.camera_front[1], viewpos_f32[2] + self.camera_front[2] } };
     const up_vec = zm.vec.Vec3f{ .data = [3]f32{ cameraUp[0], cameraUp[1], cameraUp[2] } };
 
     const view = zm.matrix.Mat4f.lookAtRH(eye_vec, target_vec, up_vec);
@@ -882,13 +1027,14 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0)))))));
 
     // Sun direction (directional light)
-    const sun_angle = @rem(@as(f128, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f128, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360), 360.0);
+    const sun_angle = @rem(@as(f64, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f64, @max(0.001, day_length_sec)) * @as(f64, @floatFromInt(std.time.ns_per_s))) / 360.0), 360.0);
     const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
     const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
     const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
 
     // Begin Command Buffer
+    std.log.debug("vtableDrawChunks: Step 7 - Beginning command buffer...", .{});
     const begin_info = vk.CommandBufferBeginInfo{
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
@@ -898,6 +1044,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     };
 
     // Begin Dynamic Rendering with depth attachment for reversed-Z support
+    std.log.debug("vtableDrawChunks: Step 8 - Beginning dynamic rendering with color and depth attachments...", .{});
     const color_attachment = vk.RenderingAttachmentInfo{
         .s_type = .rendering_attachment_info,
         .image_view = self.render_color_view,
@@ -932,9 +1079,11 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .p_depth_attachment = &depth_attachment,
         .p_stencil_attachment = null,
     };
+    std.log.debug("vtableDrawChunks: Step 9 - Calling cmdBeginRendering...", .{});
     self.dev.cmdBeginRendering(cmd_buffer, &render_info);
 
     // Bind Opaque Pipeline
+    std.log.debug("vtableDrawChunks: Step 10 - Binding opaque pipeline...", .{});
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
 
     // Set viewport and scissor (dynamic states)
@@ -969,6 +1118,25 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         null,
     );
 
+    // Update chunk data SSBO buffer for current frame (must be done after binding descriptor sets)
+    const chunk_data_write = vk.WriteDescriptorSet{
+        .dst_set = self.global_descriptor_set,
+        .dst_binding = 0,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .storage_buffer,
+        .p_image_info = undefined,
+        .p_buffer_info = @ptrCast(&.{vk.DescriptorBufferInfo{
+            .buffer = self.chunk_data_buffers[current_frame],
+            .offset = 0,
+            .range = vk.WHOLE_SIZE,
+        }}),
+
+        .p_texel_buffer_view = undefined,
+    };
+
+    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{chunk_data_write}, null);
+
     // Push Constants
     var pc = PushConstants{
         .projview = std.mem.zeroes([16]f32),
@@ -982,31 +1150,29 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         pc.projview[i] = @as([16]f32, @bitCast(projview))[i];
     }
 
-    self.dev.cmdPushConstants(
-        cmd_buffer,
-        self.pipeline_layout,
-        .{ .vertex_bit = true, .fragment_bit = true },
-        0,
-        @sizeOf(PushConstants),
-        @ptrCast(&pc)
-    );
+    self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&pc));
 
     // Draw Opaque and Transparent passes
+    std.log.debug("vtableDrawChunks: Step 12 - Extracting frustum planes...", .{});
     const frustum = Frustum.extractFrustumPlanes(projview);
 
     // Draw opaque chunks with opaque pipeline (already bound)
+    std.log.debug("vtableDrawChunks: Step 13 - Drawing opaque chunks...", .{});
     self.drawChunksReal(io, cmd_buffer, viewpos, frustum, false) catch |err| switch (err) {
         else => return error.DrawFailed,
-    };// Opaque
+    }; // Opaque
 
     // Bind transparent pipeline for transparent rendering (depth_write_enable = .false)
+    std.log.debug("vtableDrawChunks: Step 14 - Binding transparent pipeline...", .{});
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.transparent_pipeline);
 
     // Draw transparent chunks with transparent pipeline
+    std.log.debug("vtableDrawChunks: Step 15 - Drawing transparent chunks...", .{});
     self.drawChunksReal(io, cmd_buffer, viewpos, frustum, true) catch |err| switch (err) {
         else => return error.DrawFailed,
-    };  // Transparent
+    }; // Transparent
 
+    std.log.debug("vtableDrawChunks: Step 16 - Calling cmdEndRendering...", .{});
     self.dev.cmdEndRendering(cmd_buffer);
 
     // Copy render color image to swapchain image for presentation - include in main command buffer
@@ -1073,13 +1239,13 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     copy_region_arr[0] = copy_region;
 
     self.dev.cmdCopyImage(
-            cmd_buffer,
-            self.render_color_image,
-            .transfer_src_optimal,
-            self.swapchain_images[image_index],
-            .transfer_dst_optimal,
-            &copy_region_arr,
-        );
+        cmd_buffer,
+        self.render_color_image,
+        .transfer_src_optimal,
+        self.swapchain_images[image_index],
+        .transfer_dst_optimal,
+        &copy_region_arr,
+    );
 
     // Transition swapchain image to present_src_khr
     const present_barrier = vk.ImageMemoryBarrier{
@@ -1121,44 +1287,56 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 
     self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_return_barrier}));
 
+    std.log.debug("vtableDrawChunks: Step 17 - Ending command buffer...", .{});
     self.dev.endCommandBuffer(cmd_buffer) catch |err| switch (err) {
         else => return error.DrawFailed,
     };
 
     // Submit to queue with synchronization primitives
+    std.log.debug("vtableDrawChunks: Step 18 - Submitting command buffer to graphics queue...", .{});
     const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true, .transfer_bit = true }};
+
+    const wait_semaphores: [1]vk.Semaphore = .{self.image_acquired_semaphores[current_frame]};
+
+    // Include OpenGL ready semaphore if available
+    const signal_semaphores: [1]vk.Semaphore = .{self.render_complete_semaphores[current_frame]};
 
     const submit_info = vk.SubmitInfo{
         .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&self.image_acquired_semaphores[self.current_frame_idx]),
+        .p_wait_semaphores = @ptrCast(&wait_semaphores),
         .p_wait_dst_stage_mask = &wait_stages,
         .command_buffer_count = 1,
         .p_command_buffers = @ptrCast(&cmd_buffer),
         .signal_semaphore_count = 1,
-        .p_signal_semaphores = @ptrCast(&self.render_complete_semaphores[self.current_frame_idx]),
+        .p_signal_semaphores = @ptrCast(&signal_semaphores),
     };
 
-    self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[self.current_frame_idx]) catch |err| switch (err) {
+    std.log.debug("vtableDrawChunks: Step 19 - Calling queueSubmit...", .{});
+    self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame]) catch |err| switch (err) {
         else => return error.DrawFailed,
     };
 
     // Prepare present info
+    std.log.debug("vtableDrawChunks: Step 20 - Preparing present info...", .{});
     const present_info = vk.PresentInfoKHR{
         .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[self.current_frame_idx]),
+        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
         .p_image_indices = &[_]u32{image_index},
         .p_results = undefined,
     };
 
+    std.log.debug("vtableDrawChunks: Step 21 - Calling queuePresentKHR...", .{});
     const present_result = self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
         else => return error.DrawFailed,
     };
 
     // Advance to next frame or recreate swapchain if needed
+    std.log.debug("vtableDrawChunks: Step 22 - Advancing to next frame or recreating swapchain...", .{});
     if (present_result == .success) {
-        self.current_frame_idx = (self.current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
+        const next_frame = (current_frame + 1) % @as(u32, @intCast(self.in_flight_fences.len));
+        self.current_frame_idx.store(next_frame, .monotonic);
     } else if (present_result == vk.Result.error_out_of_date_khr or present_result == vk.Result.suboptimal_khr) {
         // Swapchain is out of date - recreate it on next frame
         self.createSwapchain() catch |create_err| switch (create_err) {
@@ -1168,20 +1346,17 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 }
 
 fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffer, playerPos: @Vector(3, f64), frustum: Frustum, is_transparent: bool) !void {
+    const frame_idx = self.current_frame_idx.load(.monotonic);
+    const indirect_mapped = try self.dev.mapMemory(self.indirect_draw_memories[frame_idx], 0, vk.WHOLE_SIZE, .{});
+    defer self.dev.unmapMemory(self.indirect_draw_memories[frame_idx]);
 
-    const indirect_mapped = try self.dev.mapMemory(self.indirect_draw_memory, 0, vk.WHOLE_SIZE, .{});
-    defer self.dev.unmapMemory(self.indirect_draw_memory);
-
-    const chunk_data_mapped = try self.dev.mapMemory(self.chunk_data_memory, 0, vk.WHOLE_SIZE, .{});
-    defer self.dev.unmapMemory(self.chunk_data_memory);
+    const chunk_data_mapped = try self.dev.mapMemory(self.chunk_data_memories[frame_idx], 0, vk.WHOLE_SIZE, .{});
+    defer self.dev.unmapMemory(self.chunk_data_memories[frame_idx]);
 
     var indirect_cmds: [*]vk.DrawIndirectCommand = @ptrCast(@alignCast(indirect_mapped));
     var chunk_data: [*]ChunkData = @ptrCast(@alignCast(chunk_data_mapped));
 
     var draw_count: u32 = 0;
-
-    self.meshes_lock.lockUncancelable(io);
-    defer self.meshes_lock.unlock(io);
 
     // For transparent sorting, collect data first then sort
     if (is_transparent) {
@@ -1213,7 +1388,8 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
                 // Calculate distance squared from player for sorting (back-to-front)
                 var dist_sq: f64 = 0;
                 inline for (0..3) |i| {
-                    dist_sq += std.math.pow(f64, chunk_blockpos[i] - playerPos[i], 2);
+                    const diff = chunk_blockpos[i] - playerPos[i];
+                    dist_sq += diff * diff;
                 }
 
                 if (trans_count < transparent_draws.len) {
@@ -1323,38 +1499,66 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
     );
 
     // Multi-Draw Indirect
-    self.dev.cmdDrawIndirect(
-        cmd_buffer,
-        self.indirect_draw_buffer,
-        0,
-        draw_count,
-        @sizeOf(vk.DrawIndirectCommand)
-    );
+    self.dev.cmdDrawIndirect(cmd_buffer, self.indirect_draw_buffers[frame_idx], 0, draw_count, @sizeOf(vk.DrawIndirectCommand));
 }
 
 // --- Helpers & Boilerplate ---
 
 fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
+    const num_frames = self.swapchain_images.len;
+
+    // Allocate per-frame indirect draw buffers
+    self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
+    @memset(self.indirect_draw_buffers, .null_handle);
+    errdefer {
+        if (self.indirect_draw_buffers.len > 0) self.allocator.free(self.indirect_draw_buffers);
+        self.indirect_draw_buffers = &.{};
+    }
+    self.indirect_draw_memories = try self.allocator.alloc(vk.DeviceMemory, num_frames);
+    @memset(self.indirect_draw_memories, .null_handle);
+    errdefer {
+        for (self.indirect_draw_memories) |mem| {
+            if (mem != .null_handle) self.dev.freeMemory(mem, null);
+        }
+        self.allocator.free(self.indirect_draw_memories);
+        if (self.indirect_draw_memories.len > 0) self.allocator.free(self.indirect_draw_memories);
+        self.indirect_draw_memories = &.{};
+    }
+
     const indirect_size = @as(vk.DeviceSize, @intCast(self.max_draw_count)) * @sizeOf(vk.DrawIndirectCommand);
-    try self.createBuffer(
-        indirect_size,
-        .{ .indirect_buffer_bit = true },
-        .{ .host_visible_bit = true, .host_coherent_bit = true },
-        &self.indirect_draw_buffer,
-        &self.indirect_draw_memory
-    );
+    for (0..num_frames) |i| {
+        try self.createBuffer(indirect_size, .{ .indirect_buffer_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &self.indirect_draw_buffers[i], &self.indirect_draw_memories[i]);
+    }
+
+    // Allocate per-frame chunk data buffers (SSBO)
+    self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
+    errdefer {
+        for (self.chunk_data_buffers) |buf| {
+            if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+        }
+        self.allocator.free(self.chunk_data_buffers);
+    }
+    self.chunk_data_memories = try self.allocator.alloc(vk.DeviceMemory, num_frames);
+    errdefer {
+        for (self.chunk_data_memories) |mem| {
+            if (mem != .null_handle) self.dev.freeMemory(mem, null);
+        }
+        self.allocator.free(self.chunk_data_memories);
+    }
 
     const chunk_data_size = @as(vk.DeviceSize, @intCast(self.max_draw_count)) * @sizeOf(ChunkData);
-    try self.createBuffer(
-        chunk_data_size,
-        .{ .storage_buffer_bit = true }, // SSBO
-        .{ .host_visible_bit = true, .host_coherent_bit = true },
-        &self.chunk_data_buffer,
-        &self.chunk_data_memory
-    );
+    for (0..num_frames) |i| {
+        try self.createBuffer(chunk_data_size, .{ .storage_buffer_bit = true }, // SSBO
+            .{ .host_visible_bit = true, .host_coherent_bit = true }, &self.chunk_data_buffers[i], &self.chunk_data_memories[i]);
+    }
 }
 
 fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, buffer: *vk.Buffer, memory: *vk.DeviceMemory) !void {
+    // Prevent creating 0-byte buffers which is invalid in Vulkan
+    if (size == 0) {
+        return error.InvalidBufferSize;
+    }
+
     const buffer_info = vk.BufferCreateInfo{
         .flags = .{},
         .size = size,
@@ -1370,18 +1574,18 @@ fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsag
         .allocation_size = mem_reqs.size,
         .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, properties),
     };
-    memory.* = try self.dev.allocateMemory( &alloc_info, null);
+    memory.* = try self.dev.allocateMemory(&alloc_info, null);
     try self.dev.bindBufferMemory(buffer.*, memory.*, 0);
 }
 
 fn copyBuffer(self: *VulkanRenderer, src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize) !void {
     const alloc_info = vk.CommandBufferAllocateInfo{
         .level = .primary,
-        .command_pool = self.command_pool,
+        .command_pool = self.upload_command_pool,
         .command_buffer_count = 1,
     };
     var cmd: vk.CommandBuffer = undefined;
-    try self.dev.allocateCommandBuffers( &alloc_info, @ptrCast(&cmd));
+    try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
 
     const begin_info = vk.CommandBufferBeginInfo{
         .flags = .{ .one_time_submit_bit = true },
@@ -1408,9 +1612,8 @@ fn copyBuffer(self: *VulkanRenderer, src: vk.Buffer, dst: vk.Buffer, size: vk.De
         .p_signal_semaphores = undefined,
     };
     try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
-    try self.dev.queueWaitIdle(self.graphics_queue);
 
-    self.dev.freeCommandBuffers(self.command_pool, &[_]vk.CommandBuffer{cmd});
+    self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
 }
 
 fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
@@ -1428,13 +1631,16 @@ fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos) bool {
     const cpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
     const cpos_f32 = @as(@Vector(3, f32), @floatCast(cpos));
     const scale = ChunkPos.toScale(chunkpos.level);
-    const radius = 16.0 * std.math.sqrt(3.0) * scale;
+    // sqrt(3) as a compile-time constant to avoid per-chunk recalculation
+    const sqrt_3: f32 = @floatCast(std.math.sqrt(3.0));
+    const radius = 16.0 * sqrt_3 * scale;
     const center = cpos_f32 + @as(@Vector(3, f32), @splat(16.0 * scale));
     return !frustum.sphereInFrustum(center, radius);
 }
 
 fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
-    const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
+    // Negated focal length for Vulkan's Y-down clip space
+    const f: f32 = -1.0 / @tan(fovY_radians / 2.0);
     return .{
         .data = .{
             .{
@@ -1473,7 +1679,7 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
 
     // Destroy old swapchain images and views
     for (self.swapchain_views) |view| {
-        if (view != .null_handle) self.dev.destroyImageView( view, null);
+        if (view != .null_handle) self.dev.destroyImageView(view, null);
     }
     self.allocator.free(self.swapchain_images);
     self.swapchain_images = &.{};
@@ -1489,73 +1695,90 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
 
     // Destroy synchronization primitives
     for (self.image_acquired_semaphores) |sem| {
-        if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     }
     for (self.render_complete_semaphores) |sem| {
-        if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     }
     for (self.in_flight_fences) |fence| {
-        if (fence != .null_handle) self.dev.destroyFence( fence, null);
+        if (fence != .null_handle) self.dev.destroyFence(fence, null);
     }
-    self.allocator.free(self.image_acquired_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
-    self.allocator.free(self.in_flight_fences);
+    if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
+    if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
+    if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
     self.image_acquired_semaphores = &.{};
     self.render_complete_semaphores = &.{};
     self.in_flight_fences = &.{};
 
     // Destroy render target images, views, and memory
     if (self.render_color_view != .null_handle) {
-        self.dev.destroyImageView( self.render_color_view, null);
+        self.dev.destroyImageView(self.render_color_view, null);
         self.render_color_view = .null_handle;
     }
     if (self.render_depth_view != .null_handle) {
-        self.dev.destroyImageView( self.render_depth_view, null);
+        self.dev.destroyImageView(self.render_depth_view, null);
         self.render_depth_view = .null_handle;
     }
     if (self.render_color_image != .null_handle) {
-        self.dev.destroyImage( self.render_color_image, null);
+        self.dev.destroyImage(self.render_color_image, null);
         self.render_color_image = .null_handle;
     }
     if (self.render_color_memory != .null_handle) {
-        self.dev.freeMemory( self.render_color_memory, null);
+        self.dev.freeMemory(self.render_color_memory, null);
         self.render_color_memory = .null_handle;
     }
     if (self.render_depth_image != .null_handle) {
-        self.dev.destroyImage( self.render_depth_image, null);
+        self.dev.destroyImage(self.render_depth_image, null);
         self.render_depth_image = .null_handle;
     }
     if (self.render_depth_memory != .null_handle) {
-        self.dev.freeMemory( self.render_depth_memory, null);
+        self.dev.freeMemory(self.render_depth_memory, null);
         self.render_depth_memory = .null_handle;
     }
 }
 
 fn createSwapchain(self: *VulkanRenderer) !void {
+    std.log.info("VulkanRenderer.createSwapchain: Starting swapchain creation...", .{});
+    std.log.debug("VulkanRenderer.createSwapchain: Step 1 - Getting physical device surface capabilities...", .{});
+
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
+    std.log.debug("VulkanRenderer.createSwapchain: Step 1 - Got surface capabilities. current_extent={{width={}, height={}}}", .{caps.current_extent.width, caps.current_extent.height});
 
     const old_swapchain = self.swapchain;
 
     // Clean up old swapchain resources before creating new ones
+    std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Checking if old swapchain resources need cleanup...", .{});
     if (old_swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
+        std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Cleaning up old swapchain resources...", .{});
         self.destroyOldSwapchainResources();
     }
+    std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Old swapchain resources destroyed", .{});
+
 
     var actual_extent = self.swapchain_extent;
+    std.log.debug("VulkanRenderer.createSwapchain: Step 3 - Determining actual swapchain extent...", .{});
     if (caps.current_extent.width != 0xFFFF_FFFF) {
         actual_extent = caps.current_extent;
     } else {
+        // Clamp to a reasonable maximum to avoid OutOfDeviceMemory (max 3840x2160)
+        const max_extent = vk.Extent2D{
+            .width = @min(caps.max_image_extent.width, 3840),
+            .height = @min(caps.max_image_extent.height, 2160),
+        };
         actual_extent = .{
-            .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
-            .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
+            .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, max_extent.width),
+            .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, max_extent.height),
         };
     }
 
     self.swapchain_extent = actual_extent;
+    std.log.debug("VulkanRenderer.createSwapchain: Step 3 - Set swapchain extent to {{width={}, height={}}}", .{actual_extent.width, actual_extent.height});
 
     // Find surface format
+    std.log.debug("VulkanRenderer.createSwapchain: Step 4 - Enumerating physical device surface formats...", .{});
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
+    std.log.debug("VulkanRenderer.createSwapchain: Step 4 - Found {} surface formats", .{surface_formats.len});
 
     var surface_format: vk.SurfaceFormatKHR = surface_formats[0];
     for (surface_formats) |sfmt| {
@@ -1565,10 +1788,13 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         }
     }
     self.swapchain_format = surface_format.format;
+    std.log.debug("VulkanRenderer.createSwapchain: Step 4 - Selected surface format: {any}", .{self.swapchain_format});
 
     // Find present mode
+    std.log.debug("VulkanRenderer.createSwapchain: Step 5 - Enumerating physical device surface present modes...", .{});
     const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(present_modes);
+    std.log.debug("VulkanRenderer.createSwapchain: Step 5 - Found {} present modes", .{present_modes.len});
 
     var present_mode: vk.PresentModeKHR = .fifo_khr;
     for (present_modes) |pm| {
@@ -1577,17 +1803,20 @@ fn createSwapchain(self: *VulkanRenderer) !void {
             break;
         }
     }
+    std.log.debug("VulkanRenderer.createSwapchain: Step 5 - Selected present mode: {any}", .{present_mode});
 
     var image_count = caps.min_image_count + 1;
     if (caps.max_image_count > 0) {
         image_count = @min(image_count, caps.max_image_count);
     }
+    std.log.debug("VulkanRenderer.createSwapchain: Step 6 - Calculated swapchain image count: {}", .{image_count});
 
     const qfi = [_]u32{ self.queue_family_index, self.present_queue_family_index };
     const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index)
         .concurrent
     else
         .exclusive;
+    std.log.debug("VulkanRenderer.createSwapchain: Step 6 - Queue family indices: graphics={}, present={}; sharing_mode: {any}", .{self.queue_family_index, self.present_queue_family_index, sharing_mode});
 
     errdefer {
         if (old_swapchain != .null_handle) {
@@ -1595,6 +1824,7 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         }
     }
 
+    std.log.debug("VulkanRenderer.createSwapchain: Step 7 - Creating swapchain KHR...", .{});
     self.swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
         .min_image_count = image_count,
@@ -1612,23 +1842,31 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         .clipped = .true,
         .old_swapchain = old_swapchain,
     }, null);
-
+    std.log.debug("VulkanRenderer.createSwapchain: Step 7 - Created swapchain handle={any}", .{self.swapchain});
     if (old_swapchain != .null_handle) {
+        std.log.debug("VulkanRenderer.createSwapchain: Step 7 - Destroying old swapchain handle={any}", .{old_swapchain});
         self.dev.destroySwapchainKHR(old_swapchain, null);
     }
 
     // Create swapchain images and views
-    const swap_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
-    defer self.allocator.free(swap_images);
+    std.log.debug("VulkanRenderer.createSwapchain: Step 8 - Getting swapchain images...", .{});
+    self.swapchain_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
+    errdefer {
+        self.allocator.free(self.swapchain_images);
+        self.swapchain_images = &.{};
+    }
 
-    self.swapchain_images = try self.allocator.alloc(vk.Image, swap_images.len);
-    errdefer self.allocator.free(self.swapchain_images);
-    @memcpy(self.swapchain_images, swap_images);
+    self.swapchain_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
+    @memset(self.swapchain_views, .null_handle);
+    errdefer {
+        for (self.swapchain_views) |view| {
+            if (view != .null_handle) self.dev.destroyImageView(view, null);
+        }
+        self.allocator.free(self.swapchain_views);
+        self.swapchain_views = &.{};
+    }
 
-    self.swapchain_views = try self.allocator.alloc(vk.ImageView, swap_images.len);
-    errdefer self.allocator.free(self.swapchain_views);
-
-    for (swap_images, 0..) |image, i| {
+    for (self.swapchain_images, 0..) |image, i| {
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},
             .image = image,
@@ -1643,46 +1881,56 @@ fn createSwapchain(self: *VulkanRenderer) !void {
                 .layer_count = 1,
             },
         };
-        self.swapchain_views[i] = try self.dev.createImageView( &view_info, null);
+        self.swapchain_views[i] = try self.dev.createImageView(&view_info, null);
     }
 
     // Create swapchain synchronization primitives
     const num_swapchain_images = self.swapchain_images.len;
 
     self.image_acquired_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
+    @memset(self.image_acquired_semaphores, .null_handle);
     errdefer {
         for (self.image_acquired_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
         }
-        self.allocator.free(self.image_acquired_semaphores);
+        if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
+        self.image_acquired_semaphores = &.{};
     }
 
     self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
+    @memset(self.render_complete_semaphores, .null_handle);
     errdefer {
         for (self.render_complete_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore( sem, null);
+            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
         }
-        self.allocator.free(self.render_complete_semaphores);
+        if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
+        self.render_complete_semaphores = &.{};
     }
 
+    std.log.debug("created semaphores", .{});
     self.in_flight_fences = try self.allocator.alloc(vk.Fence, num_swapchain_images);
+    @memset(self.in_flight_fences, .null_handle);
     errdefer {
         for (self.in_flight_fences) |fence| {
-            if (fence != .null_handle) self.dev.destroyFence( fence, null);
+            if (fence != .null_handle) self.dev.destroyFence(fence, null);
         }
-        self.allocator.free(self.in_flight_fences);
+        if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
+        self.in_flight_fences = &.{};
     }
 
-    const semaphore_create_info = vk.SemaphoreCreateInfo{.flags = .{}};
+    const semaphore_create_info = vk.SemaphoreCreateInfo{ .flags = .{} };
     const fence_create_info = vk.FenceCreateInfo{
         .flags = .{ .signaled_bit = true },
     };
+    std.log.debug("created semaphore and fence info", .{});
 
     for (0..num_swapchain_images) |i| {
         self.image_acquired_semaphores[i] = try self.dev.createSemaphore(&semaphore_create_info, null);
         self.render_complete_semaphores[i] = try self.dev.createSemaphore(&semaphore_create_info, null);
         self.in_flight_fences[i] = try self.dev.createFence(&fence_create_info, null);
     }
+    std.log.debug("created semaphores and fences", .{});
+
 
     // Create swapchain command buffers
     const cmd_alloc_info = vk.CommandBufferAllocateInfo{
@@ -1690,42 +1938,52 @@ fn createSwapchain(self: *VulkanRenderer) !void {
         .level = .primary,
         .command_buffer_count = @intCast(num_swapchain_images),
     };
+    std.log.debug("allocating command buffers", .{});
+
     self.cmd_buffers = try self.allocator.alloc(vk.CommandBuffer, num_swapchain_images);
     errdefer self.allocator.free(self.cmd_buffers);
     try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
+    std.log.debug("allocated command buffers", .{});
 
     // Create render target images for dynamic rendering with depth support
-    try self.createRenderTargets(actual_extent);
+    self.createRenderTargets(actual_extent) catch |err| {
+        std.log.err("createRenderTargets failed: {}", .{err});
+        return err;
+    };
 }
 
 fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 1 - Starting render targets creation for extent {{width={}, height={}}}", .{extent.width, extent.height});
+
     // Destroy existing render targets if any
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 1a - Cleaning up existing render targets...", .{});
     if (self.render_color_view != .null_handle) {
-        self.dev.destroyImageView( self.render_color_view, null);
+        self.dev.destroyImageView(self.render_color_view, null);
         self.render_color_view = .null_handle;
     }
     if (self.render_depth_view != .null_handle) {
-        self.dev.destroyImageView( self.render_depth_view, null);
+        self.dev.destroyImageView(self.render_depth_view, null);
         self.render_depth_view = .null_handle;
     }
     if (self.render_color_image != .null_handle) {
-        self.dev.destroyImage( self.render_color_image, null);
+        self.dev.destroyImage(self.render_color_image, null);
         self.render_color_image = .null_handle;
     }
     if (self.render_color_memory != .null_handle) {
-        self.dev.freeMemory( self.render_color_memory, null);
+        self.dev.freeMemory(self.render_color_memory, null);
         self.render_color_memory = .null_handle;
     }
     if (self.render_depth_image != .null_handle) {
-        self.dev.destroyImage( self.render_depth_image, null);
+        self.dev.destroyImage(self.render_depth_image, null);
         self.render_depth_image = .null_handle;
     }
     if (self.render_depth_memory != .null_handle) {
-        self.dev.freeMemory( self.render_depth_memory, null);
+        self.dev.freeMemory(self.render_depth_memory, null);
         self.render_depth_memory = .null_handle;
     }
 
     // Create color image
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 2 - Creating color image...", .{});
     const color_image_info = vk.ImageCreateInfo{
         .flags = .{},
         .image_type = .@"2d",
@@ -1742,17 +2000,22 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .p_queue_family_indices = undefined,
     };
 
-    self.render_color_image = try self.dev.createImage( &color_image_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 2 - Creating color image handle...", .{});
+    self.render_color_image = try self.dev.createImage(&color_image_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 2 - Created color image handle={any}", .{self.render_color_image});
 
     const color_mem_reqs = self.dev.getImageMemoryRequirements(self.render_color_image);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 2 - Color image memory requirements: size={}, type_bits={}", .{color_mem_reqs.size, color_mem_reqs.memory_type_bits});
     const color_alloc_info = vk.MemoryAllocateInfo{
         .allocation_size = color_mem_reqs.size,
         .memory_type_index = self.findMemoryType(color_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    self.render_color_memory = try self.dev.allocateMemory( &color_alloc_info, null);
-    try self.dev.bindImageMemory( self.render_color_image, self.render_color_memory, 0);
+    self.render_color_memory = try self.dev.allocateMemory(&color_alloc_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 2 - Allocated color image memory={any}, binding to image...", .{self.render_color_memory});
+    try self.dev.bindImageMemory(self.render_color_image, self.render_color_memory, 0);
 
     // Transition color image to color_attachment_optimal
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 3 - Transitioning color image to color_attachment_optimal...", .{});
     {
         const cmd = try self.beginSingleTimeCommands();
         defer self.endSingleTimeCommands(cmd) catch {};
@@ -1778,6 +2041,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     }
 
     // Create color image view
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 4 - Creating color image view...", .{});
     const color_view_info = vk.ImageViewCreateInfo{
         .flags = .{},
         .image = self.render_color_image,
@@ -1792,11 +2056,22 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
             .layer_count = 1,
         },
     };
-    self.render_color_view = try self.dev.createImageView( &color_view_info, null);
+    self.render_color_view = try self.dev.createImageView(&color_view_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 4 - Created color image view={any}", .{self.render_color_view});
 
     // Create depth image (D32_SFLOAT for reversed-Z support)
     const depth_format: vk.Format = .d32_sfloat_s8_uint;
 
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 5 - Checking if depth format {any} is supported...", .{depth_format});
+    // Check if depth format is supported as a depth-stencil attachment
+    const depth_format_props = self.instance.getPhysicalDeviceFormatProperties(self.pdev, depth_format);
+    if (!(depth_format_props.optimal_tiling_features.depth_stencil_attachment_bit)) {
+        std.log.err("createRenderTargets: depth format {any} not supported as depth-stencil attachment", .{depth_format});
+        return error.DepthFormatNotSupported;
+    }
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 5 - Depth format {any} is supported", .{depth_format});
+
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 6 - Creating depth image...", .{});
     const depth_image_info = vk.ImageCreateInfo{
         .flags = .{},
         .image_type = .@"2d",
@@ -1813,17 +2088,21 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         .p_queue_family_indices = undefined,
     };
 
-    self.render_depth_image = try self.dev.createImage( &depth_image_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 6 - Creating depth image handle...", .{});
+    self.render_depth_image = try self.dev.createImage(&depth_image_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 6 - Created depth image handle={any}", .{self.render_depth_image});
 
     const depth_mem_reqs = self.dev.getImageMemoryRequirements(self.render_depth_image);
     const depth_alloc_info = vk.MemoryAllocateInfo{
         .allocation_size = depth_mem_reqs.size,
         .memory_type_index = self.findMemoryType(depth_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    self.render_depth_memory = try self.dev.allocateMemory( &depth_alloc_info, null);
-    try self.dev.bindImageMemory( self.render_depth_image, self.render_depth_memory, 0);
+    self.render_depth_memory = try self.dev.allocateMemory(&depth_alloc_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 6 - Allocated depth image memory={any}, binding to image...", .{self.render_depth_memory});
+    try self.dev.bindImageMemory(self.render_depth_image, self.render_depth_memory, 0);
 
     // Transition depth image to depth_stencil_attachment_optimal
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 7 - Transitioning depth image to depth_stencil_attachment_optimal...", .{});
     {
         const cmd = try self.beginSingleTimeCommands();
         defer self.endSingleTimeCommands(cmd) catch {};
@@ -1849,6 +2128,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     }
 
     // Create depth image view
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 8 - Creating depth image view...", .{});
     const depth_view_info = vk.ImageViewCreateInfo{
         .flags = .{},
         .image = self.render_depth_image,
@@ -1863,15 +2143,19 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
             .layer_count = 1,
         },
     };
-    self.render_depth_view = try self.dev.createImageView( &depth_view_info, null);
+    self.render_depth_view = try self.dev.createImageView(&depth_view_info, null);
+    std.log.debug("VulkanRenderer.createRenderTargets: Step 8 - Created depth image view={any}", .{self.render_depth_view});
 
-    std.log.info("Created render targets: color image {}, depth image {}\n", .{ self.render_color_image, self.render_depth_image });
+    std.log.info("VulkanRenderer.createRenderTargets: SUCCESS - Created render targets: color image {any}, depth image {any}\n", .{ self.render_color_image, self.render_depth_image });
 }
 
 // --- Descriptor Set Layout and Pipeline ---
 
 fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
+    std.log.debug("VulkanRenderer.createDescriptorSetLayout: Step 1 - Creating descriptor set layout...", .{});
+
     // Binding 0: SSBO for Chunk Data (Multi-Draw Indirect)
+    std.log.debug("VulkanRenderer.createDescriptorSetLayout: Step 1 - Configuring binding 0: SSBO for Chunk Data...", .{});
     const chunk_data_binding = vk.DescriptorSetLayoutBinding{
         .binding = 0,
         .descriptor_type = .storage_buffer,
@@ -1881,6 +2165,7 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
     };
 
     // Binding 1: Texture Array for block textures
+    std.log.debug("VulkanRenderer.createDescriptorSetLayout: Step 1 - Configuring binding 1: Texture Array for block textures...", .{});
     const texture_array_binding = vk.DescriptorSetLayoutBinding{
         .binding = 1,
         .descriptor_type = .combined_image_sampler,
@@ -1897,10 +2182,13 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
         .p_bindings = @ptrCast(&bindings),
     };
 
+    std.log.debug("VulkanRenderer.createDescriptorSetLayout: Step 2 - Creating descriptor set layout with {} bindings...", .{bindings.len});
     self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorSetLayout: Step 2 - Created descriptor set layout handle={any}", .{self.descriptor_set_layout});
 }
 
 fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Creating descriptor pool...", .{});
     const pool_sizes = [_]vk.DescriptorPoolSize{
         .{ .type = .storage_buffer, .descriptor_count = 1 },
         .{ .type = .combined_image_sampler, .descriptor_count = 1 },
@@ -1913,8 +2201,11 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         .p_pool_sizes = @ptrCast(&pool_sizes),
     };
 
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Creating descriptor pool with {} sizes, max_sets=1...", .{pool_sizes.len});
     self.descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Created descriptor pool handle={any}", .{self.descriptor_pool});
 
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 2 - Allocating descriptor sets...", .{});
     const alloc_info = vk.DescriptorSetAllocateInfo{
         .descriptor_pool = self.descriptor_pool,
         .descriptor_set_count = 1,
@@ -1922,24 +2213,25 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     };
 
     var desc_sets: [1]vk.DescriptorSet = undefined;
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 3 - Allocating {} descriptor sets...", .{alloc_info.descriptor_set_count});
     try self.dev.allocateDescriptorSets(&alloc_info, &desc_sets);
     self.global_descriptor_set = desc_sets[0];
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 3 - Allocated global descriptor set handle={any}", .{self.global_descriptor_set});
 
-    // Write Binding 0 (The Chunk Data SSBO) to the descriptor set once here
-    const chunk_data_write = vk.WriteDescriptorSet{
+    // Write Binding 0 (The Chunk Data SSBO) - will be updated per-frame with chunk_data_buffers[current_frame_idx]
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 4 - Writing binding 0: Chunk Data SSBO...", .{});
+    const chunk_data_write_init = vk.WriteDescriptorSet{
         .dst_set = self.global_descriptor_set,
         .dst_binding = 0,
         .dst_array_element = 0,
         .descriptor_count = 1,
         .descriptor_type = .storage_buffer,
         .p_image_info = undefined,
-        .p_buffer_info = @ptrCast(&.{
-            vk.DescriptorBufferInfo{
-                .buffer = self.chunk_data_buffer,
-                .offset = 0,
-                .range = vk.WHOLE_SIZE,
-            }
-        }),
+        .p_buffer_info = @ptrCast(@alignCast(&.{vk.DescriptorBufferInfo{
+            .buffer = .null_handle, // Placeholder, will be updated per-frame
+            .offset = 0,
+            .range = vk.WHOLE_SIZE,
+        }})),
         .p_texel_buffer_view = undefined,
     };
 
@@ -1951,13 +2243,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
 
     var staging_buffer_dummy: vk.Buffer = .null_handle;
     var staging_memory_dummy: vk.DeviceMemory = .null_handle;
-    try self.createBuffer(
-        @as(vk.DeviceSize, 4),
-        .{ .transfer_src_bit = true },
-        .{ .host_visible_bit = true, .host_coherent_bit = true },
-        &staging_buffer_dummy,
-        &staging_memory_dummy
-    );
+    try self.createBuffer(@as(vk.DeviceSize, 4), .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer_dummy, &staging_memory_dummy);
 
     const dummy_data = try self.dev.mapMemory(staging_memory_dummy, 0, @as(vk.DeviceSize, 4), .{});
     @memcpy(@as([*]u8, @ptrCast(dummy_data))[0..4], &dummy_white_pixel);
@@ -1980,6 +2266,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     };
 
     self.dummy_image = try self.dev.createImage(&dummy_image_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 5 - Created dummy image handle={any}", .{self.dummy_image});
 
     const dummy_mem_reqs = self.dev.getImageMemoryRequirements(self.dummy_image);
     const dummy_alloc_info = vk.MemoryAllocateInfo{
@@ -1987,9 +2274,11 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         .memory_type_index = self.findMemoryType(dummy_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
     self.dummy_memory = try self.dev.allocateMemory(&dummy_alloc_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 5 - Allocated dummy image memory={any}, binding to image...", .{self.dummy_memory});
     try self.dev.bindImageMemory(self.dummy_image, self.dummy_memory, 0);
 
     // Transition layout and copy data
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 6 - Transitioning dummy image layout and copying data...", .{});
     {
         const cmd = try self.beginSingleTimeCommands();
         defer self.endSingleTimeCommands(cmd) catch {};
@@ -2032,7 +2321,6 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
 
         self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, self.dummy_image, .transfer_dst_optimal, &copy_region_arr);
 
-
         // Transition to shader_read_only_optimal
         barrier.old_layout = .transfer_dst_optimal;
         barrier.new_layout = .shader_read_only_optimal;
@@ -2059,7 +2347,9 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     };
 
     self.dummy_view = try self.dev.createImageView(&dummy_view_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 7 - Created dummy image view handle={any}", .{self.dummy_view});
 
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 8 - Creating dummy sampler...", .{});
     const sampler_info = vk.SamplerCreateInfo{
         .flags = .{},
         .mag_filter = .linear,
@@ -2080,6 +2370,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     };
 
     self.dummy_sampler = try self.dev.createSampler(&sampler_info, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 8 - Created dummy sampler handle={any}", .{self.dummy_sampler});
 
     texture_image_info_descriptor = vk.DescriptorImageInfo{
         .image_layout = .shader_read_only_optimal,
@@ -2088,9 +2379,11 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     };
 
     // Clean up staging buffer and memory
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 9 - Cleaning up staging buffer and memory...", .{});
     if (staging_buffer_dummy != .null_handle) self.dev.destroyBuffer(staging_buffer_dummy, null);
     if (staging_memory_dummy != .null_handle) self.dev.freeMemory(staging_memory_dummy, null);
 
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 10 - Writing binding 1: Texture Array...", .{});
     const texture_array_write = vk.WriteDescriptorSet{
         .dst_set = self.global_descriptor_set,
         .dst_binding = 1,
@@ -2102,10 +2395,13 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
         .p_texel_buffer_view = undefined,
     };
 
-    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{chunk_data_write, texture_array_write}, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 11 - Updating descriptor sets with {} writes...", .{2});
+    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{ chunk_data_write_init, texture_array_write }, null);
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: SUCCESS - Descriptor pool and sets created and updated", .{});
 }
 
 fn createPipeline(self: *VulkanRenderer) !void {
+    std.log.debug("VulkanRenderer.createPipeline: Step 1 - Creating pipeline layout...", .{});
     // Create Pipeline Layout
     const pc_range = vk.PushConstantRange{
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
@@ -2121,9 +2417,12 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .p_push_constant_ranges = @ptrCast(&pc_range),
     };
 
+    std.log.debug("VulkanRenderer.createPipeline: Step 1 - Creating pipeline layout with {} set layouts...", .{layout_info.set_layout_count});
     self.pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+    std.log.debug("VulkanRenderer.createPipeline: Step 1 - Created pipeline layout handle={any}", .{self.pipeline_layout});
 
     // Create Graphics Pipeline (Dynamic Rendering)
+    std.log.debug("VulkanRenderer.createPipeline: Step 2 - Creating graphics pipeline state create infos...", .{});
     const piasci = vk.PipelineInputAssemblyStateCreateInfo{
         .topology = .triangle_list,
         .primitive_restart_enable = .false,
@@ -2198,19 +2497,25 @@ fn createPipeline(self: *VulkanRenderer) !void {
     };
 
     // Create shader modules from embedded SPIR-V data
+    std.log.debug("VulkanRenderer.createPipeline: Step 3 - Creating vertex shader module (size={} bytes)...", .{vertex_shader_spv.len});
     const vert_shader_module_info = vk.ShaderModuleCreateInfo{
         .flags = .{},
         .code_size = vertex_shader_spv.len,
         .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)),
     };
+    std.log.debug("VulkanRenderer.createPipeline: Step 3 - Created vertex shader module handle...", .{});
     const vert_shader_module = try self.dev.createShaderModule(&vert_shader_module_info, null);
+    errdefer self.dev.destroyShaderModule(vert_shader_module, null);
 
+    std.log.debug("VulkanRenderer.createPipeline: Step 3 - Creating fragment shader module (size={} bytes)...", .{fragment_shader_spv.len});
     const frag_shader_module_info = vk.ShaderModuleCreateInfo{
         .flags = .{},
         .code_size = fragment_shader_spv.len,
         .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)),
     };
+    std.log.debug("VulkanRenderer.createPipeline: Step 3 - Created fragment shader module handle...", .{});
     const frag_shader_module = try self.dev.createShaderModule(&frag_shader_module_info, null);
+    errdefer self.dev.destroyShaderModule(frag_shader_module, null);
 
     // Create pipeline shader stage create info structures
     var pssci: [2]vk.PipelineShaderStageCreateInfo = undefined;
@@ -2271,6 +2576,7 @@ fn createPipeline(self: *VulkanRenderer) !void {
     };
 
     var pipeline: vk.Pipeline = undefined;
+    std.log.debug("VulkanRenderer.createPipeline: Step 4 - Creating graphics pipelines with {} create infos...", .{1});
     const result = self.dev.createGraphicsPipelines(
         .null_handle,
         &.{gpci},
@@ -2283,14 +2589,17 @@ fn createPipeline(self: *VulkanRenderer) !void {
         return err;
     }
 
+    std.log.debug("VulkanRenderer.createPipeline: Step 5 - Cleaning up shader modules after pipeline creation...", .{});
     // Clean up shader modules after pipeline creation
     self.dev.destroyShaderModule(vert_shader_module, null);
     self.dev.destroyShaderModule(frag_shader_module, null);
 
+    std.log.debug("VulkanRenderer.createPipeline: SUCCESS - Created opaque pipeline handle={any}", .{self.pipeline});
     self.pipeline = pipeline;
 }
 
 fn createTransparentPipeline(self: *VulkanRenderer) !void {
+    std.log.debug("VulkanRenderer.createTransparentPipeline: Step 1 - Creating transparent graphics pipeline state create infos...", .{});
     // Create Graphics Pipeline for Transparent Rendering (Dynamic Rendering)
     const piasci = vk.PipelineInputAssemblyStateCreateInfo{
         .topology = .triangle_list,
@@ -2366,6 +2675,7 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
     };
 
     // Create shader modules from embedded SPIR-V data (reuse existing ones if possible)
+    std.log.debug("VulkanRenderer.createTransparentPipeline: Step 2 - Creating vertex and fragment shader modules...", .{});
     const vert_shader_module_info = vk.ShaderModuleCreateInfo{
         .flags = .{},
         .code_size = vertex_shader_spv.len,
@@ -2439,6 +2749,7 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
     };
 
     var transparent_pipeline: vk.Pipeline = undefined;
+    std.log.debug("VulkanRenderer.createTransparentPipeline: Step 3 - Creating transparent graphics pipelines with {} create infos...", .{1});
     const result_transparent = self.dev.createGraphicsPipelines(
         .null_handle,
         &.{gpci_transparent},
@@ -2451,10 +2762,12 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         return err;
     }
 
+    std.log.debug("VulkanRenderer.createTransparentPipeline: Step 4 - Cleaning up shader modules after pipeline creation...", .{});
     // Clean up shader modules after pipeline creation
     self.dev.destroyShaderModule(vert_shader_module, null);
     self.dev.destroyShaderModule(frag_shader_module, null);
 
+    std.log.debug("VulkanRenderer.createTransparentPipeline: SUCCESS - Created transparent pipeline handle={any}", .{self.transparent_pipeline});
     self.transparent_pipeline = transparent_pipeline;
 }
 
@@ -2463,11 +2776,11 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
 pub fn beginSingleTimeCommands(self: *VulkanRenderer) !vk.CommandBuffer {
     const alloc_info = vk.CommandBufferAllocateInfo{
         .level = .primary,
-        .command_pool = self.command_pool,
+        .command_pool = self.upload_command_pool,
         .command_buffer_count = 1,
     };
     var cmd: vk.CommandBuffer = undefined;
-    try self.dev.allocateCommandBuffers( &alloc_info, @ptrCast(&cmd));
+    try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
 
     const begin_info = vk.CommandBufferBeginInfo{
         .flags = .{ .one_time_submit_bit = true },
@@ -2494,11 +2807,33 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, cmd: vk.CommandBuffer) !void
     try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
     try self.dev.queueWaitIdle(self.graphics_queue);
 
-    self.dev.freeCommandBuffers(self.command_pool, &[_]vk.CommandBuffer{cmd});
+    self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
+}
+
+pub fn present(self: *VulkanRenderer) !void {
+    const current_frame = self.current_frame_idx.load(.monotonic);
+
+    const wait_semaphores = &[_]vk.Semaphore{self.render_complete_semaphores[current_frame]};
+
+    const present_info = vk.PresentInfoKHR{
+        .wait_semaphore_count = @as(u32, @intCast(wait_semaphores.len)),
+        .p_wait_semaphores = @ptrCast(wait_semaphores.ptr),
+        .swapchain_count = 1,
+        .p_swapchains = @ptrCast(&self.swapchain),
+        .p_image_indices = &[_]u32{current_frame},
+        .p_results = undefined,
+    };
+
+    _ = self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
+        else => return error.VulkanPresentFailed,
+    };
 }
 
 // --- Boilerplate implementations required by VTable ---
-fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void { _ = userdata; _ = viewpos; }
+fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+    _ = userdata;
+    _ = viewpos;
+}
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.viewport_pixels = viewport_pixels;
@@ -2513,10 +2848,25 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
 }
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    self.meshes_lock.lock(io) catch return error.Canceled;
-    defer self.meshes_lock.unlock(io);
+
+    // Collect chunk positions first to avoid executing callback while holding iterator locks
+    // Use a fixed-size array to avoid dynamic allocation
+    var positions: [8192]ChunkPos = undefined;
+    var pos_count: usize = 0;
+
     var it = self.meshes.iterator();
     while (try it.next(io)) |entry| {
-        callback(callback_userdata, entry.key_ptr.*.toPos());
+        if (pos_count < positions.len) {
+            positions[pos_count] = entry.key_ptr.*.toPos();
+            pos_count += 1;
+        } else {
+            // Buffer full, can't add more
+            break;
+        }
+    }
+
+    // Execute callback outside the lock to prevent deadlock if callback modifies chunks
+    for (positions[0..pos_count]) |pos| {
+        callback(callback_userdata, pos);
     }
 }

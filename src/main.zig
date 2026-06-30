@@ -63,145 +63,232 @@ pub fn main(init: std.process.Init) !void {
     var events: wio.EventQueue = .empty;
     defer events.deinit();
 
-    const gl_options: wio.GlOptions = .{
-        .major_version = 4,
-        .minor_version = 5,
-        .profile = .core,
-        .forward_compatible = true,
-        .debug = builtin.mode == .Debug,
-        .samples = 4,
-        .alpha_bits = 0,
-    };
+    var window: wio.Window = undefined;
 
-    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gl_options, .event_fn_data = &events });
-    defer window.destroy();
+    if (!options.test_play) {
+        const gl_options: wio.GlOptions = .{
+            .major_version = 4,
+            .minor_version = 5,
+            .profile = .core,
+            .forward_compatible = true,
+            .debug = builtin.mode == .Debug,
+            .samples = 4,
+            .alpha_bits = 0,
+        };
 
-    if (!options.test_play) window.setMode(.maximized);
+        window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gl_options, .event_fn_data = &events });
+        defer window.destroy();
 
-    var ui_context = try window.glCreateContext(.{ .options = gl_options });
-    defer ui_context.destroy();
-    window.glMakeContextCurrent(ui_context);
+        window.setMode(.maximized);
 
-    var proc_table: gl.ProcTable = undefined;
-    if (!gl.ProcTable.init(&proc_table, wio.glGetProcAddress))
-        return error.FailedToInitProcTable;
-    gl.makeProcTableCurrent(&proc_table);
-    setCallback();
+        var ui_context = try window.glCreateContext(.{ .options = gl_options });
+        defer ui_context.destroy();
+        window.glMakeContextCurrent(ui_context);
 
-    var backend = try wio_backend.init(.{ .io = io, .window = window });
-    defer backend.deinit();
+        var proc_table: gl.ProcTable = undefined;
+        if (!gl.ProcTable.init(&proc_table, wio.glGetProcAddress))
+            return error.FailedToInitProcTable;
+        gl.makeProcTableCurrent(&proc_table);
+        setCallback();
 
-    var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
-    defer render_backend.deinit();
+        var backend = try wio_backend.init(.{ .io = io, .window = window });
+        defer backend.deinit();
 
-    var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
-    defer ui_window.deinit();
+        var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
+        defer render_backend.deinit();
 
-    try Ui.loadFonts(&ui_window);
+        var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
+        defer ui_window.deinit();
 
-    var keymap = Key.Map.init(gpa);
-    defer keymap.map.deinit();
+        try Ui.loadFonts(&ui_window);
 
-    var single_press = Key.Singlepress.empty;
-    //TODO load keymap from file
-    try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
-    try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
+        var keymap = Key.Map.init(gpa);
+        defer keymap.map.deinit();
 
-    single_press.insert(.escape_menu);
+        var single_press = Key.Singlepress.empty;
+        //TODO load keymap from file
+        try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
+        try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
 
-    try keymap.setActionKey(io, .{ .key = .w }, .forward);
-    try keymap.setActionKey(io, .{ .key = .s }, .backward);
-    try keymap.setActionKey(io, .{ .key = .a }, .left);
-    try keymap.setActionKey(io, .{ .key = .d }, .right);
-    try keymap.setActionKey(io, .{ .key = .space }, .up);
-    try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
-    try keymap.setActionKey(io, .{ .key = .mouse_left }, .use_item_primary);
-    try keymap.setActionKey(io, .{ .key = .mouse_right }, .use_item_secondary);
-    try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
+        single_press.insert(.escape_menu);
 
-    var game: Game = undefined;
-    if (options.test_play) {
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window);
-    }
-    var ui: Ui = .{
-        .proc_table = &proc_table,
-        .window = &window,
-        .config = &config,
-        .config_lock = &config_lock,
-        .game = &game,
-        .menu_state = if (options.test_play) .{ .ingame = true } else .{ .main = true },
-        .config_path = config_path,
-        .worlds_path = worlds_path,
-        .ui_context = &ui_context,
-        .gl_options = gl_options,
-        .running = &running,
-        .ui_window = &ui_window,
-        .menu_background = undefined,
-    };
-    try ui.initAssets(gpa);
-    defer ui.deinit();
+        try keymap.setActionKey(io, .{ .key = .w }, .forward);
+        try keymap.setActionKey(io, .{ .key = .s }, .backward);
+        try keymap.setActionKey(io, .{ .key = .a }, .left);
+        try keymap.setActionKey(io, .{ .key = .d }, .right);
+        try keymap.setActionKey(io, .{ .key = .space }, .up);
+        try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
+        try keymap.setActionKey(io, .{ .key = .mouse_left }, .use_item_primary);
+        try keymap.setActionKey(io, .{ .key = .mouse_right }, .use_item_secondary);
+        try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
 
-    defer if (ui.menu_state.ingame) game.deinit(io);
-    var frame_time: std.Io.Timestamp = .now(io, .awake);
-    var action_set = Key.ActionSet.empty;
-    while (running.load(.unordered)) {
-        wio.update();
-        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
-        if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
-        frame_time = .now(io, .awake);
-        if (ui.menu_state.ingame) {
-            try game.frame(io, gpa);
-            window.glMakeContextCurrent(ui_context);
-        }
-        {
-            const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
-            defer dw.end();
-            window.glMakeContextCurrent(ui_context);
-            try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-            var menu_changed: bool = false;
-            {
-                const ov = dvui.overlay(@src(), .{ .expand = .both });
-                defer ov.deinit();
+        var game: Game = undefined;
+        var ui: Ui = .{
+            .proc_table = &proc_table,
+            .window = &window,
+            .config = &config,
+            .config_lock = &config_lock,
+            .game = &game,
+            .menu_state = .{ .main = true },
+            .config_path = config_path,
+            .worlds_path = worlds_path,
+            .ui_context = &ui_context,
+            .gl_options = gl_options,
+            .running = &running,
+            .ui_window = &ui_window,
+            .menu_background = undefined,
+        };
+        try ui.initAssets(gpa);
+        defer ui.deinit();
 
-                if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
-                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
-                if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
-                if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
-                    var error_buffer: [65536]u8 = undefined;
-                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
+        var frame_time: std.Io.Timestamp = .now(io, .awake);
+        var action_set = Key.ActionSet.empty;
+        while (running.load(.unordered)) {
+            wio.update();
+            try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
+            if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
+            frame_time = .now(io, .awake);
 
-                    switch (err) {
-                        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-                        else => error_writer.print("{any}", .{err}) catch unreachable,
-                    }
+            if (ui.menu_state.ingame) {
+                // Update game state and submit Vulkan render commands first (includes Vulkan presentation via vkQueuePresentKHR)
+                try game.frame(io, gpa);
 
-                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
-                    break :err false;
-                };
-                if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
-                if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
-                    var error_buffer: [65536]u8 = undefined;
-                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
+                // Draw UI overlay on top of the 3D scene using OpenGL interop shared texture
+                const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+                defer dw.end();
 
-                    switch (err) {
-                        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
-                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                        else => error_writer.print("{any}", .{err}) catch unreachable,
-                    }
+                // Render dvui UI to the shared FBO that Vulkan will incorporate
+                try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+                var menu_changed: bool = false;
+                {
+                    const ov = dvui.overlay(@src(), .{ .expand = .both });
+                    defer ov.deinit();
 
-                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
-                    break :err false;
-                };
+                    if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
+                    if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
+                    if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
+                    if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
+                        var error_buffer: [65536]u8 = undefined;
+                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                        switch (err) {
+                            error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                            error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                            else => error_writer.print("{any}", .{err}) catch unreachable,
+                        }
+
+                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
+                        break :err false;
+                    };
+                    if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
+                    if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
+                        var error_buffer: [65536]u8 = undefined;
+                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                        switch (err) {
+                            error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                            else => error_writer.print("{any}", .{err}) catch unreachable,
+                        }
+
+                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
+                        break :err false;
+                    };
+                }
+                _ = try ui_window.end(.{});
+
+                // Vulkan already presented via vkQueuePresentKHR in game.frame() - no glSwapBuffers() needed here
+            } else {
+                // UI only mode: draw and present with OpenGL context for menus
+                const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+                defer dw.end();
+                try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+                var menu_changed: bool = false;
+                {
+                    const ov = dvui.overlay(@src(), .{ .expand = .both });
+                    defer ov.deinit();
+
+                    if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
+                    if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
+                        var error_buffer: [65536]u8 = undefined;
+                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                        switch (err) {
+                            error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                            error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                            else => error_writer.print("{any}", .{err}) catch unreachable,
+                        }
+
+                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
+                        break :err false;
+                    };
+                    if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
+                    if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
+                        var error_buffer: [65536]u8 = undefined;
+                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                        switch (err) {
+                            error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                            else => error_writer.print("{any}", .{err}) catch unreachable,
+                        }
+
+                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
+                        break :err false;
+                    };
+                }
+                _ = try ui_window.end(.{});
+
+                // Present with OpenGL context for menus
+                const sw = tracy.Zone.begin(.{ .src = @src(), .name = "swap" });
+                window.glSwapBuffers();
+                sw.end();
             }
-            _ = try ui_window.end(.{});
+            tracy.frameMark(null);
         }
+    } else {
+        // Pure Vulkan window for test_play mode
+        window = try wio.Window.create(.{ .title = "terrafinity", .event_fn_data = &events });
+        defer window.destroy();
 
-        const sw = tracy.Zone.begin(.{ .src = @src(), .name = "swap" });
-        window.glSwapBuffers();
-        sw.end();
-        tracy.frameMark(null);
+        var keymap = Key.Map.init(gpa);
+        defer keymap.map.deinit();
+
+        var single_press = Key.Singlepress.empty;
+        //TODO load keymap from file
+        try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
+        try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
+
+        single_press.insert(.escape_menu);
+
+        try keymap.setActionKey(io, .{ .key = .w }, .forward);
+        try keymap.setActionKey(io, .{ .key = .s }, .backward);
+        try keymap.setActionKey(io, .{ .key = .a }, .left);
+        try keymap.setActionKey(io, .{ .key = .d }, .right);
+        try keymap.setActionKey(io, .{ .key = .space }, .up);
+        try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
+        try keymap.setActionKey(io, .{ .key = .mouse_left }, .use_item_primary);
+        try keymap.setActionKey(io, .{ .key = .mouse_right }, .use_item_secondary);
+        try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
+
+        var game: Game = undefined;
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window);
+        defer game.deinit(io);
+
+        var frame_time: std.Io.Timestamp = .now(io, .awake);
+        var action_set = Key.ActionSet.empty;
+        while (running.load(.unordered)) {
+            wio.update();
+            try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events);
+            frame_time = .now(io, .awake);
+
+            // Update game state and submit Vulkan render commands (includes Vulkan presentation via vkQueuePresentKHR)
+            try game.frame(io, gpa);
+
+            tracy.frameMark(null);
+        }
     }
 }
 
@@ -306,6 +393,52 @@ fn handleEvents(
     }
     if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
     if (ui.menu_state.ingame) try ui.game.handleButtonActions(io, action_set, dt);
+}
+
+fn handleEventsGame(
+    io: std.Io,
+    key_map: *Key.Map,
+    single_press: Key.Singlepress,
+    action_set: *Key.ActionSet,
+    running: *std.atomic.Value(bool),
+    win: *wio.Window,
+    events: *wio.EventQueue,
+) !void {
+    win.enableRelativeMouse(.{ .unaccelerated = true });
+
+    //set all single press buttons like escape to false
+    var it = action_set.iterator();
+    while (it.next()) |action| {
+        if (single_press.contains(action)) action_set.remove(action);
+    }
+    {
+        while (events.pop()) |event| {
+            switch (event) {
+                .button_press => |key| {
+                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                    action_set.insert(action);
+                },
+                .button_release => |key| {
+                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                    action_set.remove(action);
+                },
+                .close => {
+                    running.store(false, .unordered);
+                },
+                .scroll_vertical => |scroll| {
+                    _ = scroll;
+                },
+                .mouse_relative => |mouse| {
+                    const mouse_moved = (mouse.x != 0 or mouse.y != 0);
+                    if (mouse_moved) win.enableRelativeMouse(.{ .unaccelerated = true });
+                },
+                .size_physical => |size| {
+                    window_size = size;
+                },
+                else => {},
+            }
+        }
+    }
 }
 
 pub fn setCallback() void {

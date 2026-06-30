@@ -827,7 +827,7 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var error_int: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError));
     while (level <= levels[1]) : (level += 1) {
         levels = self.getLevels(io);
-        group.async(io, loadChunksSpiral, .{self, io, allocator, level, &error_int});
+        group.async(io, loadChunksSpiral, .{ self, io, allocator, level, &error_int });
     }
     try group.await(io);
 }
@@ -853,10 +853,10 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
             break;
         }
 
-        if(game.player.physics.mutex.tryLock()){
+        if (game.player.physics.mutex.tryLock()) {
             defer game.player.physics.mutex.unlock(io);
             const new_player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(game.player.physics.pos), level);
-            if(!std.meta.eql(player_chunk_pos, new_player_chunk_pos)) {
+            if (!std.meta.eql(player_chunk_pos, new_player_chunk_pos)) {
                 player_chunk_pos = new_player_chunk_pos;
                 player_pos = game.player.physics.pos;
                 c = 0;

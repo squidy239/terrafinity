@@ -39,9 +39,9 @@ shaderprogram: c_uint,
 block_atlas_texture_id: c_uint,
 vao: c_uint,
 uniforms: struct {
-        chunks: ChunkUniformLocations,
-        entity: EntityUniformLocations,
-    },
+    chunks: ChunkUniformLocations,
+    entity: EntityUniformLocations,
+},
 camera_front: @Vector(3, f32),
 render_buffer: MultiRenderBuffer(RenderBufferKey),
 interface: Renderer,
@@ -413,8 +413,8 @@ fn loadFacebuffer(self: *@This()) !void {
     gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @sizeOf(u32) * indices.len, &indices, gl.STATIC_DRAW);
 
     gl.GenBuffers(1, @ptrCast(&self.facebuffer));
-    gl.BindBuffer(gl.
-        ARRAY_BUFFER, self.facebuffer);
+    gl.BindBuffer(gl
+        .ARRAY_BUFFER, self.facebuffer);
 
     gl.BufferData(gl.ARRAY_BUFFER, @sizeOf(f32) * vertices.len, &vertices, gl.STATIC_DRAW);
 }
