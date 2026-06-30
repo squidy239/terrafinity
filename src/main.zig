@@ -279,10 +279,18 @@ pub fn main(init: std.process.Init) !void {
 
         var frame_time: std.Io.Timestamp = .now(io, .awake);
         var action_set = Key.ActionSet.empty;
+        var visible: bool = false;
         while (running.load(.unordered)) {
             wio.update();
-            try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events);
+            try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible);
             frame_time = .now(io, .awake);
+
+            // Only render and present if window is visible and should present
+            if (!visible or !window.shouldPresent()) {
+                // Process deferred deletions to prevent unbounded memory leak on render pause
+                game.vulkan_renderer.processDeferredDeletions(io) catch {};
+                continue;
+            }
 
             // Update game state and submit Vulkan render commands (includes Vulkan presentation via vkQueuePresentKHR)
             try game.frame(io, gpa);
@@ -403,6 +411,7 @@ fn handleEventsGame(
     running: *std.atomic.Value(bool),
     win: *wio.Window,
     events: *wio.EventQueue,
+    visible: *bool,
 ) !void {
     win.enableRelativeMouse(.{ .unaccelerated = true });
 
@@ -434,6 +443,12 @@ fn handleEventsGame(
                 },
                 .size_physical => |size| {
                     window_size = size;
+                },
+                .visible => {
+                    visible.* = true;
+                },
+                .hidden => {
+                    visible.* = false;
                 },
                 else => {},
             }

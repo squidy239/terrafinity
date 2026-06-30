@@ -208,7 +208,7 @@ pub const TextureArrayManager = struct {
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},
             .image = texture_image,
-            .view_type = .@"2d",
+            .view_type = .@"2d_array",
             .format = .r8g8b8a8_srgb,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
