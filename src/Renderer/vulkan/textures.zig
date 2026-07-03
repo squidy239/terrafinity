@@ -22,7 +22,6 @@ pub const TextureArrayManager = struct {
         };
     }
 
-    /// Loads textures from a directory using zigimg and creates a Vulkan texture array
     pub fn loadTextureDirectory(
         self: *TextureArrayManager,
         io: std.Io,
@@ -32,7 +31,6 @@ pub const TextureArrayManager = struct {
     ) !void {
         var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
-        // First pass: count and validate resolutions
         var dir_it = std.Io.Dir.iterate(textures_path);
         var first_resolution: ?[2]usize = null;
         var texture_count: usize = 0;
@@ -56,7 +54,6 @@ pub const TextureArrayManager = struct {
         const res = first_resolution.?;
         std.log.info("texture resolution: {any}, count: {d}\n", .{ res, texture_count });
 
-        // Second pass: load all textures into an array
         var texture_images = try allocator.alloc(zigimg.Image, texture_count);
 
         dir_it = std.Io.Dir.iterate(textures_path);
@@ -87,10 +84,8 @@ pub const TextureArrayManager = struct {
 
         std.log.info("loaded {d} textures\n", .{texture_images.len});
 
-        // Create Vulkan texture array
         try self.createVulkanTextureArray(io, allocator, texture_images, res[0], res[1]);
 
-        // Deinit images after they've been uploaded to GPU
         for (texture_images) |*img| img.deinit(allocator);
         allocator.free(texture_images);
     }
@@ -103,13 +98,12 @@ pub const TextureArrayManager = struct {
         width: usize,
         height: usize,
     ) !void {
-        _ = io; // Mark as used
-        _ = allocator; // Mark as used
+        _ = io;
+        _ = allocator;
 
         const image_count = images.len;
-        const image_size = @as(vk.DeviceSize, @intCast(width)) * @as(vk.DeviceSize, @intCast(height)) * 4; // RGBA
+        const image_size = @as(vk.DeviceSize, @intCast(width)) * @as(vk.DeviceSize, @intCast(height)) * 4;
 
-        // Create staging buffer for all textures
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_memory: vk.DeviceMemory = .null_handle;
 
@@ -120,7 +114,6 @@ pub const TextureArrayManager = struct {
             if (staging_memory != .null_handle) self.renderer.dev.freeMemory(staging_memory, null);
         }
 
-        // Map and copy all texture data to staging buffer
         const data = try self.renderer.dev.mapMemory(staging_memory, 0, total_staging_size, .{});
         const mapped_slice = @as([*]u8, @ptrCast(data))[0..total_staging_size];
 
@@ -133,7 +126,6 @@ pub const TextureArrayManager = struct {
 
         self.renderer.dev.unmapMemory(staging_memory);
 
-        // Create vk.Image for texture array (with mipmaps)
         const max_dim = @max(width, height);
         const max_dim_f: f64 = @floatFromInt(max_dim);
         const num_mip_levels: u32 = @intCast(std.math.max(1, @as(u32, @intFromFloat(@log2(max_dim_f))) + 1));
@@ -156,7 +148,6 @@ pub const TextureArrayManager = struct {
 
         const texture_image = try self.renderer.dev.createImage(&image_info, null);
 
-        // Allocate image memory
         const mem_reqs = self.renderer.dev.getImageMemoryRequirements(texture_image);
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_reqs.size,
@@ -165,17 +156,13 @@ pub const TextureArrayManager = struct {
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
-        // Begin single command buffer for all layout transitions and copies
         const cmd = try self.renderer.beginSingleTimeCommands();
 
-        // Transition layout and copy data for each layer
         for (0..image_count) |layer_idx| {
             const layer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size;
 
-            // Transition to transfer_dst_optimal for this layer
             try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, @intCast(layer_idx), 1);
 
-            // Copy data for this layer
             const region = vk.BufferImageCopy{
                 .buffer_offset = layer_offset,
                 .buffer_row_length = 0,
@@ -193,18 +180,14 @@ pub const TextureArrayManager = struct {
             self.renderer.dev.cmdCopyBufferToImage(cmd, staging_buffer, texture_image, .transfer_dst_optimal, 1, @ptrCast(&region));
         }
 
-        // Transition to shader_read_only_optimal for all layers
         try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .shader_read_only_optimal, 0, num_mip_levels, 0, @intCast(image_count));
 
-        // End single time commands (submits and waits)
         try self.renderer.endSingleTimeCommands(cmd);
 
-        // Generate mipmaps if the image has more than 1 mip level
         if (num_mip_levels > 1) {
             try self.generateMipmaps(texture_image, @intCast(width), @intCast(height), @intCast(image_count));
         }
 
-        // Create image view for texture array
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},
             .image = texture_image,
@@ -222,7 +205,6 @@ pub const TextureArrayManager = struct {
 
         const texture_view = try self.renderer.dev.createImageView(&view_info, null);
 
-        // Create sampler for the texture array (linear filtering with mipmaps)
         const sampler_info = vk.SamplerCreateInfo{
             .flags = .{},
             .mag_filter = .linear,
@@ -244,7 +226,6 @@ pub const TextureArrayManager = struct {
 
         const sampler = try self.renderer.dev.createSampler(&sampler_info, null);
 
-        // Update global descriptor set with the texture array (binding 1)
         const image_info_descriptor = vk.DescriptorImageInfo{
             .image_layout = .shader_read_only_optimal,
             .image_view = texture_view,
@@ -253,7 +234,7 @@ pub const TextureArrayManager = struct {
 
         const descriptor_write = vk.WriteDescriptorSet{
             .dst_set = self.renderer.global_descriptor_set,
-            .dst_binding = 1, // Matches layout(binding = 1) in frag shader (texture_array)
+            .dst_binding = 1,
             .dst_array_element = 0,
             .descriptor_count = 1,
             .descriptor_type = .combined_image_sampler,
@@ -264,7 +245,6 @@ pub const TextureArrayManager = struct {
 
         self.renderer.dev.updateDescriptorSets(self.renderer.dev_handle, 1, @ptrCast(&descriptor_write), 0, undefined);
 
-        // Store Vulkan resources for cleanup
         self.texture_image = texture_image;
         self.texture_memory = memory;
         self.texture_view = texture_view;
@@ -340,31 +320,25 @@ pub const TextureArrayManager = struct {
     fn generateMipmaps(self: *TextureArrayManager, image: vk.Image, width: u32, height: u32, image_count: u32) !void {
         const cmd = try self.renderer.beginSingleTimeCommands();
 
-        // Calculate num_mip_levels
         const max_dim: u32 = @max(width, height);
         const num_mip_levels: u32 = std.math.max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim)))))) + 1;
 
         var src_layout: vk.ImageLayout = .shader_read_only_optimal;
         var dst_layout: vk.ImageLayout = .transfer_dst_optimal;
 
-        // For each mip level from 1 to num_mip_levels-1
         var mip_level: u32 = 1;
         while (mip_level < num_mip_levels) : (mip_level += 1) {
             const prev_mip_level = mip_level - 1;
 
-            // Calculate dimensions for previous and current mip levels
             const prev_width = @max(1, width >> prev_mip_level);
             const prev_height = @max(1, height >> prev_mip_level);
             const curr_width = @max(1, width >> mip_level);
             const curr_height = @max(1, height >> mip_level);
 
-            // Transition previous mip level to transfer_src_optimal
             try self.transitionImageLayout(cmd, image, src_layout, .transfer_src_optimal, prev_mip_level, 1, 0, image_count);
 
-            // Transition current mip level to transfer_dst_optimal
             try self.transitionImageLayout(cmd, image, dst_layout, .transfer_dst_optimal, mip_level, 1, 0, image_count);
 
-            // Create blit region
             const blit_region = vk.ImageBlit{
                 .src_subresource = .{
                     .aspect_mask = .{ .color_bit = true },
@@ -388,7 +362,6 @@ pub const TextureArrayManager = struct {
                 },
             };
 
-            // Blit from previous mip level to current mip level
             self.renderer.dev.cmdBlitImage(
                 cmd,
                 image,
@@ -400,15 +373,12 @@ pub const TextureArrayManager = struct {
                 .linear,
             );
 
-            // Transition previous mip level back to shader_read_only_optimal
             try self.transitionImageLayout(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, prev_mip_level, 1, 0, image_count);
 
-            // Update layouts for next iteration
             src_layout = .shader_read_only_optimal;
             dst_layout = .transfer_dst_optimal;
         }
 
-        // Transition the last mip level to shader_read_only_optimal
         try self.transitionImageLayout(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
 
         try self.renderer.endSingleTimeCommands(cmd);
