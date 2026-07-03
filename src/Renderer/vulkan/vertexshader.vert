@@ -91,7 +91,8 @@ void main() {
     scale = chunks[gl_InstanceIndex].scale;
 
     uint face_in_chunk = gl_VertexIndex / 6u;
-    uint local_vertex = gl_VertexIndex % 4u;
+    const uint quad_indices[6] = uint[6](0u, 1u, 2u, 0u, 2u, 3u);
+    uint local_vertex = quad_indices[gl_VertexIndex % 6u];
 
     uint64_t val = getPackedData(face_in_chunk);
     uvec3 pos     = decodePosition(val);

@@ -253,6 +253,8 @@ pub fn main(init: std.process.Init) !void {
         window = try wio.Window.create(.{ .title = "terrafinity", .event_fn_data = &events });
         defer window.destroy();
 
+        window.setMode(.maximized);
+
         var keymap = Key.Map.init(gpa);
         defer keymap.map.deinit();
 
@@ -282,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
         var visible: bool = false;
         while (running.load(.unordered)) {
             wio.update();
-            try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible);
+            try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible, &game, frame_time.untilNow(io, .awake));
             frame_time = .now(io, .awake);
 
             // Only render and present if window is visible and should present
@@ -412,6 +414,8 @@ fn handleEventsGame(
     win: *wio.Window,
     events: *wio.EventQueue,
     visible: *bool,
+    game: *Game,
+    dt: std.Io.Duration,
 ) !void {
     win.enableRelativeMouse(.{ .unaccelerated = true });
 
@@ -439,7 +443,10 @@ fn handleEventsGame(
                 },
                 .mouse_relative => |mouse| {
                     const mouse_moved = (mouse.x != 0 or mouse.y != 0);
-                    if (mouse_moved) win.enableRelativeMouse(.{ .unaccelerated = true });
+                    if (mouse_moved) {
+                        win.enableRelativeMouse(.{ .unaccelerated = true });
+                        game.handleMouseMotion(io, mouse);
+                    }
                 },
                 .size_physical => |size| {
                     window_size = size;
@@ -454,6 +461,8 @@ fn handleEventsGame(
             }
         }
     }
+    try game.handleButtonActions(io, action_set, dt);
+    try game.renderer.setViewport(.{ window_size.width, window_size.height });
 }
 
 pub fn setCallback() void {

@@ -14,6 +14,7 @@ const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").Concurrent
 const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
 const World = @import("../../world/World.zig");
+const ChunkSize = World.ChunkSize;
 const ChunkPos = World.ChunkPos;
 const Frustum = @import("../opengl/Frustum.zig").Frustum;
 const textures = @import("textures.zig");
@@ -947,14 +948,7 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
 
     const existing = try self.meshes.fetchPut(io, self.allocator, key, mesh_buffer);
     if (existing) |e| {
-        const frame_idx = self.getDeletionQueueIndex();
-        _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-            error.Canceled => {},
-        };
-        defer self.deferred_deletions_mutex.unlock(io);
-        _ = self.deferred_deletions[frame_idx].append(self.allocator, e) catch |err| switch (err) {
-            error.OutOfMemory => std.log.err("uploadMesh: Out of memory appending to deferred deletion queue", .{}),
-        };
+        self.enqueueDeferredDeletion(io, e);
     }
 }
 
@@ -968,24 +962,10 @@ fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
 
     if (self.meshes.fetchRemove(io, .{ .@"opaque" = chunk_pos })) |mesh| {
-        const frame_idx = self.getDeletionQueueIndex();
-        _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-            error.Canceled => {},
-        };
-        defer self.deferred_deletions_mutex.unlock(io);
-        _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
-            error.OutOfMemory => std.log.err("vtableRemoveChunk: Out of memory appending to deferred deletion queue", .{}),
-        };
+        self.enqueueDeferredDeletion(io, mesh);
     }
     if (self.meshes.fetchRemove(io, .{ .transparent = chunk_pos })) |mesh| {
-        const frame_idx = self.getDeletionQueueIndex();
-        _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-            error.Canceled => {},
-        };
-        defer self.deferred_deletions_mutex.unlock(io);
-        _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
-            error.OutOfMemory => std.log.err("vtableRemoveChunk: Out of memory appending to deferred deletion queue", .{}),
-        };
+        self.enqueueDeferredDeletion(io, mesh);
     }
 }
 
@@ -995,27 +975,12 @@ fn destroyChunkMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer) void {
 }
 
 pub fn processDeferredDeletions(self: *VulkanRenderer, io: std.Io) error{DrawFailed}!void {
-    const current_frame_unbound = self.current_frame_idx.load(.monotonic);
-    const current_frame = @as(u32, @intCast(current_frame_unbound % @as(u64, @intCast(self.in_flight_fences.len))));
+    const current_frame = self.currentFrame();
 
     var fences_wait: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
-    if (self.dev.waitForFences(&fences_wait, .true, 2000000000)) |res| {
-        if (res != .success) return error.DrawFailed;
-    } else |_| return error.DrawFailed;
+    try self.waitFences(&fences_wait);
 
-    const current_deletion_queue_idx = current_frame % @as(u32, @intCast(self.deferred_deletions.len));
-
-    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => {},
-    };
-    defer self.deferred_deletions_mutex.unlock(io);
-
-    var deletion_queue = &self.deferred_deletions[current_deletion_queue_idx];
-    for (deletion_queue.items) |mesh| {
-        if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-        if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
-    }
-    deletion_queue.clearRetainingCapacity();
+    try self.processDeletionQueue(io, current_frame);
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -1025,30 +990,14 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
-    std.log.debug("vtableDrawChunks: Step 1 - Loading current frame index...", .{});
-    const current_frame_unbound = self.current_frame_idx.load(.monotonic);
-    const current_frame = @as(u32, @intCast(current_frame_unbound % @as(u64, @intCast(self.in_flight_fences.len))));
+    var current_frame = self.currentFrame();
 
     std.log.debug("vtableDrawChunks: Step 2 - Waiting for previous frame fences to complete...", .{});
     var fences_wait: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
-    if (self.dev.waitForFences(&fences_wait, .true, 2000000000)) |res| {
-        if (res != .success) return error.DrawFailed;
-    } else |_| return error.DrawFailed;
+    _ = try self.waitFences(&fences_wait);
 
-    std.log.debug("vtableDrawChunks: Step 3 - Processing deferred deletions from current frame queue...", .{});
-    const current_deletion_queue_idx = current_frame % @as(u32, @intCast(self.deferred_deletions.len));
-
-    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => {},
-    };
-    defer self.deferred_deletions_mutex.unlock(io);
-
-    var deletion_queue = &self.deferred_deletions[current_deletion_queue_idx];
-    for (deletion_queue.items) |mesh| {
-        if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-        if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
-    }
-    deletion_queue.clearRetainingCapacity();
+    std.log.debug("vtableDrawChunks: Step 3 - Processing deferred deletions...", .{});
+    self.processDeletionQueue(io, current_frame) catch return error.DrawFailed;
 
     std.log.debug("vtableDrawChunks: Step 4 - Resetting fences for current frame...", .{});
     var fences_reset: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
@@ -1071,6 +1020,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         self.createSwapchain(io) catch |err| switch (err) {
             else => return error.DrawFailed,
         };
+        current_frame = self.currentFrame();
         const acquire_result_res2 = self.dev.acquireNextImageKHR(
             self.swapchain,
             std.math.maxInt(u64),
@@ -1084,6 +1034,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         self.recreateSwapchainOnly(io) catch |err| switch (err) {
             else => return error.DrawFailed,
         };
+        current_frame = self.currentFrame();
         const acquire_result_res2 = self.dev.acquireNextImageKHR(
             self.swapchain,
             std.math.maxInt(u64),
@@ -1109,12 +1060,16 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
 
-    const viewpos_f32: @Vector(3, f32) = @floatCast(viewpos);
-    const eye_vec = zm.vec.Vec3f{ .data = [3]f32{ viewpos_f32[0], viewpos_f32[1], viewpos_f32[2] } };
-    const target_vec = zm.vec.Vec3f{ .data = [3]f32{ viewpos_f32[0] + self.camera_front[0], viewpos_f32[1] + self.camera_front[1], viewpos_f32[2] + self.camera_front[2] } };
+    // Pure-rotation view matrix at origin — matches OpenGL convention.
+    // The vertex shader already applies the translation via relative_position = chunk_pos - playerPos,
+    // so including it in the view matrix would cause double-translation, putting everything off-screen.
     const up_vec = zm.vec.Vec3f{ .data = [3]f32{ cameraUp[0], cameraUp[1], cameraUp[2] } };
 
-    const view = zm.matrix.Mat4f.lookAtRH(eye_vec, target_vec, up_vec);
+    const view = zm.matrix.Mat4f.lookAtRH(
+        .{ .data = @Vector(3, f32){ 0, 0, 0 } },
+        .{ .data = self.camera_front },
+        up_vec,
+    );
 
     const projection = makeInfReversedZProjRh(fov, aspect, 0.01);
     const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
@@ -1219,14 +1174,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 
     var desc_set_arr: [1]vk.DescriptorSet = undefined;
     desc_set_arr[0] = self.descriptor_sets_per_frame[current_frame];
-    self.dev.cmdBindDescriptorSets(
-        cmd_buffer,
-        .graphics,
-        self.pipeline_layout,
-        0,
-        &desc_set_arr,
-        null,
-    );
+    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, &desc_set_arr, null);
 
     var pc = PushConstants{
         .projview = std.mem.zeroes([16]f32),
@@ -1235,7 +1183,6 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .draw_over = if (draw_over) 1 else 0,
     };
 
-    // Transpose row-major matrix to column-major for GLSL
     inline for (0..4) |row| {
         inline for (0..4) |col| {
             pc.projview[row * 4 + col] = @as([4][4]f32, @bitCast(projview))[col][row];
@@ -1251,13 +1198,17 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
 
     std.log.debug("vtableDrawChunks: Step 13 - Drawing opaque chunks...", .{});
-    const opaque_draw_count = self.drawChunksReal(io, cmd_buffer, current_frame, viewpos, frustum, false, 0) catch return error.DrawFailed;
+    const opaque_draw_count = self.drawChunksReal(io, cmd_buffer, current_frame, viewpos, frustum, false, 0) catch {
+        return error.DrawFailed;
+    };
 
     std.log.debug("vtableDrawChunks: Step 14 - Binding transparent pipeline...", .{});
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.transparent_pipeline);
 
     std.log.debug("vtableDrawChunks: Step 15 - Drawing transparent chunks...", .{});
-    _ = self.drawChunksReal(io, cmd_buffer, current_frame, viewpos, frustum, true, opaque_draw_count) catch return error.DrawFailed;
+    _ = self.drawChunksReal(io, cmd_buffer, current_frame, viewpos, frustum, true, opaque_draw_count) catch {
+        return error.DrawFailed;
+    };
 
     // End frame timing
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
@@ -1486,7 +1437,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
             candidates += 1;
             const chunkpos = key.toPos();
 
-            if (!cullChunk(&frustum, chunkpos)) {
+            if (!cullChunk(&frustum, chunkpos, playerPos)) {
                 const mesh = &entry.value_ptr.*;
 
                 const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
@@ -1555,7 +1506,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
             candidates += 1;
             const chunkpos = key.toPos();
 
-            if (!cullChunk(&frustum, chunkpos)) {
+            if (!cullChunk(&frustum, chunkpos, playerPos)) {
                 const mesh = entry.value_ptr.*;
 
                 const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
@@ -1754,23 +1705,19 @@ fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryP
     @panic("Failed to find suitable memory type");
 }
 
-fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos) bool {
-    _ = frustum;
-    _ = chunkpos;
-    // Temporarily disabled: always return false (not culled)
-    // const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
-    // const cpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
-    // const cpos_f32 = @as(@Vector(3, f32), @floatCast(cpos));
-    // const scale = ChunkPos.toScale(chunkpos.level);
-    // const sqrt_3: f32 = @floatCast(std.math.sqrt(3.0));
-    // const radius = 16.0 * sqrt_3 * scale;
-    // const center = cpos_f32 + @as(@Vector(3, f32), @splat(16.0 * scale));
-    // return !frustum.sphereInFrustum(center, radius);
-    return false;
+fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
+    const scale = ChunkPos.toScale(chunkpos.level);
+    const chunkSizeVec: @Vector(3, f32) = @splat(ChunkSize * scale);
+    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
+    return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
 fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
     const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
+    // m11 = -f flips Y for Vulkan's Y-down clip space.
+    // The last two rows implement infinite reversed-Z:
+    //   z_clip = zNear * w_input  →  at near z=-zN: z_ndc = 1, at far z=-inf: z_ndc → 0
+    //   w_clip = -z_input         →  standard RH perspective divide
     return .{
         .data = .{
             .{
@@ -1781,7 +1728,7 @@ fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
             },
             .{
                 0.0,
-                f,
+                -f,
                 0.0,
                 0.0,
             },
@@ -1829,6 +1776,7 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     self.swapchain_extent = actual_extent;
+    self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
 
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
@@ -1982,6 +1930,22 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
 
     // Recreate descriptor pool and sets
     try self.createDescriptorPoolAndSets(io);
+
+    // Recreate pipelines with the current swapchain format
+    if (self.pipeline != .null_handle) {
+        self.dev.destroyPipeline(self.pipeline, null);
+        self.pipeline = .null_handle;
+    }
+    if (self.transparent_pipeline != .null_handle) {
+        self.dev.destroyPipeline(self.transparent_pipeline, null);
+        self.transparent_pipeline = .null_handle;
+    }
+    if (self.pipeline_layout != .null_handle) {
+        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        self.pipeline_layout = .null_handle;
+    }
+    try self.createPipeline();
+    try self.createTransparentPipeline();
 }
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
@@ -2120,6 +2084,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     self.swapchain_extent = actual_extent;
+    self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
     std.log.debug("VulkanRenderer.createSwapchain: Step 3 - Set swapchain extent to {{width={}, height={}}}", .{ actual_extent.width, actual_extent.height });
 
     std.log.debug("VulkanRenderer.createSwapchain: Step 4 - Enumerating physical device surface formats...", .{});
@@ -2293,6 +2258,22 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     };
 
     try self.allocateIndirectBuffers();
+
+    // Recreate pipelines with the current swapchain format (only if they already exist)
+    if (self.pipeline_layout != .null_handle) {
+        if (self.pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.pipeline, null);
+            self.pipeline = .null_handle;
+        }
+        if (self.transparent_pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.transparent_pipeline, null);
+            self.transparent_pipeline = .null_handle;
+        }
+        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        self.pipeline_layout = .null_handle;
+        try self.createPipeline();
+        try self.createTransparentPipeline();
+    }
 }
 
 fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !void {
@@ -2713,23 +2694,10 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     if (staging_memory_dummy != .null_handle) self.dev.freeMemory(staging_memory_dummy, null);
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 10 - Writing binding 1: Texture Array...", .{});
-    const texture_array_write = vk.WriteDescriptorSet{
-        .dst_set = self.descriptor_sets_per_frame[0],
-        .dst_binding = 1,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .combined_image_sampler,
-        .p_image_info = @ptrCast(&texture_image_info_descriptor),
-        .p_buffer_info = undefined,
-        .p_texel_buffer_view = undefined,
-    };
-    _ = texture_array_write;
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 11 - Updating descriptor sets...", .{});
-    var update_writes: []vk.WriteDescriptorSet = try self.allocator.alloc(vk.WriteDescriptorSet, self.descriptor_sets_per_frame.len);
-    defer self.allocator.free(update_writes);
-    for (self.descriptor_sets_per_frame, 0..) |desc_set, i| {
-        update_writes[i] = .{
+    for (self.descriptor_sets_per_frame) |desc_set| {
+        self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{.{
             .dst_set = desc_set,
             .dst_binding = 1,
             .dst_array_element = 0,
@@ -2738,9 +2706,8 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
             .p_image_info = @ptrCast(&texture_image_info_descriptor),
             .p_buffer_info = undefined,
             .p_texel_buffer_view = undefined,
-        };
+        }}, null);
     }
-    self.dev.updateDescriptorSets(update_writes, null);
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: SUCCESS - Descriptor pool and sets created and updated", .{});
 }
 
@@ -2914,17 +2881,14 @@ fn createPipeline(self: *VulkanRenderer) !void {
 
     var pipeline: vk.Pipeline = undefined;
     std.log.debug("VulkanRenderer.createPipeline: Step 4 - Creating graphics pipelines with {} create infos...", .{1});
-    const result = self.dev.createGraphicsPipelines(
+    if (self.dev.createGraphicsPipelines(
         .null_handle,
         &.{gpci},
         null,
         (&pipeline)[0..1],
-    );
-    if (result) |res| {
+    )) |res| {
         if (res != .success) return error.PipelineCreationFailed;
-    } else |err| {
-        return err;
-    }
+    } else |err| return err;
 
     std.log.debug("VulkanRenderer.createPipeline: Step 5 - Cleaning up shader modules after pipeline creation...", .{});
     self.dev.destroyShaderModule(vert_shader_module, null);
@@ -3080,17 +3044,14 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
 
     var transparent_pipeline: vk.Pipeline = undefined;
     std.log.debug("VulkanRenderer.createTransparentPipeline: Step 3 - Creating transparent graphics pipelines with {} create infos...", .{1});
-    const result_transparent = self.dev.createGraphicsPipelines(
+    if (self.dev.createGraphicsPipelines(
         .null_handle,
         &.{gpci_transparent},
         null,
         (&transparent_pipeline)[0..1],
-    );
-    if (result_transparent) |res| {
+    )) |res| {
         if (res != .success) return error.PipelineCreationFailed;
-    } else |err| {
-        return err;
-    }
+    } else |err| return err;
 
     std.log.debug("VulkanRenderer.createTransparentPipeline: Step 4 - Cleaning up shader modules after pipeline creation...", .{});
     self.dev.destroyShaderModule(vert_shader_module, null);
@@ -3098,6 +3059,46 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
 
     self.transparent_pipeline = transparent_pipeline;
     std.log.debug("VulkanRenderer.createTransparentPipeline: SUCCESS - Created transparent pipeline handle={any}", .{self.transparent_pipeline});
+}
+
+fn currentFrame(self: *VulkanRenderer) u32 {
+    const current_frame_unbound = self.current_frame_idx.load(.monotonic);
+    const num_frames = @as(u32, @intCast(self.in_flight_fences.len));
+    return if (num_frames > 0) @as(u32, @intCast(current_frame_unbound % num_frames)) else 0;
+}
+
+fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) !void {
+    if (self.dev.waitForFences(fences, .true, 2000000000)) |res| {
+        if (res != .success) return error.DrawFailed;
+    } else |_| return error.DrawFailed;
+}
+
+fn enqueueDeferredDeletion(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
+    const frame_idx = self.getDeletionQueueIndex();
+
+    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
+        error.Canceled => {},
+    };
+    defer self.deferred_deletions_mutex.unlock(io);
+    _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
+        error.OutOfMemory => std.log.err("enqueueDeferredDeletion: Out of memory appending to deferred deletion queue", .{}),
+    };
+}
+
+fn processDeletionQueue(self: *VulkanRenderer, io: std.Io, frame_idx: u32) !void {
+    const current_deletion_queue_idx = frame_idx % @as(u32, @intCast(self.deferred_deletions.len));
+
+    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
+        error.Canceled => {},
+    };
+    defer self.deferred_deletions_mutex.unlock(io);
+
+    var deletion_queue = &self.deferred_deletions[current_deletion_queue_idx];
+    for (deletion_queue.items) |mesh| {
+        if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
+        if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
+    }
+    deletion_queue.clearRetainingCapacity();
 }
 
 pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuffer {
@@ -3145,14 +3146,7 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
 }
 
 pub fn present(self: *VulkanRenderer, io: std.Io) !void {
-    const image_idx = self.current_swapchain_image_index;
-
-    // The semaphore was signaled for the current frame, not the swapchain image index.
-    // These can diverge when the number of in-flight frames differs from the
-    // number of swapchain images.
-    const current_frame_unbound = self.current_frame_idx.load(.monotonic);
-    const num_frames = @as(u32, @intCast(self.in_flight_fences.len));
-    const current_frame = if (num_frames > 0) @as(u32, @intCast(current_frame_unbound % num_frames)) else 0;
+    const current_frame = self.currentFrame();
 
     const wait_semaphores = &[_]vk.Semaphore{self.render_complete_semaphores[current_frame]};
 
@@ -3161,7 +3155,7 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
         .p_wait_semaphores = @ptrCast(wait_semaphores.ptr),
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
-        .p_image_indices = &[_]u32{image_idx},
+        .p_image_indices = &[_]u32{self.current_swapchain_image_index},
         .p_results = undefined,
     };
 
@@ -3182,10 +3176,17 @@ fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.viewport_pixels = viewport_pixels;
+    // NOTE: swapchain_extent is intentionally NOT updated here — it must stay in sync with
+    // the actual swapchain and render target dimensions.  Only recreateSwapchainOnly and
+    // createSwapchain set swapchain_extent (to the real surface extent from caps.current_extent).
 }
 fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    self.camera_front = viewDir;
+    // Convert viewDir (pitch, yaw, _) to a unit direction vector, matching OpenGL.
+    self.camera_front[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
 }
 fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
@@ -3200,4 +3201,178 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
         callback(callback_userdata, chunk_pos);
         try it.unpause(io);
     }
+}
+
+test "makeInfReversedZProjRh — Vulkan Y-down and reversed-Z properties" {
+    const fov = std.math.degreesToRadians(90.0);
+    const aspect = 800.0 / 600.0;
+    const zNear: f32 = 0.01;
+
+    const P = makeInfReversedZProjRh(fov, aspect, zNear);
+
+    // Helper to transform a point and get NDC
+    const transform = struct {
+        fn apply(p: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
+            const v = p.multiplyVec(zm.vec.Vec4f{ .data = pt });
+            const c = v.data;
+            return .{
+                .clip = c,
+                .ndc = .{ c[0] / c[3], c[1] / c[3], c[2] / c[3] },
+            };
+        }
+    }.apply;
+
+    // 1. Y-down: positive Y world → negative NDC Y (top of screen in Vulkan)
+    {
+        const r = transform(P, .{ 0, 10, -50, 1 });
+        try std.testing.expect(r.ndc[1] < 0);
+    }
+
+    // 2. Y-down: negative Y world → positive NDC Y (bottom of screen)
+    {
+        const r = transform(P, .{ 0, -10, -50, 1 });
+        try std.testing.expect(r.ndc[1] > 0);
+    }
+
+    // 3. X: positive X world → positive NDC X (right side)
+    {
+        const r = transform(P, .{ 10, 0, -50, 1 });
+        try std.testing.expect(r.ndc[0] > 0);
+    }
+
+    // 4. X: negative X world → negative NDC X (left side)
+    {
+        const r = transform(P, .{ -10, 0, -50, 1 });
+        try std.testing.expect(r.ndc[0] < 0);
+    }
+
+    // 5. Reversed-Z: near plane (z=-zN) → NDC z = 1.0
+    {
+        const r = transform(P, .{ 0, 0, -zNear, 1 });
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), r.ndc[2], 1e-6);
+    }
+
+    // 6. Reversed-Z: far plane (z→-inf) → NDC z → 0.0
+    {
+        const r = transform(P, .{ 0, 0, -1e9, 1 });
+        try std.testing.expect(r.ndc[2] > 0);
+        try std.testing.expect(r.ndc[2] < 1e-6);
+    }
+
+    // 7. W is positive for points in front of camera (z < 0 in RH)
+    {
+        const r = transform(P, .{ 0, 0, -50, 1 });
+        try std.testing.expect(r.clip[3] > 0);
+    }
+
+    // 8. Perspective: farther objects are smaller
+    {
+        const near = transform(P, .{ 10, 0, -50, 1 });
+        const far = transform(P, .{ 10, 0, -500, 1 });
+        // |ndc_x| is smaller for farther objects
+        try std.testing.expect(@abs(near.ndc[0]) > @abs(far.ndc[0]));
+    }
+}
+
+test "lookAtRH at origin — pure rotation view matrix" {
+    const up = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 1, 0 } };
+    const front = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 0, 1 } };
+
+    const view = zm.matrix.Mat4f.lookAtRH(
+        .{ .data = @Vector(3, f32){ 0, 0, 0 } },
+        front,
+        up,
+    );
+
+    // A pure rotation matrix has no translation → last column should be [0, 0, 0, 1]
+    try std.testing.expectEqual(@as(f32, 0.0), view.data[0][3]);
+    try std.testing.expectEqual(@as(f32, 0.0), view.data[1][3]);
+    try std.testing.expectEqual(@as(f32, 0.0), view.data[2][3]);
+    try std.testing.expectEqual(@as(f32, 1.0), view.data[3][3]);
+
+    // Camera at origin looking along +Z.
+    // In RH view space, the camera looks along -Z, so points in front have z_view < 0.
+    // A point at world (0, 0, 50) is in front of the camera.
+    const pt = view.multiplyVec(.{ .data = .{ 0, 0, 50, 1 } });
+    try std.testing.expect(pt.data[2] < 0);
+
+    // A point behind the camera at world (0, 0, -50) should have z_view > 0.
+    const behind = view.multiplyVec(.{ .data = .{ 0, 0, -50, 1 } });
+    try std.testing.expect(behind.data[2] > 0);
+
+    // Right: f=(0,0,1), up=(0,1,0), s = f×up = (-1,0,0).
+    // +X in world maps to -X in view space (the camera's right vector is -X).
+    const right = view.multiplyVec(.{ .data = .{ 10, 0, 0, 1 } });
+    try std.testing.expect(right.data[0] < 0);
+
+    // +Y (up) in world stays +Y in view: u = s×f = (0,1,0).
+    const up_pt = view.multiplyVec(.{ .data = .{ 0, 10, 0, 1 } });
+    try std.testing.expect(up_pt.data[1] > 0);
+}
+
+test "anglesToDirection — matches OpenGL convention" {
+    const viewDir = @Vector(3, f32){ 0.0001, -0.4, 0.001 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    // Direction should be a unit vector
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-6);
+
+    // Raw angles should NOT equal the direction
+    try std.testing.expect(dir[0] != viewDir[0]);
+    try std.testing.expect(dir[1] != viewDir[1]);
+
+    // With pitch near 0, the yaw rotation should be visible
+    // yaw=-0.4° means looking slightly to the right
+    // cos(-0.4°)≈0.99998, sin(-0.4°)≈-0.00698
+    try std.testing.expectApproxEqAbs(@as(f32, -0.00698), dir[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.000001745), dir[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.99998), dir[2], 1e-4);
+}
+
+test "projview combination — full pipeline sanity" {
+    const fov = std.math.degreesToRadians(90.0);
+    const aspect = 800.0 / 600.0;
+    const zNear: f32 = 0.01;
+
+    const P = makeInfReversedZProjRh(fov, aspect, zNear);
+
+    // Camera looking along +Z from origin, pure rotation
+    const up = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 1, 0 } };
+    const front = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 0, 1 } };
+    const V = zm.matrix.Mat4f.lookAtRH(
+        .{ .data = @Vector(3, f32){ 0, 0, 0 } },
+        front,
+        up,
+    );
+
+    const projview = P.multiply(V);
+
+    // Helper
+    const transform = struct {
+        fn apply(pv: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
+            const v = pv.multiplyVec(zm.vec.Vec4f{ .data = pt });
+            const c = v.data;
+            return .{
+                .clip = c,
+                .ndc = .{ c[0] / c[3], c[1] / c[3], c[2] / c[3] },
+            };
+        }
+    }.apply;
+
+    // Point in front of camera at world z=+50: should be visible (within clip volume)
+    const r = transform(projview, .{ 0, 0, 50, 1 });
+    // NDC should be in [-1, 1] clip space or [0, 1] for depth (reversed-Z near=1)
+    try std.testing.expect(@abs(r.ndc[0]) <= 1);
+    try std.testing.expect(@abs(r.ndc[1]) <= 1);
+    try std.testing.expect(r.ndc[2] >= 0 and r.ndc[2] <= 1);
+
+    // Point behind camera at world z=-50: should NOT be visible (w should be negative)
+    const behind = transform(projview, .{ 0, 0, -50, 1 });
+    try std.testing.expect(behind.clip[3] < 0);
 }
