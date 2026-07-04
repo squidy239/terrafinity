@@ -97,8 +97,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
             .vtable = &.{
                 .addChunk = vtableAddChunk,
                 .removeChunk = vtableRemoveChunk,
-                .drawChunks = vtableDrawChunks,
-                .clear = vtableClear,
+                .draw = vtableDrawChunks,
                 .setViewport = vtableSetViewport,
                 .updateCameraDirection = vtableUpdateCameraDirection,
                 .getCameraFront = vtableGetCameraFront,
@@ -285,6 +284,18 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
+
+    // Clear color and depth attachments (previously separate vtableClear)
+    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
+    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
+    var cz = tracy.Zone.begin(.{ .src = @src(), .name = "Clear" });
+    defer cz.end();
+    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+    gl.ClearDepth(0.0);
+    gl.Clear(gl.DEPTH_BUFFER_BIT);
+
     (self.drawChunks(io, viewpos, .{ 32, 32, 32, 255 }, self.viewport_pixels)) catch return error.DrawFailed;
 
     gl.BlitNamedFramebuffer(
@@ -302,22 +313,6 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         gl.NEAREST,
     );
     gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-}
-
-fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
-    gl.makeProcTableCurrent(self.proc_table);
-    self.window.glMakeContextCurrent(self.draw_context);
-    gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
-    const blueSky = @Vector(4, f32){ 0, 0.4, 0.8, 1.0 };
-    const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0, viewpos[1] / 4096)))))));
-    var c = tracy.Zone.begin(.{ .src = @src(), .name = "Clear" });
-    defer c.end();
-    gl.ClearColor(skyColor[0], skyColor[1], skyColor[2], skyColor[3]);
-    gl.Clear(gl.COLOR_BUFFER_BIT);
-    gl.ClearDepth(0.0);
-    gl.Clear(gl.DEPTH_BUFFER_BIT);
 }
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {

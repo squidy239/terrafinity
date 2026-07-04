@@ -439,7 +439,7 @@ fn handleEventsGame(
                     running.store(false, .unordered);
                 },
                 .scroll_vertical => |scroll| {
-                    _ = scroll;
+                    game.handleScroll(io, scroll) catch {};
                 },
                 .mouse_relative => |mouse| {
                     const mouse_moved = (mouse.x != 0 or mouse.y != 0);

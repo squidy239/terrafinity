@@ -462,6 +462,30 @@ pub const TextureArrayManager = struct {
         self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
     }
 
+    /// Rebind the texture array to all per-frame descriptor sets (needed after swapchain
+    /// recreation, which destroys and recreates the descriptor pool).
+    pub fn rebindDescriptorSets(self: *TextureArrayManager) void {
+        if (self.texture_view == .null_handle or self.sampler == .null_handle) return;
+        const descriptor_image_info = vk.DescriptorImageInfo{
+            .image_layout = .shader_read_only_optimal,
+            .image_view = self.texture_view,
+            .sampler = self.sampler,
+        };
+        for (self.renderer.descriptor_sets_per_frame) |desc_set| {
+            const descriptor_write = vk.WriteDescriptorSet{
+                .dst_set = desc_set,
+                .dst_binding = 1,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = @ptrCast(&descriptor_image_info),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
+            self.renderer.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
+        }
+    }
+
     pub fn destroyTextureArray(self: *TextureArrayManager) void {
         if (self.sampler != .null_handle) {
             self.renderer.dev.destroySampler(self.sampler, null);

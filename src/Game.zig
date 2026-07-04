@@ -359,7 +359,7 @@ pub fn init(
         .entity_registry = .init(),
     };
 
-    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, window);
+    game.vulkan_renderer = try Renderer.Vulkan.initWithOptions(io, allocator, window, @ptrCast(&game.options.render_options), game.options_lock);
     errdefer game.vulkan_renderer.deinit(io);
 
     game.renderer = game.vulkan_renderer.interface;
@@ -436,18 +436,13 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     defer entities_future.cancel(io) catch {};
     try restartFutures(self, io, allocator);
 
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
-
-    try self.renderer.clear(player_pos);
     try self.player.physics.update(&self.world, io, allocator);
 
     self.player.physics.mutex.lockUncancelable(io);
     const player_pos_updated = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
 
-    try self.renderer.drawChunks(io, player_pos_updated);
+    try self.renderer.draw(io, player_pos_updated);
     try self.handleErrors();
     try entities_future.await(io);
 }
@@ -538,8 +533,10 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.unlockShared(io);
     switch (self.player.game_mode.load(.seq_cst)) {
         .Creative, .Spectator => {
-            const fly_speed_linear_old = self.player.fly_speed_linear.fetchAdd(-scroll * scroll_sensitivity, .seq_cst);
-            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fly_speed_linear_old)), .seq_cst);
+            const scroll_delta = -scroll * scroll_sensitivity;
+            const fly_speed_linear_old = self.player.fly_speed_linear.fetchAdd(scroll_delta, .seq_cst);
+            const fly_speed_linear_new = fly_speed_linear_old + scroll_delta;
+            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fly_speed_linear_new)), .seq_cst);
         },
         .Survival => {},
     }

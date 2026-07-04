@@ -154,6 +154,7 @@ swapchain_format: vk.Format = .b8g8r8a8_srgb,
 swapchain_images: []vk.Image = &.{},
 swapchain_views: []vk.ImageView = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
+swapchain_needs_recreate: bool = false,
 
 render_color_image: vk.Image = .null_handle,
 render_color_memory: vk.DeviceMemory = .null_handle,
@@ -249,6 +250,10 @@ fn getDeviceProcAddrLoader(device: vk.Device, procname: [*:0]const u8, instance_
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*VulkanRenderer {
+    return initWithOptions(io, allocator, window, &default_render_options, &default_render_options_lock);
+}
+
+pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
     std.log.debug("VulkanRenderer.init: ENTER - Starting Vulkan initialization...", .{});
     std.log.info("VulkanRenderer.init: Starting Vulkan initialization...", .{});
 
@@ -283,6 +288,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
 
     self.allocator = allocator;
     self.window = window;
+    self.render_options = render_options;
+    self.render_options_lock = render_options_lock;
 
     std.log.debug("VulkanRenderer.init: Step 2 - Initializing Vulkan handle fields to safe defaults...", .{});
 
@@ -738,8 +745,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
         .vtable = &.{
             .addChunk = vtableAddChunk,
             .removeChunk = vtableRemoveChunk,
-            .drawChunks = vtableDrawChunks,
-            .clear = vtableClear,
+            .draw = vtableDrawChunks,
             .setViewport = vtableSetViewport,
             .updateCameraDirection = vtableUpdateCameraDirection,
             .getCameraFront = vtableGetCameraFront,
@@ -1062,6 +1068,16 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         else => {},
     };
 
+    if (self.swapchain_needs_recreate) {
+        self.swapchain_needs_recreate = false;
+        std.log.debug("vtableDrawChunks: Swapchain needs recreation due to viewport resize...", .{});
+        _ = self.dev.deviceWaitIdle() catch {};
+        self.createSwapchain(io) catch |err| switch (err) {
+            else => return error.DrawFailed,
+        };
+        current_frame = self.currentFrame();
+    }
+
     std.log.debug("vtableDrawChunks: Step 5 - Acquiring next swapchain image...", .{});
     var image_index: u32 = 0;
     const acquire_result_res = self.dev.acquireNextImageKHR(
@@ -1262,6 +1278,13 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     std.log.debug("vtableDrawChunks: Step 14 - Binding transparent pipeline...", .{});
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.transparent_pipeline);
 
+    // OIT integration point: replace the simple indirect draw below with an OIT pass.
+    // To implement Order Independent Transparency, change this section to:
+    //   1. Bind an OIT pipeline (or compute shader) that accumulates fragments
+    //      into a per-pixel linked list or atomic accumulation buffer.
+    //   2. Draw transparent geometry without sorting (already done below).
+    //   3. Resolve the OIT buffer with a fullscreen pass (blend or sort per-pixel).
+    // The transparent pipeline's depth_write_enable=false is already OIT-compatible.
     std.log.debug("vtableDrawChunks: Step 15 - Drawing transparent chunks...", .{});
     _ = self.drawChunksReal(io, cmd_buffer, current_frame, viewpos, frustum, true, opaque_draw_count) catch {
         return error.DrawFailed;
@@ -1474,17 +1497,10 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
     var culled: u32 = 0;
 
     if (is_transparent) {
-        const TransparentDraw = struct {
-            dist_sq: f64,
-            chunkpos: ChunkPos,
-            face_count: u32,
-            device_address: vk.DeviceAddress,
-            ratio: @Vector(3, f64),
-            chunk_blockpos: @Vector(3, f64),
-        };
-
-        var all_transparent_draws: std.ArrayList(TransparentDraw) = .empty;
-        errdefer all_transparent_draws.deinit(self.allocator);
+        // Note: transparency sorting removed in preparation for Order Independent Transparency (OIT).
+        // In the future, replace this simple indirect draw with an OIT pass that accumulates
+        // fragments (e.g., per-pixel linked lists or compute-shader blending).
+        // The transparent pipeline already uses depth_write_enable = false which is OIT-compatible.
 
         var it = self.meshes.iterator();
         while (try it.next(io)) |entry| {
@@ -1499,56 +1515,30 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
 
                 const ratio: @Vector(3, f64) = @splat(@floatCast(ChunkPos.levelToBlockRatioFloat(chunkpos.level)));
                 const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * ratio;
+                const relative_blockpos = chunk_blockpos - playerPos;
 
-                var dist_sq: f64 = 0;
-                inline for (0..3) |i| {
-                    const diff = chunk_blockpos[i] - playerPos[i];
-                    dist_sq += diff * diff;
-                }
+                const write_idx = write_offset + draw_count;
 
-                try all_transparent_draws.append(self.allocator, .{
-                    .dist_sq = dist_sq,
-                    .chunkpos = chunkpos,
-                    .face_count = mesh.face_count,
-                    .device_address = mesh.device_address,
-                    .ratio = ratio,
-                    .chunk_blockpos = chunk_blockpos,
-                });
+                chunk_data[write_idx] = .{
+                    .absolute_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(chunk_blockpos)))),
+                    .relative_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(relative_blockpos)))),
+                    .scale = ChunkPos.toScale(chunkpos.level),
+                    .address = mesh.device_address,
+                };
+
+                indirect_cmds[write_idx] = .{
+                    .vertex_count = @as(u32, mesh.face_count) * 6,
+                    .instance_count = 1,
+                    .first_vertex = 0,
+                    .first_instance = write_offset + draw_count,
+                };
+
+                draw_count += 1;
+                if (draw_count >= self.max_draw_count - write_offset) break;
             } else {
                 culled += 1;
             }
         }
-
-        std.sort.block(TransparentDraw, all_transparent_draws.items, {}, struct {
-            pub fn lessThan(_: void, a: TransparentDraw, b: TransparentDraw) bool {
-                return a.dist_sq > b.dist_sq;
-            }
-        }.lessThan);
-
-        const draw_count_limit = @min(@as(usize, self.max_draw_count - write_offset), all_transparent_draws.items.len);
-        for (all_transparent_draws.items[0..draw_count_limit], 0..) |td, i| {
-            draw_count = @intCast(i);
-
-            const relative_blockpos = td.chunk_blockpos - playerPos;
-            const write_idx = write_offset + draw_count;
-
-            chunk_data[write_idx] = .{
-                .absolute_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(td.chunk_blockpos)))),
-                .relative_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(relative_blockpos)))),
-                .scale = ChunkPos.toScale(td.chunkpos.level),
-                .address = td.device_address,
-            };
-
-            indirect_cmds[write_idx] = .{
-                .vertex_count = @as(u32, td.face_count) * 6,
-                .instance_count = 1,
-                .first_vertex = 0,
-                .first_instance = write_offset + draw_count,
-            };
-
-            if (draw_count + 1 >= self.max_draw_count - write_offset) break;
-        }
-        draw_count = @intCast(draw_count_limit);
 
         // Record stats
         self.frame_stats.transparent_candidates = candidates;
@@ -1987,6 +1977,10 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
 
     // Recreate descriptor pool and sets
     try self.createDescriptorPoolAndSets(io);
+    // Rebind the real block texture array to the new descriptor sets
+    if (self.texture_manager.texture_view != .null_handle) {
+        self.texture_manager.rebindDescriptorSets();
+    }
 
     // Recreate pipelines with the current swapchain format
     if (self.pipeline != .null_handle) {
@@ -2316,6 +2310,17 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
 
     try self.allocateIndirectBuffers();
 
+    // Recreate descriptor pool and sets if they were previously created (i.e., this is
+    // a resize, not the initial creation — descriptor_set_layout doesn't exist yet at init)
+    if (self.descriptor_set_layout != .null_handle) {
+        try self.createDescriptorPoolAndSets(io);
+        // Rebind the real block texture array to the new descriptor sets
+        // (createDescriptorPoolAndSets writes the dummy white texture; overwrite with real one if loaded)
+        if (self.texture_manager.texture_view != .null_handle) {
+            self.texture_manager.rebindDescriptorSets();
+        }
+    }
+
     // Recreate pipelines with the current swapchain format (only if they already exist)
     if (self.pipeline_layout != .null_handle) {
         if (self.pipeline != .null_handle) {
@@ -2454,6 +2459,12 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         return error.DepthFormatNotSupported;
     }
 
+    const depth_has_stencil = depth_format == .d32_sfloat_s8_uint or depth_format == .d24_unorm_s8_uint;
+    const depth_aspect_mask: vk.ImageAspectFlags = if (depth_has_stencil)
+        .{ .depth_bit = true, .stencil_bit = true }
+    else
+        .{ .depth_bit = true };
+
     std.log.debug("VulkanRenderer.createRenderTargets: Step 6 - Creating depth image...", .{});
     const depth_image_info = vk.ImageCreateInfo{
         .flags = .{},
@@ -2496,7 +2507,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .image = self.render_depth_image,
             .subresource_range = .{
-                .aspect_mask = .{ .depth_bit = true, .stencil_bit = true },
+                .aspect_mask = depth_aspect_mask,
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -2517,7 +2528,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         .format = depth_format,
         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
         .subresource_range = .{
-            .aspect_mask = .{ .depth_bit = true, .stencil_bit = true },
+            .aspect_mask = depth_aspect_mask,
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
@@ -2855,8 +2866,24 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .depth_compare_op = .greater,
         .depth_bounds_test_enable = .false,
         .stencil_test_enable = .false,
-        .front = undefined,
-        .back = undefined,
+        .front = .{
+            .fail_op = .keep,
+            .pass_op = .keep,
+            .depth_fail_op = .keep,
+            .compare_op = .always,
+            .compare_mask = 0,
+            .write_mask = 0,
+            .reference = 0,
+        },
+        .back = .{
+            .fail_op = .keep,
+            .pass_op = .keep,
+            .depth_fail_op = .keep,
+            .compare_op = .always,
+            .compare_mask = 0,
+            .write_mask = 0,
+            .reference = 0,
+        },
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
@@ -3016,6 +3043,10 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .p_dynamic_states = &dynstate,
     };
 
+    // OIT-compatible depth state: depth reads enabled for correct occlusion of transparent
+    // fragments behind opaque geometry, but depth writes disabled so that transparent surfaces
+    // at different depths can accumulate correctly. For Weighted Blended OIT or per-pixel linked
+    // lists, keep depth_test_enable = true and depth_write_enable = false.
     const depth_stencil_state_transparent = vk.PipelineDepthStencilStateCreateInfo{
         .flags = .{},
         .depth_test_enable = .true,
@@ -3023,8 +3054,24 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .depth_compare_op = .greater,
         .depth_bounds_test_enable = .false,
         .stencil_test_enable = .false,
-        .front = undefined,
-        .back = undefined,
+        .front = .{
+            .fail_op = .keep,
+            .pass_op = .keep,
+            .depth_fail_op = .keep,
+            .compare_op = .always,
+            .compare_mask = 0,
+            .write_mask = 0,
+            .reference = 0,
+        },
+        .back = .{
+            .fail_op = .keep,
+            .pass_op = .keep,
+            .depth_fail_op = .keep,
+            .compare_op = .always,
+            .compare_mask = 0,
+            .write_mask = 0,
+            .reference = 0,
+        },
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
@@ -3226,16 +3273,18 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
     };
 }
 
-fn vtableClear(userdata: *anyopaque, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
-    _ = userdata;
-    _ = viewpos;
-}
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.viewport_pixels = viewport_pixels;
-    // NOTE: swapchain_extent is intentionally NOT updated here — it must stay in sync with
-    // the actual swapchain and render target dimensions.  Only recreateSwapchainOnly and
-    // createSwapchain set swapchain_extent (to the real surface extent from caps.current_extent).
+    if (viewport_pixels[0] != self.swapchain_extent.width or
+        viewport_pixels[1] != self.swapchain_extent.height)
+    {
+        self.swapchain_extent = .{
+            .width = viewport_pixels[0],
+            .height = viewport_pixels[1],
+        };
+        self.swapchain_needs_recreate = true;
+    }
 }
 fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
