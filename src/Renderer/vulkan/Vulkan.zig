@@ -577,12 +577,12 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         if (self.command_pool != .null_handle) {
             self.dev.destroyCommandPool(self.command_pool, null);
         }
+        if (self.upload_command_pool != .null_handle) {
+            self.dev.destroyCommandPool(self.upload_command_pool, null);
+        }
         if (self.swapchain != .null_handle) {
             for (self.swapchain_views) |view| {
                 if (view != .null_handle) self.dev.destroyImageView(view, null);
-            }
-            if (self.upload_command_pool != .null_handle) {
-                self.dev.destroyCommandPool(self.upload_command_pool, null);
             }
             for (self.image_acquired_semaphores) |sem| {
                 if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
@@ -786,6 +786,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         if (mem != .null_handle) self.dev.freeMemory(mem, null);
     }
     self.allocator.free(self.indirect_draw_memories);
+    if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
 
     for (self.chunk_data_buffers) |buf| {
         if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
@@ -795,6 +796,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         if (mem != .null_handle) self.dev.freeMemory(mem, null);
     }
     self.allocator.free(self.chunk_data_memories);
+    if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
 
     if (self.swapchain != .null_handle) {
         for (self.swapchain_views) |view| {
@@ -855,6 +857,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     if (self.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.descriptor_pool, null);
     }
+    if (self.descriptor_sets_per_frame.len > 0) self.allocator.free(self.descriptor_sets_per_frame);
 
     if (self.dummy_sampler != .null_handle) {
         self.dev.destroySampler(self.dummy_sampler, null);
@@ -1611,6 +1614,9 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
     @memset(self.indirect_draw_buffers, .null_handle);
     errdefer {
+        for (self.indirect_draw_buffers) |buf| {
+            if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+        }
         if (self.indirect_draw_buffers.len > 0) self.allocator.free(self.indirect_draw_buffers);
         self.indirect_draw_buffers = &.{};
     }
@@ -2593,6 +2599,30 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Creating descriptor pool with {} sizes, max_sets={}", .{ pool_sizes.len, num_frames });
     self.descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Created descriptor pool handle={any}", .{self.descriptor_pool});
+    errdefer {
+        // Clean up any dummy resources that may have been partially created,
+        // plus the descriptor pool itself, on any error during this function.
+        if (self.dummy_sampler != .null_handle) {
+            self.dev.destroySampler(self.dummy_sampler, null);
+            self.dummy_sampler = .null_handle;
+        }
+        if (self.dummy_view != .null_handle) {
+            self.dev.destroyImageView(self.dummy_view, null);
+            self.dummy_view = .null_handle;
+        }
+        if (self.dummy_image != .null_handle) {
+            self.dev.destroyImage(self.dummy_image, null);
+            self.dummy_image = .null_handle;
+        }
+        if (self.dummy_memory != .null_handle) {
+            self.dev.freeMemory(self.dummy_memory, null);
+            self.dummy_memory = .null_handle;
+        }
+        if (self.descriptor_pool != .null_handle) {
+            self.dev.destroyDescriptorPool(self.descriptor_pool, null);
+            self.descriptor_pool = .null_handle;
+        }
+    }
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 2 - Allocating descriptor sets per frame...", .{});
     self.descriptor_sets_per_frame = try self.allocator.alloc(vk.DescriptorSet, num_frames);
@@ -2621,6 +2651,10 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     var staging_buffer_dummy: vk.Buffer = .null_handle;
     var staging_memory_dummy: vk.DeviceMemory = .null_handle;
     try self.createBuffer(dummy_staging_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer_dummy, &staging_memory_dummy);
+    defer {
+        if (staging_buffer_dummy != .null_handle) self.dev.destroyBuffer(staging_buffer_dummy, null);
+        if (staging_memory_dummy != .null_handle) self.dev.freeMemory(staging_memory_dummy, null);
+    }
 
     const dummy_data = try self.dev.mapMemory(staging_memory_dummy, 0, dummy_staging_size, .{});
     const mapped_slice = @as([*]u8, @ptrCast(dummy_data))[0..dummy_staging_size];
@@ -2758,8 +2792,10 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     };
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 9 - Cleaning up staging buffer and memory...", .{});
-    if (staging_buffer_dummy != .null_handle) self.dev.destroyBuffer(staging_buffer_dummy, null);
-    if (staging_memory_dummy != .null_handle) self.dev.freeMemory(staging_memory_dummy, null);
+    // Staging resources are cleaned up by the defer registered at creation site.
+    // Null the handles here so the defer becomes a no-op (cleanup already done).
+    staging_buffer_dummy = .null_handle;
+    staging_memory_dummy = .null_handle;
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 10 - Writing binding 1: Texture Array...", .{});
 
