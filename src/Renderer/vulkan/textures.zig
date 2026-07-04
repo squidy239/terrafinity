@@ -4,6 +4,7 @@ const vk = @import("vulkan");
 const zigimg = @import("zigimg");
 
 const VulkanRenderer = @import("Vulkan.zig");
+const Block = @import("../../main.zig").Block;
 
 pub const TextureArrayManager = struct {
     renderer: *VulkanRenderer,
@@ -31,12 +32,21 @@ pub const TextureArrayManager = struct {
     ) !void {
         var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
+        // --- Pass 1: validate resolution consistency, count visible Block textures ---
         var dir_it = std.Io.Dir.iterate(textures_path);
         var first_resolution: ?[2]usize = null;
         var texture_count: usize = 0;
 
         while (try dir_it.next(io)) |entry| {
             if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
+                // Map filename → Block; skip unknown files (same as OpenGL)
+                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
+                const block_type = std.meta.stringToEnum(Block, block_name);
+                if (block_type == null or !block_type.?.isVisible()) {
+                    std.log.warn("Skipping non-block texture: {s}\n", .{entry.name});
+                    continue;
+                }
+
                 const img_res = try getResolution(io, allocator, textures_path, entry.name, &read_buffer);
                 if (first_resolution == null) {
                     first_resolution = img_res;
@@ -50,60 +60,114 @@ pub const TextureArrayManager = struct {
         }
 
         if (first_resolution == null) return error.NoTexturesFound;
-
         const res = first_resolution.?;
+
+        // Validate square (same as OpenGL)
+        if (res[0] != res[1]) return error.TexturesNotSquare;
+
         std.log.info("texture resolution: {any}, count: {d}\n", .{ res, texture_count });
 
-        var texture_images = try allocator.alloc(zigimg.Image, texture_count);
+        // --- Pass 2: load each file and place at the right enum-indexer layer ---
+        // Use the same indexer strategy as OpenGL: layer = EnumIndexer position
+        const indexer = std.enums.EnumIndexer(Block);
+
+        // Max layer index we'll need (max declaration position among loaded textures)
+        var max_layer_index: usize = 0;
+
+        // First pass to find max_layer_index
+        dir_it = std.Io.Dir.iterate(textures_path);
+        while (try dir_it.next(io)) |entry| {
+            if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
+                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
+                const block_type = std.meta.stringToEnum(Block, block_name) orelse continue;
+                if (!block_type.isVisible()) continue;
+                const layer = indexer.indexOf(block_type);
+                if (layer > max_layer_index) max_layer_index = layer;
+            }
+        }
+
+        // Number of layers = max_layer_index + 1 so we cover all declared Block positions
+        const layer_count = max_layer_index + 1;
+
+        // Temporarily store texture images indexed by layer (missing textures get null)
+        var layer_images = try allocator.alloc(?zigimg.Image, layer_count);
+        defer {
+            for (layer_images) |*maybe_img| {
+                if (maybe_img.*) |*img| img.deinit(allocator);
+            }
+            allocator.free(layer_images);
+        }
+        @memset(layer_images, null);
 
         dir_it = std.Io.Dir.iterate(textures_path);
-        var texture_idx: usize = 0;
-
-        errdefer {
-            for (texture_images[0..texture_idx]) |*img| img.deinit(allocator);
-            allocator.free(texture_images);
-        }
+        var loaded_count: usize = 0;
 
         while (try dir_it.next(io)) |entry| {
             if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
+                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
+                const block_type = std.meta.stringToEnum(Block, block_name) orelse continue;
+                if (!block_type.isVisible()) continue;
+
+                const layer = indexer.indexOf(block_type);
+
                 const texture_file = try textures_path.openFile(io, entry.name, .{});
                 defer texture_file.close(io);
 
-                const loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
-
+                var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
                 try loaded_img.convert(allocator, .rgba32);
                 if (loaded_img.width != res[0] or loaded_img.height != res[1]) {
                     loaded_img.deinit(allocator);
                     return error.InvalidTextureResolution;
                 }
 
-                texture_images[texture_idx] = loaded_img;
-                texture_idx += 1;
+                std.log.debug("loaded texture {s} -> layer {d}\n", .{ entry.name, layer });
+
+                // Free any previous image at this layer (shouldn't happen)
+                if (layer_images[layer]) |*old_img| old_img.deinit(allocator);
+                layer_images[layer] = loaded_img;
+                loaded_count += 1;
             }
         }
 
-        std.log.info("loaded {d} textures\n", .{texture_images.len});
+        std.log.info("loaded {d}/{d} texture layers\n", .{ loaded_count, layer_count });
 
-        try self.createVulkanTextureArray(io, allocator, texture_images, res[0], res[1]);
-
-        for (texture_images) |*img| img.deinit(allocator);
-        allocator.free(texture_images);
+        try self.createVulkanTextureArray(io, allocator, layer_images, res[0], res[1]);
     }
 
     fn createVulkanTextureArray(
         self: *TextureArrayManager,
         io: std.Io,
         allocator: std.mem.Allocator,
-        images: []zigimg.Image,
+        layer_images: []?zigimg.Image,
         width: usize,
         height: usize,
     ) !void {
-        _ = io;
-        _ = allocator;
-
-        const image_count = images.len;
+        const image_count = @as(u32, @intCast(layer_images.len));
         const image_size = @as(vk.DeviceSize, @intCast(width)) * @as(vk.DeviceSize, @intCast(height)) * 4;
 
+        // --- Generate missing-texture fallback (16×16 magenta/black checkerboard) ---
+        const fallback_w: usize = 16;
+        const fallback_h: usize = 16;
+        var fallback_pixels: [fallback_w * fallback_h * 4]u8 = undefined;
+        for (0..fallback_h) |y| {
+            for (0..fallback_w) |x| {
+                const is_magenta = (x / 8 + y / 8) % 2 == 0;
+                const i = (y * fallback_w + x) * 4;
+                if (is_magenta) {
+                    fallback_pixels[i + 0] = 255;
+                    fallback_pixels[i + 1] = 0;
+                    fallback_pixels[i + 2] = 255;
+                    fallback_pixels[i + 3] = 255;
+                } else {
+                    fallback_pixels[i + 0] = 0;
+                    fallback_pixels[i + 1] = 0;
+                    fallback_pixels[i + 2] = 0;
+                    fallback_pixels[i + 3] = 255;
+                }
+            }
+        }
+
+        // --- Staging buffer for all layer data ---
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_memory: vk.DeviceMemory = .null_handle;
 
@@ -117,19 +181,23 @@ pub const TextureArrayManager = struct {
         const data = try self.renderer.dev.mapMemory(staging_memory, 0, total_staging_size, .{});
         const mapped_slice = @as([*]u8, @ptrCast(data))[0..total_staging_size];
 
-        var offset: vk.DeviceSize = 0;
-        for (images) |img| {
-            const rgba_data = img.rawBytes();
-            @memcpy(mapped_slice[offset .. offset + rgba_data.len], rgba_data);
-            offset += @as(vk.DeviceSize, @intCast(rgba_data.len));
+        for (layer_images, 0..) |maybe_img, i| {
+            const rgba_data = if (maybe_img) |img|
+                img.rawBytes()
+            else
+                @as([]const u8, fallback_pixels[0..@min(fallback_w * fallback_h * 4, @as(usize, @intCast(image_size)))]);
+
+            const layer_offset = @as(vk.DeviceSize, @intCast(i)) * image_size;
+            @memcpy(mapped_slice[layer_offset .. layer_offset + rgba_data.len], rgba_data);
         }
 
         self.renderer.dev.unmapMemory(staging_memory);
 
+        // --- Calculate mip levels ---
         const max_dim = @max(width, height);
-        const max_dim_f: f64 = @floatFromInt(max_dim);
-        const num_mip_levels: u32 = @intCast(std.math.max(1, @as(u32, @intFromFloat(@log2(max_dim_f))) + 1));
+        const num_mip_levels: u32 = @max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim))))) + 1);
 
+        // --- Create the texture array image ---
         const image_info = vk.ImageCreateInfo{
             .flags = .{},
             .image_type = .@"2d",
@@ -139,7 +207,7 @@ pub const TextureArrayManager = struct {
             .format = .r8g8b8a8_srgb,
             .tiling = .optimal,
             .initial_layout = .undefined,
-            .usage = .{ .transfer_dst_bit = true, .sampled_bit = true },
+            .usage = .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
             .sharing_mode = .exclusive,
             .samples = .{ .@"1_bit" = true },
             .queue_family_index_count = 0,
@@ -156,38 +224,102 @@ pub const TextureArrayManager = struct {
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
-        const cmd = try self.renderer.beginSingleTimeCommands();
+        // --- Single command buffer for copy + mip generation ---
+        const cmd = try self.renderer.beginSingleTimeCommands(io);
+
+        // 1. Transition ALL layers mip 0: undefined → transfer_dst_optimal
+        try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, 0, image_count);
+
+        // 2. Copy each layer from staging buffer → image mip 0 (one batch of regions)
+        var copy_regions = try allocator.alloc(vk.BufferImageCopy, image_count);
+        defer allocator.free(copy_regions);
 
         for (0..image_count) |layer_idx| {
-            const layer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size;
-
-            try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, @intCast(layer_idx), 1);
-
-            const region = vk.BufferImageCopy{
-                .buffer_offset = layer_offset,
+            copy_regions[layer_idx] = vk.BufferImageCopy{
+                .buffer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size,
                 .buffer_row_length = 0,
                 .buffer_image_height = 0,
                 .image_subresource = .{
                     .aspect_mask = .{ .color_bit = true },
                     .mip_level = 0,
-                    .base_array_layer = @intCast(layer_idx),
+                    .base_array_layer = @as(u32, @intCast(layer_idx)),
                     .layer_count = 1,
                 },
                 .image_offset = .{ .x = 0, .y = 0, .z = 0 },
                 .image_extent = .{ .width = @intCast(width), .height = @intCast(height), .depth = 1 },
             };
-
-            self.renderer.dev.cmdCopyBufferToImage(cmd, staging_buffer, texture_image, .transfer_dst_optimal, 1, @ptrCast(&region));
         }
 
-        try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .shader_read_only_optimal, 0, num_mip_levels, 0, @intCast(image_count));
+        self.renderer.dev.cmdCopyBufferToImage(cmd, staging_buffer, texture_image, .transfer_dst_optimal, copy_regions);
 
-        try self.renderer.endSingleTimeCommands(cmd);
+        // 3. Transition mip 0: transfer_dst_optimal → transfer_src_optimal (ready for blit source)
+        try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .transfer_src_optimal, 0, 1, 0, image_count);
 
+        // 4. Generate mip chain via blit
         if (num_mip_levels > 1) {
-            try self.generateMipmaps(texture_image, @intCast(width), @intCast(height), @intCast(image_count));
+            // For each destination mip level, blit from the previous level
+            var mip_level: u32 = 1;
+            while (mip_level < num_mip_levels) : (mip_level += 1) {
+                const prev_mip = mip_level - 1;
+                const src_w = @max(@as(u32, 1), @as(u32, @truncate(width >> @as(u6, @truncate(prev_mip)))));
+                const src_h = @max(@as(u32, 1), @as(u32, @truncate(height >> @as(u6, @truncate(prev_mip)))));
+                const dst_w = @max(@as(u32, 1), @as(u32, @truncate(width >> @as(u6, @truncate(mip_level)))));
+                const dst_h = @max(@as(u32, 1), @as(u32, @truncate(height >> @as(u6, @truncate(mip_level)))));
+
+                // Transition dest mip level: undefined → transfer_dst_optimal
+                try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, mip_level, 1, 0, image_count);
+
+                // Blit from prev mip (transfer_src_optimal) → current mip (transfer_dst_optimal)
+                const blit_region = vk.ImageBlit{
+                    .src_subresource = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .mip_level = prev_mip,
+                        .base_array_layer = 0,
+                        .layer_count = image_count,
+                    },
+                    .src_offsets = .{
+                        .{ .x = 0, .y = 0, .z = 0 },
+                        .{ .x = @as(i32, @intCast(src_w)), .y = @as(i32, @intCast(src_h)), .z = 1 },
+                    },
+                    .dst_subresource = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .mip_level = mip_level,
+                        .base_array_layer = 0,
+                        .layer_count = image_count,
+                    },
+                    .dst_offsets = .{
+                        .{ .x = 0, .y = 0, .z = 0 },
+                        .{ .x = @as(i32, @intCast(dst_w)), .y = @as(i32, @intCast(dst_h)), .z = 1 },
+                    },
+                };
+
+                self.renderer.dev.cmdBlitImage(
+                    cmd,
+                    texture_image,
+                    .transfer_src_optimal,
+                    texture_image,
+                    .transfer_dst_optimal,
+                    &[_]vk.ImageBlit{blit_region},
+                    .linear,
+                );
+
+                // Transition prev mip to shader_read_only (done with it)
+                try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, prev_mip, 1, 0, image_count);
+
+                // Transition current mip to transfer_src_optimal for next iteration (or final read)
+                try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .transfer_src_optimal, mip_level, 1, 0, image_count);
+            }
+
+            // Transition last mip level: transfer_src_optimal → shader_read_only_optimal
+            try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
+        } else {
+            // No mipmaps: transition mip 0: transfer_src_optimal → shader_read_only_optimal
+            try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1, 0, image_count);
         }
 
+        try self.renderer.endSingleTimeCommands(io, cmd);
+
+        // --- Create image view (2D array) ---
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},
             .image = texture_image,
@@ -205,45 +337,49 @@ pub const TextureArrayManager = struct {
 
         const texture_view = try self.renderer.dev.createImageView(&view_info, null);
 
+        // --- Create sampler (matches OpenGL: LINEAR_MIPMAP_LINEAR min, NEAREST mag) ---
         const sampler_info = vk.SamplerCreateInfo{
             .flags = .{},
-            .mag_filter = .linear,
+            .mag_filter = .nearest,
             .min_filter = .linear,
             .mipmap_mode = .linear,
             .address_mode_u = .repeat,
             .address_mode_v = .repeat,
             .address_mode_w = .repeat,
             .mip_lod_bias = 0.0,
-            .anisotropy_enable = vk.FALSE,
+            .anisotropy_enable = .false,
             .max_anisotropy = 1.0,
-            .compare_enable = vk.FALSE,
+            .compare_enable = .false,
             .compare_op = .always,
             .min_lod = 0.0,
             .max_lod = @floatFromInt(num_mip_levels - 1),
             .border_color = .int_opaque_black,
-            .unnormalized_coordinates = vk.FALSE,
+            .unnormalized_coordinates = .false,
         };
 
         const sampler = try self.renderer.dev.createSampler(&sampler_info, null);
 
-        const image_info_descriptor = vk.DescriptorImageInfo{
+        // --- Update per-frame descriptor sets (binding 1 = combined_image_sampler) ---
+        const descriptor_image_info = vk.DescriptorImageInfo{
             .image_layout = .shader_read_only_optimal,
             .image_view = texture_view,
             .sampler = sampler,
         };
 
-        const descriptor_write = vk.WriteDescriptorSet{
-            .dst_set = self.renderer.global_descriptor_set,
-            .dst_binding = 1,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .combined_image_sampler,
-            .p_image_info = @ptrCast(&image_info_descriptor),
-            .p_buffer_info = undefined,
-            .p_texel_buffer_view = undefined,
-        };
+        for (self.renderer.descriptor_sets_per_frame) |desc_set| {
+            const descriptor_write = vk.WriteDescriptorSet{
+                .dst_set = desc_set,
+                .dst_binding = 1,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = @ptrCast(&descriptor_image_info),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
 
-        self.renderer.dev.updateDescriptorSets(self.renderer.dev_handle, 1, @ptrCast(&descriptor_write), 0, undefined);
+            self.renderer.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
+        }
 
         self.texture_image = texture_image;
         self.texture_memory = memory;
@@ -265,7 +401,6 @@ pub const TextureArrayManager = struct {
         array_layer_count: u32,
     ) !void {
         var barrier = vk.ImageMemoryBarrier{
-            .flags = .{},
             .old_layout = old_layout,
             .new_layout = new_layout,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -290,15 +425,10 @@ pub const TextureArrayManager = struct {
             barrier.dst_access_mask = .{ .transfer_write_bit = true };
             source_stage = .{ .top_of_pipe_bit = true };
             dest_stage = .{ .transfer_bit = true };
-        } else if (old_layout == .transfer_dst_optimal and new_layout == .shader_read_only_optimal) {
+        } else if (old_layout == .transfer_dst_optimal and new_layout == .transfer_src_optimal) {
             barrier.src_access_mask = .{ .transfer_write_bit = true };
-            barrier.dst_access_mask = .{ .shader_read_bit = true };
-            source_stage = .{ .transfer_bit = true };
-            dest_stage = .{ .fragment_shader_bit = true };
-        } else if (old_layout == .shader_read_only_optimal and new_layout == .transfer_src_optimal) {
-            barrier.src_access_mask = .{ .shader_read_bit = true };
             barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            source_stage = .{ .fragment_shader_bit = true };
+            source_stage = .{ .transfer_bit = true };
             dest_stage = .{ .transfer_bit = true };
         } else if (old_layout == .transfer_src_optimal and new_layout == .shader_read_only_optimal) {
             barrier.src_access_mask = .{ .transfer_read_bit = true };
@@ -310,78 +440,26 @@ pub const TextureArrayManager = struct {
             barrier.dst_access_mask = .{ .transfer_read_bit = true };
             source_stage = .{ .top_of_pipe_bit = true };
             dest_stage = .{ .transfer_bit = true };
+        } else if (old_layout == .shader_read_only_optimal and new_layout == .transfer_src_optimal) {
+            barrier.src_access_mask = .{ .shader_read_bit = true };
+            barrier.dst_access_mask = .{ .transfer_read_bit = true };
+            source_stage = .{ .fragment_shader_bit = true };
+            dest_stage = .{ .transfer_bit = true };
+        } else if (old_layout == .transfer_dst_optimal and new_layout == .shader_read_only_optimal) {
+            barrier.src_access_mask = .{ .transfer_write_bit = true };
+            barrier.dst_access_mask = .{ .shader_read_bit = true };
+            source_stage = .{ .transfer_bit = true };
+            dest_stage = .{ .fragment_shader_bit = true };
+        } else if (old_layout == .transfer_src_optimal and new_layout == .transfer_dst_optimal) {
+            barrier.src_access_mask = .{ .transfer_read_bit = true };
+            barrier.dst_access_mask = .{ .transfer_write_bit = true };
+            source_stage = .{ .transfer_bit = true };
+            dest_stage = .{ .transfer_bit = true };
         } else {
             @panic("Unsupported layout transition");
         }
 
-        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, 0, undefined, 0, undefined, 1, @ptrCast(&barrier));
-    }
-
-    fn generateMipmaps(self: *TextureArrayManager, image: vk.Image, width: u32, height: u32, image_count: u32) !void {
-        const cmd = try self.renderer.beginSingleTimeCommands();
-
-        const max_dim: u32 = @max(width, height);
-        const num_mip_levels: u32 = std.math.max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim)))))) + 1;
-
-        var src_layout: vk.ImageLayout = .shader_read_only_optimal;
-        var dst_layout: vk.ImageLayout = .transfer_dst_optimal;
-
-        var mip_level: u32 = 1;
-        while (mip_level < num_mip_levels) : (mip_level += 1) {
-            const prev_mip_level = mip_level - 1;
-
-            const prev_width = @max(1, width >> prev_mip_level);
-            const prev_height = @max(1, height >> prev_mip_level);
-            const curr_width = @max(1, width >> mip_level);
-            const curr_height = @max(1, height >> mip_level);
-
-            try self.transitionImageLayout(cmd, image, src_layout, .transfer_src_optimal, prev_mip_level, 1, 0, image_count);
-
-            try self.transitionImageLayout(cmd, image, dst_layout, .transfer_dst_optimal, mip_level, 1, 0, image_count);
-
-            const blit_region = vk.ImageBlit{
-                .src_subresource = .{
-                    .aspect_mask = .{ .color_bit = true },
-                    .mip_level = prev_mip_level,
-                    .base_array_layer = 0,
-                    .layer_count = image_count,
-                },
-                .src_offsets = .{
-                    .{ .x = 0, .y = 0, .z = 0 },
-                    .{ .x = @as(i32, @intCast(prev_width)), .y = @as(i32, @intCast(prev_height)), .z = 1 },
-                },
-                .dst_subresource = .{
-                    .aspect_mask = .{ .color_bit = true },
-                    .mip_level = mip_level,
-                    .base_array_layer = 0,
-                    .layer_count = image_count,
-                },
-                .dst_offsets = .{
-                    .{ .x = 0, .y = 0, .z = 0 },
-                    .{ .x = @as(i32, @intCast(curr_width)), .y = @as(i32, @intCast(curr_height)), .z = 1 },
-                },
-            };
-
-            self.renderer.dev.cmdBlitImage(
-                cmd,
-                image,
-                .transfer_src_optimal,
-                image,
-                .transfer_dst_optimal,
-                1,
-                @ptrCast(&blit_region),
-                .linear,
-            );
-
-            try self.transitionImageLayout(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, prev_mip_level, 1, 0, image_count);
-
-            src_layout = .shader_read_only_optimal;
-            dst_layout = .transfer_dst_optimal;
-        }
-
-        try self.transitionImageLayout(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
-
-        try self.renderer.endSingleTimeCommands(cmd);
+        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
     }
 
     pub fn destroyTextureArray(self: *TextureArrayManager) void {
@@ -403,6 +481,15 @@ pub const TextureArrayManager = struct {
         }
     }
 };
+
+test "TextureArrayManager.init — null handles and zeroed state" {
+    // init() should return a manager with null_handle for all Vulkan resources
+    const manager = TextureArrayManager.init(undefined);
+    try std.testing.expectEqual(@as(vk.Image, .null_handle), manager.texture_image);
+    try std.testing.expectEqual(@as(vk.DeviceMemory, .null_handle), manager.texture_memory);
+    try std.testing.expectEqual(@as(vk.ImageView, .null_handle), manager.texture_view);
+    try std.testing.expectEqual(@as(vk.Sampler, .null_handle), manager.sampler);
+}
 
 fn getResolution(io: std.Io, allocator: std.mem.Allocator, textures_path: std.Io.Dir, filename: []const u8, read_buffer: *[zigimg.io.DEFAULT_BUFFER_SIZE]u8) ![2]usize {
     const texture = try textures_path.openFile(io, filename, .{});

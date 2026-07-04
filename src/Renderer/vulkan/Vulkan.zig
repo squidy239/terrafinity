@@ -108,6 +108,11 @@ const ChunkData = extern struct {
     scale: f32,
     address: u64 align(@sizeOf(u64)),
 };
+comptime {
+    if (@sizeOf(ChunkData) != 48) @compileError("ChunkData size must be 48 bytes");
+    if (@offsetOf(ChunkData, "address") != 32) @compileError("address offset must be 32");
+    if (@offsetOf(ChunkData, "scale") != 28) @compileError("scale offset must be 28");
+}
 
 const PushConstants = extern struct {
     projview: [16]f32,
@@ -157,6 +162,8 @@ render_depth_image: vk.Image = .null_handle,
 render_depth_memory: vk.DeviceMemory = .null_handle,
 render_depth_view: vk.ImageView = .null_handle,
 depth_format: vk.Format = .undefined,
+
+texture_manager: textures.TextureArrayManager = undefined,
 
 dummy_image: vk.Image = .null_handle,
 dummy_memory: vk.DeviceMemory = .null_handle,
@@ -675,6 +682,43 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*Vul
     std.log.debug("VulkanRenderer.init: Step 20 - Creating descriptor pool and sets...", .{});
     try self.createDescriptorPoolAndSets(io);
     std.log.debug("VulkanRenderer.init: Step 20 - Descriptor pool and sets created successfully", .{});
+
+    std.log.debug("VulkanRenderer.init: Step 20a - Loading block textures...", .{});
+    {
+        self.texture_manager = textures.TextureArrayManager.init(self);
+
+        // Write embedded block texture PNGs to disk (same as OpenGL renderer)
+        const dir = try std.Io.Dir.cwd().createDirPathOpen(io, "packs/default/Blocks/", .{ .open_options = .{ .iterate = true } });
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/grass.png"), .sub_path = "grass.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/dirt.png"), .sub_path = "dirt.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/snow.png"), .sub_path = "snow.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/stone.png"), .sub_path = "stone.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/water.png"), .sub_path = "water.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/wood.png"), .sub_path = "wood.png" });
+        try dir.writeFile(io, .{ .data = @embedFile("../opengl/Blocks/leaves.png"), .sub_path = "leaves.png" });
+
+        try self.texture_manager.loadTextureDirectory(io, dir, allocator, ".png");
+    }
+    // Destroy dummy placeholder textures now that real textures are loaded
+    if (self.dummy_sampler != .null_handle) {
+        self.dev.destroySampler(self.dummy_sampler, null);
+        self.dummy_sampler = .null_handle;
+    }
+    if (self.dummy_view != .null_handle) {
+        self.dev.destroyImageView(self.dummy_view, null);
+        self.dummy_view = .null_handle;
+    }
+    if (self.dummy_image != .null_handle) {
+        self.dev.destroyImage(self.dummy_image, null);
+        self.dummy_image = .null_handle;
+    }
+    if (self.dummy_memory != .null_handle) {
+        self.dev.freeMemory(self.dummy_memory, null);
+        self.dummy_memory = .null_handle;
+    }
+    std.log.debug("VulkanRenderer.init: Step 20a - Block textures loaded successfully", .{});
+
     std.log.debug("VulkanRenderer.init: Step 21 - Creating opaque pipeline...", .{});
     try self.createPipeline();
     std.log.debug("VulkanRenderer.init: Step 21 - Opaque pipeline created successfully", .{});
@@ -808,16 +852,22 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     if (self.dummy_sampler != .null_handle) {
         self.dev.destroySampler(self.dummy_sampler, null);
+        self.dummy_sampler = .null_handle;
     }
     if (self.dummy_view != .null_handle) {
         self.dev.destroyImageView(self.dummy_view, null);
+        self.dummy_view = .null_handle;
     }
     if (self.dummy_image != .null_handle) {
         self.dev.destroyImage(self.dummy_image, null);
+        self.dummy_image = .null_handle;
     }
     if (self.dummy_memory != .null_handle) {
         self.dev.freeMemory(self.dummy_memory, null);
+        self.dummy_memory = .null_handle;
     }
+
+    self.texture_manager.destroyTextureArray();
 
     if (self.cmd_buffers.len > 0) {
         self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
@@ -878,6 +928,13 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
 
 fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []Mesher.Face) !void {
     const buffer_size = @as(vk.DeviceSize, @intCast(faces.len)) * @sizeOf(Mesher.Face);
+
+    // Index block_type via EnumIndexer (same as OpenGL) so texture array layer
+    // indices match the Block declaration order
+    const indexer = std.enums.EnumIndexer(World.Block);
+    for (faces) |*face| {
+        face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+    }
 
     var staging_buffer: vk.Buffer = .null_handle;
     var staging_memory: vk.DeviceMemory = .null_handle;
@@ -1625,7 +1682,7 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     }
 }
 
-fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, buffer: *vk.Buffer, memory: *vk.DeviceMemory) !void {
+pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, buffer: *vk.Buffer, memory: *vk.DeviceMemory) !void {
     if (size == 0) {
         return error.InvalidBufferSize;
     }
@@ -1696,7 +1753,7 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
     self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
 }
 
-fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
     for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |mem_type, i| {
         if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
             return @as(u32, @intCast(i));
@@ -3375,4 +3432,570 @@ test "projview combination — full pipeline sanity" {
     // Point behind camera at world z=-50: should NOT be visible (w should be negative)
     const behind = transform(projview, .{ 0, 0, -50, 1 });
     try std.testing.expect(behind.clip[3] < 0);
+}
+
+// ──── RenderBufferKey ──────────────────────────────────────────────────────────
+
+test "RenderBufferKey.toPos — opaque and transparent" {
+    const pos_a = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };
+    const pos_b = ChunkPos{ .level = -3, .position = .{ -10, 20, 30 } };
+
+    const opaque_key: RenderBufferKey = .{ .@"opaque" = pos_a };
+    const transparent_key: RenderBufferKey = .{ .transparent = pos_b };
+
+    try std.testing.expectEqual(pos_a, opaque_key.toPos());
+    try std.testing.expectEqual(pos_b, transparent_key.toPos());
+}
+
+test "RenderBufferKey.toPos — identity after round-trip" {
+    const pos = ChunkPos{ .level = 5, .position = .{ -100, 200, -300 } };
+
+    const key: RenderBufferKey = .{ .@"opaque" = pos };
+    const extracted = key.toPos();
+
+    try std.testing.expectEqual(pos.level, extracted.level);
+    try std.testing.expectEqual(pos.position[0], extracted.position[0]);
+    try std.testing.expectEqual(pos.position[1], extracted.position[1]);
+    try std.testing.expectEqual(pos.position[2], extracted.position[2]);
+}
+
+// ──── FrameDebugStats ──────────────────────────────────────────────────────────
+
+test "FrameDebugStats — default initialization" {
+    const stats = FrameDebugStats{};
+    try std.testing.expectEqual(@as(u64, 0), stats.frame_number);
+    try std.testing.expectEqual(@as(u32, 0), stats.total_meshes);
+    try std.testing.expectEqual(@as(u32, 0), stats.opaque_candidates);
+    try std.testing.expectEqual(@as(u32, 0), stats.opaque_culled);
+    try std.testing.expectEqual(@as(u32, 0), stats.opaque_drawn);
+    try std.testing.expectEqual(@as(u32, 0), stats.transparent_candidates);
+    try std.testing.expectEqual(@as(u32, 0), stats.transparent_culled);
+    try std.testing.expectEqual(@as(u32, 0), stats.transparent_drawn);
+    try std.testing.expectEqual(@as(u64, 0), stats.elapsed_ns);
+}
+
+test "FrameDebugStats — log with zero values does not crash" {
+    // The log method is a no-op in terms of side-effects we can assert,
+    // but it must not panic or crash even with all-zero inputs.
+    const stats = FrameDebugStats{};
+    stats.log();
+}
+
+test "FrameDebugStats — log with partial populated stats" {
+    var stats = FrameDebugStats{
+        .frame_number = 42,
+        .total_meshes = 100,
+        .opaque_candidates = 60,
+        .opaque_culled = 10,
+        .opaque_drawn = 50,
+        .transparent_candidates = 30,
+        .transparent_culled = 20,
+        .transparent_drawn = 10,
+        .elapsed_ns = 16_666_666,
+        .player_pos = .{ 10.5, 20.3, -5.0 },
+        .camera_front = .{ 0.1, -0.2, 0.97 },
+    };
+    stats.log();
+}
+
+test "FrameDebugStats — log triggers zero-drawn warning when total_drawn == 0" {
+    var stats = FrameDebugStats{
+        .frame_number = 1,
+        .total_meshes = 10,
+        .opaque_candidates = 5,
+        .transparent_candidates = 3,
+        .elapsed_ns = 5_000_000,
+    };
+    stats.log(); // Should log warning since total_drawn == 0
+}
+
+// ──── getDeletionQueueIndex ─────────────────────────────────────────────────────
+
+test "getDeletionQueueIndex — frame 0 with 2 in-flight fences" {
+    var renderer: VulkanRenderer = undefined;
+    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
+    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
+    renderer.in_flight_fences = &fences_2;
+
+    // fence_slot = 0 % 2 = 0; result = 0 % 8 = 0
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+}
+
+test "getDeletionQueueIndex — monotonically increasing frames" {
+    var renderer: VulkanRenderer = undefined;
+    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
+    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
+    renderer.in_flight_fences = &fences_2;
+
+    var expected: u32 = 0;
+    while (expected < 16) : (expected += 1) {
+        renderer.current_frame_idx.store(expected, .monotonic);
+        // fence_slot = expected % 2; result = (expected % 2) % 8 = expected % 2
+        const want = @as(u32, @intCast(@as(u64, expected) % 2));
+        try std.testing.expectEqual(want, renderer.getDeletionQueueIndex());
+    }
+}
+
+test "getDeletionQueueIndex — wraps around deferred_deletions (8)" {
+    var renderer: VulkanRenderer = undefined;
+    renderer.current_frame_idx = std.atomic.Value(u32).init(8);
+    var fences_3: [3]vk.Fence = .{ .null_handle, .null_handle, .null_handle };
+    renderer.in_flight_fences = &fences_3;
+
+    // fence_slot = 8 % 3 = 2; result = 2 % 8 = 2
+    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
+}
+
+test "getDeletionQueueIndex — large frame numbers" {
+    var renderer: VulkanRenderer = undefined;
+    renderer.current_frame_idx = std.atomic.Value(u32).init(100_000);
+    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
+    renderer.in_flight_fences = &fences_2;
+
+    // fence_slot = 100_000 % 2 = 0; result = 0 % 8 = 0
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(100_001, .monotonic);
+    // fence_slot = 100_001 % 2 = 1; result = 1 % 8 = 1
+    try std.testing.expectEqual(@as(u32, 1), renderer.getDeletionQueueIndex());
+}
+
+test "getDeletionQueueIndex — 5 in-flight fences, varied frames" {
+    var renderer: VulkanRenderer = undefined;
+    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
+    var fences_5: [5]vk.Fence = .{ .null_handle, .null_handle, .null_handle, .null_handle, .null_handle };
+    renderer.in_flight_fences = &fences_5;
+
+    // frame 0: fence_slot = 0 % 5 = 0; result = 0 % 8 = 0
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(7, .monotonic);
+    // frame 7: fence_slot = 7 % 5 = 2; result = 2 % 8 = 2
+    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(13, .monotonic);
+    // frame 13: fence_slot = 13 % 5 = 3; result = 3 % 8 = 3
+    try std.testing.expectEqual(@as(u32, 3), renderer.getDeletionQueueIndex());
+}
+
+// ──── findMemoryType ────────────────────────────────────────────────────────────
+
+test "findMemoryType — selects host_visible|host_coherent" {
+    var renderer: VulkanRenderer = undefined;
+    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
+    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
+    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
+    mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
+    mem_types[2] = .{ .property_flags = .{ .host_visible_bit = true, .host_cached_bit = true }, .heap_index = 0 };
+
+    renderer.mem_props = .{
+        .memory_type_count = 3,
+        .memory_types = mem_types,
+        .memory_heap_count = 2,
+        .memory_heaps = undefined,
+    };
+
+    // Find host_visible | host_coherent among types 0,1,2
+    const idx = renderer.findMemoryType(
+        @as(u32, 0b111),
+        vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
+    );
+    try std.testing.expectEqual(@as(u32, 0), idx);
+}
+
+test "findMemoryType — selects device_local" {
+    var renderer: VulkanRenderer = undefined;
+    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
+    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
+    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
+    mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
+
+    renderer.mem_props = .{
+        .memory_type_count = 2,
+        .memory_types = mem_types,
+        .memory_heap_count = 2,
+        .memory_heaps = undefined,
+    };
+
+    const idx = renderer.findMemoryType(
+        @as(u32, 0b11),
+        vk.MemoryPropertyFlags{ .device_local_bit = true },
+    );
+    try std.testing.expectEqual(@as(u32, 1), idx);
+}
+
+test "findMemoryType — respects type_filter" {
+    var renderer: VulkanRenderer = undefined;
+    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
+    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
+    mem_types[0] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 0 };
+    // type 5 also has device_local but is only reachable via bit 5 in type_filter
+    mem_types[5] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
+
+    renderer.mem_props = .{
+        .memory_type_count = 6,
+        .memory_types = mem_types,
+        .memory_heap_count = 2,
+        .memory_heaps = undefined,
+    };
+
+    // type_filter with only bit 5 set → must match memory type 5
+    const idx = renderer.findMemoryType(
+        @as(u32, 1 << 5),
+        vk.MemoryPropertyFlags{ .device_local_bit = true },
+    );
+    try std.testing.expectEqual(@as(u32, 5), idx);
+}
+
+test "findMemoryType — skips types not in type_filter" {
+    var renderer: VulkanRenderer = undefined;
+    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
+    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
+    // type 0 is host_visible but NOT in type_filter (bit 0 not set)
+    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true }, .heap_index = 0 };
+    // type 1 is host_visible AND in type_filter
+    mem_types[1] = .{ .property_flags = .{ .host_visible_bit = true }, .heap_index = 1 };
+
+    renderer.mem_props = .{
+        .memory_type_count = 2,
+        .memory_types = mem_types,
+        .memory_heap_count = 2,
+        .memory_heaps = undefined,
+    };
+
+    // Only bit 1 set in filter → must select type 1, not type 0
+    const idx = renderer.findMemoryType(
+        @as(u32, 1 << 1),
+        vk.MemoryPropertyFlags{ .host_visible_bit = true },
+    );
+    try std.testing.expectEqual(@as(u32, 1), idx);
+}
+
+// ──── makeInfReversedZProjRh edge cases ────────────────────────────────────────
+
+test "makeInfReversedZProjRh — very narrow FOV" {
+    const fov = std.math.degreesToRadians(10.0);
+    const aspect = 16.0 / 9.0;
+    const zNear: f32 = 0.01;
+
+    const P = makeInfReversedZProjRh(fov, aspect, zNear);
+
+    // Reversed-Z: near plane maps to NDC z = 1.0
+    const v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
+    const ndc_z = v.data[2] / v.data[3];
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), ndc_z, 1e-6);
+
+    // Far plane maps to NDC z ≈ 0
+    const far_v = P.multiplyVec(.{ .data = .{ 0, 0, -1e9, 1 } });
+    const far_ndc_z = far_v.data[2] / far_v.data[3];
+    try std.testing.expect(far_ndc_z > 0);
+    try std.testing.expect(far_ndc_z < 1e-6);
+}
+
+test "makeInfReversedZProjRh — ultra-near zNear" {
+    const fov = std.math.degreesToRadians(90.0);
+    const aspect = 1.0;
+    const zNear: f32 = 0.0001;
+
+    const P = makeInfReversedZProjRh(fov, aspect, zNear);
+
+    // Near plane still maps to NDC z = 1.0
+    const v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
+    const ndc_z = v.data[2] / v.data[3];
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), ndc_z, 1e-6);
+}
+
+test "makeInfReversedZProjRh — wide aspect ratio (ultrawide)" {
+    const fov = std.math.degreesToRadians(90.0);
+    const aspect = 32.0 / 9.0; // ~super ultrawide
+    const zNear: f32 = 0.1;
+
+    const P = makeInfReversedZProjRh(fov, aspect, zNear);
+
+    // Y-down: +Y world → negative NDC Y
+    // With 90° VFOV and wide aspect, the viewable horizontal range is much wider
+    const r = P.multiplyVec(.{ .data = .{ 10, 0, -50, 1 } });
+    const ndc_x = r.data[0] / r.data[3];
+    // Should still be visible (within [-1, 1]) but with the wide aspect,
+    // the same world X is a smaller fraction of screen width
+    try std.testing.expect(@abs(ndc_x) <= 1);
+
+    // Reversed-Z invariant
+    const near_v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
+    const near_ndc_z = near_v.data[2] / near_v.data[3];
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), near_ndc_z, 1e-6);
+
+    // Y-down check
+    const y_up = P.multiplyVec(.{ .data = .{ 0, 10, -50, 1 } });
+    try std.testing.expect(y_up.data[1] / y_up.data[3] < 0);
+}
+
+// ──── Camera direction math edge cases ──────────────────────────────────────────
+
+test "camera direction — looking straight up (pitch=+90°)" {
+    const viewDir = @Vector(3, f32){ 90.0, 0.0, 0.0 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
+
+    // Looking straight up: direction should be (0, 1, 0)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), dir[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
+}
+
+test "camera direction — looking straight down (pitch=-90°)" {
+    const viewDir = @Vector(3, f32){ -90.0, 0.0, 0.0 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
+
+    // Looking straight down: direction should be (0, -1, 0)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
+}
+
+test "camera direction — looking directly behind (yaw=180°)" {
+    const viewDir = @Vector(3, f32){ 0.0, 180.0, 0.0 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
+
+    // Looking behind (180° yaw from +Z): direction should be (0, 0, -1)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[2], 1e-5);
+}
+
+test "camera direction — looking right (yaw=+90°)" {
+    const viewDir = @Vector(3, f32){ 0.0, 90.0, 0.0 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
+
+    // Looking right: direction should be (1, 0, 0)
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), dir[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
+}
+
+test "camera direction — looking left (yaw=-90°)" {
+    const viewDir = @Vector(3, f32){ 0.0, -90.0, 0.0 };
+
+    var dir: @Vector(3, f32) = undefined;
+    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
+    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    dir = zm.Vec3f.norm(.{ .data = dir }).data;
+
+    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
+
+    // Looking left: direction should be (-1, 0, 0)
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
+}
+
+// ──── cullChunk ─────────────────────────────────────────────────────────────────
+
+/// Helper: build a Frustum from a camera configured at `eye` looking toward `target`.
+fn makeTestFrustum(eye: @Vector(3, f32), target: @Vector(3, f32), up: @Vector(3, f32), fov_deg: f32, aspect: f32, z_near: f32) Frustum {
+    const fov = std.math.degreesToRadians(fov_deg);
+    const P = makeInfReversedZProjRh(fov, aspect, z_near);
+    const V = zm.Mat4f.lookAtRH(
+        .{ .data = eye },
+        .{ .data = target },
+        .{ .data = up },
+    );
+    const projview = P.multiply(V);
+
+    const flat: @Vector(16, f32) = .{
+        projview.data[0][0], projview.data[0][1], projview.data[0][2], projview.data[0][3],
+        projview.data[1][0], projview.data[1][1], projview.data[1][2], projview.data[1][3],
+        projview.data[2][0], projview.data[2][1], projview.data[2][2], projview.data[2][3],
+        projview.data[3][0], projview.data[3][1], projview.data[3][2], projview.data[3][3],
+    };
+
+    return Frustum.extractFrustumPlanes(flat);
+}
+
+test "cullChunk — chunk directly in front of camera is NOT culled" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 }, // eye at origin
+        .{ 0, 0, 1 }, // looking along +Z
+        .{ 0, 1, 0 }, // up
+        90.0, // 90° vertical FOV
+        800.0 / 600.0, // standard aspect
+        0.01, // zNear
+    );
+
+    // Chunk at level 0, position (0, 0, 0) — sits at world origin, right at the camera's feet
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, 0 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
+}
+
+test "cullChunk — chunk in front along view direction is NOT culled" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
+    );
+
+    // Chunk at level 0, position (0, 0, 1) — in front along +Z
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, 1 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
+}
+
+test "cullChunk — chunk behind camera IS culled" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
+    );
+
+    // Chunk behind camera at position (0, 0, -2) — behind the viewer
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, -2 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
+}
+
+test "cullChunk — chunk far to the side IS culled outside 90° FOV" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
+    );
+
+    // Chunk far to the right at X=20 chunks → world X = 640, well outside frustum
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 20, 0, 1 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
+}
+
+test "cullChunk — chunk slightly off-center but still visible" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
+    );
+
+    // Chunk at (1, 0, 1) is slightly to the right but should still be within ~106° HFOV
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 1, 0, 1 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
+}
+
+test "cullChunk — chunk far above camera IS culled" {
+    const frustum = makeTestFrustum(
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
+    );
+
+    // Chunk far above at (0, 20, 1) — Y=20 chunks = 640 world units, culled by top plane
+    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 20, 1 } };
+    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
+
+    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
+}
+
+// ──── RenderOptions ─────────────────────────────────────────────────────────────
+
+test "RenderOptions — default values" {
+    const options = VulkanRenderer.RenderOptions{};
+    try std.testing.expect(!options.draw_over);
+    try std.testing.expectApproxEqAbs(@as(f32, 90.0), options.fov, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 60 * 5), options.day_length_sec, 1e-6);
+}
+
+// ──── ChunkData layout ──────────────────────────────────────────────────────────
+
+test "ChunkData — struct size and alignment" {
+    // ChunkData: absolute_position[3]f32 align(4*@sizeOf(f32)=16) (12+4pad), relative_position[3]f32 align(16) (12+4pad),
+    // scale f32 (4), pad(4), address u64 align(8) (8) = 48 total with align(16)
+    try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
+}
+
+// ──── PushConstants layout ───────────────────────────────────────────────────────
+
+test "PushConstants — struct size and alignment" {
+    // PushConstants: projview [16]f32=64, sun_dir [3]f32=12, _pad0 f32=4, time f32=4, draw_over i32=4
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(PushConstants));
+    try std.testing.expectEqual(@as(usize, 84), @sizeOf(PushConstants));
+}
+
+// ──── VulkanRenderer itself (partial, structural) ───────────────────────────────
+
+test "VulkanRenderer — RenderOptions has expected field types" {
+    const Opts = VulkanRenderer.RenderOptions;
+    // Verify at compile time — ensure struct exists and fields are accessible
+    comptime {
+        if (!@hasField(Opts, "draw_over")) @compileError("missing draw_over");
+        if (!@hasField(Opts, "fov")) @compileError("missing fov");
+        if (!@hasField(Opts, "day_length_sec")) @compileError("missing day_length_sec");
+    }
+}
+
+test "ChunkMeshBuffer — struct layout" {
+    // buffer: vk.Buffer (Vulkan handle, u64), memory: vk.DeviceMemory (u64),
+    // device_address: vk.DeviceAddress (u64), face_count: u32
+    // Max alignment among fields is 8 (u64 handles)
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(ChunkMeshBuffer));
+    // Regular (non-extern) struct; verify size is as expected with u64 handles
+    try std.testing.expect(@sizeOf(ChunkMeshBuffer) >= 28); // 3*u64 + u32 + potentially padding
+}
+
+test "ChunkData — field sizes" {
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf([3]f32));
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(f32));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(u64));
 }
