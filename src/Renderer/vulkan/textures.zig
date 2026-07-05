@@ -71,10 +71,8 @@ pub const TextureArrayManager = struct {
 
         if (entry_names.items.len == 0) return error.NoTexturesFound;
 
-        // Number of layers = max_layer_index + 1 so we cover all declared Block positions
         const layer_count = max_layer_index + 1;
 
-        // Temporarily store texture images indexed by layer (missing textures get null)
         var layer_images = try allocator.alloc(?zigimg.Image, layer_count);
         defer {
             for (layer_images) |*maybe_img| {
@@ -112,8 +110,6 @@ pub const TextureArrayManager = struct {
                     }
                 }
 
-                std.log.debug("loaded texture {s} -> layer {d}\n", .{ name, layer });
-
                 if (layer_images[layer]) |*old_img| old_img.deinit(allocator);
                 layer_images[layer] = loaded_img;
                 loaded_count += 1;
@@ -123,7 +119,6 @@ pub const TextureArrayManager = struct {
         if (first_resolution == null) return error.NoTexturesFound;
         const res = first_resolution.?;
 
-        // Validate square (same as OpenGL)
         if (res[0] != res[1]) return error.TexturesNotSquare;
 
         std.log.info("texture resolution: {any}, count: {d}\n", .{ res, loaded_count });
@@ -255,7 +250,6 @@ pub const TextureArrayManager = struct {
 
         // 4. Generate mip chain via blit
         if (num_mip_levels > 1) {
-            // For each destination mip level, blit from the previous level
             var mip_level: u32 = 1;
             while (mip_level < num_mip_levels) : (mip_level += 1) {
                 const prev_mip = mip_level - 1;
@@ -264,10 +258,8 @@ pub const TextureArrayManager = struct {
                 const dst_w = @max(@as(u32, 1), @as(u32, @truncate(width >> @as(u6, @truncate(mip_level)))));
                 const dst_h = @max(@as(u32, 1), @as(u32, @truncate(height >> @as(u6, @truncate(mip_level)))));
 
-                // Transition dest mip level: undefined → transfer_dst_optimal
                 try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, mip_level, 1, 0, image_count);
 
-                // Blit from prev mip (transfer_src_optimal) → current mip (transfer_dst_optimal)
                 const blit_region = vk.ImageBlit{
                     .src_subresource = .{
                         .aspect_mask = .{ .color_bit = true },
@@ -301,17 +293,13 @@ pub const TextureArrayManager = struct {
                     .linear,
                 );
 
-                // Transition prev mip to shader_read_only (done with it)
                 try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, prev_mip, 1, 0, image_count);
 
-                // Transition current mip to transfer_src_optimal for next iteration (or final read)
                 try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .transfer_src_optimal, mip_level, 1, 0, image_count);
             }
 
-            // Transition last mip level: transfer_src_optimal → shader_read_only_optimal
             try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
         } else {
-            // No mipmaps: transition mip 0: transfer_src_optimal → shader_read_only_optimal
             try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1, 0, image_count);
         }
 
