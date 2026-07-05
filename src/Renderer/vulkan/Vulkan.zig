@@ -210,6 +210,7 @@ queue_mutex: std.Io.Mutex = .init,
 
 deferred_deletions_mutex: std.Io.Mutex = .init,
 
+init_time_ns: u64 = 0,
 frame_number: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
@@ -217,12 +218,14 @@ pub const RenderOptions = struct {
     draw_over: bool = false,
     fov: f32 = 90.0,
     day_length_sec: f32 = 60 * 5,
+    gamma_correction: bool = true,
 };
 
 const default_render_options: RenderOptions = .{
     .draw_over = false,
     .fov = 90.0,
     .day_length_sec = 60 * 5,
+    .gamma_correction = true,
 };
 
 var default_render_options_lock: std.Io.RwLock = .init;
@@ -290,6 +293,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.window = window;
     self.render_options = render_options;
     self.render_options_lock = render_options_lock;
+    self.init_time_ns = @as(u64, @intCast(std.Io.Timestamp.now(io, .real).nanoseconds));
 
     std.log.debug("VulkanRenderer.init: Step 2 - Initializing Vulkan handle fields to safe defaults...", .{});
 
@@ -692,7 +696,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
 
     std.log.debug("VulkanRenderer.init: Step 20a - Loading block textures...", .{});
     {
-        self.texture_manager = textures.TextureArrayManager.init(self);
+        self.texture_manager = textures.TextureArrayManager.init(self, self.render_options.gamma_correction);
 
         // Write embedded block texture PNGs to disk (same as OpenGL renderer)
         const dir = try std.Io.Dir.cwd().createDirPathOpen(io, "packs/default/Blocks/", .{ .open_options = .{ .iterate = true } });
@@ -733,9 +737,10 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     try self.createTransparentPipeline();
     std.log.debug("VulkanRenderer.init: Step 22 - Transparent pipeline created successfully", .{});
 
-    std.log.debug("VulkanRenderer.init: Step 23 - Allocating indirect buffers...", .{});
-    try self.allocateIndirectBuffers();
-    std.log.debug("VulkanRenderer.init: Step 23 - Indirect buffers allocated successfully", .{});
+    // Indirect buffers are already allocated by createSwapchain above (line 685).
+    // Do NOT call allocateIndirectBuffers again here — that would leak the first
+    // batch of Vulkan buffers/memory and their Zig slice allocations.
+    std.log.debug("VulkanRenderer.init: Step 23 - Indirect buffers already allocated by createSwapchain", .{});
 
     self.queue_family_index = graphics_family;
     self.present_queue_family_index = present_family;
@@ -761,7 +766,11 @@ pub fn getSurface(self: *VulkanRenderer) vk.SurfaceKHR {
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
-    _ = self.dev.deviceWaitIdle() catch {};
+    {
+        _ = self.queue_mutex.lock(io) catch {};
+        defer self.queue_mutex.unlock(io);
+        _ = self.dev.deviceWaitIdle() catch {};
+    }
 
     var it = self.meshes.iterator();
     while (it.next(io) catch null) |entry| {
@@ -928,7 +937,11 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
     if (transparent_mesh.len > 0) {
         self.uploadMesh(io, .{ .transparent = chunk_pos }, transparent_mesh) catch |err| switch (err) {
             error.OutOfHostMemory, error.OutOfDeviceMemory => return error.OutOfVideoMemory,
-            else => return error.Unexpected,
+            else => {
+                // Transparent upload failed after opaque succeeded. Remove orphaned opaque mesh.
+                if (opaque_mesh.len > 0) self.remove(io, .{ .@"opaque" = chunk_pos });
+                return error.Unexpected;
+            },
         };
     } else {
         self.remove(io, .{ .transparent = chunk_pos });
@@ -1020,7 +1033,7 @@ fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []
 
 pub fn remove(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey) void {
     if (self.meshes.fetchRemove(io, key)) |mesh| {
-        self.destroyChunkMesh(mesh);
+        self.enqueueDeferredDeletion(io, mesh);
     }
 }
 
@@ -1067,18 +1080,25 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 
     std.log.debug("vtableDrawChunks: Step 4 - Resetting fences for current frame...", .{});
     var fences_reset: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
-    _ = self.dev.resetFences(&fences_reset) catch |err| switch (err) {
-        else => {},
-    };
+    self.dev.resetFences(&fences_reset) catch return error.DrawFailed;
 
     if (self.swapchain_needs_recreate) {
         self.swapchain_needs_recreate = false;
         std.log.debug("vtableDrawChunks: Swapchain needs recreation due to viewport resize...", .{});
-        _ = self.dev.deviceWaitIdle() catch {};
+        {
+            _ = self.queue_mutex.lock(io) catch |err| switch (err) {
+                error.Canceled => return error.DrawFailed,
+            };
+            defer self.queue_mutex.unlock(io);
+            self.dev.deviceWaitIdle() catch return error.DrawFailed;
+        }
         self.createSwapchain(io) catch |err| switch (err) {
             else => return error.DrawFailed,
         };
         current_frame = self.currentFrame();
+        // Reset the new fence at this frame index (fences are created signaled,
+        // but Step 4 already reset the old fence before recreation).
+        self.dev.resetFences(&.{self.in_flight_fences[current_frame]}) catch return error.DrawFailed;
     }
 
     std.log.debug("vtableDrawChunks: Step 5 - Acquiring next swapchain image...", .{});
@@ -1097,6 +1117,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
             else => return error.DrawFailed,
         };
         current_frame = self.currentFrame();
+        // Reset the new fence (fences are created signaled).
+        self.dev.resetFences(&.{self.in_flight_fences[current_frame]}) catch return error.DrawFailed;
         const acquire_result_res2 = self.dev.acquireNextImageKHR(
             self.swapchain,
             std.math.maxInt(u64),
@@ -1111,6 +1133,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
             else => return error.DrawFailed,
         };
         current_frame = self.currentFrame();
+        // Reset the new fence (fences are created signaled).
+        self.dev.resetFences(&.{self.in_flight_fences[current_frame]}) catch return error.DrawFailed;
         const acquire_result_res2 = self.dev.acquireNextImageKHR(
             self.swapchain,
             std.math.maxInt(u64),
@@ -1158,7 +1182,9 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
     const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
-    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const elapsed_ns = now_ns -| self.init_time_ns;
+    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
 
     std.log.debug("vtableDrawChunks: Step 7 - Beginning command buffer...", .{});
     const begin_info = vk.CommandBufferBeginInfo{
@@ -1255,7 +1281,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     var pc = PushConstants{
         .projview = std.mem.zeroes([16]f32),
         .sun_dir = @as([3]f32, @bitCast(sun_dir)),
-        .time = @floatFromInt(millitimestamp),
+        .time = elapsed_sec,
         .draw_over = if (draw_over) 1 else 0,
     };
 
@@ -1305,8 +1331,10 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     self.frame_stats.camera_front = self.camera_front;
     self.frame_stats.elapsed_ns = frame_elapsed_ns;
 
-    // Log frame debug stats every frame
-    self.frame_stats.log();
+    // Log frame debug stats periodically (every 60 frames) to avoid console spam
+    if (self.frame_number % 60 == 0) {
+        self.frame_stats.log();
+    }
 
     std.log.debug("vtableDrawChunks: Step 16 - Calling cmdEndRendering...", .{});
     self.dev.cmdEndRendering(cmd_buffer);
@@ -1328,7 +1356,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{ .transfer_read_bit = true },
     };
 
-    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_to_copy_barrier}));
+    const color_to_copy_barriers = [_]vk.ImageMemoryBarrier{color_to_copy_barrier};
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &color_to_copy_barriers);
 
     const swapchain_barrier = vk.ImageMemoryBarrier{
         .old_layout = .undefined,
@@ -1347,7 +1376,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{ .transfer_write_bit = true },
     };
 
-    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true, .transfer_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{swapchain_barrier}));
+    const swapchain_barriers = [_]vk.ImageMemoryBarrier{swapchain_barrier};
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true, .transfer_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &swapchain_barriers);
 
     const copy_region = vk.ImageCopy{
         .src_subresource = .{
@@ -1396,7 +1426,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{},
     };
 
-    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{present_barrier}));
+    const present_barriers = [_]vk.ImageMemoryBarrier{present_barrier};
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, null, null, &present_barriers);
 
     const color_return_barrier = vk.ImageMemoryBarrier{
         .old_layout = .transfer_src_optimal,
@@ -1415,7 +1446,8 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .dst_access_mask = .{ .color_attachment_write_bit = true },
     };
 
-    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{color_return_barrier}));
+    const color_return_barriers = [_]vk.ImageMemoryBarrier{color_return_barrier};
+    self.dev.cmdPipelineBarrier(cmd_buffer, .{ .transfer_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_return_barriers);
 
     std.log.debug("vtableDrawChunks: Step 17 - Ending command buffer...", .{});
     self.dev.endCommandBuffer(cmd_buffer) catch |err| switch (err) {
@@ -1458,7 +1490,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
         .p_image_indices = &[_]u32{image_index},
-        .p_results = undefined,
+        .p_results = null,
     };
 
     std.log.debug("vtableDrawChunks: Step 21 - Calling queuePresentKHR...", .{});
@@ -1636,7 +1668,6 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     }
 
     self.indirect_draw_buffers_mapped = try self.allocator.alloc([*]u8, num_frames);
-    @memset(self.indirect_draw_buffers_mapped, undefined);
     errdefer {
         if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
         self.indirect_draw_buffers_mapped = &.{};
@@ -1667,7 +1698,6 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     }
 
     self.chunk_data_buffers_mapped = try self.allocator.alloc([*]u8, num_frames);
-    @memset(self.chunk_data_buffers_mapped, undefined);
     errdefer {
         if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
         self.chunk_data_buffers_mapped = &.{};
@@ -1744,7 +1774,9 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
 
     try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
 
-    _ = self.dev.queueWaitIdle(self.graphics_queue) catch {};
+    self.dev.queueWaitIdle(self.graphics_queue) catch |err| switch (err) {
+        else => return error.DrawFailed,
+    };
 
     self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
 }
@@ -1760,8 +1792,12 @@ pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.Mem
 
 fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
-    const chunkSizeVec: @Vector(3, f32) = @splat(ChunkSize * scale);
-    const relativeChunkPos: @Vector(3, f32) = @floatCast((@as(@Vector(3, f32), @floatFromInt(chunkpos.position)) * chunkSizeVec) - playerPos);
+    const chunkSizeBlocks: f64 = @as(f64, @floatFromInt(ChunkSize)) * @as(f64, @floatCast(scale));
+    // Compute chunk's world position in f64 to avoid precision loss when the
+    // camera is close to chunk boundaries (f32 has only ~7 decimal digits).
+    const chunkWorldPos: @Vector(3, f64) = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
+    const relativeChunkPos: @Vector(3, f32) = @floatCast(chunkWorldPos - playerPos);
+    const chunkSizeVec: @Vector(3, f32) = @splat(@as(f32, @floatCast(chunkSizeBlocks)));
     return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
@@ -1802,12 +1838,18 @@ fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat
 }
 
 fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
-    _ = self.dev.deviceWaitIdle() catch {};
+    {
+        _ = self.queue_mutex.lock(io) catch |err| switch (err) {
+            error.Canceled => return error.DrawFailed,
+        };
+        defer self.queue_mutex.unlock(io);
+        _ = self.dev.deviceWaitIdle() catch {};
+    }
 
     // Clean up all old per-frame resources (indirect buffers, chunk data,
     // semaphores, fences, cmd buffers, render targets) before reallocating.
     // This prevents a VRAM leak on every VK_SUBOPTIMAL_KHR frame.
-    self.destroyOldSwapchainResources();
+    self.destroyOldSwapchainResources(io);
 
     const old_swapchain = self.swapchain;
 
@@ -1834,11 +1876,27 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
 
+    // Read gamma correction setting under lock
+    self.render_options_lock.lockSharedUncancelable(io);
+    const gamma_correction = self.render_options.gamma_correction;
+    self.render_options_lock.unlockShared(io);
+
     var surface_format: vk.SurfaceFormatKHR = surface_formats[0];
-    for (surface_formats) |sfmt| {
-        if (sfmt.format == .b8g8r8a8_srgb or sfmt.format == .r8g8b8a8_unorm) {
-            surface_format = sfmt;
-            break;
+    if (gamma_correction) {
+        // Prefer sRGB swapchain for gamma-correct rendering
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == .b8g8r8a8_srgb) {
+                surface_format = sfmt;
+                break;
+            }
+        }
+    } else {
+        // Prefer UNORM swapchain to match OpenGL behavior (no gamma correction)
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == .b8g8r8a8_unorm) {
+                surface_format = sfmt;
+                break;
+            }
         }
     }
     self.swapchain_format = surface_format.format;
@@ -1854,7 +1912,7 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
         }
     }
 
-    var image_count = caps.min_image_count + 1;
+    var image_count = @max(caps.min_image_count + 1, @as(u32, 2));
     if (caps.max_image_count > 0) {
         image_count = @min(image_count, caps.max_image_count);
     }
@@ -2005,8 +2063,12 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
     try self.createTransparentPipeline();
 }
 
-fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
-    _ = self.dev.deviceWaitIdle() catch {};
+fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
+    {
+        _ = self.queue_mutex.lock(io) catch {};
+        defer self.queue_mutex.unlock(io);
+        _ = self.dev.deviceWaitIdle() catch {};
+    }
 
     for (self.swapchain_views) |view| {
         if (view != .null_handle) self.dev.destroyImageView(view, null);
@@ -2121,7 +2183,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Checking if old swapchain resources need cleanup...", .{});
     if (old_swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
         std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Cleaning up old swapchain resources...", .{});
-        self.destroyOldSwapchainResources();
+        self.destroyOldSwapchainResources(io);
     }
     std.log.debug("VulkanRenderer.createSwapchain: Step 2 - Old swapchain resources destroyed", .{});
 
@@ -2149,11 +2211,25 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     defer self.allocator.free(surface_formats);
     std.log.debug("VulkanRenderer.createSwapchain: Step 4 - Found {} surface formats", .{surface_formats.len});
 
+    // Read gamma correction setting under lock
+    self.render_options_lock.lockSharedUncancelable(io);
+    const gamma_correction = self.render_options.gamma_correction;
+    self.render_options_lock.unlockShared(io);
+
     var surface_format: vk.SurfaceFormatKHR = surface_formats[0];
-    for (surface_formats) |sfmt| {
-        if (sfmt.format == .b8g8r8a8_srgb or sfmt.format == .r8g8b8a8_unorm) {
-            surface_format = sfmt;
-            break;
+    if (gamma_correction) {
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == .b8g8r8a8_srgb) {
+                surface_format = sfmt;
+                break;
+            }
+        }
+    } else {
+        for (surface_formats) |sfmt| {
+            if (sfmt.format == .b8g8r8a8_unorm) {
+                surface_format = sfmt;
+                break;
+            }
         }
     }
     self.swapchain_format = surface_format.format;
@@ -2173,7 +2249,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     }
     std.log.debug("VulkanRenderer.createSwapchain: Step 5 - Selected present mode: {any}", .{present_mode});
 
-    var image_count = caps.min_image_count + 1;
+    var image_count = @max(caps.min_image_count + 1, @as(u32, 2));
     if (caps.max_image_count > 0) {
         image_count = @min(image_count, caps.max_image_count);
     }
@@ -2426,7 +2502,8 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
             .dst_access_mask = .{ .color_attachment_write_bit = true },
         };
 
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
+        const color_barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
+        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_barrier_arr);
     }
 
     std.log.debug("VulkanRenderer.createRenderTargets: Step 4 - Creating color image view...", .{});
@@ -2523,7 +2600,8 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
             .dst_access_mask = .{ .depth_stencil_attachment_write_bit = true },
         };
 
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
+        const depth_barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
+        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, &depth_barrier_arr);
     }
 
     std.log.debug("VulkanRenderer.createRenderTargets: Step 8 - Creating depth image view...", .{});
@@ -2582,6 +2660,25 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
 }
 
 fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
+    // Destroy any stale dummy textures from a previous call (swapchain recreation).
+    // On first call during init they start as .null_handle so this is a no-op.
+    if (self.dummy_sampler != .null_handle) {
+        self.dev.destroySampler(self.dummy_sampler, null);
+        self.dummy_sampler = .null_handle;
+    }
+    if (self.dummy_view != .null_handle) {
+        self.dev.destroyImageView(self.dummy_view, null);
+        self.dummy_view = .null_handle;
+    }
+    if (self.dummy_image != .null_handle) {
+        self.dev.destroyImage(self.dummy_image, null);
+        self.dummy_image = .null_handle;
+    }
+    if (self.dummy_memory != .null_handle) {
+        self.dev.freeMemory(self.dummy_memory, null);
+        self.dummy_memory = .null_handle;
+    }
+
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 1 - Creating descriptor pool...", .{});
     const num_frames = self.swapchain_images.len;
     const pool_sizes = [_]vk.DescriptorPoolSize{
@@ -2714,7 +2811,8 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
             .dst_access_mask = .{ .transfer_write_bit = true },
         };
 
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
+        const to_transfer_dst = [_]vk.ImageMemoryBarrier{barrier};
+        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &to_transfer_dst);
 
         const copy_region = vk.BufferImageCopy{
             .buffer_offset = 0,
@@ -2741,7 +2839,8 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         barrier.dst_access_mask = .{ .shader_read_bit = true };
         barrier.image = self.dummy_image;
 
-        self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
+        const to_shader_read = [_]vk.ImageMemoryBarrier{barrier};
+        self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &to_shader_read);
     }
 
     const dummy_view_info = vk.ImageViewCreateInfo{
@@ -2791,17 +2890,13 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         .sampler = self.dummy_sampler,
     };
 
-    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 9 - Cleaning up staging buffer and memory...", .{});
-    // Staging resources are cleaned up by the defer registered at creation site.
-    // Null the handles here so the defer becomes a no-op (cleanup already done).
-    staging_buffer_dummy = .null_handle;
-    staging_memory_dummy = .null_handle;
+    std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 9 - Staging buffer was already cleaned up by endSingleTimeCommands; defer will destroy the staging objects.", .{});
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 10 - Writing binding 1: Texture Array...", .{});
 
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: Step 11 - Updating descriptor sets...", .{});
     for (self.descriptor_sets_per_frame) |desc_set| {
-        self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{.{
+        const writes = [_]vk.WriteDescriptorSet{.{
             .dst_set = desc_set,
             .dst_binding = 1,
             .dst_array_element = 0,
@@ -2810,7 +2905,8 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
             .p_image_info = @ptrCast(&texture_image_info_descriptor),
             .p_buffer_info = undefined,
             .p_texel_buffer_view = undefined,
-        }}, null);
+        }};
+        self.dev.updateDescriptorSets(&writes, null);
     }
     std.log.debug("VulkanRenderer.createDescriptorPoolAndSets: SUCCESS - Descriptor pool and sets created and updated", .{});
 }
@@ -2869,8 +2965,9 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .alpha_to_one_enable = .false,
     };
 
-    const pcbas = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = .true,
+    // Opaque pipeline: blend disabled. Transparent pipeline enables blending.
+    const pcbas_opaque = vk.PipelineColorBlendAttachmentState{
+        .blend_enable = .false,
         .src_color_blend_factor = .src_alpha,
         .dst_color_blend_factor = .one_minus_src_alpha,
         .color_blend_op = .add,
@@ -2884,7 +2981,7 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .logic_op_enable = .false,
         .logic_op = .copy,
         .attachment_count = 1,
-        .p_attachments = @ptrCast(&pcbas),
+        .p_attachments = @ptrCast(&pcbas_opaque),
         .blend_constants = [_]f32{ 0, 0, 0, 0 },
     };
 
@@ -3280,7 +3377,9 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
 
     try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
 
-    _ = self.dev.queueWaitIdle(self.graphics_queue) catch {};
+    self.dev.queueWaitIdle(self.graphics_queue) catch |err| switch (err) {
+        else => return error.DrawFailed,
+    };
 
     self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
 }
@@ -3296,7 +3395,7 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
         .p_image_indices = &[_]u32{self.current_swapchain_image_index},
-        .p_results = undefined,
+        .p_results = null,
     };
 
     _ = self.queue_mutex.lock(io) catch |err| switch (err) {
@@ -4083,4 +4182,52 @@ test "ChunkData — field sizes" {
     try std.testing.expectEqual(@as(usize, 12), @sizeOf([3]f32));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(f32));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(u64));
+}
+
+// ──── Time / elapsed seconds ────────────────────────────────────────────────────
+
+test "elapsed seconds — no overflow for large init times" {
+    // Simulate: init_time_ns at epoch (large i96) and now_ns ~1 hour later.
+    // The elapsed_ns computation uses saturating sub (-|) so it never underflows.
+    const init_time_ns: u64 = @as(u64, @intCast(@as(i96, 1_700_000_000_000) * std.time.ns_per_s));
+    const now_ns: u64 = init_time_ns + 3_600_000_000_000; // +1 hour
+    const elapsed_ns = now_ns -| init_time_ns;
+    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+    try std.testing.expect(elapsed_sec > 3599.0 and elapsed_sec < 3601.0);
+}
+
+test "elapsed seconds — sub-second precision for small deltas" {
+    const init_time_ns: u64 = 1_000_000_000;
+    const now_ns: u64 = 1_000_500_000; // +500µs
+    const elapsed_ns = now_ns -| init_time_ns;
+    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+    try std.testing.expect(elapsed_sec > 0.0 and elapsed_sec < 0.001);
+}
+
+test "elapsed seconds — f32 does not overflow at large values" {
+    // Many hours of uptime should still produce a valid f32.
+    const init_time_ns: u64 = 0;
+    const now_ns: u64 = 100 * std.time.ns_per_hour; // 100 hours
+    const elapsed_ns = now_ns -| init_time_ns;
+    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+    try std.testing.expect(elapsed_sec > 359_999.0 and elapsed_sec < 360_001.0);
+}
+
+// ──── cullChunk camera-too-close precision ───────────────────────────────────────
+
+test "cullChunk — camera inside chunk (close to boundary) does not NaN" {
+    // Camera at a level-3 chunk boundary. The f64→f32 conversion in cullChunk
+    // must not produce NaN/garbage. This test passes if it doesn't crash.
+    const lookDir: @Vector(3, f32) = .{ 0, 0, 1 };
+    const up: @Vector(3, f32) = .{ 0, 1, 0 };
+    const proj = makeInfReversedZProjRh(std.math.degreesToRadians(90.0), 800.0 / 600.0, 0.01);
+    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = lookDir }, .{ .data = up });
+    const frustum = Frustum.extractFrustumPlanes(proj.multiply(view));
+
+    // Player at level-3 chunk boundary with f64 fractional offset that challenges f32 precision
+    const chunkpos = ChunkPos{ .level = 3, .position = .{ 0, 0, 0 } };
+    const playerPos: @Vector(3, f64) = .{ 4096.0000001, 4096.0, 4096.0 };
+
+    // This must not crash or produce NaN
+    _ = cullChunk(&frustum, chunkpos, playerPos);
 }

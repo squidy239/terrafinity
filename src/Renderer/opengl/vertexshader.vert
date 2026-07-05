@@ -95,10 +95,12 @@ void main() {
     // Waves
     if (block_type == 3u) {
         float speed = 2000.0;
-        float t     = 1.0 + float(mod(time, 100000000.0)) / 10000000.0;
+        float t     = 1.0 + time;
         vec3  vp    = coords + vec3(pos) * scale + absolute_position;
+        float safe_y = max(abs(vp.y), 1e-10);
+        float safe_z = max(abs(vp.z), 1e-10);
         float p     = 1.0 + bouncingMod(
-            vp.x * vp.y * vp.z * (vp.x / vp.y / vp.z) *
+            vp.x * vp.y * vp.z * (vp.x / safe_y / safe_z) *
             (sin(vp.x) * sin(vp.y) * sin(vp.z)),
             400.0) / 400.0;
         coords.y -= bouncingMod(p * t * speed, 0.4);

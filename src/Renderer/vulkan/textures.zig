@@ -8,14 +8,16 @@ const Block = @import("../../main.zig").Block;
 
 pub const TextureArrayManager = struct {
     renderer: *VulkanRenderer,
+    gamma_correction: bool,
     texture_image: vk.Image,
     texture_memory: vk.DeviceMemory,
     texture_view: vk.ImageView,
     sampler: vk.Sampler,
 
-    pub fn init(renderer: *VulkanRenderer) TextureArrayManager {
+    pub fn init(renderer: *VulkanRenderer, gamma_correction: bool) TextureArrayManager {
         return TextureArrayManager{
             .renderer = renderer,
+            .gamma_correction = gamma_correction,
             .texture_image = .null_handle,
             .texture_memory = .null_handle,
             .texture_view = .null_handle,
@@ -32,59 +34,42 @@ pub const TextureArrayManager = struct {
     ) !void {
         var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
-        // --- Pass 1: validate resolution consistency, count visible Block textures ---
-        var dir_it = std.Io.Dir.iterate(textures_path);
-        var first_resolution: ?[2]usize = null;
-        var texture_count: usize = 0;
+        const indexer = std.enums.EnumIndexer(Block);
 
-        while (try dir_it.next(io)) |entry| {
-            if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
-                // Map filename → Block; skip unknown files (same as OpenGL)
-                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
-                const block_type = std.meta.stringToEnum(Block, block_name);
-                if (block_type == null or !block_type.?.isVisible()) {
+        // --- Pass 1: collect visible block filenames, find max layer index ---
+        var entry_names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (entry_names.items) |n| allocator.free(n);
+            entry_names.deinit(allocator);
+        }
+
+        var first_resolution: ?[2]usize = null;
+        var max_layer_index: usize = 0;
+
+        {
+            var dir_it = std.Io.Dir.iterate(textures_path);
+            while (try dir_it.next(io)) |entry| {
+                if (entry.kind != .file or std.mem.indexOf(u8, entry.name, keyword) == null) continue;
+
+                const dot = std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len;
+                const block_name = entry.name[0..dot];
+                const block_type = std.meta.stringToEnum(Block, block_name) orelse {
+                    std.log.warn("Skipping non-block texture: {s}\n", .{entry.name});
+                    continue;
+                };
+                if (!block_type.isVisible()) {
                     std.log.warn("Skipping non-block texture: {s}\n", .{entry.name});
                     continue;
                 }
 
-                const img_res = try getResolution(io, allocator, textures_path, entry.name, &read_buffer);
-                if (first_resolution == null) {
-                    first_resolution = img_res;
-                } else {
-                    if (first_resolution.?[0] != img_res[0] or first_resolution.?[1] != img_res[1]) {
-                        return error.InconsistentTextureResolution;
-                    }
-                }
-                texture_count += 1;
-            }
-        }
-
-        if (first_resolution == null) return error.NoTexturesFound;
-        const res = first_resolution.?;
-
-        // Validate square (same as OpenGL)
-        if (res[0] != res[1]) return error.TexturesNotSquare;
-
-        std.log.info("texture resolution: {any}, count: {d}\n", .{ res, texture_count });
-
-        // --- Pass 2: load each file and place at the right enum-indexer layer ---
-        // Use the same indexer strategy as OpenGL: layer = EnumIndexer position
-        const indexer = std.enums.EnumIndexer(Block);
-
-        // Max layer index we'll need (max declaration position among loaded textures)
-        var max_layer_index: usize = 0;
-
-        // First pass to find max_layer_index
-        dir_it = std.Io.Dir.iterate(textures_path);
-        while (try dir_it.next(io)) |entry| {
-            if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
-                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
-                const block_type = std.meta.stringToEnum(Block, block_name) orelse continue;
-                if (!block_type.isVisible()) continue;
                 const layer = indexer.indexOf(block_type);
                 if (layer > max_layer_index) max_layer_index = layer;
+
+                try entry_names.append(allocator, try allocator.dupe(u8, entry.name));
             }
         }
+
+        if (entry_names.items.len == 0) return error.NoTexturesFound;
 
         // Number of layers = max_layer_index + 1 so we cover all declared Block positions
         const layer_count = max_layer_index + 1;
@@ -99,36 +84,49 @@ pub const TextureArrayManager = struct {
         }
         @memset(layer_images, null);
 
-        dir_it = std.Io.Dir.iterate(textures_path);
+        // --- Pass 2: load each texture file once, validate resolution ---
         var loaded_count: usize = 0;
 
-        while (try dir_it.next(io)) |entry| {
-            if (entry.kind == .file and std.mem.indexOf(u8, entry.name, keyword) != null) {
-                const block_name = entry.name[0 .. std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len];
-                const block_type = std.meta.stringToEnum(Block, block_name) orelse continue;
-                if (!block_type.isVisible()) continue;
+        for (entry_names.items) |name| {
+            {
+                // Names are freed by the outer defer at line 40 — do NOT free them here or we double-free.
 
-                const layer = indexer.indexOf(block_type);
+                const dot2 = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
+                const block_name2 = name[0..dot2];
+                const block_type2 = std.meta.stringToEnum(Block, block_name2).?;
 
-                const texture_file = try textures_path.openFile(io, entry.name, .{});
+                const layer = indexer.indexOf(block_type2);
+
+                const texture_file = try textures_path.openFile(io, name, .{});
                 defer texture_file.close(io);
 
                 var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
                 try loaded_img.convert(allocator, .rgba32);
-                if (loaded_img.width != res[0] or loaded_img.height != res[1]) {
-                    loaded_img.deinit(allocator);
-                    return error.InvalidTextureResolution;
+
+                if (first_resolution == null) {
+                    first_resolution = .{ loaded_img.width, loaded_img.height };
+                } else {
+                    if (first_resolution.?[0] != loaded_img.width or first_resolution.?[1] != loaded_img.height) {
+                        loaded_img.deinit(allocator);
+                        return error.InconsistentTextureResolution;
+                    }
                 }
 
-                std.log.debug("loaded texture {s} -> layer {d}\n", .{ entry.name, layer });
+                std.log.debug("loaded texture {s} -> layer {d}\n", .{ name, layer });
 
-                // Free any previous image at this layer (shouldn't happen)
                 if (layer_images[layer]) |*old_img| old_img.deinit(allocator);
                 layer_images[layer] = loaded_img;
                 loaded_count += 1;
             }
         }
 
+        if (first_resolution == null) return error.NoTexturesFound;
+        const res = first_resolution.?;
+
+        // Validate square (same as OpenGL)
+        if (res[0] != res[1]) return error.TexturesNotSquare;
+
+        std.log.info("texture resolution: {any}, count: {d}\n", .{ res, loaded_count });
         std.log.info("loaded {d}/{d} texture layers\n", .{ loaded_count, layer_count });
 
         try self.createVulkanTextureArray(io, allocator, layer_images, res[0], res[1]);
@@ -204,7 +202,7 @@ pub const TextureArrayManager = struct {
             .extent = .{ .width = @intCast(width), .height = @intCast(height), .depth = 1 },
             .mip_levels = num_mip_levels,
             .array_layers = @intCast(image_count),
-            .format = .r8g8b8a8_srgb,
+            .format = if (self.gamma_correction) .r8g8b8a8_srgb else .r8g8b8a8_unorm,
             .tiling = .optimal,
             .initial_layout = .undefined,
             .usage = .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
@@ -324,7 +322,7 @@ pub const TextureArrayManager = struct {
             .flags = .{},
             .image = texture_image,
             .view_type = .@"2d_array",
-            .format = .r8g8b8a8_srgb,
+            .format = if (self.gamma_correction) .r8g8b8a8_srgb else .r8g8b8a8_unorm,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
@@ -459,7 +457,8 @@ pub const TextureArrayManager = struct {
             @panic("Unsupported layout transition");
         }
 
-        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, @ptrCast(&[_]vk.ImageMemoryBarrier{barrier}));
+        const barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
+        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, &barrier_arr);
     }
 
     /// Rebind the texture array to all per-frame descriptor sets (needed after swapchain
@@ -508,19 +507,9 @@ pub const TextureArrayManager = struct {
 
 test "TextureArrayManager.init — null handles and zeroed state" {
     // init() should return a manager with null_handle for all Vulkan resources
-    const manager = TextureArrayManager.init(undefined);
+    const manager = TextureArrayManager.init(undefined, true);
     try std.testing.expectEqual(@as(vk.Image, .null_handle), manager.texture_image);
     try std.testing.expectEqual(@as(vk.DeviceMemory, .null_handle), manager.texture_memory);
     try std.testing.expectEqual(@as(vk.ImageView, .null_handle), manager.texture_view);
     try std.testing.expectEqual(@as(vk.Sampler, .null_handle), manager.sampler);
-}
-
-fn getResolution(io: std.Io, allocator: std.mem.Allocator, textures_path: std.Io.Dir, filename: []const u8, read_buffer: *[zigimg.io.DEFAULT_BUFFER_SIZE]u8) ![2]usize {
-    const texture = try textures_path.openFile(io, filename, .{});
-    defer texture.close(io);
-
-    var img = try zigimg.Image.fromFile(allocator, io, texture, read_buffer);
-    defer img.deinit(allocator);
-
-    return [2]usize{ img.width, img.height };
 }

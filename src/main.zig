@@ -29,7 +29,7 @@ pub const tracy_options: tracy.Options = .{
 };
 
 fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(60), .awake) catch unreachable;
+    io.sleep(.fromSeconds(20), .awake) catch unreachable;
     running.store(false, .unordered);
 }
 

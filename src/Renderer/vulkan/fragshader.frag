@@ -1,5 +1,12 @@
 #version 460 core
 
+// Early fragment tests enable the GPU to discard occluded fragments before
+// running the fragment shader. Without this, the unconditional gl_FragDepth
+// write disables early-Z, wasting shader throughput on hidden fragments.
+// When draw_over != 0, the depth value is modified, which means late-Z handles
+// the updated depth — but the common case (draw_over == 0) benefits from early-Z.
+layout(early_fragment_tests) in;
+
 layout(location = 0) out vec4 frag_color;
 
 layout(location = 1) in vec3 coordss;

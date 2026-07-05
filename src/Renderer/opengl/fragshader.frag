@@ -1,5 +1,8 @@
 #version 450 core
 
+// Early fragment tests prevent gl_FragDepth write from disabling early-Z.
+layout(early_fragment_tests) in;
+
 in vec3 coordss;
 in vec3 fragpos;
 flat in vec3 sun_dir_norm;

@@ -32,6 +32,7 @@ const RenderBufferKey = union(enum) {
 };
 
 allocator: std.mem.Allocator,
+init_time_ns: u64 = 0,
 facebuffer: c_uint,
 indices: c_uint,
 entityshaderprogram: c_uint,
@@ -65,6 +66,7 @@ pub const RenderOptions = struct {
     draw_over: bool = false,
     fov: f32 = 90.0,
     day_length_sec: f32 = 60 * 5,
+    gamma_correction: bool = true,
 };
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable, render_options: *RenderOptions, render_options_lock: *std.Io.RwLock) !void {
@@ -74,6 +76,7 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
         .render_options = render_options,
         .render_options_lock = render_options_lock,
         .allocator = allocator,
+        .init_time_ns = @as(u64, @intCast(std.Io.Timestamp.now(io, .real).nanoseconds)),
         .gl_options = gl_options,
         .facebuffer = undefined,
         .indices = undefined,
@@ -443,8 +446,10 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
 
     gl.UniformMatrix4fv(self.uniforms.chunks.projview, 1, gl.TRUE, @ptrCast(&(projview)));
     gl.Uniform3f(self.uniforms.chunks.sun_dir, sun_dir[0], sun_dir[1], sun_dir[2]);
-    const millitimestamp = std.Io.Timestamp.now(io, .real).toMilliseconds();
-    gl.Uniform1f(self.uniforms.chunks.time, @floatFromInt(millitimestamp));
+    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const elapsed_ns = now_ns -| self.init_time_ns;
+    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+    gl.Uniform1f(self.uniforms.chunks.time, elapsed_sec);
     gl.Uniform1i(self.uniforms.chunks.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
 
     const frustum = Frustum.extractFrustumPlanes(projview);
