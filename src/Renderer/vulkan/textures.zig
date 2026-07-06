@@ -15,7 +15,7 @@ pub const TextureArrayManager = struct {
     sampler: vk.Sampler,
 
     pub fn init(renderer: *VulkanRenderer, gamma_correction: bool) TextureArrayManager {
-        return TextureArrayManager{
+        return .{
             .renderer = renderer,
             .gamma_correction = gamma_correction,
             .texture_image = .null_handle,
@@ -36,14 +36,12 @@ pub const TextureArrayManager = struct {
 
         const indexer = std.enums.EnumIndexer(Block);
 
-        // --- Pass 1: collect visible block filenames, find max layer index ---
         var entry_names: std.ArrayList([]const u8) = .empty;
         defer {
             for (entry_names.items) |n| allocator.free(n);
             entry_names.deinit(allocator);
         }
 
-        var first_resolution: ?[2]usize = null;
         var max_layer_index: usize = 0;
 
         {
@@ -62,8 +60,7 @@ pub const TextureArrayManager = struct {
                     continue;
                 }
 
-                const layer = indexer.indexOf(block_type);
-                if (layer > max_layer_index) max_layer_index = layer;
+                max_layer_index = @max(max_layer_index, indexer.indexOf(block_type));
 
                 try entry_names.append(allocator, try allocator.dupe(u8, entry.name));
             }
@@ -73,98 +70,44 @@ pub const TextureArrayManager = struct {
 
         const layer_count = max_layer_index + 1;
 
-        var layer_images = try allocator.alloc(?zigimg.Image, layer_count);
-        defer {
-            for (layer_images) |*maybe_img| {
-                if (maybe_img.*) |*img| img.deinit(allocator);
-            }
-            allocator.free(layer_images);
-        }
-        @memset(layer_images, null);
-
-        // --- Pass 2: load each texture file once, validate resolution ---
-        var loaded_count: usize = 0;
-
-        for (entry_names.items) |name| {
-            {
-                // Names are freed by the outer defer at line 40 — do NOT free them here or we double-free.
-
-                const dot2 = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
-                const block_name2 = name[0..dot2];
-                const block_type2 = std.meta.stringToEnum(Block, block_name2).?;
-
-                const layer = indexer.indexOf(block_type2);
-
-                const texture_file = try textures_path.openFile(io, name, .{});
-                defer texture_file.close(io);
-
-                var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
-                try loaded_img.convert(allocator, .rgba32);
-
-                if (first_resolution == null) {
-                    first_resolution = .{ loaded_img.width, loaded_img.height };
-                } else {
-                    if (first_resolution.?[0] != loaded_img.width or first_resolution.?[1] != loaded_img.height) {
-                        loaded_img.deinit(allocator);
-                        return error.InconsistentTextureResolution;
-                    }
-                }
-
-                if (layer_images[layer]) |*old_img| old_img.deinit(allocator);
-                layer_images[layer] = loaded_img;
-                loaded_count += 1;
-            }
+        // Open and read just the first texture to determine resolution
+        var first_w: usize = 0;
+        var first_h: usize = 0;
+        {
+            const first_name = entry_names.items[0];
+            const texture_file = try textures_path.openFile(io, first_name, .{});
+            defer texture_file.close(io);
+            var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
+            defer loaded_img.deinit(allocator);
+            first_w = loaded_img.width;
+            first_h = loaded_img.height;
         }
 
-        if (first_resolution == null) return error.NoTexturesFound;
-        const res = first_resolution.?;
+        if (first_w != first_h) return error.TexturesNotSquare;
 
-        if (res[0] != res[1]) return error.TexturesNotSquare;
+        std.log.info("texture resolution: {d}x{d}, count: {d}\n", .{ first_w, first_h, entry_names.items.len });
+        std.log.info("loading {d} texture layers sequentially...\n", .{layer_count});
 
-        std.log.info("texture resolution: {any}, count: {d}\n", .{ res, loaded_count });
-        std.log.info("loaded {d}/{d} texture layers\n", .{ loaded_count, layer_count });
-
-        try self.createVulkanTextureArray(io, allocator, layer_images, res[0], res[1]);
+        try self.createVulkanTextureArray(io, allocator, textures_path, entry_names.items, first_w, first_h, layer_count);
     }
 
     fn createVulkanTextureArray(
         self: *TextureArrayManager,
         io: std.Io,
         allocator: std.mem.Allocator,
-        layer_images: []?zigimg.Image,
+        textures_path: std.Io.Dir,
+        entry_names: [][]const u8,
         width: usize,
         height: usize,
+        layer_count: usize,
     ) !void {
-        const image_count = @as(u32, @intCast(layer_images.len));
-        const image_size = @as(vk.DeviceSize, @intCast(width)) * @as(vk.DeviceSize, @intCast(height)) * 4;
+        const image_count: u32 = @intCast(layer_count);
+        const image_size: vk.DeviceSize = @intCast(width * height * 4);
 
-        // --- Generate missing-texture fallback (16×16 magenta/black checkerboard) ---
-        const fallback_w: usize = 16;
-        const fallback_h: usize = 16;
-        var fallback_pixels: [fallback_w * fallback_h * 4]u8 = undefined;
-        for (0..fallback_h) |y| {
-            for (0..fallback_w) |x| {
-                const is_magenta = (x / 8 + y / 8) % 2 == 0;
-                const i = (y * fallback_w + x) * 4;
-                if (is_magenta) {
-                    fallback_pixels[i + 0] = 255;
-                    fallback_pixels[i + 1] = 0;
-                    fallback_pixels[i + 2] = 255;
-                    fallback_pixels[i + 3] = 255;
-                } else {
-                    fallback_pixels[i + 0] = 0;
-                    fallback_pixels[i + 1] = 0;
-                    fallback_pixels[i + 2] = 0;
-                    fallback_pixels[i + 3] = 255;
-                }
-            }
-        }
-
-        // --- Staging buffer for all layer data ---
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_memory: vk.DeviceMemory = .null_handle;
 
-        const total_staging_size = image_size * @as(vk.DeviceSize, @intCast(image_count));
+        const total_staging_size = image_size * image_count;
         try self.renderer.createBuffer(total_staging_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer, &staging_memory);
         defer {
             if (staging_buffer != .null_handle) self.renderer.dev.destroyBuffer(staging_buffer, null);
@@ -174,23 +117,67 @@ pub const TextureArrayManager = struct {
         const data = try self.renderer.dev.mapMemory(staging_memory, 0, total_staging_size, .{});
         const mapped_slice = @as([*]u8, @ptrCast(data))[0..total_staging_size];
 
-        for (layer_images, 0..) |maybe_img, i| {
-            const rgba_data = if (maybe_img) |img|
-                img.rawBytes()
-            else
-                @as([]const u8, fallback_pixels[0..@min(fallback_w * fallback_h * 4, @as(usize, @intCast(image_size)))]);
+        const indexer = std.enums.EnumIndexer(Block);
+        var loaded_layers = try allocator.alloc(bool, layer_count);
+        defer allocator.free(loaded_layers);
+        @memset(loaded_layers, false);
 
-            const layer_offset = @as(vk.DeviceSize, @intCast(i)) * image_size;
+        var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
+
+        for (entry_names) |name| {
+            const dot = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
+            const block_name = name[0..dot];
+            const block_type = std.meta.stringToEnum(Block, block_name).?;
+            const layer = indexer.indexOf(block_type);
+
+            const texture_file = try textures_path.openFile(io, name, .{});
+            defer texture_file.close(io);
+
+            var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
+            defer loaded_img.deinit(allocator);
+
+            try loaded_img.convert(allocator, .rgba32);
+
+            if (loaded_img.width != width or loaded_img.height != height) {
+                return error.InconsistentTextureResolution;
+            }
+
+            const layer_offset = @as(vk.DeviceSize, @intCast(layer)) * image_size;
+            const rgba_data = loaded_img.rawBytes();
             @memcpy(mapped_slice[layer_offset .. layer_offset + rgba_data.len], rgba_data);
+            loaded_layers[layer] = true;
+        }
+
+        // Fill missing layers with a 16x16 magenta/black checkerboard fallback scaled to layer size
+        for (0..layer_count) |layer| {
+            if (!loaded_layers[layer]) {
+                const layer_offset = @as(vk.DeviceSize, @intCast(layer)) * image_size;
+                for (0..height) |y| {
+                    for (0..width) |x| {
+                        // checker size of 8 pixels
+                        const is_magenta = ((x / 8) + (y / 8)) % 2 == 0;
+                        const idx = layer_offset + (y * width + x) * 4;
+                        if (is_magenta) {
+                            mapped_slice[idx + 0] = 255;
+                            mapped_slice[idx + 1] = 0;
+                            mapped_slice[idx + 2] = 255;
+                            mapped_slice[idx + 3] = 255;
+                        } else {
+                            mapped_slice[idx + 0] = 0;
+                            mapped_slice[idx + 1] = 0;
+                            mapped_slice[idx + 2] = 0;
+                            mapped_slice[idx + 3] = 255;
+                        }
+                    }
+                }
+            }
         }
 
         self.renderer.dev.unmapMemory(staging_memory);
 
-        // --- Calculate mip levels ---
         const max_dim = @max(width, height);
         const num_mip_levels: u32 = @max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim))))) + 1);
 
-        // --- Create the texture array image ---
         const image_info = vk.ImageCreateInfo{
             .flags = .{},
             .image_type = .@"2d",
@@ -217,46 +204,43 @@ pub const TextureArrayManager = struct {
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
-        // --- Single command buffer for copy + mip generation ---
         const cmd = try self.renderer.beginSingleTimeCommands(io);
 
-        // 1. Transition ALL layers mip 0: undefined → transfer_dst_optimal
         try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, 0, image_count);
 
-        // 2. Copy each layer from staging buffer → image mip 0 (one batch of regions)
         var copy_regions = try allocator.alloc(vk.BufferImageCopy, image_count);
         defer allocator.free(copy_regions);
 
+        const w: u32 = @intCast(width);
+        const h: u32 = @intCast(height);
         for (0..image_count) |layer_idx| {
-            copy_regions[layer_idx] = vk.BufferImageCopy{
+            copy_regions[layer_idx] = .{
                 .buffer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size,
                 .buffer_row_length = 0,
                 .buffer_image_height = 0,
                 .image_subresource = .{
                     .aspect_mask = .{ .color_bit = true },
                     .mip_level = 0,
-                    .base_array_layer = @as(u32, @intCast(layer_idx)),
+                    .base_array_layer = @intCast(layer_idx),
                     .layer_count = 1,
                 },
                 .image_offset = .{ .x = 0, .y = 0, .z = 0 },
-                .image_extent = .{ .width = @intCast(width), .height = @intCast(height), .depth = 1 },
+                .image_extent = .{ .width = w, .height = h, .depth = 1 },
             };
         }
 
         self.renderer.dev.cmdCopyBufferToImage(cmd, staging_buffer, texture_image, .transfer_dst_optimal, copy_regions);
 
-        // 3. Transition mip 0: transfer_dst_optimal → transfer_src_optimal (ready for blit source)
         try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .transfer_src_optimal, 0, 1, 0, image_count);
 
-        // 4. Generate mip chain via blit
         if (num_mip_levels > 1) {
             var mip_level: u32 = 1;
             while (mip_level < num_mip_levels) : (mip_level += 1) {
                 const prev_mip = mip_level - 1;
-                const src_w = @max(@as(u32, 1), @as(u32, @truncate(width >> @as(u6, @truncate(prev_mip)))));
-                const src_h = @max(@as(u32, 1), @as(u32, @truncate(height >> @as(u6, @truncate(prev_mip)))));
-                const dst_w = @max(@as(u32, 1), @as(u32, @truncate(width >> @as(u6, @truncate(mip_level)))));
-                const dst_h = @max(@as(u32, 1), @as(u32, @truncate(height >> @as(u6, @truncate(mip_level)))));
+                const src_w = @max(1, width >> prev_mip);
+                const src_h = @max(1, height >> prev_mip);
+                const dst_w = @max(1, width >> mip_level);
+                const dst_h = @max(1, height >> mip_level);
 
                 try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, mip_level, 1, 0, image_count);
 
@@ -269,7 +253,7 @@ pub const TextureArrayManager = struct {
                     },
                     .src_offsets = .{
                         .{ .x = 0, .y = 0, .z = 0 },
-                        .{ .x = @as(i32, @intCast(src_w)), .y = @as(i32, @intCast(src_h)), .z = 1 },
+                        .{ .x = @intCast(src_w), .y = @intCast(src_h), .z = 1 },
                     },
                     .dst_subresource = .{
                         .aspect_mask = .{ .color_bit = true },
@@ -279,7 +263,7 @@ pub const TextureArrayManager = struct {
                     },
                     .dst_offsets = .{
                         .{ .x = 0, .y = 0, .z = 0 },
-                        .{ .x = @as(i32, @intCast(dst_w)), .y = @as(i32, @intCast(dst_h)), .z = 1 },
+                        .{ .x = @intCast(dst_w), .y = @intCast(dst_h), .z = 1 },
                     },
                 };
 
@@ -297,15 +281,12 @@ pub const TextureArrayManager = struct {
 
                 try self.transitionImageLayout(cmd, texture_image, .transfer_dst_optimal, .transfer_src_optimal, mip_level, 1, 0, image_count);
             }
-
-            try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1, 0, image_count);
-        } else {
-            try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1, 0, image_count);
         }
+
+        try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, if (num_mip_levels > 1) num_mip_levels - 1 else 0, 1, 0, image_count);
 
         try self.renderer.endSingleTimeCommands(io, cmd);
 
-        // --- Create image view (2D array) ---
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},
             .image = texture_image,
@@ -323,7 +304,6 @@ pub const TextureArrayManager = struct {
 
         const texture_view = try self.renderer.dev.createImageView(&view_info, null);
 
-        // --- Create sampler (matches OpenGL: LINEAR_MIPMAP_LINEAR min, NEAREST mag) ---
         const sampler_info = vk.SamplerCreateInfo{
             .flags = .{},
             .mag_filter = .nearest,
@@ -345,7 +325,6 @@ pub const TextureArrayManager = struct {
 
         const sampler = try self.renderer.dev.createSampler(&sampler_info, null);
 
-        // --- Update per-frame descriptor sets (binding 1 = combined_image_sampler) ---
         const descriptor_image_info = vk.DescriptorImageInfo{
             .image_layout = .shader_read_only_optimal,
             .image_view = texture_view,
@@ -494,7 +473,6 @@ pub const TextureArrayManager = struct {
 };
 
 test "TextureArrayManager.init — null handles and zeroed state" {
-    // init() should return a manager with null_handle for all Vulkan resources
     const manager = TextureArrayManager.init(undefined, true);
     try std.testing.expectEqual(@as(vk.Image, .null_handle), manager.texture_image);
     try std.testing.expectEqual(@as(vk.DeviceMemory, .null_handle), manager.texture_memory);
