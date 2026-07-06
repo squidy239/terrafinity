@@ -1279,6 +1279,7 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
     self.addChunk(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfVideoMemory => return error.OutOfVideoMemory,
         else => return error.Unexpected,
     };
 }
@@ -1498,9 +1499,7 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
         if (count == 0) break;
 
         for (req_buf[0..count]) |req| {
-            self.uploadOnePending(io, req) catch |err| {
-                std.log.err("processPendingUploads: Failed to upload pending: {any}", .{err});
-            };
+            try self.uploadOnePending(io, req);
         }
     }
 
@@ -1528,8 +1527,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
             self.queue_mutex.lockUncancelable(io);
             defer self.queue_mutex.unlock(io);
             try self.dev.deviceWaitIdle();
+            try self.createSwapchainLocked(io);
         }
-        try self.createSwapchain(io);
         current_frame = self.currentFrame();
         try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
     }
@@ -2089,9 +2088,12 @@ pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties:
 }
 
 fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+
     try self.dev.deviceWaitIdle();
 
-    try self.createSwapchain(io);
+    try self.createSwapchainLocked(io);
 }
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
@@ -2168,7 +2170,10 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
 fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
+    try self.createSwapchainLocked(io);
+}
 
+fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
@@ -2349,10 +2354,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         self.cmd_buffers = &.{};
     }
 
-    self.createRenderTargets(io, actual_extent) catch |err| {
-        std.log.err("createRenderTargets failed: {}", .{err});
-        return err;
-    };
+    try self.createRenderTargets(io, actual_extent);
 
     try self.allocateIndirectBuffers();
 
