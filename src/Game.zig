@@ -846,6 +846,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
     var c: usize = 0;
 
     while (true) {
+        if (!game.running.load(.unordered)) return;
         if (amount_tested >= 4 * outer_radius[0] * outer_radius[0]) {
             break;
         }
@@ -871,6 +872,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
         const m = move(xz, &c);
         var cc: i32 = 0;
         while (line(&xz, &cc, m)) {
+            if (!game.running.load(.unordered)) return;
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));

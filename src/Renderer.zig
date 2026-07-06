@@ -11,8 +11,8 @@ last_viewport: ?[2]u32 = null,
 
 pub const VTable = struct {
     removeChunk: *const fn (*anyopaque, std.Io, ChunkPos) void,
-    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void,
-    draw: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) error{DrawFailed}!void,
+    addChunk: *const fn (*anyopaque, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{ OutOfMemory, OutOfVideoMemory, Unexpected })!void,
+    draw: *const fn (*anyopaque, io: std.Io, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     setViewport: *const fn (*anyopaque, @Vector(2, u32)) error{ViewportSetFailed}!void,
     updateCameraDirection: *const fn (*anyopaque, @Vector(3, f32)) void,
     getCameraFront: *const fn (*anyopaque) @Vector(3, f32),
@@ -31,7 +31,7 @@ pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
-pub fn draw(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+pub fn draw(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     return self.vtable.draw(self.userdata, io, viewpos);
 }
 

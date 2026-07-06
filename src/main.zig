@@ -28,11 +28,6 @@ pub const tracy_options: tracy.Options = .{
     .verbose = false,
 };
 
-fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(20), .awake) catch unreachable;
-    running.store(false, .unordered);
-}
-
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
@@ -40,11 +35,6 @@ pub fn main(init: std.process.Init) !void {
 
     const gpa = tracy_allocator.allocator();
     const io = init.io;
-
-    var exit = if (options.test_play)
-        try io.concurrent(exiter, .{ io, &running })
-    else {};
-    defer if (options.test_play) exit.await(io);
 
     //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
@@ -280,6 +270,7 @@ pub fn main(init: std.process.Init) !void {
         defer game.deinit(io);
 
         var frame_time: std.Io.Timestamp = .now(io, .awake);
+        const start_time: std.Io.Timestamp = .now(io, .awake);
         var action_set = Key.ActionSet.empty;
         var visible: bool = false;
         while (running.load(.unordered)) {
@@ -287,8 +278,13 @@ pub fn main(init: std.process.Init) !void {
             try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible, &game, frame_time.untilNow(io, .awake));
             frame_time = .now(io, .awake);
 
+            if (start_time.untilNow(io, .awake).toSeconds() >= 10) {
+                std.log.info("Test play timeout reached (10s), stopping the loop cleanly...", .{});
+                running.store(false, .unordered);
+            }
+
             // Only render and present if window is visible and should present
-            if (!visible or !window.shouldPresent()) {
+            if (!options.test_play and (!visible or !window.shouldPresent())) {
                 // Process deferred deletions to prevent unbounded memory leak on render pause
                 game.vulkan_renderer.processDeferredDeletions(io) catch {};
                 continue;
