@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     // Compile shaders using glslc
     const vert_cmd = b.addSystemCommand(&.{
         "glslc",
-        "--target-env=vulkan1.2",
+        "--target-env=vulkan1.3",
         "-o",
     });
     const vert_spv = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const frag_cmd = b.addSystemCommand(&.{
         "glslc",
-        "--target-env=vulkan1.2",
+        "--target-env=vulkan1.3",
         "-o",
     });
     const frag_spv = frag_cmd.addOutputFileArg("src/Renderer/vulkan/fragshader.spv");

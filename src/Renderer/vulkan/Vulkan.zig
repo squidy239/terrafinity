@@ -141,7 +141,7 @@ const StagingRingBuffer = struct {
     write_offset: vk.DeviceSize = 0,
     mutex: std.Io.Mutex = .init,
 
-    fn init(self: *StagingRingBuffer, dev: DeviceProxy, renderer: *VulkanRenderer) !void {
+    pub fn init(self: *StagingRingBuffer, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties) !void {
         const buffer_info = vk.BufferCreateInfo{
             .flags = .{},
             .size = self.size,
@@ -154,7 +154,7 @@ const StagingRingBuffer = struct {
         errdefer dev.destroyBuffer(self.buffer, null);
 
         const mem_reqs = dev.getBufferMemoryRequirements(self.buffer);
-        const mem_type = renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
+        const mem_type = findMemoryTypeRaw(mem_props, mem_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
 
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_reqs.size,
@@ -170,7 +170,7 @@ const StagingRingBuffer = struct {
         self.ptr = @ptrCast(data);
     }
 
-    fn deinit(self: *StagingRingBuffer, dev: DeviceProxy) void {
+    pub fn deinit(self: *StagingRingBuffer, dev: DeviceProxy) void {
         if (self.buffer != .null_handle) {
             dev.unmapMemory(self.memory);
             dev.destroyBuffer(self.buffer, null);
@@ -180,7 +180,7 @@ const StagingRingBuffer = struct {
         }
     }
 
-    fn allocate(self: *StagingRingBuffer, io: std.Io, size: vk.DeviceSize) vk.DeviceSize {
+    pub fn allocate(self: *StagingRingBuffer, io: std.Io, size: vk.DeviceSize) vk.DeviceSize {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
@@ -202,7 +202,7 @@ const GlobalDeviceAllocator = struct {
     mutex: std.Io.Mutex = .init,
     allocator: std.mem.Allocator = undefined,
 
-    fn init(self: *GlobalDeviceAllocator, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, allocator: std.mem.Allocator) !void {
+    pub fn init(self: *GlobalDeviceAllocator, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, allocator: std.mem.Allocator) !void {
         self.allocator = allocator;
         for (&self.buckets) |*b| {
             b.* = .empty;
@@ -240,6 +240,7 @@ const GlobalDeviceAllocator = struct {
                 break;
             }
         }
+
         if (!found) {
             @panic("Failed to find suitable memory type for GlobalDeviceAllocator");
         }
@@ -253,7 +254,7 @@ const GlobalDeviceAllocator = struct {
         self.memory = try dev.allocateMemory(&alloc_info, null);
     }
 
-    fn deinit(self: *GlobalDeviceAllocator, dev: DeviceProxy) void {
+    pub fn deinit(self: *GlobalDeviceAllocator, dev: DeviceProxy) void {
         if (self.memory != .null_handle) {
             dev.freeMemory(self.memory, null);
         }
@@ -268,39 +269,34 @@ const GlobalDeviceAllocator = struct {
         return @intCast(bits);
     }
 
-    fn allocate(self: *GlobalDeviceAllocator, io: std.Io, size: vk.DeviceSize, alignment: vk.DeviceSize) !struct { offset: vk.DeviceSize, alloc_size: vk.DeviceSize } {
+    pub fn allocate(self: *GlobalDeviceAllocator, io: std.Io, size: vk.DeviceSize, alignment: vk.DeviceSize) !struct { offset: vk.DeviceSize, alloc_size: vk.DeviceSize } {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const bucket_idx = bucketIndex(size);
-        const alloc_size = @as(vk.DeviceSize, 1) << bucket_idx;
+        const alloc_size = @as(vk.DeviceSize, 1) << bucketIndex(size);
+        const idx = bucketIndex(alloc_size);
 
-        var bucket = &self.buckets[bucket_idx];
-        if (bucket.items.len > 0) {
-            const offset = bucket.pop().?;
+        if (self.buckets[idx].items.len > 0) {
+            const offset = self.buckets[idx].pop().?;
             const aligned_offset = std.mem.alignForward(vk.DeviceSize, offset, alignment);
-            if (aligned_offset == offset) {
-                return .{ .offset = offset, .alloc_size = alloc_size };
-            } else {
-                try bucket.append(self.allocator, offset);
-            }
+            return .{ .offset = aligned_offset, .alloc_size = alloc_size };
         }
 
-        const aligned_bump = std.mem.alignForward(vk.DeviceSize, self.bump_offset, alignment);
-        if (aligned_bump + alloc_size > self.size) {
+        const aligned_offset = std.mem.alignForward(vk.DeviceSize, self.bump_offset, alignment);
+        if (aligned_offset + alloc_size > self.size) {
             return error.OutOfVideoMemory;
         }
-        self.bump_offset = aligned_bump + alloc_size;
-        return .{ .offset = aligned_bump, .alloc_size = alloc_size };
+        self.bump_offset = aligned_offset + alloc_size;
+        return .{ .offset = aligned_offset, .alloc_size = alloc_size };
     }
 
-    fn free(self: *GlobalDeviceAllocator, io: std.Io, offset: vk.DeviceSize, alloc_size: vk.DeviceSize) void {
+    pub fn free(self: *GlobalDeviceAllocator, io: std.Io, offset: vk.DeviceSize, alloc_size: vk.DeviceSize) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const bucket_idx = bucketIndex(alloc_size);
-        self.buckets[bucket_idx].append(self.allocator, offset) catch {
-            std.log.err("Failed to return offset to GlobalDeviceAllocator bucket", .{});
+        const idx = bucketIndex(alloc_size);
+        self.buckets[idx].append(self.allocator, offset) catch {
+            std.log.err("GlobalDeviceAllocator.free: Failed to return offset {d} to bucket {d}", .{ offset, idx });
         };
     }
 };
@@ -310,7 +306,7 @@ const CommandPoolReservoir = struct {
     used: []bool = &.{},
     mutex: std.Io.Mutex = .init,
 
-    fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
+    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
         self.pools = try allocator.alloc(vk.CommandPool, count);
         self.used = try allocator.alloc(bool, count);
         @memset(self.used, false);
@@ -323,7 +319,7 @@ const CommandPoolReservoir = struct {
         }
     }
 
-    fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, allocator: std.mem.Allocator) void {
         for (self.pools) |pool| {
             if (pool != .null_handle) dev.destroyCommandPool(pool, null);
         }
@@ -331,7 +327,7 @@ const CommandPoolReservoir = struct {
         allocator.free(self.used);
     }
 
-    fn borrowPool(self: *CommandPoolReservoir, io: std.Io) ?vk.CommandPool {
+    pub fn borrowPool(self: *CommandPoolReservoir, io: std.Io) ?vk.CommandPool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         for (self.pools, 0..) |pool, i| {
@@ -343,7 +339,7 @@ const CommandPoolReservoir = struct {
         return null;
     }
 
-    fn returnPool(self: *CommandPoolReservoir, io: std.Io, pool: vk.CommandPool) void {
+    pub fn returnPool(self: *CommandPoolReservoir, io: std.Io, pool: vk.CommandPool) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         for (self.pools, 0..) |p, i| {
@@ -361,11 +357,6 @@ const ChunkData = extern struct {
     scale: f32,
     address: u64 align(@sizeOf(u64)),
 };
-comptime {
-    if (@sizeOf(ChunkData) != 48) @compileError("ChunkData size must be 48 bytes");
-    if (@offsetOf(ChunkData, "address") != 32) @compileError("address offset must be 32");
-    if (@offsetOf(ChunkData, "scale") != 28) @compileError("scale offset must be 28");
-}
 
 const PushConstants = extern struct {
     projview: [16]f32,
@@ -373,6 +364,56 @@ const PushConstants = extern struct {
     time: f32,
     draw_over: i32,
 };
+
+fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+    for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
+        if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
+            return @as(u32, @intCast(i));
+        }
+    }
+    @panic("Failed to find suitable memory type");
+}
+
+fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
+    const scale = ChunkPos.toScale(chunkpos.level);
+    const chunkSizeBlocks: f64 = @as(f64, @floatFromInt(ChunkSize)) * @as(f64, @floatCast(scale));
+    const chunkWorldPos: @Vector(3, f64) = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
+    const relativeChunkPos: @Vector(3, f32) = @floatCast(chunkWorldPos - playerPos);
+    const chunkSizeVec: @Vector(3, f32) = @splat(@as(f32, @floatCast(chunkSizeBlocks)));
+    return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+}
+
+fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
+    const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
+    return .{
+        .data = .{
+            .{
+                f / aspectWbyH,
+                0.0,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                -f,
+                0.0,
+                0.0,
+            },
+            .{
+                0.0,
+                0.0,
+                0.0,
+                zNear,
+            },
+            .{
+                0.0,
+                0.0,
+                -1.0,
+                0.0,
+            },
+        },
+    };
+}
 
 pub const VulkanRenderer = @This();
 
@@ -506,7 +547,7 @@ var default_render_options_lock: std.Io.RwLock = .init;
 fn getDeletionQueueIndex(self: *VulkanRenderer) u32 {
     const unbound = self.current_frame_idx.load(.monotonic);
     const fence_slot = @as(u32, @intCast(unbound % @as(u64, @intCast(self.in_flight_fences.len))));
-    return fence_slot % @as(u32, @intCast(self.deferred_deletions.len));
+    return fence_slot;
 }
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
@@ -989,22 +1030,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         try self.texture_manager.loadTextureDirectory(io, dir, allocator, ".png");
     }
     // Destroy dummy placeholder textures now that real textures are loaded
-    if (self.dummy_sampler != .null_handle) {
-        self.dev.destroySampler(self.dummy_sampler, null);
-        self.dummy_sampler = .null_handle;
-    }
-    if (self.dummy_view != .null_handle) {
-        self.dev.destroyImageView(self.dummy_view, null);
-        self.dummy_view = .null_handle;
-    }
-    if (self.dummy_image != .null_handle) {
-        self.dev.destroyImage(self.dummy_image, null);
-        self.dummy_image = .null_handle;
-    }
-    if (self.dummy_memory != .null_handle) {
-        self.dev.freeMemory(self.dummy_memory, null);
-        self.dummy_memory = .null_handle;
-    }
+    self.destroyDummyResources();
 
     try self.createPipeline();
     try self.createTransparentPipeline();
@@ -1038,7 +1064,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.transfer_semaphore_value = std.atomic.Value(u64).init(0);
 
     // Initialize staging ring buffer
-    try self.staging_ring_buffer.init(self.dev, self);
+    try self.staging_ring_buffer.init(self.dev, self.mem_props);
     errdefer self.staging_ring_buffer.deinit(self.dev);
 
     // Initialize global device allocator
@@ -1202,22 +1228,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     if (self.descriptor_sets_per_frame.len > 0) self.allocator.free(self.descriptor_sets_per_frame);
 
-    if (self.dummy_sampler != .null_handle) {
-        self.dev.destroySampler(self.dummy_sampler, null);
-        self.dummy_sampler = .null_handle;
-    }
-    if (self.dummy_view != .null_handle) {
-        self.dev.destroyImageView(self.dummy_view, null);
-        self.dummy_view = .null_handle;
-    }
-    if (self.dummy_image != .null_handle) {
-        self.dev.destroyImage(self.dummy_image, null);
-        self.dummy_image = .null_handle;
-    }
-    if (self.dummy_memory != .null_handle) {
-        self.dev.freeMemory(self.dummy_memory, null);
-        self.dummy_memory = .null_handle;
-    }
+    self.destroyDummyResources();
 
     self.texture_manager.destroyTextureArray();
 
@@ -2160,284 +2171,17 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
 }
 
 pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
-    for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |mem_type, i| {
-        if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
-            return @as(u32, @intCast(i));
-        }
-    }
-    @panic("Failed to find suitable memory type");
-}
-
-fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
-    const scale = ChunkPos.toScale(chunkpos.level);
-    const chunkSizeBlocks: f64 = @as(f64, @floatFromInt(ChunkSize)) * @as(f64, @floatCast(scale));
-    // Compute chunk's world position in f64 to avoid precision loss when the
-    // camera is close to chunk boundaries (f32 has only ~7 decimal digits).
-    const chunkWorldPos: @Vector(3, f64) = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
-    const relativeChunkPos: @Vector(3, f32) = @floatCast(chunkWorldPos - playerPos);
-    const chunkSizeVec: @Vector(3, f32) = @splat(@as(f32, @floatCast(chunkSizeBlocks)));
-    return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
-}
-
-fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
-    const f: f32 = 1.0 / @tan(fovY_radians / 2.0);
-    // m11 = -f flips Y for Vulkan's Y-down clip space.
-    // The last two rows implement infinite reversed-Z:
-    //   z_clip = zNear * w_input  →  at near z=-zN: z_ndc = 1, at far z=-inf: z_ndc → 0
-    //   w_clip = -z_input         →  standard RH perspective divide
-    return .{
-        .data = .{
-            .{
-                f / aspectWbyH,
-                0.0,
-                0.0,
-                0.0,
-            },
-            .{
-                0.0,
-                -f,
-                0.0,
-                0.0,
-            },
-            .{
-                0.0,
-                0.0,
-                0.0,
-                zNear,
-            },
-            .{
-                0.0,
-                0.0,
-                -1.0,
-                0.0,
-            },
-        },
-    };
+    return findMemoryTypeRaw(self.mem_props, type_filter, properties);
 }
 
 fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
-    {
-        _ = self.queue_mutex.lock(io) catch |err| switch (err) {
-            error.Canceled => return error.DrawFailed,
-        };
-        defer self.queue_mutex.unlock(io);
-        _ = self.dev.deviceWaitIdle() catch {};
-    }
-
-    // Clean up all old per-frame resources (indirect buffers, chunk data,
-    // semaphores, fences, cmd buffers, render targets) before reallocating.
-    // This prevents a VRAM leak on every VK_SUBOPTIMAL_KHR frame.
-    self.destroyOldSwapchainResources(io);
-
-    const old_swapchain = self.swapchain;
-
-    var actual_extent = self.swapchain_extent;
-
-    const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
-
-    if (caps.current_extent.width != 0xFFFF_FFFF) {
-        actual_extent = caps.current_extent;
-    } else {
-        const max_extent = vk.Extent2D{
-            .width = @min(caps.max_image_extent.width, 3840),
-            .height = @min(caps.max_image_extent.height, 2160),
-        };
-        actual_extent = .{
-            .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, max_extent.width),
-            .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, max_extent.height),
-        };
-    }
-
-    self.swapchain_extent = actual_extent;
-    self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
-
-    const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(surface_formats);
-
-    self.render_options_lock.lockSharedUncancelable(io);
-    const gamma_correction = self.render_options.gamma_correction;
-    self.render_options_lock.unlockShared(io);
-
-    var surface_format: vk.SurfaceFormatKHR = surface_formats[0];
-    if (gamma_correction) {
-        // Prefer sRGB swapchain for gamma-correct rendering
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == .b8g8r8a8_srgb) {
-                surface_format = sfmt;
-                break;
-            }
-        }
-    } else {
-        // Prefer UNORM swapchain to match OpenGL behavior (no gamma correction)
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == .b8g8r8a8_unorm) {
-                surface_format = sfmt;
-                break;
-            }
-        }
-    }
-    self.swapchain_format = surface_format.format;
-
-    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(present_modes);
-
-    var present_mode: vk.PresentModeKHR = .fifo_khr;
-    for (present_modes) |pm| {
-        if (pm == .mailbox_khr or pm == .immediate_khr) {
-            present_mode = pm;
-            break;
-        }
-    }
-
-    var image_count = @max(caps.min_image_count + 1, @as(u32, 2));
-    if (caps.max_image_count > 0) {
-        image_count = @min(image_count, caps.max_image_count);
-    }
-
-    const qfi = [_]u32{ self.queue_family_index, self.present_queue_family_index };
-    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index)
-        .concurrent
-    else
-        .exclusive;
-
-    self.swapchain = try self.dev.createSwapchainKHR(&.{
-        .surface = self.surface,
-        .min_image_count = image_count,
-        .image_format = self.swapchain_format,
-        .image_color_space = surface_format.color_space,
-        .image_extent = actual_extent,
-        .image_array_layers = 1,
-        .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
-        .image_sharing_mode = sharing_mode,
-        .queue_family_index_count = if (sharing_mode == .concurrent) @as(u32, qfi.len) else 0,
-        .p_queue_family_indices = if (sharing_mode == .concurrent) &qfi else null,
-        .pre_transform = caps.current_transform,
-        .composite_alpha = .{ .opaque_bit_khr = true },
-        .present_mode = present_mode,
-        .clipped = .true,
-        .old_swapchain = old_swapchain,
-    }, null);
-
-    // old_swapchain is consumed by vkCreateSwapchainKHR (the implementation
-    // may reference it during creation), but the application still owns it
-    // and must destroy it separately. No errdefer here: if createSwapchainKHR
-    // failed, self.swapchain still holds the old value, so there is no leak.
-    if (old_swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(old_swapchain, null);
-    }
-
-    self.swapchain_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
-    errdefer {
-        self.allocator.free(self.swapchain_images);
-        self.swapchain_images = &.{};
-    }
-
-    for (self.swapchain_views) |view| {
-        if (view != .null_handle) self.dev.destroyImageView(view, null);
-    }
-    self.allocator.free(self.swapchain_views);
-
-    self.swapchain_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
-    @memset(self.swapchain_views, .null_handle);
-    errdefer {
-        for (self.swapchain_views) |view| {
-            if (view != .null_handle) self.dev.destroyImageView(view, null);
-        }
-        self.allocator.free(self.swapchain_views);
-        self.swapchain_views = &.{};
-    }
-
-    for (self.swapchain_images, 0..) |image, i| {
-        const view_info = vk.ImageViewCreateInfo{
-            .flags = .{},
-            .image = image,
-            .view_type = .@"2d",
-            .format = self.swapchain_format,
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-        self.swapchain_views[i] = try self.dev.createImageView(&view_info, null);
-    }
-
-    try self.allocateIndirectBuffers();
-
-    // Recreate per-frame semaphores and fences
-    const num_swapchain_images = self.swapchain_images.len;
-
-    if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
-    if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
-    if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
-
-    self.image_acquired_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.image_acquired_semaphores, .null_handle);
-    errdefer self.allocator.free(self.image_acquired_semaphores);
-
-    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.render_complete_semaphores, .null_handle);
-    errdefer self.allocator.free(self.render_complete_semaphores);
-
-    self.in_flight_fences = try self.allocator.alloc(vk.Fence, num_swapchain_images);
-    @memset(self.in_flight_fences, .null_handle);
-    errdefer self.allocator.free(self.in_flight_fences);
-
-    const semaphore_create_info = vk.SemaphoreCreateInfo{ .flags = .{} };
-    const fence_create_info = vk.FenceCreateInfo{
-        .flags = .{ .signaled_bit = true },
+    _ = self.queue_mutex.lock(io) catch |err| switch (err) {
+        error.Canceled => return error.DrawFailed,
     };
+    defer self.queue_mutex.unlock(io);
+    _ = self.dev.deviceWaitIdle() catch {};
 
-    for (0..num_swapchain_images) |i| {
-        self.image_acquired_semaphores[i] = try self.dev.createSemaphore(&semaphore_create_info, null);
-        self.render_complete_semaphores[i] = try self.dev.createSemaphore(&semaphore_create_info, null);
-        self.in_flight_fences[i] = try self.dev.createFence(&fence_create_info, null);
-    }
-
-    // Recreate command buffers
-    if (self.cmd_buffers.len > 0) {
-        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-        self.allocator.free(self.cmd_buffers);
-    }
-
-    const cmd_alloc_info = vk.CommandBufferAllocateInfo{
-        .command_pool = self.command_pool,
-        .level = .primary,
-        .command_buffer_count = @intCast(num_swapchain_images),
-    };
-
-    self.cmd_buffers = try self.allocator.alloc(vk.CommandBuffer, num_swapchain_images);
-    errdefer self.allocator.free(self.cmd_buffers);
-    try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
-
-    // Recreate render targets
-    try self.createRenderTargets(io, actual_extent);
-
-    // Recreate descriptor pool and sets
-    try self.createDescriptorPoolAndSets(io);
-    // Rebind the real block texture array to the new descriptor sets
-    if (self.texture_manager.texture_view != .null_handle) {
-        self.texture_manager.rebindDescriptorSets();
-    }
-
-    // Recreate pipelines with the current swapchain format
-    if (self.pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.pipeline, null);
-        self.pipeline = .null_handle;
-    }
-    if (self.transparent_pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.transparent_pipeline, null);
-        self.transparent_pipeline = .null_handle;
-    }
-    if (self.pipeline_layout != .null_handle) {
-        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
-        self.pipeline_layout = .null_handle;
-    }
-    try self.createPipeline();
-    try self.createTransparentPipeline();
+    try self.createSwapchain(io);
 }
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
@@ -2987,22 +2731,7 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
 fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     // Destroy any stale dummy textures from a previous call (swapchain recreation).
     // On first call during init they start as .null_handle so this is a no-op.
-    if (self.dummy_sampler != .null_handle) {
-        self.dev.destroySampler(self.dummy_sampler, null);
-        self.dummy_sampler = .null_handle;
-    }
-    if (self.dummy_view != .null_handle) {
-        self.dev.destroyImageView(self.dummy_view, null);
-        self.dummy_view = .null_handle;
-    }
-    if (self.dummy_image != .null_handle) {
-        self.dev.destroyImage(self.dummy_image, null);
-        self.dummy_image = .null_handle;
-    }
-    if (self.dummy_memory != .null_handle) {
-        self.dev.freeMemory(self.dummy_memory, null);
-        self.dummy_memory = .null_handle;
-    }
+    self.destroyDummyResources();
 
     const num_frames = self.swapchain_images.len;
     const pool_sizes = [_]vk.DescriptorPoolSize{
@@ -3021,22 +2750,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     errdefer {
         // Clean up any dummy resources that may have been partially created,
         // plus the descriptor pool itself, on any error during this function.
-        if (self.dummy_sampler != .null_handle) {
-            self.dev.destroySampler(self.dummy_sampler, null);
-            self.dummy_sampler = .null_handle;
-        }
-        if (self.dummy_view != .null_handle) {
-            self.dev.destroyImageView(self.dummy_view, null);
-            self.dummy_view = .null_handle;
-        }
-        if (self.dummy_image != .null_handle) {
-            self.dev.destroyImage(self.dummy_image, null);
-            self.dummy_image = .null_handle;
-        }
-        if (self.dummy_memory != .null_handle) {
-            self.dev.freeMemory(self.dummy_memory, null);
-            self.dummy_memory = .null_handle;
-        }
+        self.destroyDummyResources();
         if (self.descriptor_pool != .null_handle) {
             self.dev.destroyDescriptorPool(self.descriptor_pool, null);
             self.descriptor_pool = .null_handle;
@@ -3310,24 +3024,8 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .depth_compare_op = .greater,
         .depth_bounds_test_enable = .false,
         .stencil_test_enable = .false,
-        .front = .{
-            .fail_op = .keep,
-            .pass_op = .keep,
-            .depth_fail_op = .keep,
-            .compare_op = .always,
-            .compare_mask = 0,
-            .write_mask = 0,
-            .reference = 0,
-        },
-        .back = .{
-            .fail_op = .keep,
-            .pass_op = .keep,
-            .depth_fail_op = .keep,
-            .compare_op = .always,
-            .compare_mask = 0,
-            .write_mask = 0,
-            .reference = 0,
-        },
+        .front = undefined,
+        .back = undefined,
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
@@ -3560,6 +3258,25 @@ fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     return self.camera_front;
 }
+fn destroyDummyResources(self: *VulkanRenderer) void {
+    if (self.dummy_sampler != .null_handle) {
+        self.dev.destroySampler(self.dummy_sampler, null);
+        self.dummy_sampler = .null_handle;
+    }
+    if (self.dummy_view != .null_handle) {
+        self.dev.destroyImageView(self.dummy_view, null);
+        self.dummy_view = .null_handle;
+    }
+    if (self.dummy_image != .null_handle) {
+        self.dev.destroyImage(self.dummy_image, null);
+        self.dummy_image = .null_handle;
+    }
+    if (self.dummy_memory != .null_handle) {
+        self.dev.freeMemory(self.dummy_memory, null);
+        self.dummy_memory = .null_handle;
+    }
+}
+
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     var it = self.meshes.iterator();
@@ -3572,6 +3289,50 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
     }
 }
 
+test "getDeletionQueueIndex" {
+    var renderer: VulkanRenderer = undefined;
+    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
+    var fences_3: [3]vk.Fence = .{ .null_handle, .null_handle, .null_handle };
+    var fences_5: [5]vk.Fence = .{ .null_handle, .null_handle, .null_handle, .null_handle, .null_handle };
+
+    // Test 1: frame 0 with 2 in-flight fences
+    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
+    renderer.in_flight_fences = &fences_2;
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+
+    // Test 2: monotonically increasing frames
+    var expected: u32 = 0;
+    while (expected < 16) : (expected += 1) {
+        renderer.current_frame_idx.store(expected, .monotonic);
+        const want = @as(u32, @intCast(@as(u64, expected) % 2));
+        try std.testing.expectEqual(want, renderer.getDeletionQueueIndex());
+    }
+
+    // Test 3: wraps around deferred_deletions (8)
+    renderer.current_frame_idx = std.atomic.Value(u32).init(8);
+    renderer.in_flight_fences = &fences_3;
+    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
+
+    // Test 4: large frame numbers
+    renderer.current_frame_idx = std.atomic.Value(u32).init(100_000);
+    renderer.in_flight_fences = &fences_2;
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(100_001, .monotonic);
+    try std.testing.expectEqual(@as(u32, 1), renderer.getDeletionQueueIndex());
+
+    // Test 5: 5 in-flight fences, varied frames
+    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
+    renderer.in_flight_fences = &fences_5;
+    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(7, .monotonic);
+    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
+
+    renderer.current_frame_idx.store(13, .monotonic);
+    try std.testing.expectEqual(@as(u32, 3), renderer.getDeletionQueueIndex());
+}
+
 test "makeInfReversedZProjRh — Vulkan Y-down and reversed-Z properties" {
     const fov = std.math.degreesToRadians(90.0);
     const aspect = 800.0 / 600.0;
@@ -3579,7 +3340,6 @@ test "makeInfReversedZProjRh — Vulkan Y-down and reversed-Z properties" {
 
     const P = makeInfReversedZProjRh(fov, aspect, zNear);
 
-    // Helper to transform a point and get NDC
     const transform = struct {
         fn apply(p: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
             const v = p.multiplyVec(zm.vec.Vec4f{ .data = pt });
@@ -3638,7 +3398,6 @@ test "makeInfReversedZProjRh — Vulkan Y-down and reversed-Z properties" {
     {
         const near = transform(P, .{ 10, 0, -50, 1 });
         const far = transform(P, .{ 10, 0, -500, 1 });
-        // |ndc_x| is smaller for farther objects
         try std.testing.expect(@abs(near.ndc[0]) > @abs(far.ndc[0]));
     }
 }
@@ -3653,28 +3412,20 @@ test "lookAtRH at origin — pure rotation view matrix" {
         up,
     );
 
-    // A pure rotation matrix has no translation → last column should be [0, 0, 0, 1]
     try std.testing.expectEqual(@as(f32, 0.0), view.data[0][3]);
     try std.testing.expectEqual(@as(f32, 0.0), view.data[1][3]);
     try std.testing.expectEqual(@as(f32, 0.0), view.data[2][3]);
     try std.testing.expectEqual(@as(f32, 1.0), view.data[3][3]);
 
-    // Camera at origin looking along +Z.
-    // In RH view space, the camera looks along -Z, so points in front have z_view < 0.
-    // A point at world (0, 0, 50) is in front of the camera.
     const pt = view.multiplyVec(.{ .data = .{ 0, 0, 50, 1 } });
     try std.testing.expect(pt.data[2] < 0);
 
-    // A point behind the camera at world (0, 0, -50) should have z_view > 0.
     const behind = view.multiplyVec(.{ .data = .{ 0, 0, -50, 1 } });
     try std.testing.expect(behind.data[2] > 0);
 
-    // Right: f=(0,0,1), up=(0,1,0), s = f×up = (-1,0,0).
-    // +X in world maps to -X in view space (the camera's right vector is -X).
     const right = view.multiplyVec(.{ .data = .{ 10, 0, 0, 1 } });
     try std.testing.expect(right.data[0] < 0);
 
-    // +Y (up) in world stays +Y in view: u = s×f = (0,1,0).
     const up_pt = view.multiplyVec(.{ .data = .{ 0, 10, 0, 1 } });
     try std.testing.expect(up_pt.data[1] > 0);
 }
@@ -3688,17 +3439,12 @@ test "anglesToDirection — matches OpenGL convention" {
     dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     dir = zm.Vec3f.norm(.{ .data = dir }).data;
 
-    // Direction should be a unit vector
     const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-6);
 
-    // Raw angles should NOT equal the direction
     try std.testing.expect(dir[0] != viewDir[0]);
     try std.testing.expect(dir[1] != viewDir[1]);
 
-    // With pitch near 0, the yaw rotation should be visible
-    // yaw=-0.4° means looking slightly to the right
-    // cos(-0.4°)≈0.99998, sin(-0.4°)≈-0.00698
     try std.testing.expectApproxEqAbs(@as(f32, -0.00698), dir[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 0.000001745), dir[1], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 0.99998), dir[2], 1e-4);
@@ -3711,7 +3457,6 @@ test "projview combination — full pipeline sanity" {
 
     const P = makeInfReversedZProjRh(fov, aspect, zNear);
 
-    // Camera looking along +Z from origin, pure rotation
     const up = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 1, 0 } };
     const front = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 0, 1 } };
     const V = zm.matrix.Mat4f.lookAtRH(
@@ -3722,7 +3467,6 @@ test "projview combination — full pipeline sanity" {
 
     const projview = P.multiply(V);
 
-    // Helper
     const transform = struct {
         fn apply(pv: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
             const v = pv.multiplyVec(zm.vec.Vec4f{ .data = pt });
@@ -3734,19 +3478,14 @@ test "projview combination — full pipeline sanity" {
         }
     }.apply;
 
-    // Point in front of camera at world z=+50: should be visible (within clip volume)
     const r = transform(projview, .{ 0, 0, 50, 1 });
-    // NDC should be in [-1, 1] clip space or [0, 1] for depth (reversed-Z near=1)
     try std.testing.expect(@abs(r.ndc[0]) <= 1);
     try std.testing.expect(@abs(r.ndc[1]) <= 1);
     try std.testing.expect(r.ndc[2] >= 0 and r.ndc[2] <= 1);
 
-    // Point behind camera at world z=-50: should NOT be visible (w should be negative)
     const behind = transform(projview, .{ 0, 0, -50, 1 });
     try std.testing.expect(behind.clip[3] < 0);
 }
-
-// ──── RenderBufferKey ──────────────────────────────────────────────────────────
 
 test "RenderBufferKey.toPos — opaque and transparent" {
     const pos_a = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };
@@ -3771,8 +3510,6 @@ test "RenderBufferKey.toPos — identity after round-trip" {
     try std.testing.expectEqual(pos.position[2], extracted.position[2]);
 }
 
-// ──── FrameDebugStats ──────────────────────────────────────────────────────────
-
 test "FrameDebugStats — default initialization" {
     const stats = FrameDebugStats{};
     try std.testing.expectEqual(@as(u64, 0), stats.frame_number);
@@ -3787,14 +3524,12 @@ test "FrameDebugStats — default initialization" {
 }
 
 test "FrameDebugStats — log with zero values does not crash" {
-    // The log method is a no-op in terms of side-effects we can assert,
-    // but it must not panic or crash even with all-zero inputs.
     const stats = FrameDebugStats{};
     stats.log();
 }
 
 test "FrameDebugStats — log with partial populated stats" {
-    var stats = FrameDebugStats{
+    const stats = FrameDebugStats{
         .frame_number = 42,
         .total_meshes = 100,
         .opaque_candidates = 60,
@@ -3810,105 +3545,22 @@ test "FrameDebugStats — log with partial populated stats" {
     stats.log();
 }
 
-test "FrameDebugStats — log triggers zero-drawn warning when total_drawn == 0" {
-    var stats = FrameDebugStats{
-        .frame_number = 1,
-        .total_meshes = 10,
-        .opaque_candidates = 5,
-        .transparent_candidates = 3,
-        .elapsed_ns = 5_000_000,
-    };
-    stats.log(); // Should log warning since total_drawn == 0
-}
-
-// ──── getDeletionQueueIndex ─────────────────────────────────────────────────────
-
-test "getDeletionQueueIndex — frame 0 with 2 in-flight fences" {
-    var renderer: VulkanRenderer = undefined;
-    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
-    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
-    renderer.in_flight_fences = &fences_2;
-
-    // fence_slot = 0 % 2 = 0; result = 0 % 8 = 0
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-}
-
-test "getDeletionQueueIndex — monotonically increasing frames" {
-    var renderer: VulkanRenderer = undefined;
-    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
-    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
-    renderer.in_flight_fences = &fences_2;
-
-    var expected: u32 = 0;
-    while (expected < 16) : (expected += 1) {
-        renderer.current_frame_idx.store(expected, .monotonic);
-        // fence_slot = expected % 2; result = (expected % 2) % 8 = expected % 2
-        const want = @as(u32, @intCast(@as(u64, expected) % 2));
-        try std.testing.expectEqual(want, renderer.getDeletionQueueIndex());
-    }
-}
-
-test "getDeletionQueueIndex — wraps around deferred_deletions (8)" {
-    var renderer: VulkanRenderer = undefined;
-    renderer.current_frame_idx = std.atomic.Value(u32).init(8);
-    var fences_3: [3]vk.Fence = .{ .null_handle, .null_handle, .null_handle };
-    renderer.in_flight_fences = &fences_3;
-
-    // fence_slot = 8 % 3 = 2; result = 2 % 8 = 2
-    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
-}
-
-test "getDeletionQueueIndex — large frame numbers" {
-    var renderer: VulkanRenderer = undefined;
-    renderer.current_frame_idx = std.atomic.Value(u32).init(100_000);
-    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
-    renderer.in_flight_fences = &fences_2;
-
-    // fence_slot = 100_000 % 2 = 0; result = 0 % 8 = 0
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(100_001, .monotonic);
-    // fence_slot = 100_001 % 2 = 1; result = 1 % 8 = 1
-    try std.testing.expectEqual(@as(u32, 1), renderer.getDeletionQueueIndex());
-}
-
-test "getDeletionQueueIndex — 5 in-flight fences, varied frames" {
-    var renderer: VulkanRenderer = undefined;
-    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
-    var fences_5: [5]vk.Fence = .{ .null_handle, .null_handle, .null_handle, .null_handle, .null_handle };
-    renderer.in_flight_fences = &fences_5;
-
-    // frame 0: fence_slot = 0 % 5 = 0; result = 0 % 8 = 0
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(7, .monotonic);
-    // frame 7: fence_slot = 7 % 5 = 2; result = 2 % 8 = 2
-    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(13, .monotonic);
-    // frame 13: fence_slot = 13 % 5 = 3; result = 3 % 8 = 3
-    try std.testing.expectEqual(@as(u32, 3), renderer.getDeletionQueueIndex());
-}
-
-// ──── findMemoryType ────────────────────────────────────────────────────────────
-
 test "findMemoryType — selects host_visible|host_coherent" {
-    var renderer: VulkanRenderer = undefined;
     var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
     @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
     mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
     mem_types[2] = .{ .property_flags = .{ .host_visible_bit = true, .host_cached_bit = true }, .heap_index = 0 };
 
-    renderer.mem_props = .{
+    const mem_props = vk.PhysicalDeviceMemoryProperties{
         .memory_type_count = 3,
         .memory_types = mem_types,
         .memory_heap_count = 2,
         .memory_heaps = undefined,
     };
 
-    // Find host_visible | host_coherent among types 0,1,2
-    const idx = renderer.findMemoryType(
+    const idx = findMemoryTypeRaw(
+        mem_props,
         @as(u32, 0b111),
         vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
     );
@@ -3916,74 +3568,25 @@ test "findMemoryType — selects host_visible|host_coherent" {
 }
 
 test "findMemoryType — selects device_local" {
-    var renderer: VulkanRenderer = undefined;
     var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
     @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
     mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
 
-    renderer.mem_props = .{
+    const mem_props = vk.PhysicalDeviceMemoryProperties{
         .memory_type_count = 2,
         .memory_types = mem_types,
         .memory_heap_count = 2,
         .memory_heaps = undefined,
     };
 
-    const idx = renderer.findMemoryType(
+    const idx = findMemoryTypeRaw(
+        mem_props,
         @as(u32, 0b11),
         vk.MemoryPropertyFlags{ .device_local_bit = true },
     );
     try std.testing.expectEqual(@as(u32, 1), idx);
 }
-
-test "findMemoryType — respects type_filter" {
-    var renderer: VulkanRenderer = undefined;
-    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
-    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
-    mem_types[0] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 0 };
-    // type 5 also has device_local but is only reachable via bit 5 in type_filter
-    mem_types[5] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
-
-    renderer.mem_props = .{
-        .memory_type_count = 6,
-        .memory_types = mem_types,
-        .memory_heap_count = 2,
-        .memory_heaps = undefined,
-    };
-
-    // type_filter with only bit 5 set → must match memory type 5
-    const idx = renderer.findMemoryType(
-        @as(u32, 1 << 5),
-        vk.MemoryPropertyFlags{ .device_local_bit = true },
-    );
-    try std.testing.expectEqual(@as(u32, 5), idx);
-}
-
-test "findMemoryType — skips types not in type_filter" {
-    var renderer: VulkanRenderer = undefined;
-    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
-    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
-    // type 0 is host_visible but NOT in type_filter (bit 0 not set)
-    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true }, .heap_index = 0 };
-    // type 1 is host_visible AND in type_filter
-    mem_types[1] = .{ .property_flags = .{ .host_visible_bit = true }, .heap_index = 1 };
-
-    renderer.mem_props = .{
-        .memory_type_count = 2,
-        .memory_types = mem_types,
-        .memory_heap_count = 2,
-        .memory_heaps = undefined,
-    };
-
-    // Only bit 1 set in filter → must select type 1, not type 0
-    const idx = renderer.findMemoryType(
-        @as(u32, 1 << 1),
-        vk.MemoryPropertyFlags{ .host_visible_bit = true },
-    );
-    try std.testing.expectEqual(@as(u32, 1), idx);
-}
-
-// ──── makeInfReversedZProjRh edge cases ────────────────────────────────────────
 
 test "makeInfReversedZProjRh — very narrow FOV" {
     const fov = std.math.degreesToRadians(10.0);
@@ -3992,57 +3595,15 @@ test "makeInfReversedZProjRh — very narrow FOV" {
 
     const P = makeInfReversedZProjRh(fov, aspect, zNear);
 
-    // Reversed-Z: near plane maps to NDC z = 1.0
     const v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
     const ndc_z = v.data[2] / v.data[3];
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), ndc_z, 1e-6);
 
-    // Far plane maps to NDC z ≈ 0
     const far_v = P.multiplyVec(.{ .data = .{ 0, 0, -1e9, 1 } });
     const far_ndc_z = far_v.data[2] / far_v.data[3];
     try std.testing.expect(far_ndc_z > 0);
     try std.testing.expect(far_ndc_z < 1e-6);
 }
-
-test "makeInfReversedZProjRh — ultra-near zNear" {
-    const fov = std.math.degreesToRadians(90.0);
-    const aspect = 1.0;
-    const zNear: f32 = 0.0001;
-
-    const P = makeInfReversedZProjRh(fov, aspect, zNear);
-
-    // Near plane still maps to NDC z = 1.0
-    const v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
-    const ndc_z = v.data[2] / v.data[3];
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), ndc_z, 1e-6);
-}
-
-test "makeInfReversedZProjRh — wide aspect ratio (ultrawide)" {
-    const fov = std.math.degreesToRadians(90.0);
-    const aspect = 32.0 / 9.0; // ~super ultrawide
-    const zNear: f32 = 0.1;
-
-    const P = makeInfReversedZProjRh(fov, aspect, zNear);
-
-    // Y-down: +Y world → negative NDC Y
-    // With 90° VFOV and wide aspect, the viewable horizontal range is much wider
-    const r = P.multiplyVec(.{ .data = .{ 10, 0, -50, 1 } });
-    const ndc_x = r.data[0] / r.data[3];
-    // Should still be visible (within [-1, 1]) but with the wide aspect,
-    // the same world X is a smaller fraction of screen width
-    try std.testing.expect(@abs(ndc_x) <= 1);
-
-    // Reversed-Z invariant
-    const near_v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
-    const near_ndc_z = near_v.data[2] / near_v.data[3];
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), near_ndc_z, 1e-6);
-
-    // Y-down check
-    const y_up = P.multiplyVec(.{ .data = .{ 0, 10, -50, 1 } });
-    try std.testing.expect(y_up.data[1] / y_up.data[3] < 0);
-}
-
-// ──── Camera direction math edge cases ──────────────────────────────────────────
 
 test "camera direction — looking straight up (pitch=+90°)" {
     const viewDir = @Vector(3, f32){ 90.0, 0.0, 0.0 };
@@ -4056,87 +3617,11 @@ test "camera direction — looking straight up (pitch=+90°)" {
     const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
 
-    // Looking straight up: direction should be (0, 1, 0)
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), dir[1], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
 }
 
-test "camera direction — looking straight down (pitch=-90°)" {
-    const viewDir = @Vector(3, f32){ -90.0, 0.0, 0.0 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
-
-    // Looking straight down: direction should be (0, -1, 0)
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[1], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
-}
-
-test "camera direction — looking directly behind (yaw=180°)" {
-    const viewDir = @Vector(3, f32){ 0.0, 180.0, 0.0 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
-
-    // Looking behind (180° yaw from +Z): direction should be (0, 0, -1)
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[2], 1e-5);
-}
-
-test "camera direction — looking right (yaw=+90°)" {
-    const viewDir = @Vector(3, f32){ 0.0, 90.0, 0.0 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
-
-    // Looking right: direction should be (1, 0, 0)
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), dir[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
-}
-
-test "camera direction — looking left (yaw=-90°)" {
-    const viewDir = @Vector(3, f32){ 0.0, -90.0, 0.0 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
-
-    // Looking left: direction should be (-1, 0, 0)
-    try std.testing.expectApproxEqAbs(@as(f32, -1.0), dir[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[1], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
-}
-
-// ──── cullChunk ─────────────────────────────────────────────────────────────────
-
-/// Helper: build a Frustum from a camera configured at `eye` looking toward `target`.
 fn makeTestFrustum(eye: @Vector(3, f32), target: @Vector(3, f32), up: @Vector(3, f32), fov_deg: f32, aspect: f32, z_near: f32) Frustum {
     const fov = std.math.degreesToRadians(fov_deg);
     const P = makeInfReversedZProjRh(fov, aspect, z_near);
@@ -4159,203 +3644,21 @@ fn makeTestFrustum(eye: @Vector(3, f32), target: @Vector(3, f32), up: @Vector(3,
 
 test "cullChunk — chunk directly in front of camera is NOT culled" {
     const frustum = makeTestFrustum(
-        .{ 0, 0, 0 }, // eye at origin
-        .{ 0, 0, 1 }, // looking along +Z
-        .{ 0, 1, 0 }, // up
-        90.0, // 90° vertical FOV
-        800.0 / 600.0, // standard aspect
-        0.01, // zNear
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        90.0,
+        800.0 / 600.0,
+        0.01,
     );
 
-    // Chunk at level 0, position (0, 0, 0) — sits at world origin, right at the camera's feet
     const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, 0 } };
     const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
 
     try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
 }
 
-test "cullChunk — chunk in front along view direction is NOT culled" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    // Chunk at level 0, position (0, 0, 1) — in front along +Z
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, 1 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
-}
-
-test "cullChunk — chunk behind camera IS culled" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    // Chunk behind camera at position (0, 0, -2) — behind the viewer
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, -2 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
-}
-
-test "cullChunk — chunk far to the side IS culled outside 90° FOV" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    // Chunk far to the right at X=20 chunks → world X = 640, well outside frustum
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 20, 0, 1 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
-}
-
-test "cullChunk — chunk slightly off-center but still visible" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    // Chunk at (1, 0, 1) is slightly to the right but should still be within ~106° HFOV
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 1, 0, 1 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
-}
-
-test "cullChunk — chunk far above camera IS culled" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    // Chunk far above at (0, 20, 1) — Y=20 chunks = 640 world units, culled by top plane
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 20, 1 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(cullChunk(&frustum, chunkpos, playerPos));
-}
-
-// ──── RenderOptions ─────────────────────────────────────────────────────────────
-
-test "RenderOptions — default values" {
-    const options = VulkanRenderer.RenderOptions{};
-    try std.testing.expect(!options.draw_over);
-    try std.testing.expectApproxEqAbs(@as(f32, 90.0), options.fov, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 60 * 5), options.day_length_sec, 1e-6);
-}
-
-// ──── ChunkData layout ──────────────────────────────────────────────────────────
-
 test "ChunkData — struct size and alignment" {
-    // ChunkData: absolute_position[3]f32 align(4*@sizeOf(f32)=16) (12+4pad), relative_position[3]f32 align(16) (12+4pad),
-    // scale f32 (4), pad(4), address u64 align(8) (8) = 48 total with align(16)
     try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
-}
-
-// ──── PushConstants layout ───────────────────────────────────────────────────────
-
-test "PushConstants — struct size and alignment" {
-    // PushConstants: projview [16]f32=64, sun_dir [3]f32=12, _pad0 f32=4, time f32=4, draw_over i32=4
-    try std.testing.expectEqual(@as(usize, 4), @alignOf(PushConstants));
-    try std.testing.expectEqual(@as(usize, 84), @sizeOf(PushConstants));
-}
-
-// ──── VulkanRenderer itself (partial, structural) ───────────────────────────────
-
-test "VulkanRenderer — RenderOptions has expected field types" {
-    const Opts = VulkanRenderer.RenderOptions;
-    // Verify at compile time — ensure struct exists and fields are accessible
-    comptime {
-        if (!@hasField(Opts, "draw_over")) @compileError("missing draw_over");
-        if (!@hasField(Opts, "fov")) @compileError("missing fov");
-        if (!@hasField(Opts, "day_length_sec")) @compileError("missing day_length_sec");
-    }
-}
-
-test "ChunkMeshBuffer — struct layout" {
-    // buffer: vk.Buffer (Vulkan handle, u64), memory: vk.DeviceMemory (u64),
-    // device_address: vk.DeviceAddress (u64), face_count: u32
-    // Max alignment among fields is 8 (u64 handles)
-    try std.testing.expectEqual(@as(usize, 8), @alignOf(ChunkMeshBuffer));
-    // Regular (non-extern) struct; verify size is as expected with u64 handles
-    try std.testing.expect(@sizeOf(ChunkMeshBuffer) >= 28); // 3*u64 + u32 + potentially padding
-}
-
-test "ChunkData — field sizes" {
-    try std.testing.expectEqual(@as(usize, 12), @sizeOf([3]f32));
-    try std.testing.expectEqual(@as(usize, 4), @sizeOf(f32));
-    try std.testing.expectEqual(@as(usize, 8), @sizeOf(u64));
-}
-
-// ──── Time / elapsed seconds ────────────────────────────────────────────────────
-
-test "elapsed seconds — no overflow for large init times" {
-    // Simulate: init_time_ns at epoch (large i96) and now_ns ~1 hour later.
-    // The elapsed_ns computation uses saturating sub (-|) so it never underflows.
-    const init_time_ns: u64 = @as(u64, @intCast(@as(i96, 1_700_000_000_000) * std.time.ns_per_s));
-    const now_ns: u64 = init_time_ns + 3_600_000_000_000; // +1 hour
-    const elapsed_ns = now_ns -| init_time_ns;
-    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
-    try std.testing.expect(elapsed_sec > 3599.0 and elapsed_sec < 3601.0);
-}
-
-test "elapsed seconds — sub-second precision for small deltas" {
-    const init_time_ns: u64 = 1_000_000_000;
-    const now_ns: u64 = 1_000_500_000; // +500µs
-    const elapsed_ns = now_ns -| init_time_ns;
-    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
-    try std.testing.expect(elapsed_sec > 0.0 and elapsed_sec < 0.001);
-}
-
-test "elapsed seconds — f32 does not overflow at large values" {
-    // Many hours of uptime should still produce a valid f32.
-    const init_time_ns: u64 = 0;
-    const now_ns: u64 = 100 * std.time.ns_per_hour; // 100 hours
-    const elapsed_ns = now_ns -| init_time_ns;
-    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
-    try std.testing.expect(elapsed_sec > 359_999.0 and elapsed_sec < 360_001.0);
-}
-
-// ──── cullChunk camera-too-close precision ───────────────────────────────────────
-
-test "cullChunk — camera inside chunk (close to boundary) does not NaN" {
-    // Camera at a level-3 chunk boundary. The f64→f32 conversion in cullChunk
-    // must not produce NaN/garbage. This test passes if it doesn't crash.
-    const lookDir: @Vector(3, f32) = .{ 0, 0, 1 };
-    const up: @Vector(3, f32) = .{ 0, 1, 0 };
-    const proj = makeInfReversedZProjRh(std.math.degreesToRadians(90.0), 800.0 / 600.0, 0.01);
-    const view = zm.Mat4f.lookAtRH(.{ .data = @Vector(3, f32){ 0, 0, 0 } }, .{ .data = lookDir }, .{ .data = up });
-    const frustum = Frustum.extractFrustumPlanes(proj.multiply(view));
-
-    // Player at level-3 chunk boundary with f64 fractional offset that challenges f32 precision
-    const chunkpos = ChunkPos{ .level = 3, .position = .{ 0, 0, 0 } };
-    const playerPos: @Vector(3, f64) = .{ 4096.0000001, 4096.0, 4096.0 };
-
-    // This must not crash or produce NaN
-    _ = cullChunk(&frustum, chunkpos, playerPos);
 }
