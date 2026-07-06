@@ -86,9 +86,10 @@ float bouncingMod(float x, float n) {
 }
 
 void main() {
-    vec3 relative_position = chunks[gl_InstanceIndex].relative_position;
-    vec3 absolute_position = chunks[gl_InstanceIndex].absolute_position;
-    scale = chunks[gl_InstanceIndex].scale;
+    ChunkData chunk = chunks[gl_InstanceIndex];
+    vec3 relative_position = chunk.relative_position;
+    vec3 absolute_position = chunk.absolute_position;
+    scale = chunk.scale;
 
     uint face_in_chunk = gl_VertexIndex / 6u;
     const uint quad_indices[6] = uint[6](0u, 1u, 2u, 0u, 2u, 3u);
@@ -102,24 +103,23 @@ void main() {
     block_array_layer = block_type_local;
 
     vec3 coords = CUBE_FACES[side][local_vertex];
-    coords = coords + (ceil(coords) * lengths);
+    coords += ceil(coords) * lengths;
     coords *= scale;
-    fragpos = (vec3(pos) * scale) + coords + absolute_position;
+    fragpos = vec3(pos) * scale + coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
     if (block_type_local == 3u) {
         float speed = 2000.0;
         float t     = 1.0 + push_consts.pc.time;
-        vec3  vp    = coords + vec3(pos) * scale + absolute_position;
-        float safe_y = max(abs(vp.y), 1e-10);
-        float safe_z = max(abs(vp.z), 1e-10);
+        float safe_y = max(abs(fragpos.y), 1e-10);
+        float safe_z = max(abs(fragpos.z), 1e-10);
         float p     = 1.0 + bouncingMod(
-            vp.x * vp.y * vp.z * (vp.x / safe_y / safe_z) *
-            (sin(vp.x) * sin(vp.y) * sin(vp.z)),
+            fragpos.x * fragpos.y * fragpos.z * (fragpos.x / (safe_y * safe_z)) *
+            (sin(fragpos.x) * sin(fragpos.y) * sin(fragpos.z)),
             400.0) / 400.0;
         coords.y -= bouncingMod(p * t * speed, 0.4);
     }
 
     coordss = coords;
-    gl_Position = push_consts.pc.projview * vec4(coords + (vec3(pos) * scale) + relative_position, 1.0);
+    gl_Position = push_consts.pc.projview * vec4(coords + vec3(pos) * scale + relative_position, 1.0);
 }

@@ -48,24 +48,12 @@ const uvec2 texcoord_axes[6] = uvec2[](
 
 void main()
 {
-    uint s = side;
-    vec3 normal = face_normals[s];
+    vec3 normal = face_normals[side];
+    vec2 texcoords = vec2(coordss[texcoord_axes[side][0]], coordss[texcoord_axes[side][1]]) * 2.0;
 
-    vec2 texcoords = vec2(coordss[texcoord_axes[s][0]], coordss[texcoord_axes[s][1]]);
-    texcoords *= 2.0;
-
-    vec3 norm = normalize(normal);
-    vec3 light_dir = sun_dir_norm;
-    float diff = max(dot(norm, light_dir), 0.0);
-    vec3 diffuse = diff * vec3(1.0);
-
-    frag_color = texture(texture_array, vec3(((texcoords.xy) + 1.0) / 2.0, float(block_array_layer)));
-    frag_color = vec4((0.5 + diffuse) * frag_color.xyz, frag_color.a);
+    frag_color = texture(texture_array, vec3((texcoords + 1.0) / 2.0, float(block_array_layer)));
+    frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
     if (frag_color.a < 0.01) discard;
 
-    if (push_consts_frag.pc.draw_over != 0) {
-        gl_FragDepth = gl_FragCoord.z / pow(max(1.0, scale), 8.0);
-    } else {
-        gl_FragDepth = gl_FragCoord.z;
-    }
+    gl_FragDepth = gl_FragCoord.z / (push_consts_frag.pc.draw_over != 0 ? pow(max(1.0, scale), 8.0) : 1.0);
 }

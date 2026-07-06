@@ -334,6 +334,7 @@ const CommandPoolReservoir = struct {
                 .queue_family_index = queue_family,
             };
             pool.* = try dev.createCommandPool(&pool_info, null);
+            i += 1;
 
             const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
                 .command_pool = pool.*,
@@ -343,7 +344,6 @@ const CommandPoolReservoir = struct {
             var cmd: vk.CommandBuffer = undefined;
             try dev.allocateCommandBuffers(&cmd_alloc_info, @ptrCast(&cmd));
             self.cmds[idx] = cmd;
-            i += 1;
         }
     }
 
@@ -685,6 +685,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     };
 
     self.instance_handle = try self.vkb.createInstance(&instance_create_info, null);
+    errdefer {
+        var local_wrapper = InstanceWrapper.load(self.instance_handle, getProcAddr);
+        const local_instance = InstanceProxy.init(self.instance_handle, &local_wrapper);
+        local_instance.destroyInstance(null);
+    }
     std.log.info("VulkanRenderer.init: Created Vulkan instance successfully", .{});
 
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
@@ -693,7 +698,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     instance_wrapper_ptr.* = .load(self.instance_handle, getProcAddr);
     self.instance_wrapper = instance_wrapper_ptr;
     self.instance = .init(self.instance_handle, instance_wrapper_ptr);
-    errdefer self.instance.destroyInstance(null);
+    errdefer {
+        self.instance.destroyInstance(null);
+        allocator.destroy(instance_wrapper_ptr);
+        self.instance_wrapper = null;
+    }
 
     var surface: vk.SurfaceKHR = .null_handle;
     const result: vk.Result = @enumFromInt(window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface)));
@@ -810,36 +819,20 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
         if (graphics_family == 0 and qf.queue_flags.graphics_bit) {
             graphics_family = family;
         }
-        var present_supported: vk.Bool32 = .false;
-        present_supported = try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface);
-        if (present_family == 0 and present_supported == .true) {
+        if (present_family == 0 and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) {
             present_family = family;
         }
     }
 
     var transfer_family: ?u32 = null;
+    var transfer_score: u8 = 0;
     for (queue_families, 0..) |qf, i| {
         const family: u32 = @intCast(i);
-        if (qf.queue_flags.transfer_bit and !qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) {
-            transfer_family = family;
-            break;
-        }
-    }
-    if (transfer_family == null) {
-        for (queue_families, 0..) |qf, i| {
-            const family: u32 = @intCast(i);
-            if (qf.queue_flags.transfer_bit and !qf.queue_flags.graphics_bit) {
+        if (qf.queue_flags.transfer_bit) {
+            const score: u8 = if (!qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) 3 else if (!qf.queue_flags.graphics_bit) 2 else 1;
+            if (score > transfer_score) {
                 transfer_family = family;
-                break;
-            }
-        }
-    }
-    if (transfer_family == null) {
-        for (queue_families, 0..) |qf, i| {
-            const family: u32 = @intCast(i);
-            if (qf.queue_flags.transfer_bit) {
-                transfer_family = family;
-                break;
+                transfer_score = score;
             }
         }
     }
@@ -856,24 +849,18 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
 
     var unique_families: [3]u32 = undefined;
     var unique_count: u32 = 0;
-    unique_families[0] = graphics_family;
-    unique_count = 1;
-
-    if (present_family != graphics_family) {
-        unique_families[unique_count] = present_family;
-        unique_count += 1;
-    }
-
-    var transfer_is_unique = true;
-    for (unique_families[0..unique_count]) |f| {
-        if (f == final_transfer_family) {
-            transfer_is_unique = false;
-            break;
+    for ([_]u32{ graphics_family, present_family, final_transfer_family }) |f| {
+        var found = false;
+        for (unique_families[0..unique_count]) |uf| {
+            if (uf == f) {
+                found = true;
+                break;
+            }
         }
-    }
-    if (transfer_is_unique) {
-        unique_families[unique_count] = final_transfer_family;
-        unique_count += 1;
+        if (!found) {
+            unique_families[unique_count] = f;
+            unique_count += 1;
+        }
     }
 
     var queue_create_infos_ptr: [3]vk.DeviceQueueCreateInfo = undefined;
@@ -1017,6 +1004,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
             }
         }
         self.dev.destroyDevice(null);
+        allocator.destroy(dev_wrapper_ptr);
+        self.dev_wrapper = null;
     }
 
     self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
@@ -1141,7 +1130,9 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     {
         self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
-        _ = self.dev.deviceWaitIdle() catch {};
+        self.dev.deviceWaitIdle() catch |err| {
+            std.log.err("VulkanRenderer.deinit: deviceWaitIdle failed: {any}", .{err});
+        };
     }
     std.log.info("VulkanRenderer.deinit: device is idle. Cleaning up Vulkan objects...", .{});
 
@@ -1582,18 +1573,13 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
     const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0))))));
 
-    const now_ns_f: f64 = @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds);
-    const day_len_f: f64 = @max(0.001, day_length_sec);
-    const ns_per_s_f: f64 = @floatFromInt(std.time.ns_per_s);
-    const sun_angle = @rem(now_ns_f / ((day_len_f * ns_per_s_f) / 360.0), 360.0);
+    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const now_ns_f = @as(f64, @floatFromInt(now_ns));
+    const sun_angle = @rem(now_ns_f / ((@as(f64, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360.0), 360.0);
     const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
     const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
-    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const elapsed_ns = now_ns -| self.init_time_ns;
-    const elapsed_f: f32 = @floatFromInt(elapsed_ns);
-    const ns_per_s_f32: f32 = @floatFromInt(std.time.ns_per_s);
-    const elapsed_sec = elapsed_f / ns_per_s_f32;
+    const elapsed_sec = @as(f32, @floatFromInt(now_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
     const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
@@ -1676,10 +1662,10 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, &desc_set_arr, null);
 
     var pc: PushConstants = .{
-        .projview = std.mem.zeroes([16]f32),
-        .sun_dir = @bitCast(sun_dir),
+        .projview = @splat(0),
+        .sun_dir = sun_dir,
         .time = elapsed_sec,
-        .draw_over = if (draw_over) 1 else 0,
+        .draw_over = @intFromBool(draw_over),
     };
 
     inline for (0..4) |row| {
@@ -1836,7 +1822,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
-        .p_image_indices = &[_]u32{image_index},
+        .p_image_indices = &.{image_index},
         .p_results = null,
     };
 
@@ -1879,8 +1865,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         const key = entry.key_ptr.*;
-        const matches_key = if (is_transparent) key == .transparent else key == .@"opaque";
-        if (!matches_key) continue;
+        if (is_transparent != (key == .transparent)) continue;
 
         candidates += 1;
         const chunkpos = key.toPos();
@@ -1936,8 +1921,14 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
 fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     const num_frames = self.swapchain_images.len;
 
-    if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
-    if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
+    if (self.indirect_draw_buffers_mapped.len > 0) {
+        self.allocator.free(self.indirect_draw_buffers_mapped);
+        self.indirect_draw_buffers_mapped = &.{};
+    }
+    if (self.chunk_data_buffers_mapped.len > 0) {
+        self.allocator.free(self.chunk_data_buffers_mapped);
+        self.chunk_data_buffers_mapped = &.{};
+    }
 
     self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
     @memset(self.indirect_draw_buffers, .null_handle);
@@ -1974,18 +1965,22 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
     }
 
     self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
+    @memset(self.chunk_data_buffers, .null_handle);
     errdefer {
         for (self.chunk_data_buffers) |buf| {
             if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
         }
         self.allocator.free(self.chunk_data_buffers);
+        self.chunk_data_buffers = &.{};
     }
     self.chunk_data_memories = try self.allocator.alloc(vk.DeviceMemory, num_frames);
+    @memset(self.chunk_data_memories, .null_handle);
     errdefer {
         for (self.chunk_data_memories) |mem| {
             if (mem != .null_handle) self.dev.freeMemory(mem, null);
         }
         self.allocator.free(self.chunk_data_memories);
+        self.chunk_data_memories = &.{};
     }
 
     const chunk_data_size: vk.DeviceSize = @intCast(self.max_draw_count * @sizeOf(ChunkData));
@@ -2005,9 +2000,7 @@ fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
 }
 
 pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, buffer: *vk.Buffer, memory: *vk.DeviceMemory) !void {
-    if (size == 0) {
-        return error.InvalidBufferSize;
-    }
+    std.debug.assert(size != 0);
 
     const buffer_info: vk.BufferCreateInfo = .{
         .flags = .{},
@@ -2040,6 +2033,7 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
     };
     var cmd: vk.CommandBuffer = undefined;
     try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
+    defer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
 
     const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
@@ -2066,13 +2060,9 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
         .p_signal_semaphores = undefined,
     };
 
-    try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
+    try self.dev.queueSubmit(self.graphics_queue, &.{submit_info}, .null_handle);
 
-    self.dev.queueWaitIdle(self.graphics_queue) catch |err| switch (err) {
-        else => return error.DrawFailed,
-    };
-
-    self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
+    try self.dev.queueWaitIdle(self.graphics_queue);
 }
 
 pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
@@ -2091,7 +2081,9 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
     {
         self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
-        _ = self.dev.deviceWaitIdle() catch {};
+        self.dev.deviceWaitIdle() catch |err| {
+            std.log.err("destroyOldSwapchainResources: deviceWaitIdle failed: {any}", .{err});
+        };
     }
 
     for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
@@ -2220,16 +2212,9 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     const image_count = if (caps.max_image_count > 0) @min(raw_count, caps.max_image_count) else raw_count;
 
     const qfi = [_]u32{ self.queue_family_index, self.present_queue_family_index };
-    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index)
-        .concurrent
-    else
-        .exclusive;
+    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
 
-    errdefer {
-        if (old_swapchain != .null_handle) {
-            self.dev.destroySwapchainKHR(old_swapchain, null);
-        }
-    }
+    errdefer if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, null);
 
     self.swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
@@ -2248,8 +2233,11 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         .clipped = .true,
         .old_swapchain = old_swapchain,
     }, null);
-    if (old_swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(old_swapchain, null);
+    if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, null);
+
+    errdefer {
+        self.dev.destroySwapchainKHR(self.swapchain, null);
+        self.swapchain = .null_handle;
     }
 
     self.swapchain_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
@@ -2338,6 +2326,11 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     self.cmd_buffers = try self.allocator.alloc(vk.CommandBuffer, num_swapchain_images);
     errdefer self.allocator.free(self.cmd_buffers);
     try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
+    errdefer {
+        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
+        self.allocator.free(self.cmd_buffers);
+        self.cmd_buffers = &.{};
+    }
 
     self.createRenderTargets(io, actual_extent) catch |err| {
         std.log.err("createRenderTargets failed: {}", .{err});
@@ -2388,6 +2381,34 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     self.render_depth_image = .null_handle;
     self.render_depth_memory = .null_handle;
 
+    errdefer {
+        if (self.render_color_view != .null_handle) {
+            self.dev.destroyImageView(self.render_color_view, null);
+            self.render_color_view = .null_handle;
+        }
+        if (self.render_depth_view != .null_handle) {
+            self.dev.destroyImageView(self.render_depth_view, null);
+            self.render_depth_view = .null_handle;
+        }
+        if (self.render_color_image != .null_handle) {
+            self.dev.destroyImage(self.render_color_image, null);
+            self.render_color_image = .null_handle;
+        }
+        if (self.render_color_memory != .null_handle) {
+            self.dev.freeMemory(self.render_color_memory, null);
+            self.render_color_memory = .null_handle;
+        }
+        if (self.render_depth_image != .null_handle) {
+            self.dev.destroyImage(self.render_depth_image, null);
+            self.render_depth_image = .null_handle;
+        }
+        if (self.render_depth_memory != .null_handle) {
+            self.dev.freeMemory(self.render_depth_memory, null);
+            self.render_depth_memory = .null_handle;
+        }
+    }
+    self.render_depth_memory = .null_handle;
+
     const color_image_info: vk.ImageCreateInfo = .{
         .flags = .{},
         .image_type = .@"2d",
@@ -2414,7 +2435,6 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
 
     {
         const cmd = try self.beginSingleTimeCommands(io);
-        defer self.endSingleTimeCommands(io, cmd) catch {};
         const barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
             .new_layout = .color_attachment_optimal,
@@ -2433,6 +2453,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         };
         const color_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_barrier_arr);
+        try self.endSingleTimeCommands(io, cmd);
     }
 
     const color_view_info: vk.ImageViewCreateInfo = .{
@@ -2490,7 +2511,6 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
 
     {
         const cmd = try self.beginSingleTimeCommands(io);
-        defer self.endSingleTimeCommands(io, cmd) catch {};
         const barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
             .new_layout = .depth_stencil_attachment_optimal,
@@ -2509,6 +2529,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         };
         const depth_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, &depth_barrier_arr);
+        try self.endSingleTimeCommands(io, cmd);
     }
 
     const depth_view_info: vk.ImageViewCreateInfo = .{
@@ -2587,7 +2608,6 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         self.descriptor_sets_per_frame[i] = desc_set[0];
     }
 
-    const dummy_white_pixel: [4]u8 = .{ 255, 255, 255, 255 };
     const dummy_staging_size: vk.DeviceSize = 256 * 4;
 
     var staging_buffer_dummy: vk.Buffer = .null_handle;
@@ -2600,10 +2620,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 
     const dummy_data = try self.dev.mapMemory(staging_memory_dummy, 0, dummy_staging_size, .{});
     const mapped_slice = @as([*]u8, @ptrCast(dummy_data))[0..dummy_staging_size];
-    for (0..256) |i| {
-        const offset = i * 4;
-        @memcpy(mapped_slice[offset .. offset + 4], &dummy_white_pixel);
-    }
+    @memset(mapped_slice, 255);
     self.dev.unmapMemory(staging_memory_dummy);
 
     const dummy_image_info: vk.ImageCreateInfo = .{
@@ -2634,7 +2651,6 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 
     {
         const cmd = try self.beginSingleTimeCommands(io);
-        defer self.endSingleTimeCommands(io, cmd) catch {};
 
         var barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
@@ -2670,10 +2686,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
             .image_extent = .{ .width = 1, .height = 1, .depth = 1 },
         };
 
-        var copy_region_arr: [1]vk.BufferImageCopy = undefined;
-        copy_region_arr[0] = copy_region;
-
-        self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, self.dummy_image, .transfer_dst_optimal, &copy_region_arr);
+        self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, self.dummy_image, .transfer_dst_optimal, &[_]vk.BufferImageCopy{copy_region});
 
         barrier.old_layout = .transfer_dst_optimal;
         barrier.new_layout = .shader_read_only_optimal;
@@ -2683,6 +2696,8 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 
         const to_shader_read: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &to_shader_read);
+
+        try self.endSingleTimeCommands(io, cmd);
     }
 
     const dummy_view_info: vk.ImageViewCreateInfo = .{
@@ -2810,7 +2825,7 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .logic_op = .copy,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&pcbas),
-        .blend_constants = [_]f32{ 0, 0, 0, 0 },
+        .blend_constants = .{ 0, 0, 0, 0 },
     };
     const dynstate: [2]vk.DynamicState = .{ .viewport, .scissor };
     const pdsci: vk.PipelineDynamicStateCreateInfo = .{
@@ -2904,9 +2919,8 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
 }
 
 fn currentFrame(self: *VulkanRenderer) u32 {
-    const current_frame_unbound = self.current_frame_idx.load(.monotonic);
     const num_frames = self.in_flight_fences.len;
-    return if (num_frames > 0) @intCast(current_frame_unbound % num_frames) else 0;
+    return if (num_frames > 0) @intCast(self.current_frame_idx.load(.monotonic) % num_frames) else 0;
 }
 
 fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}!void {
@@ -2957,6 +2971,7 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuf
     };
     var cmd: vk.CommandBuffer = undefined;
     try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
+    errdefer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
 
     const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
@@ -2968,6 +2983,8 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuf
 }
 
 pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandBuffer) !void {
+    defer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
+
     try self.dev.endCommandBuffer(cmd);
 
     const submit_info: vk.SubmitInfo = .{
@@ -2983,35 +3000,27 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
     self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
-    try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
+    try self.dev.queueSubmit(self.graphics_queue, &.{submit_info}, .null_handle);
 
-    self.dev.queueWaitIdle(self.graphics_queue) catch |err| switch (err) {
-        else => return error.DrawFailed,
-    };
-
-    self.dev.freeCommandBuffers(self.upload_command_pool, &[_]vk.CommandBuffer{cmd});
+    try self.dev.queueWaitIdle(self.graphics_queue);
 }
 
 pub fn present(self: *VulkanRenderer, io: std.Io) !void {
     const current_frame = self.currentFrame();
 
-    const wait_semaphores = &[_]vk.Semaphore{self.render_complete_semaphores[current_frame]};
-
     const present_info: vk.PresentInfoKHR = .{
-        .wait_semaphore_count = @as(u32, @intCast(wait_semaphores.len)),
-        .p_wait_semaphores = @ptrCast(wait_semaphores.ptr),
+        .wait_semaphore_count = 1,
+        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&self.swapchain),
-        .p_image_indices = &[_]u32{self.current_swapchain_image_index},
+        .p_image_indices = &.{self.current_swapchain_image_index},
         .p_results = null,
     };
 
     self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
-    _ = self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
-        else => return error.VulkanPresentFailed,
-    };
+    _ = try self.dev.queuePresentKHR(self.present_queue, &present_info);
 }
 
 fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {

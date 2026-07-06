@@ -148,26 +148,17 @@ pub const TextureArrayManager = struct {
             loaded_layers[layer] = true;
         }
 
-        // Fill missing layers with a 16x16 magenta/black checkerboard fallback scaled to layer size
         for (0..layer_count) |layer| {
             if (!loaded_layers[layer]) {
                 const layer_offset = @as(vk.DeviceSize, @intCast(layer)) * image_size;
                 for (0..height) |y| {
                     for (0..width) |x| {
-                        // checker size of 8 pixels
                         const is_magenta = ((x / 8) + (y / 8)) % 2 == 0;
                         const idx = layer_offset + (y * width + x) * 4;
-                        if (is_magenta) {
-                            mapped_slice[idx + 0] = 255;
-                            mapped_slice[idx + 1] = 0;
-                            mapped_slice[idx + 2] = 255;
-                            mapped_slice[idx + 3] = 255;
-                        } else {
-                            mapped_slice[idx + 0] = 0;
-                            mapped_slice[idx + 1] = 0;
-                            mapped_slice[idx + 2] = 0;
-                            mapped_slice[idx + 3] = 255;
-                        }
+                        mapped_slice[idx + 0] = if (is_magenta) 255 else 0;
+                        mapped_slice[idx + 1] = 0;
+                        mapped_slice[idx + 2] = if (is_magenta) 255 else 0;
+                        mapped_slice[idx + 3] = 255;
                     }
                 }
             }
@@ -176,7 +167,7 @@ pub const TextureArrayManager = struct {
         self.renderer.dev.unmapMemory(staging_memory);
 
         const max_dim = @max(width, height);
-        const num_mip_levels: u32 = @max(1, @as(u32, @intFromFloat(@log2(@as(f64, @floatFromInt(max_dim))))) + 1);
+        const num_mip_levels: u16 = @intCast(std.math.log2(max_dim) + 1);
 
         const image_info = vk.ImageCreateInfo{
             .flags = .{},
@@ -195,6 +186,7 @@ pub const TextureArrayManager = struct {
         };
 
         const texture_image = try self.renderer.dev.createImage(&image_info, null);
+        errdefer self.renderer.dev.destroyImage(texture_image, null);
 
         const mem_reqs = self.renderer.dev.getImageMemoryRequirements(texture_image);
         const alloc_info = vk.MemoryAllocateInfo{
@@ -202,9 +194,11 @@ pub const TextureArrayManager = struct {
             .memory_type_index = self.renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
         };
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
+        errdefer self.renderer.dev.freeMemory(memory, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
         const cmd = try self.renderer.beginSingleTimeCommands(io);
+        errdefer self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
         try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, 0, image_count);
 
@@ -237,10 +231,10 @@ pub const TextureArrayManager = struct {
             var mip_level: u32 = 1;
             while (mip_level < num_mip_levels) : (mip_level += 1) {
                 const prev_mip = mip_level - 1;
-                const src_w = @max(1, width >> prev_mip);
-                const src_h = @max(1, height >> prev_mip);
-                const dst_w = @max(1, width >> mip_level);
-                const dst_h = @max(1, height >> mip_level);
+                const src_w = @max(1, width >> @as(u6, @intCast(prev_mip)));
+                const src_h = @max(1, height >> @as(u6, @intCast(prev_mip)));
+                const dst_w = @max(1, width >> @as(u6, @intCast(mip_level)));
+                const dst_h = @max(1, height >> @as(u6, @intCast(mip_level)));
 
                 try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, mip_level, 1, 0, image_count);
 
@@ -298,11 +292,12 @@ pub const TextureArrayManager = struct {
                 .base_mip_level = 0,
                 .level_count = num_mip_levels,
                 .base_array_layer = 0,
-                .layer_count = @intCast(image_count),
+                .layer_count = image_count,
             },
         };
 
         const texture_view = try self.renderer.dev.createImageView(&view_info, null);
+        errdefer self.renderer.dev.destroyImageView(texture_view, null);
 
         const sampler_info = vk.SamplerCreateInfo{
             .flags = .{},
@@ -318,12 +313,13 @@ pub const TextureArrayManager = struct {
             .compare_enable = .false,
             .compare_op = .always,
             .min_lod = 0.0,
-            .max_lod = @floatFromInt(num_mip_levels - 1),
+            .max_lod = num_mip_levels - 1,
             .border_color = .int_opaque_black,
             .unnormalized_coordinates = .false,
         };
 
         const sampler = try self.renderer.dev.createSampler(&sampler_info, null);
+        errdefer self.renderer.dev.destroySampler(sampler, null);
 
         const descriptor_image_info = vk.DescriptorImageInfo{
             .image_layout = .shader_read_only_optimal,
