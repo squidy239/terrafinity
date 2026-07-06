@@ -95,9 +95,264 @@ const RenderBufferKey = union(enum) {
 
 const ChunkMeshBuffer = struct {
     buffer: vk.Buffer,
-    memory: vk.DeviceMemory,
+    alloc_offset: vk.DeviceSize,
+    alloc_size: vk.DeviceSize,
     device_address: vk.DeviceAddress,
     face_count: u32,
+};
+
+const UploadRequest = struct {
+    key: RenderBufferKey,
+    faces: []Mesher.Face,
+};
+
+const CompletedUpload = struct {
+    key: RenderBufferKey,
+    device_address: vk.DeviceAddress,
+    timeline_value: u64,
+    buffer: vk.Buffer,
+    alloc_offset: vk.DeviceSize,
+    alloc_size: vk.DeviceSize,
+    face_count: u32,
+    pool: vk.CommandPool,
+};
+
+const PendingUpload = struct {
+    key: RenderBufferKey,
+    device_address: vk.DeviceAddress,
+    timeline_value: u64,
+    buffer: vk.Buffer,
+    alloc_offset: vk.DeviceSize,
+    alloc_size: vk.DeviceSize,
+    face_count: u32,
+    pool: vk.CommandPool,
+};
+
+const DeletionEntry = struct {
+    mesh: ChunkMeshBuffer,
+    graphics_timeline_value: u64,
+};
+
+const StagingRingBuffer = struct {
+    buffer: vk.Buffer = .null_handle,
+    memory: vk.DeviceMemory = .null_handle,
+    ptr: [*]u8 = undefined,
+    size: vk.DeviceSize = 128 * 1024 * 1024,
+    write_offset: vk.DeviceSize = 0,
+    mutex: std.Io.Mutex = .init,
+
+    fn init(self: *StagingRingBuffer, dev: DeviceProxy, renderer: *VulkanRenderer) !void {
+        const buffer_info = vk.BufferCreateInfo{
+            .flags = .{},
+            .size = self.size,
+            .usage = .{ .transfer_src_bit = true },
+            .sharing_mode = .exclusive,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = undefined,
+        };
+        self.buffer = try dev.createBuffer(&buffer_info, null);
+        errdefer dev.destroyBuffer(self.buffer, null);
+
+        const mem_reqs = dev.getBufferMemoryRequirements(self.buffer);
+        const mem_type = renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
+
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = mem_reqs.size,
+            .memory_type_index = mem_type,
+            .p_next = null,
+        };
+        self.memory = try dev.allocateMemory(&alloc_info, null);
+        errdefer dev.freeMemory(self.memory, null);
+
+        try dev.bindBufferMemory(self.buffer, self.memory, 0);
+
+        const data = try dev.mapMemory(self.memory, 0, self.size, .{});
+        self.ptr = @ptrCast(data);
+    }
+
+    fn deinit(self: *StagingRingBuffer, dev: DeviceProxy) void {
+        if (self.buffer != .null_handle) {
+            dev.unmapMemory(self.memory);
+            dev.destroyBuffer(self.buffer, null);
+        }
+        if (self.memory != .null_handle) {
+            dev.freeMemory(self.memory, null);
+        }
+    }
+
+    fn allocate(self: *StagingRingBuffer, io: std.Io, size: vk.DeviceSize) vk.DeviceSize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const aligned_size = std.mem.alignForward(vk.DeviceSize, size, 16);
+        if (self.write_offset + aligned_size > self.size) {
+            self.write_offset = 0;
+        }
+        const offset = self.write_offset;
+        self.write_offset += aligned_size;
+        return offset;
+    }
+};
+
+const GlobalDeviceAllocator = struct {
+    memory: vk.DeviceMemory = .null_handle,
+    size: vk.DeviceSize = 256 * 1024 * 1024,
+    bump_offset: vk.DeviceSize = 0,
+    buckets: [32]std.ArrayList(vk.DeviceSize) = undefined,
+    mutex: std.Io.Mutex = .init,
+    allocator: std.mem.Allocator = undefined,
+
+    fn init(self: *GlobalDeviceAllocator, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, allocator: std.mem.Allocator) !void {
+        self.allocator = allocator;
+        for (&self.buckets) |*b| {
+            b.* = .empty;
+        }
+
+        const temp_buffer_info = vk.BufferCreateInfo{
+            .flags = .{},
+            .size = 1024,
+            .usage = .{
+                .transfer_dst_bit = true,
+                .storage_buffer_bit = true,
+                .shader_device_address_bit = true,
+            },
+            .sharing_mode = .exclusive,
+            .queue_family_index_count = 0,
+            .p_queue_family_indices = undefined,
+        };
+        const temp_buffer = try dev.createBuffer(&temp_buffer_info, null);
+        defer dev.destroyBuffer(temp_buffer, null);
+
+        const mem_reqs = dev.getBufferMemoryRequirements(temp_buffer);
+
+        var alloc_flags = vk.MemoryAllocateFlagsInfo{
+            .flags = .{ .device_address_bit = true },
+            .device_mask = 0,
+        };
+
+        var memory_type_index: u32 = 0;
+        var found = false;
+        const properties = vk.MemoryPropertyFlags{ .device_local_bit = true };
+        for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
+            if ((mem_reqs.memory_type_bits & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
+                memory_type_index = @as(u32, @intCast(i));
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            @panic("Failed to find suitable memory type for GlobalDeviceAllocator");
+        }
+
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = self.size,
+            .memory_type_index = memory_type_index,
+            .p_next = @ptrCast(&alloc_flags),
+        };
+
+        self.memory = try dev.allocateMemory(&alloc_info, null);
+    }
+
+    fn deinit(self: *GlobalDeviceAllocator, dev: DeviceProxy) void {
+        if (self.memory != .null_handle) {
+            dev.freeMemory(self.memory, null);
+        }
+        for (&self.buckets) |*b| {
+            b.deinit(self.allocator);
+        }
+    }
+
+    fn bucketIndex(size: vk.DeviceSize) u5 {
+        if (size <= 16) return 4;
+        const bits = 64 - @clz(size - 1);
+        return @intCast(bits);
+    }
+
+    fn allocate(self: *GlobalDeviceAllocator, io: std.Io, size: vk.DeviceSize, alignment: vk.DeviceSize) !struct { offset: vk.DeviceSize, alloc_size: vk.DeviceSize } {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const bucket_idx = bucketIndex(size);
+        const alloc_size = @as(vk.DeviceSize, 1) << bucket_idx;
+
+        var bucket = &self.buckets[bucket_idx];
+        if (bucket.items.len > 0) {
+            const offset = bucket.pop().?;
+            const aligned_offset = std.mem.alignForward(vk.DeviceSize, offset, alignment);
+            if (aligned_offset == offset) {
+                return .{ .offset = offset, .alloc_size = alloc_size };
+            } else {
+                try bucket.append(self.allocator, offset);
+            }
+        }
+
+        const aligned_bump = std.mem.alignForward(vk.DeviceSize, self.bump_offset, alignment);
+        if (aligned_bump + alloc_size > self.size) {
+            return error.OutOfVideoMemory;
+        }
+        self.bump_offset = aligned_bump + alloc_size;
+        return .{ .offset = aligned_bump, .alloc_size = alloc_size };
+    }
+
+    fn free(self: *GlobalDeviceAllocator, io: std.Io, offset: vk.DeviceSize, alloc_size: vk.DeviceSize) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const bucket_idx = bucketIndex(alloc_size);
+        self.buckets[bucket_idx].append(self.allocator, offset) catch {
+            std.log.err("Failed to return offset to GlobalDeviceAllocator bucket", .{});
+        };
+    }
+};
+
+const CommandPoolReservoir = struct {
+    pools: []vk.CommandPool = &.{},
+    used: []bool = &.{},
+    mutex: std.Io.Mutex = .init,
+
+    fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
+        self.pools = try allocator.alloc(vk.CommandPool, count);
+        self.used = try allocator.alloc(bool, count);
+        @memset(self.used, false);
+        for (self.pools) |*pool| {
+            const pool_info = vk.CommandPoolCreateInfo{
+                .flags = .{ .reset_command_buffer_bit = true },
+                .queue_family_index = queue_family,
+            };
+            pool.* = try dev.createCommandPool(&pool_info, null);
+        }
+    }
+
+    fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, allocator: std.mem.Allocator) void {
+        for (self.pools) |pool| {
+            if (pool != .null_handle) dev.destroyCommandPool(pool, null);
+        }
+        allocator.free(self.pools);
+        allocator.free(self.used);
+    }
+
+    fn borrowPool(self: *CommandPoolReservoir, io: std.Io) ?vk.CommandPool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.pools, 0..) |pool, i| {
+            if (!self.used[i]) {
+                self.used[i] = true;
+                return pool;
+            }
+        }
+        return null;
+    }
+
+    fn returnPool(self: *CommandPoolReservoir, io: std.Io, pool: vk.CommandPool) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.pools, 0..) |p, i| {
+            if (p == pool) {
+                self.used[i] = false;
+                return;
+            }
+        }
+    }
 };
 
 const ChunkData = extern struct {
@@ -182,6 +437,14 @@ transparent_pipeline: vk.Pipeline = .null_handle,
 descriptor_pool: vk.DescriptorPool = .null_handle,
 descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
 
+io: std.Io = undefined,
+transfer_queue: vk.Queue = undefined,
+transfer_queue_family_index: u32 = undefined,
+
+transfer_semaphore: vk.Semaphore = .null_handle,
+transfer_semaphore_value: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+graphics_timeline_semaphore: vk.Semaphore = .null_handle,
+
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
 
 indirect_draw_buffers: []vk.Buffer = &.{},
@@ -194,7 +457,23 @@ chunk_data_buffers_mapped: [][*]u8 = &.{},
 
 max_draw_count: u32 = 100_000,
 
-deferred_deletions: [8]std.ArrayList(ChunkMeshBuffer) = undefined,
+deferred_deletions: std.ArrayList(DeletionEntry) = undefined,
+
+staging_ring_buffer: StagingRingBuffer = .{},
+device_allocator: GlobalDeviceAllocator = .{},
+pool_reservoir: CommandPoolReservoir = .{},
+
+upload_queue: std.Io.Queue(UploadRequest) = undefined,
+upload_queue_buf: [1024]UploadRequest = undefined,
+upload_queue_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+completed_queue: std.Io.Queue(CompletedUpload) = undefined,
+completed_queue_buf: [1024]CompletedUpload = undefined,
+
+pending_uploads: std.ArrayList(PendingUpload) = undefined,
+
+worker_threads: [4]std.Thread = undefined,
+workers_should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
 camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
@@ -286,16 +565,15 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
 
     self.allocator = allocator;
     self.window = window;
+    self.io = io;
     self.render_options = render_options;
     self.render_options_lock = render_options_lock;
     self.init_time_ns = @as(u64, @intCast(std.Io.Timestamp.now(io, .real).nanoseconds));
 
-    inline for (0..8) |i| {
-        self.deferred_deletions[i] = .{
-            .items = &[_]ChunkMeshBuffer{},
-            .capacity = 0,
-        };
-    }
+    self.deferred_deletions = .empty;
+    self.pending_uploads = .empty;
+    self.upload_queue = std.Io.Queue(UploadRequest).init(&self.upload_queue_buf);
+    self.completed_queue = std.Io.Queue(CompletedUpload).init(&self.completed_queue_buf);
 
     self.vkb = BaseWrapper.load(getProcAddr);
 
@@ -472,34 +750,83 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         }
     }
 
+    var transfer_family: ?u32 = null;
+    for (queue_families, 0..) |qf, i| {
+        const family: u32 = @intCast(i);
+        if (qf.queue_flags.transfer_bit and !qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) {
+            transfer_family = family;
+            break;
+        }
+    }
+    if (transfer_family == null) {
+        for (queue_families, 0..) |qf, i| {
+            const family: u32 = @intCast(i);
+            if (qf.queue_flags.transfer_bit and !qf.queue_flags.graphics_bit) {
+                transfer_family = family;
+                break;
+            }
+        }
+    }
+    if (transfer_family == null) {
+        for (queue_families, 0..) |qf, i| {
+            const family: u32 = @intCast(i);
+            if (qf.queue_flags.transfer_bit) {
+                transfer_family = family;
+                break;
+            }
+        }
+    }
+    const final_transfer_family = transfer_family orelse graphics_family;
+
     self.queue_family_index = graphics_family;
     self.present_queue_family_index = present_family;
+    self.transfer_queue_family_index = final_transfer_family;
 
     const device_extensions = [_][*:0]const u8{
         vk.extensions.khr_swapchain.name,
         vk.extensions.khr_dynamic_rendering.name,
     };
 
-    const queue_create_info_count: u32 = if (graphics_family == present_family) 1 else 2;
+    var unique_families: [3]u32 = undefined;
+    var unique_count: u32 = 0;
+    unique_families[0] = graphics_family;
+    unique_count = 1;
 
-    var queue_create_infos_ptr: [2]vk.DeviceQueueCreateInfo = undefined;
-    queue_create_infos_ptr[0] = .{
-        .flags = .{},
-        .queue_family_index = graphics_family,
-        .queue_count = 1,
-        .p_queue_priorities = &queue_priorities,
-    };
-    if (graphics_family != present_family) {
-        queue_create_infos_ptr[1] = .{
+    if (present_family != graphics_family) {
+        unique_families[unique_count] = present_family;
+        unique_count += 1;
+    }
+
+    var transfer_is_unique = true;
+    for (unique_families[0..unique_count]) |f| {
+        if (f == final_transfer_family) {
+            transfer_is_unique = false;
+            break;
+        }
+    }
+    if (transfer_is_unique) {
+        unique_families[unique_count] = final_transfer_family;
+        unique_count += 1;
+    }
+
+    var queue_create_infos_ptr: [3]vk.DeviceQueueCreateInfo = undefined;
+    for (unique_families[0..unique_count], 0..) |f, i| {
+        queue_create_infos_ptr[i] = .{
             .flags = .{},
-            .queue_family_index = present_family,
+            .queue_family_index = f,
             .queue_count = 1,
             .p_queue_priorities = &queue_priorities,
         };
     }
 
+    const queue_create_info_count = unique_count;
+
     var dynamic_rendering_features = vk.PhysicalDeviceDynamicRenderingFeatures{
         .dynamic_rendering = .true,
+    };
+    var sync2_features = vk.PhysicalDeviceSynchronization2Features{
+        .synchronization_2 = .true,
+        .p_next = @ptrCast(&dynamic_rendering_features),
     };
     var features12 = vk.PhysicalDeviceVulkan12Features{
         .draw_indirect_count = .true,
@@ -507,7 +834,8 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         .runtime_descriptor_array = .true,
         .descriptor_binding_partially_bound = .true,
         .buffer_device_address = .true,
-        .p_next = @ptrCast(&dynamic_rendering_features),
+        .timeline_semaphore = .true,
+        .p_next = @ptrCast(&sync2_features),
     };
 
     var features11 = vk.PhysicalDeviceVulkan11Features{
@@ -693,6 +1021,45 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.queue_family_index = graphics_family;
     self.present_queue_family_index = present_family;
     self.meshes = .init;
+
+    // Initialize transfer queue
+    self.transfer_queue = self.dev.getDeviceQueue(self.transfer_queue_family_index, 0);
+
+    // Initialize timeline semaphores
+    var sem_type_create_info = vk.SemaphoreTypeCreateInfo{
+        .semaphore_type = .timeline,
+        .initial_value = 0,
+    };
+    const sem_create_info = vk.SemaphoreCreateInfo{
+        .p_next = @ptrCast(&sem_type_create_info),
+        .flags = .{},
+    };
+    self.transfer_semaphore = try self.dev.createSemaphore(&sem_create_info, null);
+    errdefer self.dev.destroySemaphore(self.transfer_semaphore, null);
+
+    self.graphics_timeline_semaphore = try self.dev.createSemaphore(&sem_create_info, null);
+    errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
+
+    self.transfer_semaphore_value = std.atomic.Value(u64).init(0);
+
+    // Initialize staging ring buffer
+    try self.staging_ring_buffer.init(self.dev, self);
+    errdefer self.staging_ring_buffer.deinit(self.dev);
+
+    // Initialize global device allocator
+    try self.device_allocator.init(self.dev, self.mem_props, allocator);
+    errdefer self.device_allocator.deinit(self.dev);
+
+    // Initialize command pool reservoir
+    try self.pool_reservoir.init(self.dev, self.transfer_queue_family_index, 8, allocator);
+    errdefer self.pool_reservoir.deinit(self.dev, allocator);
+
+    // Spawn background worker threads
+    self.workers_should_stop.store(false, .monotonic);
+    for (0..self.worker_threads.len) |i| {
+        self.worker_threads[i] = try std.Thread.spawn(.{}, workerThreadLoop, .{self});
+    }
+
     self.interface = .{
         .userdata = @ptrCast(self),
         .vtable = &.{
@@ -714,25 +1081,51 @@ pub fn getSurface(self: *VulkanRenderer) vk.SurfaceKHR {
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
+    // 1. Tell threads to stop and close queues to unblock sleeping threads
+    self.workers_should_stop.store(true, .monotonic);
+    self.upload_queue.close(io);
+    self.completed_queue.close(io);
+
+    // 2. Join the worker threads
+    for (self.worker_threads) |t| {
+        t.join();
+    }
+
+    // 3. Normal deinit
     {
         _ = self.queue_mutex.lock(io) catch {};
         defer self.queue_mutex.unlock(io);
         _ = self.dev.deviceWaitIdle() catch {};
     }
 
+    for (self.pending_uploads.items) |pending| {
+        if (pending.buffer != .null_handle) self.dev.destroyBuffer(pending.buffer, null);
+        self.device_allocator.free(io, pending.alloc_offset, pending.alloc_size);
+    }
+    self.pending_uploads.deinit(self.allocator);
+
+    for (self.deferred_deletions.items) |entry| {
+        if (entry.mesh.buffer != .null_handle) self.dev.destroyBuffer(entry.mesh.buffer, null);
+        self.device_allocator.free(io, entry.mesh.alloc_offset, entry.mesh.alloc_size);
+    }
+    self.deferred_deletions.deinit(self.allocator);
+
     var it = self.meshes.iterator();
     while (it.next(io) catch null) |entry| {
-        self.destroyChunkMesh(entry.value_ptr.*);
+        self.destroyChunkMesh(io, entry.value_ptr.*);
     }
     self.meshes.deinit(io, self.allocator);
 
-    inline for (0..8) |i| {
-        var dq = &self.deferred_deletions[i];
-        for (dq.items) |mesh| {
-            if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-            if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
-        }
-        dq.deinit(self.allocator);
+    // Destroy pools and allocators
+    self.pool_reservoir.deinit(self.dev, self.allocator);
+    self.device_allocator.deinit(self.dev);
+    self.staging_ring_buffer.deinit(self.dev);
+
+    if (self.transfer_semaphore != .null_handle) {
+        self.dev.destroySemaphore(self.transfer_semaphore, null);
+    }
+    if (self.graphics_timeline_semaphore != .null_handle) {
+        self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
     }
 
     for (self.indirect_draw_buffers) |buf| {
@@ -874,108 +1267,33 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
 
     if (opaque_mesh.len > 0) {
-        self.uploadMesh(io, .{ .@"opaque" = chunk_pos }, opaque_mesh) catch |err| switch (err) {
-            error.OutOfHostMemory, error.OutOfDeviceMemory => return error.OutOfVideoMemory,
-            else => return error.Unexpected,
+        const faces = self.allocator.dupe(Mesher.Face, opaque_mesh) catch return error.OutOfMemory;
+        // Index block_type via EnumIndexer (same as OpenGL) so texture array layer
+        // indices match the Block declaration order
+        const indexer = std.enums.EnumIndexer(World.Block);
+        for (faces) |*face| {
+            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+        }
+        self.upload_queue.putOne(io, .{ .key = .{ .@"opaque" = chunk_pos }, .faces = faces }) catch {
+            self.allocator.free(faces);
+            return error.Unexpected;
         };
     } else {
         self.remove(io, .{ .@"opaque" = chunk_pos });
     }
 
     if (transparent_mesh.len > 0) {
-        self.uploadMesh(io, .{ .transparent = chunk_pos }, transparent_mesh) catch |err| switch (err) {
-            error.OutOfHostMemory, error.OutOfDeviceMemory => return error.OutOfVideoMemory,
-            else => {
-                // Transparent upload failed after opaque succeeded. Remove orphaned opaque mesh.
-                if (opaque_mesh.len > 0) self.remove(io, .{ .@"opaque" = chunk_pos });
-                return error.Unexpected;
-            },
+        const faces = self.allocator.dupe(Mesher.Face, transparent_mesh) catch return error.OutOfMemory;
+        const indexer = std.enums.EnumIndexer(World.Block);
+        for (faces) |*face| {
+            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+        }
+        self.upload_queue.putOne(io, .{ .key = .{ .transparent = chunk_pos }, .faces = faces }) catch {
+            self.allocator.free(faces);
+            return error.Unexpected;
         };
     } else {
         self.remove(io, .{ .transparent = chunk_pos });
-    }
-}
-
-fn uploadMesh(self: *VulkanRenderer, io: std.Io, key: RenderBufferKey, faces: []Mesher.Face) !void {
-    const buffer_size = @as(vk.DeviceSize, @intCast(faces.len)) * @sizeOf(Mesher.Face);
-
-    // Index block_type via EnumIndexer (same as OpenGL) so texture array layer
-    // indices match the Block declaration order
-    const indexer = std.enums.EnumIndexer(World.Block);
-    for (faces) |*face| {
-        face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
-    }
-
-    var staging_buffer: vk.Buffer = .null_handle;
-    var staging_memory: vk.DeviceMemory = .null_handle;
-    try self.createBuffer(buffer_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer, &staging_memory);
-    defer {
-        if (staging_buffer != .null_handle) self.dev.destroyBuffer(staging_buffer, null);
-        if (staging_memory != .null_handle) self.dev.freeMemory(staging_memory, null);
-    }
-
-    const data = try self.dev.mapMemory(staging_memory, 0, buffer_size, .{});
-    const mapped_slice = @as([*]u8, @ptrCast(data))[0..buffer_size];
-    const src_slice = std.mem.sliceAsBytes(faces);
-    @memcpy(mapped_slice, src_slice);
-
-    self.dev.unmapMemory(staging_memory);
-
-    var buffer: vk.Buffer = .null_handle;
-    var memory: vk.DeviceMemory = .null_handle;
-    errdefer {
-        if (buffer != .null_handle) self.dev.destroyBuffer(buffer, null);
-        if (memory != .null_handle) self.dev.freeMemory(memory, null);
-    }
-
-    const usage = vk.BufferUsageFlags{
-        .transfer_dst_bit = true,
-        .storage_buffer_bit = true,
-        .shader_device_address_bit = true,
-    };
-
-    const buffer_info = vk.BufferCreateInfo{
-        .flags = .{},
-        .size = buffer_size,
-        .usage = usage,
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-
-    buffer = try self.dev.createBuffer(&buffer_info, null);
-
-    var alloc_flags = vk.MemoryAllocateFlagsInfo{
-        .flags = .{ .device_address_bit = true },
-        .device_mask = 0,
-    };
-    const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
-    const alloc_info = vk.MemoryAllocateInfo{
-        .allocation_size = mem_reqs.size,
-        .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-        .p_next = @ptrCast(&alloc_flags),
-    };
-
-    memory = try self.dev.allocateMemory(&alloc_info, null);
-    try self.dev.bindBufferMemory(buffer, memory, 0);
-
-    try self.copyBuffer(io, staging_buffer, buffer, buffer_size);
-
-    const address_info = vk.BufferDeviceAddressInfo{
-        .buffer = buffer,
-    };
-    const device_address = self.dev.getBufferDeviceAddress(&address_info);
-
-    const mesh_buffer = ChunkMeshBuffer{
-        .buffer = buffer,
-        .memory = memory,
-        .device_address = device_address,
-        .face_count = @intCast(faces.len),
-    };
-
-    const existing = try self.meshes.fetchPut(io, self.allocator, key, mesh_buffer);
-    if (existing) |e| {
-        self.enqueueDeferredDeletion(io, e);
     }
 }
 
@@ -996,18 +1314,277 @@ fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void
     }
 }
 
-fn destroyChunkMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer) void {
+fn destroyChunkMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
     if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-    if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
+    self.device_allocator.free(io, mesh.alloc_offset, mesh.alloc_size);
+}
+
+fn workerThreadLoop(self: *VulkanRenderer) void {
+    var buf: [1]UploadRequest = undefined;
+    while (!self.workers_should_stop.load(.monotonic)) {
+        const got = self.upload_queue.get(self.io, &buf, 1) catch |err| {
+            if (err == error.Canceled or err == error.Closed) break;
+            self.io.sleep(std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            continue;
+        };
+        if (got == 0) continue;
+
+        const req = buf[0];
+        defer self.allocator.free(req.faces);
+
+        if (self.workers_should_stop.load(.monotonic)) break;
+
+        const buffer_size = @as(vk.DeviceSize, @intCast(req.faces.len)) * @sizeOf(Mesher.Face);
+        const staging_offset = self.staging_ring_buffer.allocate(self.io, buffer_size);
+
+        const mapped_dest = self.staging_ring_buffer.ptr + staging_offset;
+        const src_bytes = std.mem.sliceAsBytes(req.faces);
+        @memcpy(mapped_dest[0..buffer_size], src_bytes);
+
+        const usage = vk.BufferUsageFlags{
+            .transfer_dst_bit = true,
+            .storage_buffer_bit = true,
+            .shader_device_address_bit = true,
+        };
+
+        var queue_families: [2]u32 = undefined;
+        var sharing_mode: vk.SharingMode = .exclusive;
+        var queue_family_count: u32 = 0;
+        if (self.queue_family_index != self.transfer_queue_family_index) {
+            sharing_mode = .concurrent;
+            queue_families[0] = self.queue_family_index;
+            queue_families[1] = self.transfer_queue_family_index;
+            queue_family_count = 2;
+        }
+
+        const buffer_info = vk.BufferCreateInfo{
+            .flags = .{},
+            .size = buffer_size,
+            .usage = usage,
+            .sharing_mode = sharing_mode,
+            .queue_family_index_count = queue_family_count,
+            .p_queue_family_indices = &queue_families,
+        };
+
+        const buffer = self.dev.createBuffer(&buffer_info, null) catch |err| {
+            std.log.err("workerThreadLoop: Failed to create Buffer: {any}", .{err});
+            continue;
+        };
+        errdefer self.dev.destroyBuffer(buffer, null);
+
+        const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
+        const alloc_res = self.device_allocator.allocate(self.io, mem_reqs.size, mem_reqs.alignment) catch |err| {
+            std.log.err("workerThreadLoop: Out of video memory: {any}", .{err});
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        };
+
+        self.dev.bindBufferMemory(buffer, self.device_allocator.memory, alloc_res.offset) catch |err| {
+            std.log.err("workerThreadLoop: Failed to bind Buffer Memory: {any}", .{err});
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        };
+
+        const address_info = vk.BufferDeviceAddressInfo{
+            .buffer = buffer,
+        };
+        const device_address = self.dev.getBufferDeviceAddress(&address_info);
+
+        var pool_opt: ?vk.CommandPool = null;
+        while (pool_opt == null) {
+            pool_opt = self.pool_reservoir.borrowPool(self.io);
+            if (pool_opt == null) {
+                self.io.sleep(std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+                if (self.workers_should_stop.load(.monotonic)) {
+                    self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+                    self.dev.destroyBuffer(buffer, null);
+                    return;
+                }
+            }
+        }
+        const pool = pool_opt.?;
+
+        self.dev.resetCommandPool(pool, .{}) catch {};
+        const cmd_alloc_info = vk.CommandBufferAllocateInfo{
+            .level = .primary,
+            .command_pool = pool,
+            .command_buffer_count = 1,
+        };
+        var cmd: vk.CommandBuffer = undefined;
+        self.dev.allocateCommandBuffers(&cmd_alloc_info, @ptrCast(&cmd)) catch |err| {
+            std.log.err("workerThreadLoop: Failed to allocate cmd buffer: {any}", .{err});
+            self.pool_reservoir.returnPool(self.io, pool);
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        };
+
+        const begin_info = vk.CommandBufferBeginInfo{
+            .flags = .{ .one_time_submit_bit = true },
+            .p_inheritance_info = null,
+        };
+        self.dev.beginCommandBuffer(cmd, &begin_info) catch |err| {
+            std.log.err("workerThreadLoop: Failed to begin cmd buffer: {any}", .{err});
+            self.pool_reservoir.returnPool(self.io, pool);
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        };
+
+        const copy_region = vk.BufferCopy2{
+            .src_offset = staging_offset,
+            .dst_offset = 0,
+            .size = buffer_size,
+        };
+        const copy_buffer_info = vk.CopyBufferInfo2{
+            .src_buffer = self.staging_ring_buffer.buffer,
+            .dst_buffer = buffer,
+            .region_count = 1,
+            .p_regions = @ptrCast(&copy_region),
+        };
+        self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
+
+        const buffer_barrier = vk.BufferMemoryBarrier2{
+            .src_stage_mask = .{ .all_transfer_bit = true },
+            .src_access_mask = .{ .transfer_write_bit = true },
+            .dst_stage_mask = .{ .all_transfer_bit = true },
+            .dst_access_mask = .{ .transfer_write_bit = true },
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .buffer = buffer,
+            .offset = 0,
+            .size = buffer_size,
+        };
+        const dependency_info = vk.DependencyInfo{
+            .dependency_flags = .{},
+            .memory_barrier_count = 0,
+            .p_memory_barriers = null,
+            .buffer_memory_barrier_count = 1,
+            .p_buffer_memory_barriers = @ptrCast(&buffer_barrier),
+            .image_memory_barrier_count = 0,
+            .p_image_memory_barriers = null,
+        };
+        self.dev.cmdPipelineBarrier2(cmd, &dependency_info);
+
+        self.dev.endCommandBuffer(cmd) catch |err| {
+            std.log.err("workerThreadLoop: Failed to end cmd buffer: {any}", .{err});
+            self.pool_reservoir.returnPool(self.io, pool);
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        };
+
+        _ = self.queue_mutex.lock(self.io) catch {};
+        const next_val = self.transfer_semaphore_value.fetchAdd(1, .monotonic) + 1;
+
+        const semaphore_submit_info = vk.SemaphoreSubmitInfo{
+            .semaphore = self.transfer_semaphore,
+            .value = next_val,
+            .stage_mask = .{ .all_transfer_bit = true },
+            .device_index = 0,
+        };
+        const command_buffer_submit_info = vk.CommandBufferSubmitInfo{
+            .command_buffer = cmd,
+            .device_mask = 0,
+        };
+
+        const submit_info = vk.SubmitInfo2{
+            .flags = .{},
+            .wait_semaphore_info_count = 0,
+            .p_wait_semaphore_infos = null,
+            .command_buffer_info_count = 1,
+            .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
+            .signal_semaphore_info_count = 1,
+            .p_signal_semaphore_infos = @ptrCast(&semaphore_submit_info),
+        };
+
+        var submit_success = true;
+        self.dev.queueSubmit2(self.transfer_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle) catch |err| {
+            std.log.err("workerThreadLoop: Failed to submit transfer queue: {any}", .{err});
+            submit_success = false;
+        };
+        self.queue_mutex.unlock(self.io);
+
+        if (!submit_success) {
+            self.pool_reservoir.returnPool(self.io, pool);
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+            continue;
+        }
+
+        self.completed_queue.putOne(self.io, .{
+            .key = req.key,
+            .device_address = device_address,
+            .timeline_value = next_val,
+            .buffer = buffer,
+            .alloc_offset = alloc_res.offset,
+            .alloc_size = alloc_res.alloc_size,
+            .face_count = @intCast(req.faces.len),
+            .pool = pool,
+        }) catch |err| {
+            std.log.err("workerThreadLoop: Failed to push to completed_queue: {any}", .{err});
+            self.pool_reservoir.returnPool(self.io, pool);
+            self.device_allocator.free(self.io, alloc_res.offset, alloc_res.alloc_size);
+            self.dev.destroyBuffer(buffer, null);
+        };
+    }
+}
+
+fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
+    var completed_buf: [128]CompletedUpload = undefined;
+    while (true) {
+        const count = try self.completed_queue.get(io, &completed_buf, 0);
+        if (count == 0) break;
+
+        for (completed_buf[0..count]) |cu| {
+            try self.pending_uploads.append(self.allocator, .{
+                .key = cu.key,
+                .device_address = cu.device_address,
+                .timeline_value = cu.timeline_value,
+                .buffer = cu.buffer,
+                .alloc_offset = cu.alloc_offset,
+                .alloc_size = cu.alloc_size,
+                .face_count = cu.face_count,
+                .pool = cu.pool,
+            });
+        }
+    }
+
+    if (self.pending_uploads.items.len == 0) return;
+
+    const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer_semaphore);
+
+    var i: usize = 0;
+    while (i < self.pending_uploads.items.len) {
+        const pending = self.pending_uploads.items[i];
+        if (current_transfer_val >= pending.timeline_value) {
+            const mesh_buffer = ChunkMeshBuffer{
+                .buffer = pending.buffer,
+                .alloc_offset = pending.alloc_offset,
+                .alloc_size = pending.alloc_size,
+                .device_address = pending.device_address,
+                .face_count = pending.face_count,
+            };
+
+            const existing = try self.meshes.fetchPut(io, self.allocator, pending.key, mesh_buffer);
+            if (existing) |e| {
+                self.enqueueDeferredDeletion(io, e);
+            }
+
+            self.pool_reservoir.returnPool(io, pending.pool);
+
+            _ = self.pending_uploads.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 pub fn processDeferredDeletions(self: *VulkanRenderer, io: std.Io) error{DrawFailed}!void {
-    const current_frame = self.currentFrame();
-
-    var fences_wait: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
-    try self.waitFences(&fences_wait);
-
-    try self.processDeletionQueue(io, current_frame);
+    _ = self;
+    _ = io;
+    // Handled dynamically by processDeletionQueue at start of frame
 }
 
 fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
@@ -1016,12 +1593,13 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
+    self.processPendingUploads(io) catch return error.DrawFailed;
+    self.processDeletionQueue(io) catch return error.DrawFailed;
+
     var current_frame = self.currentFrame();
 
     var fences_wait: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
     _ = try self.waitFences(&fences_wait);
-
-    self.processDeletionQueue(io, current_frame) catch return error.DrawFailed;
 
     var fences_reset: [1]vk.Fence = .{self.in_flight_fences[current_frame]};
     self.dev.resetFences(&fences_reset) catch return error.DrawFailed;
@@ -1381,16 +1959,26 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 
     const wait_semaphores: [1]vk.Semaphore = .{self.image_acquired_semaphores[current_frame]};
 
-    const signal_semaphores: [1]vk.Semaphore = .{self.render_complete_semaphores[current_frame]};
+    const signal_sems = [_]vk.Semaphore{ self.render_complete_semaphores[current_frame], self.graphics_timeline_semaphore };
+    const signal_values = [_]u64{ 0, self.frame_number };
+
+    const wait_values = [_]u64{ 0 };
+    var timeline_submit_info = vk.TimelineSemaphoreSubmitInfo{
+        .wait_semaphore_value_count = 1,
+        .p_wait_semaphore_values = @ptrCast(&wait_values),
+        .signal_semaphore_value_count = 2,
+        .p_signal_semaphore_values = @ptrCast(&signal_values),
+    };
 
     const submit_info = vk.SubmitInfo{
+        .p_next = &timeline_submit_info,
         .wait_semaphore_count = 1,
         .p_wait_semaphores = @ptrCast(&wait_semaphores),
-        .p_wait_dst_stage_mask = &wait_stages,
+        .p_wait_dst_stage_mask = @ptrCast(&wait_stages),
         .command_buffer_count = 1,
         .p_command_buffers = @ptrCast(&cmd_buffer),
-        .signal_semaphore_count = 1,
-        .p_signal_semaphores = @ptrCast(&signal_semaphores),
+        .signal_semaphore_count = 2,
+        .p_signal_semaphores = @ptrCast(&signal_sems),
     };
 
     {
@@ -2916,31 +3504,41 @@ fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}
 }
 
 fn enqueueDeferredDeletion(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
-    const frame_idx = self.getDeletionQueueIndex();
-
     _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
         error.Canceled => {},
     };
     defer self.deferred_deletions_mutex.unlock(io);
-    _ = self.deferred_deletions[frame_idx].append(self.allocator, mesh) catch |err| switch (err) {
-        error.OutOfMemory => std.log.err("enqueueDeferredDeletion: Out of memory appending to deferred deletion queue", .{}),
+
+    self.deferred_deletions.append(self.allocator, .{
+        .mesh = mesh,
+        .graphics_timeline_value = self.frame_number,
+    }) catch |err| {
+        std.log.err("enqueueDeferredDeletion: Out of memory appending: {any}", .{err});
     };
 }
 
-fn processDeletionQueue(self: *VulkanRenderer, io: std.Io, frame_idx: u32) !void {
-    const current_deletion_queue_idx = frame_idx % @as(u32, @intCast(self.deferred_deletions.len));
-
+fn processDeletionQueue(self: *VulkanRenderer, io: std.Io) !void {
     _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
         error.Canceled => {},
     };
     defer self.deferred_deletions_mutex.unlock(io);
 
-    var deletion_queue = &self.deferred_deletions[current_deletion_queue_idx];
-    for (deletion_queue.items) |mesh| {
-        if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-        if (mesh.memory != .null_handle) self.dev.freeMemory(mesh.memory, null);
+    if (self.deferred_deletions.items.len == 0) return;
+
+    const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.graphics_timeline_semaphore);
+
+    var i: usize = 0;
+    while (i < self.deferred_deletions.items.len) {
+        const entry = self.deferred_deletions.items[i];
+        if (current_graphics_val >= entry.graphics_timeline_value) {
+            if (entry.mesh.buffer != .null_handle) self.dev.destroyBuffer(entry.mesh.buffer, null);
+            self.device_allocator.free(io, entry.mesh.alloc_offset, entry.mesh.alloc_size);
+
+            _ = self.deferred_deletions.swapRemove(i);
+        } else {
+            i += 1;
+        }
     }
-    deletion_queue.clearRetainingCapacity();
 }
 
 pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuffer {
