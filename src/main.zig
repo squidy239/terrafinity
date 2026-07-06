@@ -285,8 +285,6 @@ pub fn main(init: std.process.Init) !void {
 
             // Only render and present if window is visible and should present
             if (!options.test_play and (!visible or !window.shouldPresent())) {
-                // Process deferred deletions to prevent unbounded memory leak on render pause
-                game.vulkan_renderer.processDeferredDeletions(io) catch {};
                 continue;
             }
 

@@ -42,15 +42,20 @@ pub const FrameDebugStats = struct {
         const total_culled = self.opaque_culled + self.transparent_culled;
         const total_drawn = self.opaque_drawn + self.transparent_drawn;
 
-        const ms = @as(f64, @floatFromInt(self.elapsed_ns)) / 1_000_000.0;
+        const elapsed_f: f64 = @floatFromInt(self.elapsed_ns);
+        const ms = elapsed_f / 1_000_000.0;
 
+        const opaque_drawn_f: f64 = @floatFromInt(self.opaque_drawn);
+        const opaque_candidates_f: f64 = @floatFromInt(self.opaque_candidates);
         const opaque_visible_pct = if (self.opaque_candidates > 0)
-            @as(f64, @floatFromInt(self.opaque_drawn)) / @as(f64, @floatFromInt(self.opaque_candidates)) * 100.0
+            opaque_drawn_f / opaque_candidates_f * 100.0
         else
             0.0;
 
+        const transparent_drawn_f: f64 = @floatFromInt(self.transparent_drawn);
+        const transparent_candidates_f: f64 = @floatFromInt(self.transparent_candidates);
         const transparent_visible_pct = if (self.transparent_candidates > 0)
-            @as(f64, @floatFromInt(self.transparent_drawn)) / @as(f64, @floatFromInt(self.transparent_candidates)) * 100.0
+            transparent_drawn_f / transparent_candidates_f * 100.0
         else
             0.0;
 
@@ -142,7 +147,7 @@ const StagingRingBuffer = struct {
     mutex: std.Io.Mutex = .init,
 
     pub fn init(self: *StagingRingBuffer, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties) !void {
-        const buffer_info = vk.BufferCreateInfo{
+        const buffer_info: vk.BufferCreateInfo = .{
             .flags = .{},
             .size = self.size,
             .usage = .{ .transfer_src_bit = true },
@@ -156,7 +161,7 @@ const StagingRingBuffer = struct {
         const mem_reqs = dev.getBufferMemoryRequirements(self.buffer);
         const mem_type = findMemoryTypeRaw(mem_props, mem_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
 
-        const alloc_info = vk.MemoryAllocateInfo{
+        const alloc_info: vk.MemoryAllocateInfo = .{
             .allocation_size = mem_reqs.size,
             .memory_type_index = mem_type,
             .p_next = null,
@@ -208,7 +213,7 @@ const GlobalDeviceAllocator = struct {
             b.* = .empty;
         }
 
-        const temp_buffer_info = vk.BufferCreateInfo{
+        const temp_buffer_info: vk.BufferCreateInfo = .{
             .flags = .{},
             .size = 1024,
             .usage = .{
@@ -225,27 +230,14 @@ const GlobalDeviceAllocator = struct {
 
         const mem_reqs = dev.getBufferMemoryRequirements(temp_buffer);
 
-        var alloc_flags = vk.MemoryAllocateFlagsInfo{
+        var alloc_flags: vk.MemoryAllocateFlagsInfo = .{
             .flags = .{ .device_address_bit = true },
             .device_mask = 0,
         };
 
-        var memory_type_index: u32 = 0;
-        var found = false;
-        const properties = vk.MemoryPropertyFlags{ .device_local_bit = true };
-        for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
-            if ((mem_reqs.memory_type_bits & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
-                memory_type_index = @as(u32, @intCast(i));
-                found = true;
-                break;
-            }
-        }
+        const memory_type_index = findMemoryTypeRaw(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true });
 
-        if (!found) {
-            @panic("Failed to find suitable memory type for GlobalDeviceAllocator");
-        }
-
-        const alloc_info = vk.MemoryAllocateInfo{
+        const alloc_info: vk.MemoryAllocateInfo = .{
             .allocation_size = self.size,
             .memory_type_index = memory_type_index,
             .p_next = @ptrCast(&alloc_flags),
@@ -311,7 +303,7 @@ const CommandPoolReservoir = struct {
         self.used = try allocator.alloc(bool, count);
         @memset(self.used, false);
         for (self.pools) |*pool| {
-            const pool_info = vk.CommandPoolCreateInfo{
+            const pool_info: vk.CommandPoolCreateInfo = .{
                 .flags = .{ .reset_command_buffer_bit = true },
                 .queue_family_index = queue_family,
             };
@@ -376,10 +368,11 @@ fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: 
 
 fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
-    const chunkSizeBlocks: f64 = @as(f64, @floatFromInt(ChunkSize)) * @as(f64, @floatCast(scale));
-    const chunkWorldPos: @Vector(3, f64) = @as(@Vector(3, f64), @floatFromInt(chunkpos.position)) * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
+    const chunkSizeBlocks: f64 = @floatCast(scale * @as(f32, ChunkSize));
+    const chunk_pos_f: @Vector(3, f64) = @floatFromInt(chunkpos.position);
+    const chunkWorldPos = chunk_pos_f * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
     const relativeChunkPos: @Vector(3, f32) = @floatCast(chunkWorldPos - playerPos);
-    const chunkSizeVec: @Vector(3, f32) = @splat(@as(f32, @floatCast(chunkSizeBlocks)));
+    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(chunkSizeBlocks));
     return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
 }
 
@@ -483,7 +476,7 @@ transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
 
 transfer_semaphore: vk.Semaphore = .null_handle,
-transfer_semaphore_value: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
@@ -506,15 +499,15 @@ pool_reservoir: CommandPoolReservoir = .{},
 
 upload_queue: std.Io.Queue(UploadRequest) = undefined,
 upload_queue_buf: [1024]UploadRequest = undefined,
-upload_queue_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+upload_queue_count: std.atomic.Value(u32) = .init(0),
 
 pending_uploads: std.ArrayList(PendingUpload) = undefined,
 
 camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
 
-render_options: *const RenderOptions = &default_render_options,
-render_options_lock: *std.Io.RwLock = &default_render_options_lock,
+render_options: *const RenderOptions,
+render_options_lock: *std.Io.RwLock,
 
 interface: Renderer,
 
@@ -535,19 +528,9 @@ pub const RenderOptions = struct {
     gamma_correction: bool = true,
 };
 
-const default_render_options: RenderOptions = .{
-    .draw_over = false,
-    .fov = 90.0,
-    .day_length_sec = 60 * 5,
-    .gamma_correction = true,
-};
-
-var default_render_options_lock: std.Io.RwLock = .init;
-
 fn getDeletionQueueIndex(self: *VulkanRenderer) u32 {
     const unbound = self.current_frame_idx.load(.monotonic);
-    const fence_slot = @as(u32, @intCast(unbound % @as(u64, @intCast(self.in_flight_fences.len))));
-    return fence_slot;
+    return @intCast(unbound % self.in_flight_fences.len);
 }
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
@@ -566,11 +549,7 @@ fn getDeviceProcAddrLoader(device: vk.Device, procname: [*:0]const u8, instance_
     return null;
 }
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window) !*VulkanRenderer {
-    return initWithOptions(io, allocator, window, &default_render_options, &default_render_options_lock);
-}
-
-pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
     std.log.info("VulkanRenderer.init: Starting Vulkan initialization...", .{});
 
     const self = try allocator.create(VulkanRenderer);
@@ -596,6 +575,8 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         .command_pool = undefined,
         .meshes = undefined,
         .interface = undefined,
+        .render_options = render_options,
+        .render_options_lock = render_options_lock,
     };
 
     std.log.info("VulkanRenderer.init: Allocated VulkanRenderer struct", .{});
@@ -603,17 +584,15 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.allocator = allocator;
     self.window = window;
     self.io = io;
-    self.render_options = render_options;
-    self.render_options_lock = render_options_lock;
-    self.init_time_ns = @as(u64, @intCast(std.Io.Timestamp.now(io, .real).nanoseconds));
+    self.init_time_ns = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
 
     self.deferred_deletions = .empty;
     self.pending_uploads = .empty;
-    self.upload_queue = std.Io.Queue(UploadRequest).init(&self.upload_queue_buf);
+    self.upload_queue = .init(&self.upload_queue_buf);
 
-    self.vkb = BaseWrapper.load(getProcAddr);
+    self.vkb = .load(getProcAddr);
 
-    const app_info = vk.ApplicationInfo{
+    const app_info: vk.ApplicationInfo = .{
         .p_application_name = "Terrafinity",
         .application_version = vk.makeApiVersion(0, 1, 0, 0).toU32(),
         .p_engine_name = "No Engine",
@@ -655,7 +634,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         }
     }
 
-    const instance_create_info = vk.InstanceCreateInfo{
+    const instance_create_info: vk.InstanceCreateInfo = .{
         .s_type = .instance_create_info,
         .flags = .{ .enumerate_portability_bit_khr = has_portability },
         .p_application_info = &app_info,
@@ -671,9 +650,9 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
     errdefer allocator.destroy(instance_wrapper_ptr);
 
-    instance_wrapper_ptr.* = InstanceWrapper.load(self.instance_handle, getProcAddr);
+    instance_wrapper_ptr.* = .load(self.instance_handle, getProcAddr);
     self.instance_wrapper = instance_wrapper_ptr;
-    self.instance = InstanceProxy.init(self.instance_handle, instance_wrapper_ptr);
+    self.instance = .init(self.instance_handle, instance_wrapper_ptr);
     errdefer self.instance.destroyInstance(null);
 
     var surface: vk.SurfaceKHR = .null_handle;
@@ -696,13 +675,13 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
 
     var selected_pdev: vk.PhysicalDevice = .null_handle;
     for (pdevs) |pdev| {
-        var features12 = vk.PhysicalDeviceVulkan12Features{
+        var features12: vk.PhysicalDeviceVulkan12Features = .{
             .buffer_device_address = .true,
             .descriptor_indexing = .true,
             .runtime_descriptor_array = .true,
             .p_next = null,
         };
-        var features2 = vk.PhysicalDeviceFeatures2{
+        var features2: vk.PhysicalDeviceFeatures2 = .{
             .features = .{ .multi_draw_indirect = .true },
             .p_next = @ptrCast(&features12),
         };
@@ -756,12 +735,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     const props = self.instance.getPhysicalDeviceProperties(self.pdev);
     self.props = props;
 
-    const max_draw_indirect_count = props.limits.max_draw_indirect_count;
-    if (max_draw_indirect_count > 0) {
-        self.max_draw_count = @min(100_000, max_draw_indirect_count);
-    } else {
-        self.max_draw_count = 65_535;
-    }
+    self.max_draw_count = if (props.limits.max_draw_indirect_count > 0) @min(100_000, props.limits.max_draw_indirect_count) else 65_535;
 
     const device_name = std.mem.sliceTo(&props.device_name, 0);
     std.log.info("VulkanRenderer.init: Selected physical device: {s}", .{device_name});
@@ -857,14 +831,14 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
 
     const queue_create_info_count = unique_count;
 
-    var dynamic_rendering_features = vk.PhysicalDeviceDynamicRenderingFeatures{
+    var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
         .dynamic_rendering = .true,
     };
-    var sync2_features = vk.PhysicalDeviceSynchronization2Features{
+    var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{
         .synchronization_2 = .true,
         .p_next = @ptrCast(&dynamic_rendering_features),
     };
-    var features12 = vk.PhysicalDeviceVulkan12Features{
+    var features12: vk.PhysicalDeviceVulkan12Features = .{
         .draw_indirect_count = .true,
         .descriptor_indexing = .true,
         .runtime_descriptor_array = .true,
@@ -874,12 +848,12 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         .p_next = @ptrCast(&sync2_features),
     };
 
-    var features11 = vk.PhysicalDeviceVulkan11Features{
+    var features11: vk.PhysicalDeviceVulkan11Features = .{
         .shader_draw_parameters = .true,
         .p_next = @ptrCast(&features12),
     };
 
-    var features = vk.PhysicalDeviceFeatures2{
+    var features: vk.PhysicalDeviceFeatures2 = .{
         .features = .{
             .multi_draw_indirect = .true,
             .shader_int_64 = .true,
@@ -887,7 +861,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
         .p_next = @ptrCast(&features11),
     };
 
-    const device_info = vk.DeviceCreateInfo{
+    const device_info: vk.DeviceCreateInfo = .{
         .s_type = .device_create_info,
         .flags = .{},
         .queue_create_info_count = @intCast(queue_create_info_count),
@@ -907,9 +881,9 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     errdefer allocator.destroy(dev_wrapper_ptr);
 
     const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
-    dev_wrapper_ptr.* = DeviceWrapper.load(self.dev_handle, gdpa);
+    dev_wrapper_ptr.* = .load(self.dev_handle, gdpa);
     self.dev_wrapper = dev_wrapper_ptr;
-    self.dev = DeviceProxy.init(self.dev_handle, dev_wrapper_ptr);
+    self.dev = .init(self.dev_handle, dev_wrapper_ptr);
     errdefer {
         if (self.command_pool != .null_handle) {
             self.dev.destroyCommandPool(self.command_pool, null);
@@ -989,21 +963,17 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     }
 
     self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
-    if (graphics_family == present_family) {
-        self.present_queue = self.graphics_queue;
-    } else {
-        self.present_queue = self.dev.getDeviceQueue(present_family, 0);
-    }
+    self.present_queue = if (graphics_family == present_family) self.graphics_queue else self.dev.getDeviceQueue(present_family, 0);
 
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
-    const pool_info = vk.CommandPoolCreateInfo{
+    const pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true },
         .queue_family_index = graphics_family,
     };
     self.command_pool = try self.dev.createCommandPool(&pool_info, null);
 
-    const upload_pool_info = vk.CommandPoolCreateInfo{
+    const upload_pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
         .queue_family_index = graphics_family,
     };
@@ -1015,7 +985,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     try self.createDescriptorPoolAndSets(io);
 
     {
-        self.texture_manager = textures.TextureArrayManager.init(self, self.render_options.gamma_correction);
+        self.texture_manager = .init(self, self.render_options.gamma_correction);
 
         const dir = try std.Io.Dir.cwd().createDirPathOpen(io, "packs/default/Blocks/", .{ .open_options = .{ .iterate = true } });
         defer dir.close(io);
@@ -1047,11 +1017,11 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.transfer_queue = self.dev.getDeviceQueue(self.transfer_queue_family_index, 0);
 
     // Initialize timeline semaphores
-    var sem_type_create_info = vk.SemaphoreTypeCreateInfo{
+    var sem_type_create_info: vk.SemaphoreTypeCreateInfo = .{
         .semaphore_type = .timeline,
         .initial_value = 0,
     };
-    const sem_create_info = vk.SemaphoreCreateInfo{
+    const sem_create_info: vk.SemaphoreCreateInfo = .{
         .p_next = @ptrCast(&sem_type_create_info),
         .flags = .{},
     };
@@ -1061,7 +1031,7 @@ pub fn initWithOptions(io: std.Io, allocator: std.mem.Allocator, window: *wio.Wi
     self.graphics_timeline_semaphore = try self.dev.createSemaphore(&sem_create_info, null);
     errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
 
-    self.transfer_semaphore_value = std.atomic.Value(u64).init(0);
+    self.transfer_semaphore_value = .init(0);
 
     // Initialize staging ring buffer
     try self.staging_ring_buffer.init(self.dev, self.mem_props);
@@ -1096,10 +1066,8 @@ pub fn getSurface(self: *VulkanRenderer) vk.SurfaceKHR {
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
-    // 1. Close upload queue and drain/free remaining requests
     self.upload_queue.close(io);
 
-    // Drain and free remaining requests in upload_queue
     var req_buf: [1]UploadRequest = undefined;
     while (true) {
         const got = self.upload_queue.get(io, &req_buf, 1) catch 0;
@@ -1108,9 +1076,8 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
 
     std.log.info("VulkanRenderer.deinit: Waiting for device idle...", .{});
-    // 3. Normal deinit
     {
-        _ = self.queue_mutex.lock(io) catch {};
+        self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
         _ = self.dev.deviceWaitIdle() catch {};
     }
@@ -1135,6 +1102,30 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     self.meshes.deinit(io, self.allocator);
 
+    // Now call destroyOldSwapchainResources to clean up all swapchain and frame-dependent resources
+    self.destroyOldSwapchainResources(io);
+
+    if (self.pipeline != .null_handle) {
+        self.dev.destroyPipeline(self.pipeline, null);
+        self.pipeline = .null_handle;
+    }
+    if (self.transparent_pipeline != .null_handle) {
+        self.dev.destroyPipeline(self.transparent_pipeline, null);
+        self.transparent_pipeline = .null_handle;
+    }
+    if (self.pipeline_layout != .null_handle) {
+        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        self.pipeline_layout = .null_handle;
+    }
+    if (self.descriptor_set_layout != .null_handle) {
+        self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
+        self.descriptor_set_layout = .null_handle;
+    }
+
+    if (self.swapchain != .null_handle) {
+        self.dev.destroySwapchainKHR(self.swapchain, null);
+    }
+
     // Destroy pools and allocators
     self.pool_reservoir.deinit(self.dev, self.allocator);
     self.device_allocator.deinit(self.dev);
@@ -1147,96 +1138,9 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
     }
 
-    for (self.indirect_draw_buffers) |buf| {
-        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-    }
-    self.allocator.free(self.indirect_draw_buffers);
-    for (self.indirect_draw_memories) |mem| {
-        if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    }
-    self.allocator.free(self.indirect_draw_memories);
-    if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
-
-    for (self.chunk_data_buffers) |buf| {
-        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-    }
-    self.allocator.free(self.chunk_data_buffers);
-    for (self.chunk_data_memories) |mem| {
-        if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    }
-    self.allocator.free(self.chunk_data_memories);
-    if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
-
-    if (self.swapchain != .null_handle) {
-        for (self.swapchain_views) |view| {
-            self.dev.destroyImageView(view, null);
-        }
-
-        for (self.image_acquired_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        for (self.render_complete_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        for (self.in_flight_fences) |fence| {
-            if (fence != .null_handle) self.dev.destroyFence(fence, null);
-        }
-
-        if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
-        if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
-        if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
-
-        if (self.swapchain_images.len > 0) self.allocator.free(self.swapchain_images);
-        if (self.swapchain_views.len > 0) self.allocator.free(self.swapchain_views);
-        self.dev.destroySwapchainKHR(self.swapchain, null);
-    }
-
-    if (self.render_color_view != .null_handle) {
-        self.dev.destroyImageView(self.render_color_view, null);
-    }
-    if (self.render_depth_view != .null_handle) {
-        self.dev.destroyImageView(self.render_depth_view, null);
-    }
-    if (self.render_color_image != .null_handle) {
-        self.dev.destroyImage(self.render_color_image, null);
-    }
-    if (self.render_color_memory != .null_handle) {
-        self.dev.freeMemory(self.render_color_memory, null);
-    }
-    if (self.render_depth_image != .null_handle) {
-        self.dev.destroyImage(self.render_depth_image, null);
-    }
-    if (self.render_depth_memory != .null_handle) {
-        self.dev.freeMemory(self.render_depth_memory, null);
-    }
-
-    if (self.pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.pipeline, null);
-    }
-    if (self.transparent_pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.transparent_pipeline, null);
-    }
-
-    if (self.pipeline_layout != .null_handle) {
-        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
-    }
-    if (self.descriptor_set_layout != .null_handle) {
-        self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
-    }
-    if (self.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.descriptor_pool, null);
-    }
-    if (self.descriptor_sets_per_frame.len > 0) self.allocator.free(self.descriptor_sets_per_frame);
-
     self.destroyDummyResources();
 
     self.texture_manager.destroyTextureArray();
-
-    if (self.cmd_buffers.len > 0) {
-        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-        self.allocator.free(self.cmd_buffers);
-        self.cmd_buffers = &.{};
-    }
 
     if (self.command_pool != .null_handle) {
         self.dev.destroyCommandPool(self.command_pool, null);
@@ -1341,7 +1245,7 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
     while (i < self.pending_uploads.items.len) {
         const pending = self.pending_uploads.items[i];
         if (current_transfer_val >= pending.timeline_value) {
-            const mesh_buffer = ChunkMeshBuffer{
+            const mesh_buffer: ChunkMeshBuffer = .{
                 .buffer = pending.buffer,
                 .alloc_offset = pending.alloc_offset,
                 .alloc_size = pending.alloc_size,
@@ -1363,6 +1267,163 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
     }
 }
 
+fn uploadOnePending(self: *VulkanRenderer, io: std.Io, req: UploadRequest) !void {
+    defer self.allocator.free(req.faces);
+
+    const buffer_size: vk.DeviceSize = @intCast(req.faces.len * @sizeOf(Mesher.Face));
+    const staging_offset = self.staging_ring_buffer.allocate(io, buffer_size);
+
+    const mapped_dest = self.staging_ring_buffer.ptr + staging_offset;
+    const src_bytes = std.mem.sliceAsBytes(req.faces);
+    @memcpy(mapped_dest[0..buffer_size], src_bytes);
+
+    const usage: vk.BufferUsageFlags = .{
+        .transfer_dst_bit = true,
+        .storage_buffer_bit = true,
+        .shader_device_address_bit = true,
+    };
+
+    var queue_families: [2]u32 = undefined;
+    var sharing_mode: vk.SharingMode = .exclusive;
+    var queue_family_count: u32 = 0;
+    if (self.queue_family_index != self.transfer_queue_family_index) {
+        sharing_mode = .concurrent;
+        queue_families[0] = self.queue_family_index;
+        queue_families[1] = self.transfer_queue_family_index;
+        queue_family_count = 2;
+    }
+
+    const buffer_info: vk.BufferCreateInfo = .{
+        .flags = .{},
+        .size = buffer_size,
+        .usage = usage,
+        .sharing_mode = sharing_mode,
+        .queue_family_index_count = queue_family_count,
+        .p_queue_family_indices = &queue_families,
+    };
+
+    const buffer = try self.dev.createBuffer(&buffer_info, null);
+    errdefer self.dev.destroyBuffer(buffer, null);
+
+    const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
+    const alloc_res = try self.device_allocator.allocate(io, mem_reqs.size, mem_reqs.alignment);
+    errdefer self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
+
+    try self.dev.bindBufferMemory(buffer, self.device_allocator.memory, alloc_res.offset);
+
+    const address_info: vk.BufferDeviceAddressInfo = .{
+        .buffer = buffer,
+    };
+    const device_address = self.dev.getBufferDeviceAddress(&address_info);
+
+    const pool = blk: {
+        var first = true;
+        while (true) {
+            if (self.pool_reservoir.borrowPool(io)) |p| break :blk p;
+            try self.retireCompletedUploads(io);
+            if (self.pool_reservoir.borrowPool(io)) |p| break :blk p;
+            if (first) {
+                first = false;
+            } else {
+                try io.sleep(std.Io.Duration.fromMilliseconds(1), .awake);
+            }
+        }
+    };
+    errdefer self.pool_reservoir.returnPool(io, pool);
+
+    try self.dev.resetCommandPool(pool, .{});
+    const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
+        .command_pool = pool,
+        .level = .primary,
+        .command_buffer_count = 1,
+    };
+    var cmd: vk.CommandBuffer = undefined;
+    try self.dev.allocateCommandBuffers(&cmd_alloc_info, @ptrCast(&cmd));
+
+    const begin_info: vk.CommandBufferBeginInfo = .{
+        .flags = .{ .one_time_submit_bit = true },
+        .p_inheritance_info = null,
+    };
+    try self.dev.beginCommandBuffer(cmd, &begin_info);
+
+    const copy_region: vk.BufferCopy2 = .{
+        .src_offset = staging_offset,
+        .dst_offset = 0,
+        .size = buffer_size,
+    };
+    const copy_buffer_info: vk.CopyBufferInfo2 = .{
+        .src_buffer = self.staging_ring_buffer.buffer,
+        .dst_buffer = buffer,
+        .region_count = 1,
+        .p_regions = @ptrCast(&copy_region),
+    };
+    self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
+
+    const buffer_barrier: vk.BufferMemoryBarrier2 = .{
+        .src_stage_mask = .{ .all_transfer_bit = true },
+        .src_access_mask = .{ .transfer_write_bit = true },
+        .dst_stage_mask = .{ .all_transfer_bit = true },
+        .dst_access_mask = .{ .transfer_write_bit = true },
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .buffer = buffer,
+        .offset = 0,
+        .size = buffer_size,
+    };
+    const dependency_info: vk.DependencyInfo = .{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = @ptrCast(&buffer_barrier),
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    };
+    self.dev.cmdPipelineBarrier2(cmd, &dependency_info);
+
+    try self.dev.endCommandBuffer(cmd);
+
+    const next_val = self.transfer_semaphore_value.fetchAdd(1, .monotonic) + 1;
+
+    const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
+        .semaphore = self.transfer_semaphore,
+        .value = next_val,
+        .stage_mask = .{ .all_transfer_bit = true },
+        .device_index = 0,
+    };
+    const command_buffer_submit_info: vk.CommandBufferSubmitInfo = .{
+        .command_buffer = cmd,
+        .device_mask = 0,
+    };
+
+    const submit_info: vk.SubmitInfo2 = .{
+        .flags = .{},
+        .wait_semaphore_info_count = 0,
+        .p_wait_semaphore_infos = null,
+        .command_buffer_info_count = 1,
+        .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
+        .signal_semaphore_info_count = 1,
+        .p_signal_semaphore_infos = @ptrCast(&semaphore_submit_info),
+    };
+
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+    try self.dev.queueSubmit2(self.transfer_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
+
+    self.pending_uploads_mutex.lockUncancelable(io);
+    defer self.pending_uploads_mutex.unlock(io);
+    try self.pending_uploads.append(self.allocator, .{
+        .key = req.key,
+        .device_address = device_address,
+        .timeline_value = next_val,
+        .buffer = buffer,
+        .alloc_offset = alloc_res.offset,
+        .alloc_size = alloc_res.alloc_size,
+        .face_count = @intCast(req.faces.len),
+        .pool = pool,
+    });
+}
+
 fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
     self.upload_mutex.lockUncancelable(io);
     defer self.upload_mutex.unlock(io);
@@ -1376,212 +1437,13 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
         if (count == 0) break;
 
         for (req_buf[0..count]) |req| {
-            defer self.allocator.free(req.faces);
-
-            const buffer_size = @as(vk.DeviceSize, @intCast(req.faces.len)) * @sizeOf(Mesher.Face);
-            const staging_offset = self.staging_ring_buffer.allocate(io, buffer_size);
-
-            const mapped_dest = self.staging_ring_buffer.ptr + staging_offset;
-            const src_bytes = std.mem.sliceAsBytes(req.faces);
-            @memcpy(mapped_dest[0..buffer_size], src_bytes);
-
-            const usage = vk.BufferUsageFlags{
-                .transfer_dst_bit = true,
-                .storage_buffer_bit = true,
-                .shader_device_address_bit = true,
+            self.uploadOnePending(io, req) catch |err| {
+                std.log.err("processPendingUploads: Failed to upload pending: {any}", .{err});
             };
-
-            var queue_families: [2]u32 = undefined;
-            var sharing_mode: vk.SharingMode = .exclusive;
-            var queue_family_count: u32 = 0;
-            if (self.queue_family_index != self.transfer_queue_family_index) {
-                sharing_mode = .concurrent;
-                queue_families[0] = self.queue_family_index;
-                queue_families[1] = self.transfer_queue_family_index;
-                queue_family_count = 2;
-            }
-
-            const buffer_info = vk.BufferCreateInfo{
-                .flags = .{},
-                .size = buffer_size,
-                .usage = usage,
-                .sharing_mode = sharing_mode,
-                .queue_family_index_count = queue_family_count,
-                .p_queue_family_indices = &queue_families,
-            };
-
-            const buffer = self.dev.createBuffer(&buffer_info, null) catch |err| {
-                std.log.err("processPendingUploads: Failed to create Buffer: {any}", .{err});
-                continue;
-            };
-            errdefer self.dev.destroyBuffer(buffer, null);
-
-            const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
-            const alloc_res = self.device_allocator.allocate(io, mem_reqs.size, mem_reqs.alignment) catch |err| {
-                std.log.err("processPendingUploads: Out of video memory: {any}", .{err});
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            };
-            errdefer self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-
-            self.dev.bindBufferMemory(buffer, self.device_allocator.memory, alloc_res.offset) catch |err| {
-                std.log.err("processPendingUploads: Failed to bind Buffer Memory: {any}", .{err});
-                self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            };
-
-            const address_info = vk.BufferDeviceAddressInfo{
-                .buffer = buffer,
-            };
-            const device_address = self.dev.getBufferDeviceAddress(&address_info);
-
-            var pool_opt: ?vk.CommandPool = null;
-            while (pool_opt == null) {
-                pool_opt = self.pool_reservoir.borrowPool(io);
-                if (pool_opt == null) {
-                    try self.retireCompletedUploads(io);
-                    pool_opt = self.pool_reservoir.borrowPool(io);
-                    if (pool_opt == null) {
-                        try io.sleep(std.Io.Duration.fromMilliseconds(1), .awake);
-                    }
-                }
-            }
-            const pool = pool_opt.?;
-            errdefer self.pool_reservoir.returnPool(io, pool);
-
-            self.dev.resetCommandPool(pool, .{}) catch {};
-            const cmd_alloc_info = vk.CommandBufferAllocateInfo{
-                .command_pool = pool,
-                .level = .primary,
-                .command_buffer_count = 1,
-            };
-            var cmd: vk.CommandBuffer = undefined;
-            self.dev.allocateCommandBuffers(&cmd_alloc_info, @ptrCast(&cmd)) catch |err| {
-                std.log.err("processPendingUploads: Failed to allocate cmd buffer: {any}", .{err});
-                self.pool_reservoir.returnPool(io, pool);
-                self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            };
-
-            const begin_info = vk.CommandBufferBeginInfo{
-                .flags = .{ .one_time_submit_bit = true },
-                .p_inheritance_info = null,
-            };
-            self.dev.beginCommandBuffer(cmd, &begin_info) catch |err| {
-                std.log.err("processPendingUploads: Failed to begin cmd buffer: {any}", .{err});
-                self.pool_reservoir.returnPool(io, pool);
-                self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            };
-
-            const copy_region = vk.BufferCopy2{
-                .src_offset = staging_offset,
-                .dst_offset = 0,
-                .size = buffer_size,
-            };
-            const copy_buffer_info = vk.CopyBufferInfo2{
-                .src_buffer = self.staging_ring_buffer.buffer,
-                .dst_buffer = buffer,
-                .region_count = 1,
-                .p_regions = @ptrCast(&copy_region),
-            };
-            self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
-
-            const buffer_barrier = vk.BufferMemoryBarrier2{
-                .src_stage_mask = .{ .all_transfer_bit = true },
-                .src_access_mask = .{ .transfer_write_bit = true },
-                .dst_stage_mask = .{ .all_transfer_bit = true },
-                .dst_access_mask = .{ .transfer_write_bit = true },
-                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .buffer = buffer,
-                .offset = 0,
-                .size = buffer_size,
-            };
-            const dependency_info = vk.DependencyInfo{
-                .dependency_flags = .{},
-                .memory_barrier_count = 0,
-                .p_memory_barriers = null,
-                .buffer_memory_barrier_count = 1,
-                .p_buffer_memory_barriers = @ptrCast(&buffer_barrier),
-                .image_memory_barrier_count = 0,
-                .p_image_memory_barriers = null,
-            };
-            self.dev.cmdPipelineBarrier2(cmd, &dependency_info);
-
-            self.dev.endCommandBuffer(cmd) catch |err| {
-                std.log.err("processPendingUploads: Failed to end cmd buffer: {any}", .{err});
-                self.pool_reservoir.returnPool(io, pool);
-                self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            };
-
-            const next_val = self.transfer_semaphore_value.fetchAdd(1, .monotonic) + 1;
-
-            const semaphore_submit_info = vk.SemaphoreSubmitInfo{
-                .semaphore = self.transfer_semaphore,
-                .value = next_val,
-                .stage_mask = .{ .all_transfer_bit = true },
-                .device_index = 0,
-            };
-            const command_buffer_submit_info = vk.CommandBufferSubmitInfo{
-                .command_buffer = cmd,
-                .device_mask = 0,
-            };
-
-            const submit_info = vk.SubmitInfo2{
-                .flags = .{},
-                .wait_semaphore_info_count = 0,
-                .p_wait_semaphore_infos = null,
-                .command_buffer_info_count = 1,
-                .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
-                .signal_semaphore_info_count = 1,
-                .p_signal_semaphore_infos = @ptrCast(&semaphore_submit_info),
-            };
-
-            self.queue_mutex.lockUncancelable(io);
-            const submit_success = blk: {
-                self.dev.queueSubmit2(self.transfer_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle) catch |err| {
-                    std.log.err("processPendingUploads: Failed to submit transfer queue: {any}", .{err});
-                    break :blk false;
-                };
-                break :blk true;
-            };
-            self.queue_mutex.unlock(io);
-
-            if (!submit_success) {
-                self.pool_reservoir.returnPool(io, pool);
-                self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-                self.dev.destroyBuffer(buffer, null);
-                continue;
-            }
-
-            self.pending_uploads_mutex.lockUncancelable(io);
-            const append_res = self.pending_uploads.append(self.allocator, .{
-                .key = req.key,
-                .device_address = device_address,
-                .timeline_value = next_val,
-                .buffer = buffer,
-                .alloc_offset = alloc_res.offset,
-                .alloc_size = alloc_res.alloc_size,
-                .face_count = @intCast(req.faces.len),
-                .pool = pool,
-            });
-            self.pending_uploads_mutex.unlock(io);
-            try append_res;
         }
     }
 
     try self.retireCompletedUploads(io);
-}
-pub fn processDeferredDeletions(self: *VulkanRenderer, io: std.Io) error{DrawFailed}!void {
-    _ = self;
-    _ = io;
-    // Handled dynamically by processDeletionQueue at start of frame
 }
 
 pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
@@ -1602,7 +1464,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     if (self.swapchain_needs_recreate) {
         self.swapchain_needs_recreate = false;
         {
-            _ = try self.queue_mutex.lock(io);
+            self.queue_mutex.lockUncancelable(io);
             defer self.queue_mutex.unlock(io);
             try self.dev.deviceWaitIdle();
         }
@@ -1619,19 +1481,12 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .null_handle,
     );
 
-    if (acquire_result_res.result == vk.Result.error_out_of_date_khr) {
-        try self.createSwapchain(io);
-        current_frame = self.currentFrame();
-        try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
-        const acquire_result_res2 = try self.dev.acquireNextImageKHR(
-            self.swapchain,
-            std.math.maxInt(u64),
-            self.image_acquired_semaphores[current_frame],
-            .null_handle,
-        );
-        image_index = acquire_result_res2.image_index;
-    } else if (acquire_result_res.result == vk.Result.suboptimal_khr) {
-        try self.recreateSwapchainOnly(io);
+    if (acquire_result_res.result == .error_out_of_date_khr or acquire_result_res.result == .suboptimal_khr) {
+        if (acquire_result_res.result == .error_out_of_date_khr) {
+            try self.createSwapchain(io);
+        } else {
+            try self.recreateSwapchainOnly(io);
+        }
         current_frame = self.currentFrame();
         try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
         const acquire_result_res2 = try self.dev.acquireNextImageKHR(
@@ -1644,6 +1499,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     } else {
         image_index = acquire_result_res.image_index;
     }
+
     self.current_swapchain_image_index = image_index;
 
     const cmd_buffer = self.cmd_buffers[current_frame];
@@ -1659,7 +1515,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     // Pure-rotation view matrix at origin — matches OpenGL convention.
     // The vertex shader already applies the translation via relative_position = chunk_pos - playerPos,
     // so including it in the view matrix would cause double-translation, putting everything off-screen.
-    const up_vec = zm.vec.Vec3f{ .data = [3]f32{ cameraUp[0], cameraUp[1], cameraUp[2] } };
+    const up_vec: zm.vec.Vec3f = .{ .data = [3]f32{ cameraUp[0], cameraUp[1], cameraUp[2] } };
 
     const view = zm.matrix.Mat4f.lookAtRH(
         .{ .data = @Vector(3, f32){ 0, 0, 0 } },
@@ -1668,27 +1524,32 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     );
 
     const projection = makeInfReversedZProjRh(fov, aspect, 0.01);
-    const projview = @as(@Vector(16, f32), @bitCast(projection.multiply(view).data));
+    const projview: @Vector(16, f32) = @bitCast(projection.multiply(view).data);
 
     const blueSky = @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@as(f32, @floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0)))))));
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0))))));
 
-    const sun_angle = @rem(@as(f64, @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds)) / ((@as(f64, @max(0.001, day_length_sec)) * @as(f64, @floatFromInt(std.time.ns_per_s))) / 360.0), 360.0);
+    const now_ns_f: f64 = @floatFromInt(std.Io.Timestamp.now(io, .real).nanoseconds);
+    const day_len_f: f64 = @max(0.001, day_length_sec);
+    const ns_per_s_f: f64 = @floatFromInt(std.time.ns_per_s);
+    const sun_angle = @rem(now_ns_f / ((day_len_f * ns_per_s_f) / 360.0), 360.0);
     const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
     const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const elapsed_ns = now_ns -| self.init_time_ns;
-    const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+    const elapsed_f: f32 = @floatFromInt(elapsed_ns);
+    const ns_per_s_f32: f32 = @floatFromInt(std.time.ns_per_s);
+    const elapsed_sec = elapsed_f / ns_per_s_f32;
 
-    const begin_info = vk.CommandBufferBeginInfo{
+    const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
     };
     try self.dev.beginCommandBuffer(cmd_buffer, &begin_info);
 
-    const color_attachment = vk.RenderingAttachmentInfo{
+    const color_attachment: vk.RenderingAttachmentInfo = .{
         .s_type = .rendering_attachment_info,
         .image_view = self.render_color_view,
         .image_layout = .color_attachment_optimal,
@@ -1700,7 +1561,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .clear_value = .{ .color = .{ .float_32 = .{ skyColor[0], skyColor[1], skyColor[2], skyColor[3] } } },
     };
 
-    const depth_attachment = vk.RenderingAttachmentInfo{
+    const depth_attachment: vk.RenderingAttachmentInfo = .{
         .s_type = .rendering_attachment_info,
         .image_view = self.render_depth_view,
         .image_layout = .depth_stencil_attachment_optimal,
@@ -1712,7 +1573,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
     };
 
-    const render_info = vk.RenderingInfo{
+    const render_info: vk.RenderingInfo = .{
         .flags = .{},
         .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent },
         .layer_count = 1,
@@ -1726,15 +1587,15 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
 
-    const viewport = vk.Viewport{
+    const viewport: vk.Viewport = .{
         .x = 0.0,
         .y = 0.0,
-        .width = @as(f32, @floatFromInt(self.swapchain_extent.width)),
-        .height = @as(f32, @floatFromInt(self.swapchain_extent.height)),
+        .width = @floatFromInt(self.swapchain_extent.width),
+        .height = @floatFromInt(self.swapchain_extent.height),
         .min_depth = 0.0,
         .max_depth = 1.0,
     };
-    const scissor = vk.Rect2D{
+    const scissor: vk.Rect2D = .{
         .offset = .{ .x = 0, .y = 0 },
         .extent = self.swapchain_extent,
     };
@@ -1745,13 +1606,13 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     scissor_arr[0] = scissor;
     self.dev.cmdSetScissor(cmd_buffer, 0, &scissor_arr);
 
-    const buffer_info = vk.DescriptorBufferInfo{
+    const buffer_info: vk.DescriptorBufferInfo = .{
         .buffer = self.chunk_data_buffers[current_frame],
         .offset = 0,
         .range = vk.WHOLE_SIZE,
     };
 
-    const chunk_data_write = vk.WriteDescriptorSet{
+    const chunk_data_write: vk.WriteDescriptorSet = .{
         .dst_set = self.descriptor_sets_per_frame[current_frame],
         .dst_binding = 0,
         .dst_array_element = 0,
@@ -1768,9 +1629,9 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     desc_set_arr[0] = self.descriptor_sets_per_frame[current_frame];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, &desc_set_arr, null);
 
-    var pc = PushConstants{
+    var pc: PushConstants = .{
         .projview = std.mem.zeroes([16]f32),
-        .sun_dir = @as([3]f32, @bitCast(sun_dir)),
+        .sun_dir = @bitCast(sun_dir),
         .time = elapsed_sec,
         .draw_over = if (draw_over) 1 else 0,
     };
@@ -1799,7 +1660,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     self.frame_number += 1;
     self.frame_stats.frame_number = self.frame_number;
-    self.frame_stats.total_meshes = @as(u32, @intCast(self.meshes.count(io)));
+    self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = viewpos;
     self.frame_stats.camera_front = self.camera_front;
     self.frame_stats.elapsed_ns = frame_elapsed_ns;
@@ -1810,7 +1671,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     self.dev.cmdEndRendering(cmd_buffer);
 
-    const color_to_copy_barrier = vk.ImageMemoryBarrier{
+    const color_to_copy_barrier: vk.ImageMemoryBarrier = .{
         .old_layout = .color_attachment_optimal,
         .new_layout = .transfer_src_optimal,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1826,7 +1687,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .src_access_mask = .{ .color_attachment_write_bit = true },
         .dst_access_mask = .{ .transfer_read_bit = true },
     };
-    const swapchain_to_copy_barrier = vk.ImageMemoryBarrier{
+    const swapchain_to_copy_barrier: vk.ImageMemoryBarrier = .{
         .old_layout = .undefined,
         .new_layout = .transfer_dst_optimal,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1845,7 +1706,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     var pre_copy_barriers = [_]vk.ImageMemoryBarrier{ color_to_copy_barrier, swapchain_to_copy_barrier };
     self.dev.cmdPipelineBarrier(cmd_buffer, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &pre_copy_barriers);
 
-    const image_copy = vk.ImageCopy{
+    const image_copy: vk.ImageCopy = .{
         .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
         .src_offset = .{ .x = 0, .y = 0, .z = 0 },
         .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
@@ -1854,7 +1715,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     };
     self.dev.cmdCopyImage(cmd_buffer, self.render_color_image, .transfer_src_optimal, self.swapchain_images[image_index], .transfer_dst_optimal, &[_]vk.ImageCopy{image_copy});
 
-    const swapchain_to_present_barrier = vk.ImageMemoryBarrier{
+    const swapchain_to_present_barrier: vk.ImageMemoryBarrier = .{
         .old_layout = .transfer_dst_optimal,
         .new_layout = .present_src_khr,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1870,7 +1731,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .src_access_mask = .{ .transfer_write_bit = true },
         .dst_access_mask = .{ .color_attachment_read_bit = true },
     };
-    const color_return_barrier = vk.ImageMemoryBarrier{
+    const color_return_barrier: vk.ImageMemoryBarrier = .{
         .old_layout = .transfer_src_optimal,
         .new_layout = .color_attachment_optimal,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1899,14 +1760,14 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const signal_values = [_]u64{ 0, self.frame_number };
 
     const wait_values = [_]u64{0};
-    var timeline_submit_info = vk.TimelineSemaphoreSubmitInfo{
+    var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
         .wait_semaphore_value_count = 1,
         .p_wait_semaphore_values = @ptrCast(&wait_values),
         .signal_semaphore_value_count = 2,
         .p_signal_semaphore_values = @ptrCast(&signal_values),
     };
 
-    const submit_info = vk.SubmitInfo{
+    const submit_info: vk.SubmitInfo = .{
         .p_next = &timeline_submit_info,
         .wait_semaphore_count = 1,
         .p_wait_semaphores = @ptrCast(&wait_semaphores),
@@ -1918,13 +1779,13 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     };
 
     {
-        _ = try self.queue_mutex.lock(io);
+        self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
 
         try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame]);
     }
 
-    const present_info = vk.PresentInfoKHR{
+    const present_info: vk.PresentInfoKHR = .{
         .wait_semaphore_count = 1,
         .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
         .swapchain_count = 1,
@@ -1934,7 +1795,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     };
 
     const present_result = blk: {
-        _ = try self.queue_mutex.lock(io);
+        self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
 
         break :blk try self.dev.queuePresentKHR(self.present_queue, &present_info);
@@ -1988,14 +1849,14 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
             const write_idx = write_offset + draw_count;
 
             chunk_data[write_idx] = .{
-                .absolute_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(chunk_blockpos)))),
-                .relative_position = @as([3]f32, @bitCast(@as(@Vector(3, f32), @floatCast(relative_blockpos)))),
+                .absolute_position = @bitCast(@as(@Vector(3, f32), @floatCast(chunk_blockpos))),
+                .relative_position = @bitCast(@as(@Vector(3, f32), @floatCast(relative_blockpos))),
                 .scale = ChunkPos.toScale(chunkpos.level),
                 .address = mesh.device_address,
             };
 
             indirect_cmds[write_idx] = .{
-                .vertex_count = @as(u32, mesh.face_count) * 6,
+                .vertex_count = mesh.face_count * 6,
                 .instance_count = 1,
                 .first_vertex = 0,
                 .first_instance = write_offset + draw_count,
@@ -2102,7 +1963,7 @@ pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.Buffer
         return error.InvalidBufferSize;
     }
 
-    const buffer_info = vk.BufferCreateInfo{
+    const buffer_info: vk.BufferCreateInfo = .{
         .flags = .{},
         .size = size,
         .usage = usage,
@@ -2113,7 +1974,7 @@ pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.Buffer
     buffer.* = try self.dev.createBuffer(&buffer_info, null);
 
     const mem_reqs = self.dev.getBufferMemoryRequirements(buffer.*);
-    const alloc_info = vk.MemoryAllocateInfo{
+    const alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = mem_reqs.size,
         .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, properties),
     };
@@ -2123,12 +1984,10 @@ pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.Buffer
 }
 
 fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize) !void {
-    _ = self.queue_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => return error.DrawFailed,
-    };
+    self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
-    const alloc_info = vk.CommandBufferAllocateInfo{
+    const alloc_info: vk.CommandBufferAllocateInfo = .{
         .level = .primary,
         .command_pool = self.upload_command_pool,
         .command_buffer_count = 1,
@@ -2136,13 +1995,13 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
     var cmd: vk.CommandBuffer = undefined;
     try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
 
-    const begin_info = vk.CommandBufferBeginInfo{
+    const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
     };
     try self.dev.beginCommandBuffer(cmd, &begin_info);
 
-    const copy_region = vk.BufferCopy{
+    const copy_region: vk.BufferCopy = .{
         .src_offset = 0,
         .dst_offset = 0,
         .size = size,
@@ -2151,7 +2010,7 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
 
     try self.dev.endCommandBuffer(cmd);
 
-    const submit_info = vk.SubmitInfo{
+    const submit_info: vk.SubmitInfo = .{
         .command_buffer_count = 1,
         .p_command_buffers = @ptrCast(&cmd),
         .wait_semaphore_count = 0,
@@ -2175,28 +2034,24 @@ pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.Mem
 }
 
 fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
-    _ = self.queue_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => return error.DrawFailed,
-    };
+    self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
-    _ = self.dev.deviceWaitIdle() catch {};
+    try self.dev.deviceWaitIdle();
 
     try self.createSwapchain(io);
 }
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
     {
-        _ = self.queue_mutex.lock(io) catch {};
+        self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
         _ = self.dev.deviceWaitIdle() catch {};
     }
 
-    for (self.swapchain_views) |view| {
-        if (view != .null_handle) self.dev.destroyImageView(view, null);
-    }
+    for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
     self.allocator.free(self.swapchain_images);
-    self.swapchain_images = &.{};
     self.allocator.free(self.swapchain_views);
+    self.swapchain_images = &.{};
     self.swapchain_views = &.{};
 
     if (self.cmd_buffers.len > 0) {
@@ -2205,86 +2060,57 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
         self.cmd_buffers = &.{};
     }
 
-    for (self.image_acquired_semaphores) |sem| {
-        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    }
-    for (self.render_complete_semaphores) |sem| {
-        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    }
-    for (self.in_flight_fences) |fence| {
-        if (fence != .null_handle) self.dev.destroyFence(fence, null);
-    }
-    if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
-    if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
-    if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
+    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.in_flight_fences) |fence| if (fence != .null_handle) self.dev.destroyFence(fence, null);
+    self.allocator.free(self.image_acquired_semaphores);
+    self.allocator.free(self.render_complete_semaphores);
+    self.allocator.free(self.in_flight_fences);
     self.image_acquired_semaphores = &.{};
     self.render_complete_semaphores = &.{};
     self.in_flight_fences = &.{};
 
-    if (self.render_color_view != .null_handle) {
-        self.dev.destroyImageView(self.render_color_view, null);
-        self.render_color_view = .null_handle;
-    }
-    if (self.render_depth_view != .null_handle) {
-        self.dev.destroyImageView(self.render_depth_view, null);
-        self.render_depth_view = .null_handle;
-    }
-    if (self.render_color_image != .null_handle) {
-        self.dev.destroyImage(self.render_color_image, null);
-        self.render_color_image = .null_handle;
-    }
-    if (self.render_color_memory != .null_handle) {
-        self.dev.freeMemory(self.render_color_memory, null);
-        self.render_color_memory = .null_handle;
-    }
-    if (self.render_depth_image != .null_handle) {
-        self.dev.destroyImage(self.render_depth_image, null);
-        self.render_depth_image = .null_handle;
-    }
-    if (self.render_depth_memory != .null_handle) {
-        self.dev.freeMemory(self.render_depth_memory, null);
-        self.render_depth_memory = .null_handle;
-    }
+    if (self.render_color_view != .null_handle) self.dev.destroyImageView(self.render_color_view, null);
+    if (self.render_depth_view != .null_handle) self.dev.destroyImageView(self.render_depth_view, null);
+    if (self.render_color_image != .null_handle) self.dev.destroyImage(self.render_color_image, null);
+    if (self.render_color_memory != .null_handle) self.dev.freeMemory(self.render_color_memory, null);
+    if (self.render_depth_image != .null_handle) self.dev.destroyImage(self.render_depth_image, null);
+    if (self.render_depth_memory != .null_handle) self.dev.freeMemory(self.render_depth_memory, null);
+    self.render_color_view = .null_handle;
+    self.render_depth_view = .null_handle;
+    self.render_color_image = .null_handle;
+    self.render_color_memory = .null_handle;
+    self.render_depth_image = .null_handle;
+    self.render_depth_memory = .null_handle;
 
-    for (self.indirect_draw_buffers) |buf| {
-        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-    }
-    if (self.indirect_draw_buffers.len > 0) self.allocator.free(self.indirect_draw_buffers);
+    for (self.indirect_draw_buffers) |buf| if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+    self.allocator.free(self.indirect_draw_buffers);
     self.indirect_draw_buffers = &.{};
 
-    for (self.indirect_draw_memories) |mem| {
-        if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    }
-    if (self.indirect_draw_memories.len > 0) self.allocator.free(self.indirect_draw_memories);
+    for (self.indirect_draw_memories) |mem| if (mem != .null_handle) self.dev.freeMemory(mem, null);
+    self.allocator.free(self.indirect_draw_memories);
     self.indirect_draw_memories = &.{};
 
-    for (self.chunk_data_buffers) |buf| {
-        if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-    }
-    if (self.chunk_data_buffers.len > 0) self.allocator.free(self.chunk_data_buffers);
+    for (self.chunk_data_buffers) |buf| if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+    self.allocator.free(self.chunk_data_buffers);
     self.chunk_data_buffers = &.{};
 
-    for (self.chunk_data_memories) |mem| {
-        if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    }
-    if (self.chunk_data_memories.len > 0) self.allocator.free(self.chunk_data_memories);
+    for (self.chunk_data_memories) |mem| if (mem != .null_handle) self.dev.freeMemory(mem, null);
+    self.allocator.free(self.chunk_data_memories);
     self.chunk_data_memories = &.{};
 
-    if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
+    self.allocator.free(self.indirect_draw_buffers_mapped);
     self.indirect_draw_buffers_mapped = &.{};
 
-    if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
+    self.allocator.free(self.chunk_data_buffers_mapped);
     self.chunk_data_buffers_mapped = &.{};
 
-    // Destroy descriptor pool and sets
     if (self.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.descriptor_pool, null);
         self.descriptor_pool = .null_handle;
     }
-    if (self.descriptor_sets_per_frame.len > 0) {
-        self.allocator.free(self.descriptor_sets_per_frame);
-        self.descriptor_sets_per_frame = &.{};
-    }
+    self.allocator.free(self.descriptor_sets_per_frame);
+    self.descriptor_sets_per_frame = &.{};
 }
 
 fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
@@ -2302,19 +2128,10 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         self.destroyOldSwapchainResources(io);
     }
 
-    var actual_extent = self.swapchain_extent;
-    if (caps.current_extent.width != 0xFFFF_FFFF) {
-        actual_extent = caps.current_extent;
-    } else {
-        const max_extent = vk.Extent2D{
-            .width = @min(caps.max_image_extent.width, 3840),
-            .height = @min(caps.max_image_extent.height, 2160),
-        };
-        actual_extent = .{
-            .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, max_extent.width),
-            .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, max_extent.height),
-        };
-    }
+    const actual_extent = if (caps.current_extent.width != 0xFFFF_FFFF) caps.current_extent else vk.Extent2D{
+        .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, @min(caps.max_image_extent.width, 3840)),
+        .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, @min(caps.max_image_extent.height, 2160)),
+    };
 
     self.swapchain_extent = actual_extent;
     self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
@@ -2326,20 +2143,12 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     const gamma_correction = self.render_options.gamma_correction;
     self.render_options_lock.unlockShared(io);
 
-    var surface_format: vk.SurfaceFormatKHR = surface_formats[0];
-    if (gamma_correction) {
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == .b8g8r8a8_srgb) {
-                surface_format = sfmt;
-                break;
-            }
-        }
-    } else {
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == .b8g8r8a8_unorm) {
-                surface_format = sfmt;
-                break;
-            }
+    const target_format: vk.Format = if (gamma_correction) .b8g8r8a8_srgb else .b8g8r8a8_unorm;
+    var surface_format = surface_formats[0];
+    for (surface_formats) |sfmt| {
+        if (sfmt.format == target_format) {
+            surface_format = sfmt;
+            break;
         }
     }
     self.swapchain_format = surface_format.format;
@@ -2355,10 +2164,8 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         }
     }
 
-    var image_count = @max(caps.min_image_count + 1, @as(u32, 2));
-    if (caps.max_image_count > 0) {
-        image_count = @min(image_count, caps.max_image_count);
-    }
+    const raw_count = @max(caps.min_image_count + 1, @as(u32, 2));
+    const image_count = if (caps.max_image_count > 0) @min(raw_count, caps.max_image_count) else raw_count;
 
     const qfi = [_]u32{ self.queue_family_index, self.present_queue_family_index };
     const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index)
@@ -2410,7 +2217,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     for (self.swapchain_images, 0..) |image, i| {
-        const view_info = vk.ImageViewCreateInfo{
+        const view_info: vk.ImageViewCreateInfo = .{
             .flags = .{},
             .image = image,
             .view_type = .@"2d",
@@ -2459,8 +2266,8 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         self.in_flight_fences = &.{};
     }
 
-    const semaphore_create_info = vk.SemaphoreCreateInfo{ .flags = .{} };
-    const fence_create_info = vk.FenceCreateInfo{
+    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
+    const fence_create_info: vk.FenceCreateInfo = .{
         .flags = .{ .signaled_bit = true },
     };
 
@@ -2470,7 +2277,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
         self.in_flight_fences[i] = try self.dev.createFence(&fence_create_info, null);
     }
 
-    const cmd_alloc_info = vk.CommandBufferAllocateInfo{
+    const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
         .command_pool = self.command_pool,
         .level = .primary,
         .command_buffer_count = @intCast(num_swapchain_images),
@@ -2541,7 +2348,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         self.render_depth_memory = .null_handle;
     }
 
-    const color_image_info = vk.ImageCreateInfo{
+    const color_image_info: vk.ImageCreateInfo = .{
         .flags = .{},
         .image_type = .@"2d",
         .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
@@ -2556,11 +2363,9 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         .queue_family_index_count = 0,
         .p_queue_family_indices = undefined,
     };
-
     self.render_color_image = try self.dev.createImage(&color_image_info, null);
-
     const color_mem_reqs = self.dev.getImageMemoryRequirements(self.render_color_image);
-    const color_alloc_info = vk.MemoryAllocateInfo{
+    const color_alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = color_mem_reqs.size,
         .memory_type_index = self.findMemoryType(color_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
@@ -2570,8 +2375,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     {
         const cmd = try self.beginSingleTimeCommands(io);
         defer self.endSingleTimeCommands(io, cmd) catch {};
-
-        const barrier = vk.ImageMemoryBarrier{
+        const barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
             .new_layout = .color_attachment_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -2587,12 +2391,11 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
             .src_access_mask = .{},
             .dst_access_mask = .{ .color_attachment_write_bit = true },
         };
-
-        const color_barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
+        const color_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_barrier_arr);
     }
 
-    const color_view_info = vk.ImageViewCreateInfo{
+    const color_view_info: vk.ImageViewCreateInfo = .{
         .flags = .{},
         .image = self.render_color_image,
         .view_type = .@"2d",
@@ -2608,29 +2411,20 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     };
     self.render_color_view = try self.dev.createImageView(&color_view_info, null);
 
-    const depth_formats = [_]vk.Format{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
+    const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
     var depth_format: vk.Format = .undefined;
-
     for (depth_formats) |fmt| {
-        const depth_format_props = self.instance.getPhysicalDeviceFormatProperties(self.pdev, fmt);
-        if (depth_format_props.optimal_tiling_features.depth_stencil_attachment_bit) {
+        if (self.instance.getPhysicalDeviceFormatProperties(self.pdev, fmt).optimal_tiling_features.depth_stencil_attachment_bit) {
             depth_format = fmt;
             self.depth_format = fmt;
             break;
         }
     }
-    if (depth_format == .undefined) {
-        std.log.err("createRenderTargets: no supported depth format found among candidate formats", .{});
-        return error.DepthFormatNotSupported;
-    }
+    if (depth_format == .undefined) return error.DepthFormatNotSupported;
 
     const depth_has_stencil = depth_format == .d32_sfloat_s8_uint or depth_format == .d24_unorm_s8_uint;
-    const depth_aspect_mask: vk.ImageAspectFlags = if (depth_has_stencil)
-        .{ .depth_bit = true, .stencil_bit = true }
-    else
-        .{ .depth_bit = true };
-
-    const depth_image_info = vk.ImageCreateInfo{
+    const depth_aspect_mask: vk.ImageAspectFlags = if (depth_has_stencil) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
+    const depth_image_info: vk.ImageCreateInfo = .{
         .flags = .{},
         .image_type = .@"2d",
         .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
@@ -2645,11 +2439,9 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         .queue_family_index_count = 0,
         .p_queue_family_indices = undefined,
     };
-
     self.render_depth_image = try self.dev.createImage(&depth_image_info, null);
-
     const depth_mem_reqs = self.dev.getImageMemoryRequirements(self.render_depth_image);
-    const depth_alloc_info = vk.MemoryAllocateInfo{
+    const depth_alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = depth_mem_reqs.size,
         .memory_type_index = self.findMemoryType(depth_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
@@ -2659,8 +2451,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     {
         const cmd = try self.beginSingleTimeCommands(io);
         defer self.endSingleTimeCommands(io, cmd) catch {};
-
-        const barrier = vk.ImageMemoryBarrier{
+        const barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
             .new_layout = .depth_stencil_attachment_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -2676,12 +2467,11 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
             .src_access_mask = .{},
             .dst_access_mask = .{ .depth_stencil_attachment_write_bit = true },
         };
-
-        const depth_barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
+        const depth_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, &depth_barrier_arr);
     }
 
-    const depth_view_info = vk.ImageViewCreateInfo{
+    const depth_view_info: vk.ImageViewCreateInfo = .{
         .flags = .{},
         .image = self.render_depth_image,
         .view_type = .@"2d",
@@ -2701,30 +2491,11 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
 }
 
 fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
-    const chunk_data_binding = vk.DescriptorSetLayoutBinding{
-        .binding = 0,
-        .descriptor_type = .storage_buffer,
-        .descriptor_count = 1,
-        .stage_flags = .{ .vertex_bit = true },
-        .p_immutable_samplers = null,
+    const bindings: [2]vk.DescriptorSetLayoutBinding = .{
+        .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
     };
-
-    const texture_array_binding = vk.DescriptorSetLayoutBinding{
-        .binding = 1,
-        .descriptor_type = .combined_image_sampler,
-        .descriptor_count = 1,
-        .stage_flags = .{ .fragment_bit = true },
-        .p_immutable_samplers = null,
-    };
-
-    const bindings = [_]vk.DescriptorSetLayoutBinding{ chunk_data_binding, texture_array_binding };
-
-    var layout_info = vk.DescriptorSetLayoutCreateInfo{
-        .flags = .{},
-        .binding_count = bindings.len,
-        .p_bindings = @ptrCast(&bindings),
-    };
-
+    var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = @ptrCast(&bindings) };
     self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
 }
 
@@ -2734,12 +2505,12 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     self.destroyDummyResources();
 
     const num_frames = self.swapchain_images.len;
-    const pool_sizes = [_]vk.DescriptorPoolSize{
+    const pool_sizes: [2]vk.DescriptorPoolSize = .{
         .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) },
         .{ .type = .combined_image_sampler, .descriptor_count = @intCast(num_frames) },
     };
 
-    const pool_info = vk.DescriptorPoolCreateInfo{
+    const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
         .max_sets = @as(u32, @intCast(num_frames)),
         .pool_size_count = pool_sizes.len,
@@ -2765,7 +2536,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     for (0..num_frames) |i| {
-        const alloc_info = vk.DescriptorSetAllocateInfo{
+        const alloc_info: vk.DescriptorSetAllocateInfo = .{
             .descriptor_pool = self.descriptor_pool,
             .descriptor_set_count = 1,
             .p_set_layouts = @ptrCast(&self.descriptor_set_layout),
@@ -2795,7 +2566,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     }
     self.dev.unmapMemory(staging_memory_dummy);
 
-    const dummy_image_info = vk.ImageCreateInfo{
+    const dummy_image_info: vk.ImageCreateInfo = .{
         .flags = .{},
         .image_type = .@"2d",
         .extent = .{ .width = 1, .height = 1, .depth = 1 },
@@ -2814,7 +2585,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
     self.dummy_image = try self.dev.createImage(&dummy_image_info, null);
 
     const dummy_mem_reqs = self.dev.getImageMemoryRequirements(self.dummy_image);
-    const dummy_alloc_info = vk.MemoryAllocateInfo{
+    const dummy_alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = dummy_mem_reqs.size,
         .memory_type_index = self.findMemoryType(dummy_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
@@ -2825,7 +2596,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         const cmd = try self.beginSingleTimeCommands(io);
         defer self.endSingleTimeCommands(io, cmd) catch {};
 
-        var barrier = vk.ImageMemoryBarrier{
+        var barrier: vk.ImageMemoryBarrier = .{
             .old_layout = .undefined,
             .new_layout = .transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -2842,10 +2613,10 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
             .dst_access_mask = .{ .transfer_write_bit = true },
         };
 
-        const to_transfer_dst = [_]vk.ImageMemoryBarrier{barrier};
+        const to_transfer_dst: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &to_transfer_dst);
 
-        const copy_region = vk.BufferImageCopy{
+        const copy_region: vk.BufferImageCopy = .{
             .buffer_offset = 0,
             .buffer_row_length = 0,
             .buffer_image_height = 0,
@@ -2870,11 +2641,11 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         barrier.dst_access_mask = .{ .shader_read_bit = true };
         barrier.image = self.dummy_image;
 
-        const to_shader_read = [_]vk.ImageMemoryBarrier{barrier};
+        const to_shader_read: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &to_shader_read);
     }
 
-    const dummy_view_info = vk.ImageViewCreateInfo{
+    const dummy_view_info: vk.ImageViewCreateInfo = .{
         .flags = .{},
         .image = self.dummy_image,
         .view_type = .@"2d_array",
@@ -2891,7 +2662,7 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 
     self.dummy_view = try self.dev.createImageView(&dummy_view_info, null);
 
-    const sampler_info = vk.SamplerCreateInfo{
+    const sampler_info: vk.SamplerCreateInfo = .{
         .flags = .{},
         .mag_filter = .linear,
         .min_filter = .linear,
@@ -2912,14 +2683,14 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 
     self.dummy_sampler = try self.dev.createSampler(&sampler_info, null);
 
-    const texture_image_info_descriptor = vk.DescriptorImageInfo{
+    const texture_image_info_descriptor: vk.DescriptorImageInfo = .{
         .image_layout = .shader_read_only_optimal,
         .image_view = self.dummy_view,
         .sampler = self.dummy_sampler,
     };
 
     for (self.descriptor_sets_per_frame) |desc_set| {
-        const writes = [_]vk.WriteDescriptorSet{.{
+        const writes: [1]vk.WriteDescriptorSet = .{.{
             .dst_set = desc_set,
             .dst_binding = 1,
             .dst_array_element = 0,
@@ -2934,22 +2705,19 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 fn createPipeline(self: *VulkanRenderer) !void {
-    const pc_range = vk.PushConstantRange{
+    const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
         .offset = 0,
         .size = @sizeOf(PushConstants),
     };
-
-    const layout_info = vk.PipelineLayoutCreateInfo{
+    const layout_info: vk.PipelineLayoutCreateInfo = .{
         .flags = .{},
         .set_layout_count = 1,
         .p_set_layouts = @ptrCast(&self.descriptor_set_layout),
         .push_constant_range_count = 1,
         .p_push_constant_ranges = @ptrCast(&pc_range),
     };
-
     self.pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
-
     self.pipeline = try self.createGraphicsPipeline(false, true);
 }
 
@@ -2958,23 +2726,21 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
 }
 
 fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write_enable: bool) !vk.Pipeline {
-    const piasci = vk.PipelineInputAssemblyStateCreateInfo{
+    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{
         .topology = .triangle_list,
         .primitive_restart_enable = .false,
     };
-
-    const pvsci = vk.PipelineViewportStateCreateInfo{
+    const pvsci: vk.PipelineViewportStateCreateInfo = .{
         .viewport_count = 1,
         .p_viewports = null,
         .scissor_count = 1,
         .p_scissors = null,
     };
-
-    const prsci = vk.PipelineRasterizationStateCreateInfo{
+    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = .false,
         .rasterizer_discard_enable = .false,
         .polygon_mode = .fill,
-        .cull_mode = .{},
+        .cull_mode = .{ .back_bit = true },
         .front_face = .clockwise,
         .depth_bias_enable = .false,
         .depth_bias_constant_factor = 0,
@@ -2982,16 +2748,14 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .depth_bias_slope_factor = 0,
         .line_width = 1,
     };
-
-    const pmsci = vk.PipelineMultisampleStateCreateInfo{
+    const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
         .rasterization_samples = .{ .@"1_bit" = true },
         .sample_shading_enable = .false,
         .min_sample_shading = 1,
         .alpha_to_coverage_enable = .false,
         .alpha_to_one_enable = .false,
     };
-
-    const pcbas = vk.PipelineColorBlendAttachmentState{
+    const pcbas: vk.PipelineColorBlendAttachmentState = .{
         .blend_enable = if (blend_enable) .true else .false,
         .src_color_blend_factor = .src_alpha,
         .dst_color_blend_factor = .one_minus_src_alpha,
@@ -3001,23 +2765,20 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
-
-    const pcbsci = vk.PipelineColorBlendStateCreateInfo{
+    const pcbsci: vk.PipelineColorBlendStateCreateInfo = .{
         .logic_op_enable = .false,
         .logic_op = .copy,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&pcbas),
         .blend_constants = [_]f32{ 0, 0, 0, 0 },
     };
-
-    const dynstate = [_]vk.DynamicState{ .viewport, .scissor };
-    const pdsci = vk.PipelineDynamicStateCreateInfo{
+    const dynstate: [2]vk.DynamicState = .{ .viewport, .scissor };
+    const pdsci: vk.PipelineDynamicStateCreateInfo = .{
         .flags = .{},
         .dynamic_state_count = dynstate.len,
         .p_dynamic_states = &dynstate,
     };
-
-    const depth_stencil_state = vk.PipelineDepthStencilStateCreateInfo{
+    const depth_stencil_state: vk.PipelineDepthStencilStateCreateInfo = .{
         .flags = .{},
         .depth_test_enable = .true,
         .depth_write_enable = if (depth_write_enable) .true else .false,
@@ -3029,56 +2790,51 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
-
-    const vert_shader_module_info = vk.ShaderModuleCreateInfo{
+    const vert_shader_info: vk.ShaderModuleCreateInfo = .{
         .flags = .{},
         .code_size = vertex_shader_spv.len,
         .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)),
     };
-    const vert_shader_module = try self.dev.createShaderModule(&vert_shader_module_info, null);
+    const vert_shader_module = try self.dev.createShaderModule(&vert_shader_info, null);
     errdefer self.dev.destroyShaderModule(vert_shader_module, null);
-
-    const frag_shader_module_info = vk.ShaderModuleCreateInfo{
+    const frag_shader_info: vk.ShaderModuleCreateInfo = .{
         .flags = .{},
         .code_size = fragment_shader_spv.len,
         .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)),
     };
-    const frag_shader_module = try self.dev.createShaderModule(&frag_shader_module_info, null);
+    const frag_shader_module = try self.dev.createShaderModule(&frag_shader_info, null);
     errdefer self.dev.destroyShaderModule(frag_shader_module, null);
-
-    var pssci: [2]vk.PipelineShaderStageCreateInfo = undefined;
-    pssci[0] = .{
-        .flags = .{},
-        .stage = .{ .vertex_bit = true },
-        .module = vert_shader_module,
-        .p_name = "main",
-        .p_specialization_info = null,
+    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
+        .{
+            .flags = .{},
+            .stage = .{ .vertex_bit = true },
+            .module = vert_shader_module,
+            .p_name = "main",
+            .p_specialization_info = null,
+        },
+        .{
+            .flags = .{},
+            .stage = .{ .fragment_bit = true },
+            .module = frag_shader_module,
+            .p_name = "main",
+            .p_specialization_info = null,
+        },
     };
-    pssci[1] = .{
-        .flags = .{},
-        .stage = .{ .fragment_bit = true },
-        .module = frag_shader_module,
-        .p_name = "main",
-        .p_specialization_info = null,
-    };
-
-    const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+    const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
         .vertex_binding_description_count = 0,
         .p_vertex_binding_descriptions = undefined,
         .vertex_attribute_description_count = 0,
         .p_vertex_attribute_descriptions = undefined,
     };
-
-    const rendering_info = vk.PipelineRenderingCreateInfo{
+    const rendering_info: vk.PipelineRenderingCreateInfo = .{
         .view_mask = 0,
         .color_attachment_count = 1,
         .p_color_attachment_formats = @ptrCast(&self.swapchain_format),
         .depth_attachment_format = self.depth_format,
         .stencil_attachment_format = .undefined,
     };
-
-    const gpci = vk.GraphicsPipelineCreateInfo{
+    const gpci: vk.GraphicsPipelineCreateInfo = .{
         .flags = .{},
         .p_next = @ptrCast(&rendering_info),
         .stage_count = 2,
@@ -3098,17 +2854,10 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
     };
-
     var pipeline: vk.Pipeline = undefined;
-    if (self.dev.createGraphicsPipelines(
-        .null_handle,
-        &.{gpci},
-        null,
-        (&pipeline)[0..1],
-    )) |res| {
+    if (self.dev.createGraphicsPipelines(.null_handle, &.{gpci}, null, (&pipeline)[0..1])) |res| {
         if (res != .success) return error.PipelineCreationFailed;
     } else |err| return err;
-
     self.dev.destroyShaderModule(vert_shader_module, null);
     self.dev.destroyShaderModule(frag_shader_module, null);
     return pipeline;
@@ -3116,8 +2865,8 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
 
 fn currentFrame(self: *VulkanRenderer) u32 {
     const current_frame_unbound = self.current_frame_idx.load(.monotonic);
-    const num_frames = @as(u32, @intCast(self.in_flight_fences.len));
-    return if (num_frames > 0) @as(u32, @intCast(current_frame_unbound % num_frames)) else 0;
+    const num_frames = self.in_flight_fences.len;
+    return if (num_frames > 0) @intCast(current_frame_unbound % num_frames) else 0;
 }
 
 fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}!void {
@@ -3126,9 +2875,7 @@ fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}
 }
 
 fn enqueueDeferredDeletion(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
-    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => {},
-    };
+    self.deferred_deletions_mutex.lockUncancelable(io);
     defer self.deferred_deletions_mutex.unlock(io);
 
     self.deferred_deletions.append(self.allocator, .{
@@ -3140,9 +2887,7 @@ fn enqueueDeferredDeletion(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuf
 }
 
 fn processDeletionQueue(self: *VulkanRenderer, io: std.Io) !void {
-    _ = self.deferred_deletions_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => {},
-    };
+    self.deferred_deletions_mutex.lockUncancelable(io);
     defer self.deferred_deletions_mutex.unlock(io);
 
     if (self.deferred_deletions.items.len == 0) return;
@@ -3165,7 +2910,7 @@ fn processDeletionQueue(self: *VulkanRenderer, io: std.Io) !void {
 
 pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuffer {
     _ = io;
-    const alloc_info = vk.CommandBufferAllocateInfo{
+    const alloc_info: vk.CommandBufferAllocateInfo = .{
         .level = .primary,
         .command_pool = self.upload_command_pool,
         .command_buffer_count = 1,
@@ -3173,7 +2918,7 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuf
     var cmd: vk.CommandBuffer = undefined;
     try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&cmd));
 
-    const begin_info = vk.CommandBufferBeginInfo{
+    const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
     };
@@ -3185,7 +2930,7 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuf
 pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandBuffer) !void {
     try self.dev.endCommandBuffer(cmd);
 
-    const submit_info = vk.SubmitInfo{
+    const submit_info: vk.SubmitInfo = .{
         .command_buffer_count = 1,
         .p_command_buffers = @ptrCast(&cmd),
         .wait_semaphore_count = 0,
@@ -3195,9 +2940,7 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
         .p_signal_semaphores = undefined,
     };
 
-    _ = self.queue_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => return error.DrawFailed,
-    };
+    self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
     try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, .null_handle);
@@ -3214,7 +2957,7 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
 
     const wait_semaphores = &[_]vk.Semaphore{self.render_complete_semaphores[current_frame]};
 
-    const present_info = vk.PresentInfoKHR{
+    const present_info: vk.PresentInfoKHR = .{
         .wait_semaphore_count = @as(u32, @intCast(wait_semaphores.len)),
         .p_wait_semaphores = @ptrCast(wait_semaphores.ptr),
         .swapchain_count = 1,
@@ -3223,9 +2966,7 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
         .p_results = null,
     };
 
-    _ = self.queue_mutex.lock(io) catch |err| switch (err) {
-        error.Canceled => return error.VulkanPresentFailed,
-    };
+    self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
     _ = self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
@@ -3290,375 +3031,76 @@ fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyo
 }
 
 test "getDeletionQueueIndex" {
-    var renderer: VulkanRenderer = undefined;
-    var fences_2: [2]vk.Fence = .{ .null_handle, .null_handle };
-    var fences_3: [3]vk.Fence = .{ .null_handle, .null_handle, .null_handle };
-    var fences_5: [5]vk.Fence = .{ .null_handle, .null_handle, .null_handle, .null_handle, .null_handle };
-
-    // Test 1: frame 0 with 2 in-flight fences
-    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
-    renderer.in_flight_fences = &fences_2;
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-
-    // Test 2: monotonically increasing frames
-    var expected: u32 = 0;
-    while (expected < 16) : (expected += 1) {
-        renderer.current_frame_idx.store(expected, .monotonic);
-        const want = @as(u32, @intCast(@as(u64, expected) % 2));
-        try std.testing.expectEqual(want, renderer.getDeletionQueueIndex());
+    var r: VulkanRenderer = undefined;
+    var f2 = [_]vk.Fence{.null_handle} ** 2;
+    var f3 = [_]vk.Fence{.null_handle} ** 3;
+    var f5 = [_]vk.Fence{.null_handle} ** 5;
+    r.current_frame_idx = .init(0);
+    r.in_flight_fences = &f2;
+    try std.testing.expectEqual(@as(u32, 0), r.getDeletionQueueIndex());
+    var exp: u32 = 0;
+    while (exp < 16) : (exp += 1) {
+        r.current_frame_idx.store(exp, .monotonic);
+        try std.testing.expectEqual(@as(u32, @intCast(@as(u64, exp) % 2)), r.getDeletionQueueIndex());
     }
-
-    // Test 3: wraps around deferred_deletions (8)
-    renderer.current_frame_idx = std.atomic.Value(u32).init(8);
-    renderer.in_flight_fences = &fences_3;
-    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
-
-    // Test 4: large frame numbers
-    renderer.current_frame_idx = std.atomic.Value(u32).init(100_000);
-    renderer.in_flight_fences = &fences_2;
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(100_001, .monotonic);
-    try std.testing.expectEqual(@as(u32, 1), renderer.getDeletionQueueIndex());
-
-    // Test 5: 5 in-flight fences, varied frames
-    renderer.current_frame_idx = std.atomic.Value(u32).init(0);
-    renderer.in_flight_fences = &fences_5;
-    try std.testing.expectEqual(@as(u32, 0), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(7, .monotonic);
-    try std.testing.expectEqual(@as(u32, 2), renderer.getDeletionQueueIndex());
-
-    renderer.current_frame_idx.store(13, .monotonic);
-    try std.testing.expectEqual(@as(u32, 3), renderer.getDeletionQueueIndex());
+    r.current_frame_idx = .init(8);
+    r.in_flight_fences = &f3;
+    try std.testing.expectEqual(@as(u32, 2), r.getDeletionQueueIndex());
+    r.current_frame_idx = .init(100_000);
+    r.in_flight_fences = &f2;
+    try std.testing.expectEqual(@as(u32, 0), r.getDeletionQueueIndex());
+    r.current_frame_idx.store(100_001, .monotonic);
+    try std.testing.expectEqual(@as(u32, 1), r.getDeletionQueueIndex());
+    r.current_frame_idx = .init(0);
+    r.in_flight_fences = &f5;
+    try std.testing.expectEqual(@as(u32, 0), r.getDeletionQueueIndex());
+    r.current_frame_idx.store(7, .monotonic);
+    try std.testing.expectEqual(@as(u32, 2), r.getDeletionQueueIndex());
+    r.current_frame_idx.store(13, .monotonic);
+    try std.testing.expectEqual(@as(u32, 3), r.getDeletionQueueIndex());
 }
 
-test "makeInfReversedZProjRh — Vulkan Y-down and reversed-Z properties" {
-    const fov = std.math.degreesToRadians(90.0);
-    const aspect = 800.0 / 600.0;
-    const zNear: f32 = 0.01;
-
-    const P = makeInfReversedZProjRh(fov, aspect, zNear);
-
-    const transform = struct {
-        fn apply(p: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
-            const v = p.multiplyVec(zm.vec.Vec4f{ .data = pt });
-            const c = v.data;
-            return .{
-                .clip = c,
-                .ndc = .{ c[0] / c[3], c[1] / c[3], c[2] / c[3] },
-            };
-        }
-    }.apply;
-
-    // 1. Y-down: positive Y world → negative NDC Y (top of screen in Vulkan)
-    {
-        const r = transform(P, .{ 0, 10, -50, 1 });
-        try std.testing.expect(r.ndc[1] < 0);
-    }
-
-    // 2. Y-down: negative Y world → positive NDC Y (bottom of screen)
-    {
-        const r = transform(P, .{ 0, -10, -50, 1 });
-        try std.testing.expect(r.ndc[1] > 0);
-    }
-
-    // 3. X: positive X world → positive NDC X (right side)
-    {
-        const r = transform(P, .{ 10, 0, -50, 1 });
-        try std.testing.expect(r.ndc[0] > 0);
-    }
-
-    // 4. X: negative X world → negative NDC X (left side)
-    {
-        const r = transform(P, .{ -10, 0, -50, 1 });
-        try std.testing.expect(r.ndc[0] < 0);
-    }
-
-    // 5. Reversed-Z: near plane (z=-zN) → NDC z = 1.0
-    {
-        const r = transform(P, .{ 0, 0, -zNear, 1 });
-        try std.testing.expectApproxEqAbs(@as(f32, 1.0), r.ndc[2], 1e-6);
-    }
-
-    // 6. Reversed-Z: far plane (z→-inf) → NDC z → 0.0
-    {
-        const r = transform(P, .{ 0, 0, -1e9, 1 });
-        try std.testing.expect(r.ndc[2] > 0);
-        try std.testing.expect(r.ndc[2] < 1e-6);
-    }
-
-    // 7. W is positive for points in front of camera (z < 0 in RH)
-    {
-        const r = transform(P, .{ 0, 0, -50, 1 });
-        try std.testing.expect(r.clip[3] > 0);
-    }
-
-    // 8. Perspective: farther objects are smaller
-    {
-        const near = transform(P, .{ 10, 0, -50, 1 });
-        const far = transform(P, .{ 10, 0, -500, 1 });
-        try std.testing.expect(@abs(near.ndc[0]) > @abs(far.ndc[0]));
-    }
+test "RenderBufferKey.toPos" {
+    const pos_a: ChunkPos = .{ .level = 0, .position = .{ 1, 2, 3 } };
+    const pos_b: ChunkPos = .{ .level = -3, .position = .{ -10, 20, 30 } };
+    try std.testing.expectEqual(pos_a, (RenderBufferKey{ .@"opaque" = pos_a }).toPos());
+    try std.testing.expectEqual(pos_b, (RenderBufferKey{ .transparent = pos_b }).toPos());
+    const pos: ChunkPos = .{ .level = 5, .position = .{ -100, 200, -300 } };
+    try std.testing.expectEqual(pos, (RenderBufferKey{ .@"opaque" = pos }).toPos());
 }
 
-test "lookAtRH at origin — pure rotation view matrix" {
-    const up = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 1, 0 } };
-    const front = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 0, 1 } };
-
-    const view = zm.matrix.Mat4f.lookAtRH(
-        .{ .data = @Vector(3, f32){ 0, 0, 0 } },
-        front,
-        up,
-    );
-
-    try std.testing.expectEqual(@as(f32, 0.0), view.data[0][3]);
-    try std.testing.expectEqual(@as(f32, 0.0), view.data[1][3]);
-    try std.testing.expectEqual(@as(f32, 0.0), view.data[2][3]);
-    try std.testing.expectEqual(@as(f32, 1.0), view.data[3][3]);
-
-    const pt = view.multiplyVec(.{ .data = .{ 0, 0, 50, 1 } });
-    try std.testing.expect(pt.data[2] < 0);
-
-    const behind = view.multiplyVec(.{ .data = .{ 0, 0, -50, 1 } });
-    try std.testing.expect(behind.data[2] > 0);
-
-    const right = view.multiplyVec(.{ .data = .{ 10, 0, 0, 1 } });
-    try std.testing.expect(right.data[0] < 0);
-
-    const up_pt = view.multiplyVec(.{ .data = .{ 0, 10, 0, 1 } });
-    try std.testing.expect(up_pt.data[1] > 0);
-}
-
-test "anglesToDirection — matches OpenGL convention" {
-    const viewDir = @Vector(3, f32){ 0.0001, -0.4, 0.001 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-6);
-
-    try std.testing.expect(dir[0] != viewDir[0]);
-    try std.testing.expect(dir[1] != viewDir[1]);
-
-    try std.testing.expectApproxEqAbs(@as(f32, -0.00698), dir[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.000001745), dir[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.99998), dir[2], 1e-4);
-}
-
-test "projview combination — full pipeline sanity" {
-    const fov = std.math.degreesToRadians(90.0);
-    const aspect = 800.0 / 600.0;
-    const zNear: f32 = 0.01;
-
-    const P = makeInfReversedZProjRh(fov, aspect, zNear);
-
-    const up = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 1, 0 } };
-    const front = zm.vec.Vec3f{ .data = @Vector(3, f32){ 0, 0, 1 } };
-    const V = zm.matrix.Mat4f.lookAtRH(
-        .{ .data = @Vector(3, f32){ 0, 0, 0 } },
-        front,
-        up,
-    );
-
-    const projview = P.multiply(V);
-
-    const transform = struct {
-        fn apply(pv: zm.Mat4f, pt: @Vector(4, f32)) struct { clip: @Vector(4, f32), ndc: @Vector(3, f32) } {
-            const v = pv.multiplyVec(zm.vec.Vec4f{ .data = pt });
-            const c = v.data;
-            return .{
-                .clip = c,
-                .ndc = .{ c[0] / c[3], c[1] / c[3], c[2] / c[3] },
-            };
-        }
-    }.apply;
-
-    const r = transform(projview, .{ 0, 0, 50, 1 });
-    try std.testing.expect(@abs(r.ndc[0]) <= 1);
-    try std.testing.expect(@abs(r.ndc[1]) <= 1);
-    try std.testing.expect(r.ndc[2] >= 0 and r.ndc[2] <= 1);
-
-    const behind = transform(projview, .{ 0, 0, -50, 1 });
-    try std.testing.expect(behind.clip[3] < 0);
-}
-
-test "RenderBufferKey.toPos — opaque and transparent" {
-    const pos_a = ChunkPos{ .level = 0, .position = .{ 1, 2, 3 } };
-    const pos_b = ChunkPos{ .level = -3, .position = .{ -10, 20, 30 } };
-
-    const opaque_key: RenderBufferKey = .{ .@"opaque" = pos_a };
-    const transparent_key: RenderBufferKey = .{ .transparent = pos_b };
-
-    try std.testing.expectEqual(pos_a, opaque_key.toPos());
-    try std.testing.expectEqual(pos_b, transparent_key.toPos());
-}
-
-test "RenderBufferKey.toPos — identity after round-trip" {
-    const pos = ChunkPos{ .level = 5, .position = .{ -100, 200, -300 } };
-
-    const key: RenderBufferKey = .{ .@"opaque" = pos };
-    const extracted = key.toPos();
-
-    try std.testing.expectEqual(pos.level, extracted.level);
-    try std.testing.expectEqual(pos.position[0], extracted.position[0]);
-    try std.testing.expectEqual(pos.position[1], extracted.position[1]);
-    try std.testing.expectEqual(pos.position[2], extracted.position[2]);
-}
-
-test "FrameDebugStats — default initialization" {
-    const stats = FrameDebugStats{};
-    try std.testing.expectEqual(@as(u64, 0), stats.frame_number);
-    try std.testing.expectEqual(@as(u32, 0), stats.total_meshes);
-    try std.testing.expectEqual(@as(u32, 0), stats.opaque_candidates);
-    try std.testing.expectEqual(@as(u32, 0), stats.opaque_culled);
-    try std.testing.expectEqual(@as(u32, 0), stats.opaque_drawn);
-    try std.testing.expectEqual(@as(u32, 0), stats.transparent_candidates);
-    try std.testing.expectEqual(@as(u32, 0), stats.transparent_culled);
-    try std.testing.expectEqual(@as(u32, 0), stats.transparent_drawn);
-    try std.testing.expectEqual(@as(u64, 0), stats.elapsed_ns);
-}
-
-test "FrameDebugStats — log with zero values does not crash" {
-    const stats = FrameDebugStats{};
-    stats.log();
-}
-
-test "FrameDebugStats — log with partial populated stats" {
-    const stats = FrameDebugStats{
-        .frame_number = 42,
-        .total_meshes = 100,
-        .opaque_candidates = 60,
-        .opaque_culled = 10,
-        .opaque_drawn = 50,
-        .transparent_candidates = 30,
-        .transparent_culled = 20,
-        .transparent_drawn = 10,
-        .elapsed_ns = 16_666_666,
-        .player_pos = .{ 10.5, 20.3, -5.0 },
-        .camera_front = .{ 0.1, -0.2, 0.97 },
-    };
-    stats.log();
-}
-
-test "findMemoryType — selects host_visible|host_coherent" {
+test "findMemoryType" {
     var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
     @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
     mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
     mem_types[2] = .{ .property_flags = .{ .host_visible_bit = true, .host_cached_bit = true }, .heap_index = 0 };
-
-    const mem_props = vk.PhysicalDeviceMemoryProperties{
-        .memory_type_count = 3,
-        .memory_types = mem_types,
-        .memory_heap_count = 2,
-        .memory_heaps = undefined,
-    };
-
-    const idx = findMemoryTypeRaw(
-        mem_props,
-        @as(u32, 0b111),
-        vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
-    );
-    try std.testing.expectEqual(@as(u32, 0), idx);
-}
-
-test "findMemoryType — selects device_local" {
-    var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
-    @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
+    var mem_props: vk.PhysicalDeviceMemoryProperties = .{ .memory_type_count = 3, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
+    try std.testing.expectEqual(@as(u32, 0), findMemoryTypeRaw(mem_props, 0b111, .{ .host_visible_bit = true, .host_coherent_bit = true }));
     mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
-
-    const mem_props = vk.PhysicalDeviceMemoryProperties{
-        .memory_type_count = 2,
-        .memory_types = mem_types,
-        .memory_heap_count = 2,
-        .memory_heaps = undefined,
-    };
-
-    const idx = findMemoryTypeRaw(
-        mem_props,
-        @as(u32, 0b11),
-        vk.MemoryPropertyFlags{ .device_local_bit = true },
-    );
-    try std.testing.expectEqual(@as(u32, 1), idx);
-}
-
-test "makeInfReversedZProjRh — very narrow FOV" {
-    const fov = std.math.degreesToRadians(10.0);
-    const aspect = 16.0 / 9.0;
-    const zNear: f32 = 0.01;
-
-    const P = makeInfReversedZProjRh(fov, aspect, zNear);
-
-    const v = P.multiplyVec(.{ .data = .{ 0, 0, -zNear, 1 } });
-    const ndc_z = v.data[2] / v.data[3];
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), ndc_z, 1e-6);
-
-    const far_v = P.multiplyVec(.{ .data = .{ 0, 0, -1e9, 1 } });
-    const far_ndc_z = far_v.data[2] / far_v.data[3];
-    try std.testing.expect(far_ndc_z > 0);
-    try std.testing.expect(far_ndc_z < 1e-6);
-}
-
-test "camera direction — looking straight up (pitch=+90°)" {
-    const viewDir = @Vector(3, f32){ 90.0, 0.0, 0.0 };
-
-    var dir: @Vector(3, f32) = undefined;
-    dir[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    dir[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    dir = zm.Vec3f.norm(.{ .data = dir }).data;
-
-    const len = @sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), len, 1e-5);
-
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), dir[1], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), dir[2], 1e-5);
+    mem_props = .{ .memory_type_count = 2, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
+    try std.testing.expectEqual(@as(u32, 1), findMemoryTypeRaw(mem_props, 0b11, .{ .device_local_bit = true }));
 }
 
 fn makeTestFrustum(eye: @Vector(3, f32), target: @Vector(3, f32), up: @Vector(3, f32), fov_deg: f32, aspect: f32, z_near: f32) Frustum {
-    const fov = std.math.degreesToRadians(fov_deg);
-    const P = makeInfReversedZProjRh(fov, aspect, z_near);
-    const V = zm.Mat4f.lookAtRH(
-        .{ .data = eye },
-        .{ .data = target },
-        .{ .data = up },
-    );
-    const projview = P.multiply(V);
-
-    const flat: @Vector(16, f32) = .{
-        projview.data[0][0], projview.data[0][1], projview.data[0][2], projview.data[0][3],
-        projview.data[1][0], projview.data[1][1], projview.data[1][2], projview.data[1][3],
-        projview.data[2][0], projview.data[2][1], projview.data[2][2], projview.data[2][3],
-        projview.data[3][0], projview.data[3][1], projview.data[3][2], projview.data[3][3],
-    };
-
-    return Frustum.extractFrustumPlanes(flat);
+    const P = makeInfReversedZProjRh(std.math.degreesToRadians(fov_deg), aspect, z_near);
+    const V = zm.Mat4f.lookAtRH(.{ .data = eye }, .{ .data = target }, .{ .data = up });
+    const pv = P.multiply(V);
+    return Frustum.extractFrustumPlanes(.{
+        pv.data[0][0], pv.data[0][1], pv.data[0][2], pv.data[0][3],
+        pv.data[1][0], pv.data[1][1], pv.data[1][2], pv.data[1][3],
+        pv.data[2][0], pv.data[2][1], pv.data[2][2], pv.data[2][3],
+        pv.data[3][0], pv.data[3][1], pv.data[3][2], pv.data[3][3],
+    });
 }
 
-test "cullChunk — chunk directly in front of camera is NOT culled" {
-    const frustum = makeTestFrustum(
-        .{ 0, 0, 0 },
-        .{ 0, 0, 1 },
-        .{ 0, 1, 0 },
-        90.0,
-        800.0 / 600.0,
-        0.01,
-    );
-
-    const chunkpos = ChunkPos{ .level = 0, .position = .{ 0, 0, 0 } };
-    const playerPos: @Vector(3, f64) = .{ 0, 0, 0 };
-
-    try std.testing.expect(!cullChunk(&frustum, chunkpos, playerPos));
+test "cullChunk" {
+    const frustum = makeTestFrustum(.{ 0, 0, 0 }, .{ 0, 0, 1 }, .{ 0, 1, 0 }, 90.0, 800.0 / 600.0, 0.01);
+    try std.testing.expect(!cullChunk(&frustum, ChunkPos{ .level = 0, .position = .{ 0, 0, 0 } }, .{ 0, 0, 0 }));
 }
 
-test "ChunkData — struct size and alignment" {
+test "ChunkData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
 }

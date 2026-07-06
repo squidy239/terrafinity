@@ -359,7 +359,7 @@ pub fn init(
         .entity_registry = .init(),
     };
 
-    game.vulkan_renderer = try Renderer.Vulkan.initWithOptions(io, allocator, window, @ptrCast(&game.options.render_options), game.options_lock);
+    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, window, @ptrCast(&game.options.render_options), game.options_lock);
     errdefer game.vulkan_renderer.deinit(io);
 
     game.renderer = game.vulkan_renderer.interface;
