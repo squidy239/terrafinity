@@ -9,6 +9,7 @@ const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 const zm = @import("zm");
+const options = @import("options");
 
 const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const Mesher = @import("../../Mesher.zig");
@@ -558,7 +559,7 @@ pending_uploads_mutex: std.Io.Mutex = .init,
 deferred_deletions_mutex: std.Io.Mutex = .init,
 
 init_time_ns: u64 = 0,
-frame_number: u64 = 0,
+frame_number: std.atomic.Value(u64) = .init(0),
 frame_stats: FrameDebugStats = .{},
 
 pub const RenderOptions = struct {
@@ -723,6 +724,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     _ = try self.instance.enumeratePhysicalDevices(&pdev_count, pdevs.ptr);
 
     var selected_pdev: vk.PhysicalDevice = .null_handle;
+    var best_device_score: u32 = 0;
     for (pdevs) |pdev| {
         var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
             .dynamic_rendering = .false,
@@ -784,8 +786,24 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
                 defer allocator.free(present_modes);
 
                 if (surface_formats.len > 0 and present_modes.len > 0) {
-                    selected_pdev = pdev;
-                    break;
+                    const props = self.instance.getPhysicalDeviceProperties(pdev);
+                    var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
+
+                    // ThreadSanitizer has known internal runtime crashes/assertion failures
+                    // (tsan_interceptors_posix.cpp:2156 "((thr->slot)) != (0)") when using
+                    // NVIDIA proprietary driver-level threads. If TSan is enabled, we avoid
+                    // selecting NVIDIA GPUs to allow thread sanitization verification to succeed.
+                    if (options.sanitize_thread) {
+                        const device_name = std.mem.sliceTo(&props.device_name, 0);
+                        if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) {
+                            score = 1;
+                        }
+                    }
+
+                    if (score > best_device_score) {
+                        best_device_score = score;
+                        selected_pdev = pdev;
+                    }
                 }
             }
         }
@@ -1028,7 +1046,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     try self.createSwapchain(io);
 
     try self.createDescriptorSetLayout();
-    try self.createDescriptorPoolAndSets(io);
+    try self.createDescriptorPoolAndSets(io, false);
 
     {
         self.texture_manager = .init(self, self.render_options.gamma_correction);
@@ -1690,14 +1708,15 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
 
-    self.frame_number += 1;
-    self.frame_stats.frame_number = self.frame_number;
+    const f_num = self.frame_number.load(.monotonic) + 1;
+    self.frame_number.store(f_num, .monotonic);
+    self.frame_stats.frame_number = f_num;
     self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = viewpos;
     self.frame_stats.camera_front = self.camera_front;
     self.frame_stats.elapsed_ns = frame_elapsed_ns;
 
-    if (self.frame_number % 60 == 0) {
+    if (f_num % 60 == 0) {
         self.frame_stats.log();
     }
 
@@ -1789,7 +1808,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const wait_semaphores: [1]vk.Semaphore = .{self.image_acquired_semaphores[current_frame]};
 
     const signal_sems = [_]vk.Semaphore{ self.render_complete_semaphores[current_frame], self.graphics_timeline_semaphore };
-    const signal_values = [_]u64{ 0, self.frame_number };
+    const signal_values = [_]u64{ 0, self.frame_number.load(.monotonic) };
 
     const wait_values = [_]u64{0};
     var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
@@ -2065,26 +2084,21 @@ fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer,
     try self.dev.queueWaitIdle(self.graphics_queue);
 }
 
-pub fn findMemoryType(self: VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
     return findMemoryTypeRaw(self.mem_props, type_filter, properties);
 }
 
 fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
     try self.dev.deviceWaitIdle();
 
     try self.createSwapchain(io);
 }
 
 fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
-    {
-        self.queue_mutex.lockUncancelable(io);
-        defer self.queue_mutex.unlock(io);
-        self.dev.deviceWaitIdle() catch |err| {
-            std.log.err("destroyOldSwapchainResources: deviceWaitIdle failed: {any}", .{err});
-        };
-    }
+    _ = io;
+    self.dev.deviceWaitIdle() catch |err| {
+        std.log.err("destroyOldSwapchainResources: deviceWaitIdle failed: {any}", .{err});
+    };
 
     for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
     self.allocator.free(self.swapchain_images);
@@ -2152,6 +2166,9 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
 }
 
 fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
@@ -2342,7 +2359,7 @@ fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
     // Recreate descriptor pool and sets if they were previously created (i.e., this is
     // a resize, not the initial creation — descriptor_set_layout doesn't exist yet at init)
     if (self.descriptor_set_layout != .null_handle) {
-        try self.createDescriptorPoolAndSets(io);
+        try self.createDescriptorPoolAndSets(io, true);
         // Rebind the real block texture array to the new descriptor sets
         // (createDescriptorPoolAndSets writes the dummy white texture; overwrite with real one if loaded)
         if (self.texture_manager.texture_view != .null_handle) {
@@ -2453,7 +2470,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         };
         const color_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_barrier_arr);
-        try self.endSingleTimeCommands(io, cmd);
+        try self.endSingleTimeCommandsLocked(cmd);
     }
 
     const color_view_info: vk.ImageViewCreateInfo = .{
@@ -2529,7 +2546,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         };
         const depth_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, &depth_barrier_arr);
-        try self.endSingleTimeCommands(io, cmd);
+        try self.endSingleTimeCommandsLocked(cmd);
     }
 
     const depth_view_info: vk.ImageViewCreateInfo = .{
@@ -2560,7 +2577,7 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
     self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
 }
 
-fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
+fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io, locked: bool) !void {
     // Destroy any stale dummy textures from a previous call (swapchain recreation).
     // On first call during init they start as .null_handle so this is a no-op.
     self.destroyDummyResources();
@@ -2697,7 +2714,11 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io) !void {
         const to_shader_read: [1]vk.ImageMemoryBarrier = .{barrier};
         self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &to_shader_read);
 
-        try self.endSingleTimeCommands(io, cmd);
+        if (locked) {
+            try self.endSingleTimeCommandsLocked(cmd);
+        } else {
+            try self.endSingleTimeCommands(io, cmd);
+        }
     }
 
     const dummy_view_info: vk.ImageViewCreateInfo = .{
@@ -2934,7 +2955,7 @@ fn enqueueDeferredDeletion(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuf
 
     self.deferred_deletions.append(self.allocator, .{
         .mesh = mesh,
-        .graphics_timeline_value = self.frame_number,
+        .graphics_timeline_value = self.frame_number.load(.monotonic),
     }) catch |err| {
         std.log.err("enqueueDeferredDeletion: Out of memory appending: {any}", .{err});
     };
@@ -2982,7 +3003,7 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuf
     return cmd;
 }
 
-pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandBuffer) !void {
+pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !void {
     defer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
 
     try self.dev.endCommandBuffer(cmd);
@@ -2997,12 +3018,15 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
         .p_signal_semaphores = undefined,
     };
 
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-
     try self.dev.queueSubmit(self.graphics_queue, &.{submit_info}, .null_handle);
 
     try self.dev.queueWaitIdle(self.graphics_queue);
+}
+
+pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandBuffer) !void {
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+    try self.endSingleTimeCommandsLocked(cmd);
 }
 
 pub fn present(self: *VulkanRenderer, io: std.Io) !void {
