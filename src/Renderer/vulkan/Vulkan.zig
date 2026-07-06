@@ -494,11 +494,6 @@ depth_format: vk.Format = .undefined,
 
 texture_manager: textures.TextureArrayManager = undefined,
 
-dummy_image: vk.Image = .null_handle,
-dummy_memory: vk.DeviceMemory = .null_handle,
-dummy_view: vk.ImageView = .null_handle,
-dummy_sampler: vk.Sampler = .null_handle,
-
 image_acquired_semaphores: []vk.Semaphore = &.{},
 render_complete_semaphores: []vk.Semaphore = &.{},
 in_flight_fences: []vk.Fence = &.{},
@@ -863,6 +858,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     const device_extensions = [_][*:0]const u8{
         vk.extensions.khr_swapchain.name,
         vk.extensions.khr_dynamic_rendering.name,
+        vk.extensions.ext_robustness_2.name,
     };
 
     var unique_families: [3]u32 = undefined;
@@ -893,8 +889,14 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
 
     const queue_create_info_count = unique_count;
 
+    var robustness2_features: vk.PhysicalDeviceRobustness2FeaturesEXT = .{
+        .robust_buffer_access_2 = .false,
+        .robust_image_access_2 = .false,
+        .null_descriptor = .true,
+    };
     var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
         .dynamic_rendering = .true,
+        .p_next = @ptrCast(&robustness2_features),
     };
     var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{
         .synchronization_2 = .true,
@@ -1068,8 +1070,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
 
         try self.texture_manager.loadTextureDirectory(io, dir, allocator, ".png");
     }
-    // Destroy dummy placeholder textures now that real textures are loaded
-    self.destroyDummyResources();
 
     try self.createPipeline();
     try self.createTransparentPipeline();
@@ -1208,8 +1208,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     if (self.graphics_timeline_semaphore != .null_handle) {
         self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
     }
-
-    self.destroyDummyResources();
 
     self.texture_manager.destroyTextureArray();
 
@@ -2580,10 +2578,8 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
 }
 
 fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io, locked: bool) !void {
-    // Destroy any stale dummy textures from a previous call (swapchain recreation).
-    // On first call during init they start as .null_handle so this is a no-op.
-    self.destroyDummyResources();
-
+    _ = io;
+    _ = locked;
     const num_frames = self.swapchain_images.len;
     const pool_sizes: [2]vk.DescriptorPoolSize = .{
         .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) },
@@ -2599,9 +2595,6 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io, locked: bool) 
 
     self.descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
     errdefer {
-        // Clean up any dummy resources that may have been partially created,
-        // plus the descriptor pool itself, on any error during this function.
-        self.destroyDummyResources();
         if (self.descriptor_pool != .null_handle) {
             self.dev.destroyDescriptorPool(self.descriptor_pool, null);
             self.descriptor_pool = .null_handle;
@@ -2625,160 +2618,6 @@ fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io, locked: bool) 
         var desc_set: [1]vk.DescriptorSet = undefined;
         try self.dev.allocateDescriptorSets(&alloc_info, &desc_set);
         self.descriptor_sets_per_frame[i] = desc_set[0];
-    }
-
-    const dummy_staging_size: vk.DeviceSize = 256 * 4;
-
-    var staging_buffer_dummy: vk.Buffer = .null_handle;
-    var staging_memory_dummy: vk.DeviceMemory = .null_handle;
-    try self.createBuffer(dummy_staging_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer_dummy, &staging_memory_dummy);
-    defer {
-        if (staging_buffer_dummy != .null_handle) self.dev.destroyBuffer(staging_buffer_dummy, null);
-        if (staging_memory_dummy != .null_handle) self.dev.freeMemory(staging_memory_dummy, null);
-    }
-
-    const dummy_data = try self.dev.mapMemory(staging_memory_dummy, 0, dummy_staging_size, .{});
-    const mapped_slice = @as([*]u8, @ptrCast(dummy_data))[0..dummy_staging_size];
-    @memset(mapped_slice, 255);
-    self.dev.unmapMemory(staging_memory_dummy);
-
-    const dummy_image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
-        .image_type = .@"2d",
-        .extent = .{ .width = 1, .height = 1, .depth = 1 },
-        .mip_levels = 1,
-        .array_layers = 256,
-        .format = .r8g8b8a8_unorm,
-        .tiling = .optimal,
-        .initial_layout = .undefined,
-        .usage = .{ .transfer_dst_bit = true, .sampled_bit = true },
-        .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-
-    self.dummy_image = try self.dev.createImage(&dummy_image_info, null);
-
-    const dummy_mem_reqs = self.dev.getImageMemoryRequirements(self.dummy_image);
-    const dummy_alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = dummy_mem_reqs.size,
-        .memory_type_index = self.findMemoryType(dummy_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-    self.dummy_memory = try self.dev.allocateMemory(&dummy_alloc_info, null);
-    try self.dev.bindImageMemory(self.dummy_image, self.dummy_memory, 0);
-
-    {
-        const cmd = try self.beginSingleTimeCommands(io);
-
-        var barrier: vk.ImageMemoryBarrier = .{
-            .old_layout = .undefined,
-            .new_layout = .transfer_dst_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.dummy_image,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 256,
-            },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .transfer_write_bit = true },
-        };
-
-        const to_transfer_dst: [1]vk.ImageMemoryBarrier = .{barrier};
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &to_transfer_dst);
-
-        const copy_region: vk.BufferImageCopy = .{
-            .buffer_offset = 0,
-            .buffer_row_length = 0,
-            .buffer_image_height = 0,
-            .image_subresource = .{
-                .aspect_mask = .{ .color_bit = true },
-                .mip_level = 0,
-                .base_array_layer = 0,
-                .layer_count = 256,
-            },
-            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
-            .image_extent = .{ .width = 1, .height = 1, .depth = 1 },
-        };
-
-        self.dev.cmdCopyBufferToImage(cmd, staging_buffer_dummy, self.dummy_image, .transfer_dst_optimal, &[_]vk.BufferImageCopy{copy_region});
-
-        barrier.old_layout = .transfer_dst_optimal;
-        barrier.new_layout = .shader_read_only_optimal;
-        barrier.src_access_mask = .{ .transfer_write_bit = true };
-        barrier.dst_access_mask = .{ .shader_read_bit = true };
-        barrier.image = self.dummy_image;
-
-        const to_shader_read: [1]vk.ImageMemoryBarrier = .{barrier};
-        self.dev.cmdPipelineBarrier(cmd, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &to_shader_read);
-
-        if (locked) {
-            try self.endSingleTimeCommandsLocked(cmd);
-        } else {
-            try self.endSingleTimeCommands(io, cmd);
-        }
-    }
-
-    const dummy_view_info: vk.ImageViewCreateInfo = .{
-        .flags = .{},
-        .image = self.dummy_image,
-        .view_type = .@"2d_array",
-        .format = .r8g8b8a8_unorm,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 256,
-        },
-    };
-
-    self.dummy_view = try self.dev.createImageView(&dummy_view_info, null);
-
-    const sampler_info: vk.SamplerCreateInfo = .{
-        .flags = .{},
-        .mag_filter = .linear,
-        .min_filter = .linear,
-        .mipmap_mode = .nearest,
-        .address_mode_u = .repeat,
-        .address_mode_v = .repeat,
-        .address_mode_w = .repeat,
-        .mip_lod_bias = 0.0,
-        .anisotropy_enable = .false,
-        .max_anisotropy = 1.0,
-        .compare_enable = .false,
-        .compare_op = .always,
-        .min_lod = 0.0,
-        .max_lod = 0.0,
-        .border_color = .int_opaque_white,
-        .unnormalized_coordinates = .false,
-    };
-
-    self.dummy_sampler = try self.dev.createSampler(&sampler_info, null);
-
-    const texture_image_info_descriptor: vk.DescriptorImageInfo = .{
-        .image_layout = .shader_read_only_optimal,
-        .image_view = self.dummy_view,
-        .sampler = self.dummy_sampler,
-    };
-
-    for (self.descriptor_sets_per_frame) |desc_set| {
-        const writes: [1]vk.WriteDescriptorSet = .{.{
-            .dst_set = desc_set,
-            .dst_binding = 1,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .combined_image_sampler,
-            .p_image_info = @ptrCast(&texture_image_info_descriptor),
-            .p_buffer_info = undefined,
-            .p_texel_buffer_view = undefined,
-        }};
-        self.dev.updateDescriptorSets(&writes, null);
     }
 }
 
@@ -3073,16 +2912,6 @@ fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) v
 fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     return self.camera_front;
-}
-fn destroyDummyResources(self: *VulkanRenderer) void {
-    if (self.dummy_sampler != .null_handle) self.dev.destroySampler(self.dummy_sampler, null);
-    if (self.dummy_view != .null_handle) self.dev.destroyImageView(self.dummy_view, null);
-    if (self.dummy_image != .null_handle) self.dev.destroyImage(self.dummy_image, null);
-    if (self.dummy_memory != .null_handle) self.dev.freeMemory(self.dummy_memory, null);
-    self.dummy_sampler = .null_handle;
-    self.dummy_view = .null_handle;
-    self.dummy_image = .null_handle;
-    self.dummy_memory = .null_handle;
 }
 
 fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
