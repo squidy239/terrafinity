@@ -62,12 +62,7 @@ depth_texture: c_uint,
 render_options: *RenderOptions,
 render_options_lock: *std.Io.RwLock,
 
-pub const RenderOptions = struct {
-    draw_over: bool = false,
-    fov: f32 = 90.0,
-    day_length_sec: f32 = 60 * 5,
-    gamma_correction: bool = true,
-};
+pub const RenderOptions = Renderer.RenderOptions;
 
 pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, gl_options: wio.GlOptions, share_context: *wio.GlContext, proc_table: *const gl.ProcTable, render_options: *RenderOptions, render_options_lock: *std.Io.RwLock) !void {
     const cpu_count = try std.Thread.getCpuCount();
@@ -99,11 +94,9 @@ pub fn init(self: *@This(), io: std.Io, allocator: std.mem.Allocator, window: *w
             .userdata = @ptrCast(self),
             .vtable = &.{
                 .addChunk = vtableAddChunk,
-                .removeChunk = vtableRemoveChunk,
                 .draw = vtableDrawChunks,
                 .setViewport = vtableSetViewport,
                 .updateCameraDirection = vtableUpdateCameraDirection,
-                .getCameraFront = vtableGetCameraFront,
                 .forEachChunk = vtableForEachChunk,
             },
         },
@@ -222,28 +215,23 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
 }
 
-fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
+fn vtableUpdateCameraDirection(userdata: *Renderer.Implementation, viewDir: @Vector(3, f32)) void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     return self.updateCameraDirection(viewDir);
 }
 
-fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
+fn vtableAddChunk(userdata: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
-    return self.camera_front;
-}
+    self.ensureContext() catch return error.AddChunkFailed;
 
-const indexer = std.enums.EnumIndexer(World.Block);
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) error{ OutOfMemory, OutOfVideoMemory, Unexpected }!void {
-    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
-    self.ensureContext() catch return error.Unexpected;
-
+    const indexer = std.enums.EnumIndexer(World.Block);
     if (opaque_mesh.len > 0) {
         for (opaque_mesh) |*face| {
             face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
         }
         self.render_buffer.put(io, .{ .@"opaque" = chunk_pos }, std.mem.sliceAsBytes(opaque_mesh)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OutOfVideoMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.AddChunkFailed,
         };
     } else {
         self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
@@ -254,22 +242,12 @@ fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_
             face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
         }
         self.render_buffer.put(io, .{ .transparent = chunk_pos }, std.mem.sliceAsBytes(transparent_mesh)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OutOfVideoMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.AddChunkFailed,
         };
     } else {
         self.render_buffer.remove(io, .{ .transparent = chunk_pos });
     }
-}
-
-pub fn remove(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    self.render_buffer.remove(io, .{ .@"opaque" = chunk_pos });
-    self.render_buffer.remove(io, .{ .transparent = chunk_pos });
-}
-
-fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
-    const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
-    return self.remove(io, chunk_pos);
 }
 
 threadlocal var thread_index: ?usize = null;
@@ -282,7 +260,7 @@ fn ensureContext(self: *@This()) !void {
     gl.makeProcTableCurrent(self.proc_table);
 }
 
-fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+fn vtableDrawChunks(userdata: *Renderer.Implementation, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
@@ -318,7 +296,7 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
     gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
 }
 
-fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
+fn vtableSetViewport(userdata: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
@@ -327,7 +305,7 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
     self.viewport_pixels = viewport_pixels;
 }
 
-fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
+fn vtableForEachChunk(userdata: *Renderer.Implementation, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
     var it = self.render_buffer.map.iterator();
     defer it.deinit(io);

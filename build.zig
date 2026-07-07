@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         "-Werror",
         "-o",
     };
-    
+
     const vert_cmd = b.addSystemCommand(&shader_cmd);
     _ = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
     vert_cmd.addFileArg(b.path("src/Renderer/vulkan/vertexshader.vert"));

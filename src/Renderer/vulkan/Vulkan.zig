@@ -391,12 +391,7 @@ init_time_ns: u64 = 0,
 frame_number: std.atomic.Value(u64) = .init(0),
 frame_stats: FrameDebugStats = .{},
 
-pub const RenderOptions = struct {
-    draw_over: bool = false,
-    fov: f32 = 90.0,
-    day_length_sec: f32 = 60 * 5,
-    gamma_correction: bool = true,
-};
+pub const RenderOptions = Renderer.RenderOptions;
 
 fn getDeletionQueueIndex(self: *VulkanRenderer) u32 {
     const unbound = self.current_frame_idx.load(.monotonic);
@@ -940,11 +935,9 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
         .userdata = @ptrCast(self),
         .vtable = &.{
             .addChunk = vtableAddChunk,
-            .removeChunk = vtableRemoveChunk,
             .draw = vtableDrawChunks,
             .setViewport = vtableSetViewport,
             .updateCameraDirection = vtableUpdateCameraDirection,
-            .getCameraFront = vtableGetCameraFront,
             .forEachChunk = vtableForEachChunk,
         },
     };
@@ -1225,18 +1218,11 @@ fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpl
     }
 }
 
-fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{ OutOfMemory, OutOfVideoMemory, Unexpected })!void {
+fn vtableAddChunk(userdata: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.addChunk(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Unexpected,
-    };
-}
-
-fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void {
-    const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    self.addChunk(io, chunk_pos, &.{}, &.{}) catch |err| {
-        std.log.err("vtableRemoveChunk: Failed to queue removal: {any}", .{err});
+        error.Canceled => return error.Canceled,
+        else => return error.AddChunkFailed,
     };
 }
 
@@ -1744,7 +1730,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     }
 }
 
-fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+fn vtableDrawChunks(userdata: *Renderer.Implementation, io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.draw(io, viewpos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -2796,7 +2782,7 @@ pub fn present(self: *VulkanRenderer, io: std.Io) !void {
     _ = try self.dev.queuePresentKHR(self.present_queue, &present_info);
 }
 
-fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
+fn vtableSetViewport(userdata: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.viewport_pixels = viewport_pixels;
     if (viewport_pixels[0] != self.swapchain_extent.width or
@@ -2809,7 +2795,7 @@ fn vtableSetViewport(userdata: *anyopaque, viewport_pixels: @Vector(2, u32)) err
         self.swapchain_needs_recreate = true;
     }
 }
-fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) void {
+fn vtableUpdateCameraDirection(userdata: *Renderer.Implementation, viewDir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     // Convert viewDir (pitch, yaw, _) to a unit direction vector, matching OpenGL.
     self.camera_front[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
@@ -2817,12 +2803,8 @@ fn vtableUpdateCameraDirection(userdata: *anyopaque, viewDir: @Vector(3, f32)) v
     self.camera_front[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
     self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
 }
-fn vtableGetCameraFront(userdata: *anyopaque) @Vector(3, f32) {
-    const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    return self.camera_front;
-}
 
-fn vtableForEachChunk(userdata: *anyopaque, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
+fn vtableForEachChunk(userdata: *Renderer.Implementation, io: std.Io, callback_userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     var it = self.meshes.iterator();
     defer it.deinit(io);

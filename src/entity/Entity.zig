@@ -8,8 +8,10 @@ const World = @import("../world/World.zig");
 
 const Entity = @This();
 
+pub const Implementation = opaque {};
+
 type: Type,
-ptr: *anyopaque,
+ptr: *Implementation,
 ref_count: std.atomic.Value(u32),
 vtable: Interface,
 
@@ -19,8 +21,8 @@ pub const Interface = struct {
     /// Unloads the entity and frees all resources allocated by it.
     /// The entity ptr is not valid after this.
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
-    getPos: ?*const fn (self: *anyopaque, io: std.Io) @Vector(3, f64) = null,
-    draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
+    getPos: ?*const fn (self: *Implementation, io: std.Io) @Vector(3, f64) = null,
+    draw: ?*const fn (self: *Implementation, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };
 
 /// Removes a ref from entity when it returns.
@@ -74,7 +76,7 @@ pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
 
     const en = Entity{
         .type = @TypeOf(tempentity).Type,
-        .ptr = mem,
+        .ptr = @ptrCast(mem),
         .ref_count = .init(1),
         .vtable = mem.getInterface(),
     };

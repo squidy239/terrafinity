@@ -137,7 +137,7 @@ pub const Player = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
+    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.physics.mutex.lockUncancelable(io);
         defer self.physics.mutex.unlock(io);
@@ -260,7 +260,7 @@ pub const Explosive = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
+    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);

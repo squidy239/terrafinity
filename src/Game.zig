@@ -242,7 +242,7 @@ pub const Options = struct {
     sphere_size: u32 = 100,
     sphere_block: World.Block = .air,
 
-    render_options: Renderer.OpenGl.RenderOptions = .{},
+    render_options: Renderer.RenderOptions = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
         .highest_level = .{ .number = .{
@@ -572,7 +572,9 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     self.player.physics.mutex.lockUncancelable(io);
     const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
-    const looking = self.renderer.getCameraFront();
+    self.player.view_direction_mutex.lockUncancelable(io);
+    const looking = moveCameraFront(self.player.view_direction);
+    self.player.view_direction_mutex.unlock(io);
 
     try self.options_lock.lockShared(io);
     const sphere_size = self.options.sphere_size;
