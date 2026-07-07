@@ -132,9 +132,7 @@ const RetiredMeshEntry = struct {
 const CommandPoolReservoir = struct {
     pools: []vk.CommandPool = &.{},
     cmds: []vk.CommandBuffer = &.{},
-    used: []bool = &.{},
-    mutex: std.Io.Mutex = .init,
-    semaphore: std.Io.Semaphore = undefined,
+    used: []std.atomic.Value(bool) = &.{},
 
     pub const Borrowed = struct {
         pool: vk.CommandPool,
@@ -146,15 +144,12 @@ const CommandPoolReservoir = struct {
         errdefer allocator.free(self.pools);
         self.cmds = try allocator.alloc(vk.CommandBuffer, count);
         errdefer allocator.free(self.cmds);
-        self.used = try allocator.alloc(bool, count);
+        self.used = try allocator.alloc(std.atomic.Value(bool), count);
         errdefer allocator.free(self.used);
 
-        @memset(self.used, false);
-        self.semaphore = .{
-            .mutex = .init,
-            .cond = .init,
-            .permits = count,
-        };
+        for (self.used) |*u| {
+            u.* = .init(false);
+        }
 
         var i: usize = 0;
         errdefer {
@@ -190,45 +185,26 @@ const CommandPoolReservoir = struct {
         allocator.free(self.used);
     }
 
-    pub fn borrowPool(self: *CommandPoolReservoir, io: std.Io) !Borrowed {
-        {
-            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "CommandPoolReservoir_wait" });
-            defer zone.end();
-            try self.semaphore.wait(io);
-        }
-        errdefer self.semaphore.post(io);
-
-        {
-            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "CommandPoolReservoir_lock" });
-            defer zone.end();
-            try self.mutex.lock(io);
-        }
-        defer self.mutex.unlock(io);
-
+    pub fn tryBorrowPool(self: *CommandPoolReservoir) ?Borrowed {
         for (self.pools, 0..) |pool, i| {
-            if (!self.used[i]) {
-                self.used[i] = true;
+            if (self.used[i].cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
                 return Borrowed{
                     .pool = pool,
                     .cmd = self.cmds[i],
                 };
             }
         }
-        unreachable;
+        return null;
     }
 
     pub fn returnPool(self: *CommandPoolReservoir, io: std.Io, pool: vk.CommandPool) void {
-        {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-            for (self.pools, 0..) |p, i| {
-                if (p == pool) {
-                    self.used[i] = false;
-                    break;
-                }
+        _ = io;
+        for (self.pools, 0..) |p, i| {
+            if (p == pool) {
+                self.used[i].store(false, .release);
+                break;
             }
         }
-        self.semaphore.post(io);
     }
 };
 
@@ -409,6 +385,7 @@ queue_mutex: std.Io.Mutex = .init,
 upload_mutex: std.Io.Mutex = .init,
 
 retired_mutex: std.Io.Mutex = .init,
+retire_mutex: std.Io.Mutex = .init,
 
 init_time_ns: u64 = 0,
 frame_number: std.atomic.Value(u64) = .init(0),
@@ -1095,7 +1072,23 @@ pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_m
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
     defer zone.end();
 
-    const borrowed = try self.pool_reservoir.borrowPool(io);
+    var borrowed_opt: ?CommandPoolReservoir.Borrowed = null;
+    while (borrowed_opt == null) {
+        borrowed_opt = self.pool_reservoir.tryBorrowPool();
+        if (borrowed_opt == null) {
+            // Pool reservoir is exhausted. Flush the current batch to make room, then retire completed uploads.
+            {
+                self.submission_batch.mutex.lockUncancelable(io);
+                defer self.submission_batch.mutex.unlock(io);
+                if (self.submission_batch.count > 0) {
+                    try self.submitBatchLocked(io);
+                }
+            }
+            try self.retireCompletedUploads(io);
+            try std.Io.sleep(io, .fromNanoseconds(0), .awake);
+        }
+    }
+    const borrowed = borrowed_opt.?;
     const pool = borrowed.pool;
     const cmd = borrowed.cmd;
     errdefer self.pool_reservoir.returnPool(io, pool);
@@ -1273,6 +1266,9 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) 
 fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "retireCompletedUploads" });
     defer zone.end();
+
+    self.retire_mutex.lockUncancelable(io);
+    defer self.retire_mutex.unlock(io);
 
     const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer_semaphore);
 
