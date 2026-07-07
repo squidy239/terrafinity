@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
 
     var window: wio.Window = undefined;
 
-    if (!options.test_play) {
+    if (options.test_play == null) {
         const gl_options: wio.GlOptions = .{
             .major_version = 4,
             .minor_version = 5,
@@ -278,13 +278,16 @@ pub fn main(init: std.process.Init) !void {
             try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible, &game, frame_time.untilNow(io, .awake));
             frame_time = .now(io, .awake);
 
-            if (start_time.untilNow(io, .awake).toSeconds() >= 60) {
-                std.log.info("Test play timeout reached (60s), stopping the loop cleanly...", .{});
-                running.store(false, .unordered);
+            if (options.test_play) |timeout| {
+                if (start_time.untilNow(io, .awake).toSeconds() >= timeout) {
+                    std.log.info("Test play timeout reached, stopping the loop cleanly...", .{});
+                    running.store(false, .unordered);
+                    break;
+                }
             }
 
             // Only render and present if window is visible and should present
-            if (!options.test_play and (!visible or !window.shouldPresent())) {
+            if (!visible or !window.shouldPresent()) {
                 continue;
             }
 

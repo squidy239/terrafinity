@@ -11,25 +11,28 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
-    const test_play = b.option(bool, "test_play", "Run test play") orelse null;
+    const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
     // Compile shaders using glslc
-    const vert_cmd = b.addSystemCommand(&.{
+
+    const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
+        switch (optimize) {
+            .Debug => "-O0",
+            .ReleaseSafe, .ReleaseFast => "-O",
+            .ReleaseSmall => "-Os",
+        },
+        "-Werror",
         "-o",
-    });
-    const vert_spv = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
-    _ = vert_spv; // autofix
+    };
+    
+    const vert_cmd = b.addSystemCommand(&shader_cmd);
+    _ = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
     vert_cmd.addFileArg(b.path("src/Renderer/vulkan/vertexshader.vert"));
 
-    const frag_cmd = b.addSystemCommand(&.{
-        "glslc",
-        "--target-env=vulkan1.3",
-        "-o",
-    });
-    const frag_spv = frag_cmd.addOutputFileArg("src/Renderer/vulkan/fragshader.spv");
-    _ = frag_spv; // autofix
+    const frag_cmd = b.addSystemCommand(&shader_cmd);
+    _ = frag_cmd.addOutputFileArg("src/Renderer/vulkan/fragshader.spv");
     frag_cmd.addFileArg(b.path("src/Renderer/vulkan/fragshader.frag"));
 
     const root_module = b.createModule(.{
@@ -51,7 +54,7 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&vert_cmd.step);
     exe.step.dependOn(&frag_cmd.step);
     var options: *std.Build.Step.Options = .create(b);
-    options.addOption(bool, "test_play", test_play orelse false);
+    options.addOption(?u32, "test_play", test_play);
     options.addOption(bool, "sanitize_thread", sanitize != .None);
     exe.root_module.addOptions("options", options);
     b.installArtifact(exe);
@@ -88,10 +91,11 @@ fn setupDependencies(
             .ReleaseFast => std.builtin.OptimizeMode.ReleaseFast,
             .ReleaseSmall => std.builtin.OptimizeMode.ReleaseSmall,
         },
+        .sanitize_thread = sanitize == .Full,
     });
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
-    rocksdb_mod.sanitize_thread = sanitize == .Full;
+
     root_module.addImport("rocksdb", rocksdb_mod);
 
     const obj_mod = b.dependency("obj", .{

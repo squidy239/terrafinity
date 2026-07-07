@@ -964,8 +964,16 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.deviceWaitIdle() catch |err| {
             std.log.err("VulkanRenderer.deinit: deviceWaitIdle failed: {any}", .{err});
         };
+        if (self.swapchain != .null_handle) {
+            self.dev.destroySwapchainKHR(self.swapchain, null);
+            self.swapchain = .null_handle;
+        }
+        self.dev.deviceWaitIdle() catch {};
+        if (self.present_queue != .null_handle) {
+            self.dev.queueWaitIdle(self.present_queue) catch {};
+        }
     }
-    std.log.info("VulkanRenderer.deinit: device is idle. Cleaning up Vulkan objects...", .{});
+    std.log.info("VulkanRenderer.deinit: device is idle and swapchain is destroyed. Cleaning up Vulkan objects...", .{});
 
     // Flush any pending submission batch
     {
@@ -1020,22 +1028,11 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.descriptor_set_layout = .null_handle;
     }
 
-    if (self.swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(self.swapchain, null);
-    }
-
     // Destroy pools and allocators
     self.pool_reservoir.deinit(self.dev, self.allocator);
     _ = self.gpu_only_gpa.deinit();
     _ = self.cpu_to_gpu_gpa.deinit();
     self.backing_allocator.deinit();
-
-    if (self.transfer_semaphore != .null_handle) {
-        self.dev.destroySemaphore(self.transfer_semaphore, null);
-    }
-    if (self.graphics_timeline_semaphore != .null_handle) {
-        self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
-    }
 
     self.texture_manager.destroyTextureArray();
 
@@ -1046,6 +1043,15 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     if (self.upload_command_pool != .null_handle) {
         self.dev.destroyCommandPool(self.upload_command_pool, null);
         self.upload_command_pool = .null_handle;
+    }
+
+    if (self.transfer_semaphore != .null_handle) {
+        self.dev.destroySemaphore(self.transfer_semaphore, null);
+        self.transfer_semaphore = .null_handle;
+    }
+    if (self.graphics_timeline_semaphore != .null_handle) {
+        self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
+        self.graphics_timeline_semaphore = .null_handle;
     }
 
     if (self.surface != .null_handle) {
@@ -1884,11 +1890,11 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
         const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity);
 
         // Copy any existing frame data gathered so far (e.g. from the old buffers)
-        if (min_capacity > 1) {
-            const old_chunk_slice = @as([*]ChunkData, @ptrCast(@alignCast(old_chunk_data_mapped)))[0 .. min_capacity - 1];
-            const old_indirect_slice = @as([*]vk.DrawIndirectCommand, @ptrCast(@alignCast(old_indirect_mapped)))[0 .. min_capacity - 1];
-            @memcpy(chunk_data_slice[0 .. min_capacity - 1], old_chunk_slice);
-            @memcpy(indirect_draw_slice[0 .. min_capacity - 1], old_indirect_slice);
+        if (old_draw_capacity > 0) {
+            const old_chunk_slice = @as([*]ChunkData, @ptrCast(@alignCast(old_chunk_data_mapped)))[0..old_draw_capacity];
+            const old_indirect_slice = @as([*]vk.DrawIndirectCommand, @ptrCast(@alignCast(old_indirect_mapped)))[0..old_draw_capacity];
+            @memcpy(chunk_data_slice[0..old_draw_capacity], old_chunk_slice);
+            @memcpy(indirect_draw_slice[0..old_draw_capacity], old_indirect_slice);
         }
 
         // Free the old buffers
