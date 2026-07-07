@@ -104,18 +104,13 @@ pub const TextureArrayManager = struct {
         const image_count: u32 = @intCast(layer_count);
         const image_size: vk.DeviceSize = @intCast(width * height * 4);
 
-        var staging_buffer: vk.Buffer = .null_handle;
-        var staging_memory: vk.DeviceMemory = .null_handle;
-
         const total_staging_size = image_size * image_count;
-        try self.renderer.createBuffer(total_staging_size, .{ .transfer_src_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &staging_buffer, &staging_memory);
-        defer {
-            if (staging_buffer != .null_handle) self.renderer.dev.destroyBuffer(staging_buffer, null);
-            if (staging_memory != .null_handle) self.renderer.dev.freeMemory(staging_memory, null);
-        }
+        const mapped_slice = try self.renderer.cpu_to_gpu_gpa.allocator().alloc(u8, total_staging_size);
+        defer self.renderer.cpu_to_gpu_gpa.allocator().free(mapped_slice);
 
-        const data = try self.renderer.dev.mapMemory(staging_memory, 0, total_staging_size, .{});
-        const mapped_slice = @as([*]u8, @ptrCast(data))[0..total_staging_size];
+        const info = self.renderer.backing_allocator.getBufferAndOffset(mapped_slice.ptr);
+        const staging_buffer = info.buffer;
+        const staging_offset = info.offset;
 
         const indexer = std.enums.EnumIndexer(Block);
         var loaded_layers = try allocator.alloc(bool, layer_count);
@@ -164,8 +159,6 @@ pub const TextureArrayManager = struct {
             }
         }
 
-        self.renderer.dev.unmapMemory(staging_memory);
-
         const max_dim = @max(width, height);
         const num_mip_levels: u16 = @intCast(std.math.log2(max_dim) + 1);
 
@@ -209,7 +202,7 @@ pub const TextureArrayManager = struct {
         const h: u32 = @intCast(height);
         for (0..image_count) |layer_idx| {
             copy_regions[layer_idx] = .{
-                .buffer_offset = @as(vk.DeviceSize, @intCast(layer_idx)) * image_size,
+                .buffer_offset = staging_offset + (@as(vk.DeviceSize, @intCast(layer_idx)) * image_size),
                 .buffer_row_length = 0,
                 .buffer_image_height = 0,
                 .image_subresource = .{

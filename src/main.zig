@@ -31,9 +31,9 @@ pub const tracy_options: tracy.Options = .{
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
 
-    var tracy_allocator = tracy.Allocator{ .parent = init.gpa };
+    // var tracy_allocator = tracy.Allocator{ .parent = init.gpa };
 
-    const gpa = tracy_allocator.allocator();
+    const gpa = init.gpa;
     const io = init.io;
 
     //TODO make this an argument once std.cli is added
@@ -278,8 +278,8 @@ pub fn main(init: std.process.Init) !void {
             try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible, &game, frame_time.untilNow(io, .awake));
             frame_time = .now(io, .awake);
 
-            if (start_time.untilNow(io, .awake).toSeconds() >= 10) {
-                std.log.info("Test play timeout reached (10s), stopping the loop cleanly...", .{});
+            if (start_time.untilNow(io, .awake).toSeconds() >= 60) {
+                std.log.info("Test play timeout reached (60s), stopping the loop cleanly...", .{});
                 running.store(false, .unordered);
             }
 

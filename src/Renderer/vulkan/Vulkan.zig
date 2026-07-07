@@ -23,6 +23,9 @@ const textures = @import("textures.zig");
 const vertex_shader_spv: []const u8 = @embedFile("vertexshader.spv");
 const fragment_shader_spv: []const u8 = @embedFile("fragshader.spv");
 
+const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
+const MemoryPool = @import("VulkanBackingAllocator.zig").MemoryPool;
+
 pub const cameraUp = @Vector(3, f32){ 0, 1, 0 };
 
 pub const FrameDebugStats = struct {
@@ -105,13 +108,11 @@ const ChunkMeshBuffer = struct {
     alloc_size: vk.DeviceSize,
     device_address: vk.DeviceAddress,
     face_count: u32,
+    slice: []u8,
 };
 
-const ChunkUploadRequest = struct {
-    chunk_pos: ChunkPos,
-    opaque_faces: []Mesher.Face,
-    transparent_faces: []Mesher.Face,
-};
+pub const batch_size = 512;
+pub const pending_queue_size = 512;
 
 const PendingChunkUpload = struct {
     chunk_pos: ChunkPos,
@@ -119,6 +120,8 @@ const PendingChunkUpload = struct {
     pool: vk.CommandPool,
     opaque_mesh: ?ChunkMeshBuffer,
     transparent_mesh: ?ChunkMeshBuffer,
+    opaque_staging_slice: ?[]u8,
+    transparent_staging_slice: ?[]u8,
 };
 
 const RetiredMeshEntry = struct {
@@ -126,175 +129,12 @@ const RetiredMeshEntry = struct {
     graphics_timeline_value: u64,
 };
 
-const StagingRingBuffer = struct {
-    buffer: vk.Buffer = .null_handle,
-    memory: vk.DeviceMemory = .null_handle,
-    ptr: [*]u8 = undefined,
-    size: vk.DeviceSize = 128 * 1024 * 1024,
-    write_offset: vk.DeviceSize = 0,
-    mutex: std.Io.Mutex = .init,
-
-    pub fn init(self: *StagingRingBuffer, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties) !void {
-        const buffer_info: vk.BufferCreateInfo = .{
-            .flags = .{},
-            .size = self.size,
-            .usage = .{ .transfer_src_bit = true },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        };
-        self.buffer = try dev.createBuffer(&buffer_info, null);
-        errdefer dev.destroyBuffer(self.buffer, null);
-
-        const mem_reqs = dev.getBufferMemoryRequirements(self.buffer);
-        const mem_type = findMemoryTypeRaw(mem_props, mem_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
-
-        const alloc_info: vk.MemoryAllocateInfo = .{
-            .allocation_size = mem_reqs.size,
-            .memory_type_index = mem_type,
-            .p_next = null,
-        };
-        self.memory = try dev.allocateMemory(&alloc_info, null);
-        errdefer dev.freeMemory(self.memory, null);
-
-        try dev.bindBufferMemory(self.buffer, self.memory, 0);
-
-        const data = try dev.mapMemory(self.memory, 0, self.size, .{});
-        self.ptr = @ptrCast(data);
-    }
-
-    pub fn deinit(self: *StagingRingBuffer, dev: DeviceProxy) void {
-        if (self.buffer != .null_handle) {
-            dev.unmapMemory(self.memory);
-            dev.destroyBuffer(self.buffer, null);
-        }
-        if (self.memory != .null_handle) {
-            dev.freeMemory(self.memory, null);
-        }
-    }
-
-    pub fn allocate(self: *StagingRingBuffer, io: std.Io, size: vk.DeviceSize, dev: DeviceProxy, semaphore: vk.Semaphore, current_timeline: u64) !vk.DeviceSize {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        const aligned_size = std.mem.alignForward(vk.DeviceSize, size, 16);
-        if (self.write_offset + aligned_size > self.size) {
-            if (current_timeline > 0) {
-                const wait_info = vk.SemaphoreWaitInfo{
-                    .flags = .{},
-                    .semaphore_count = 1,
-                    .p_semaphores = @ptrCast(&semaphore),
-                    .p_values = @ptrCast(&current_timeline),
-                };
-                _ = try dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
-            }
-            self.write_offset = 0;
-        }
-        const offset = self.write_offset;
-        self.write_offset += aligned_size;
-        return offset;
-    }
-};
-
-const GlobalDeviceAllocator = struct {
-    memory: vk.DeviceMemory = .null_handle,
-    size: vk.DeviceSize = 256 * 1024 * 1024,
-    bump_offset: vk.DeviceSize = 0,
-    buckets: [32]std.ArrayList(vk.DeviceSize) = undefined,
-    mutex: std.Io.Mutex = .init,
-    allocator: std.mem.Allocator = undefined,
-
-    pub fn init(self: *GlobalDeviceAllocator, dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, allocator: std.mem.Allocator) !void {
-        self.allocator = allocator;
-        for (&self.buckets) |*b| {
-            b.* = .empty;
-        }
-
-        const temp_buffer_info: vk.BufferCreateInfo = .{
-            .flags = .{},
-            .size = 1024,
-            .usage = .{
-                .transfer_dst_bit = true,
-                .storage_buffer_bit = true,
-                .shader_device_address_bit = true,
-            },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        };
-        const temp_buffer = try dev.createBuffer(&temp_buffer_info, null);
-        defer dev.destroyBuffer(temp_buffer, null);
-
-        const mem_reqs = dev.getBufferMemoryRequirements(temp_buffer);
-
-        var alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-            .flags = .{ .device_address_bit = true },
-            .device_mask = 0,
-        };
-
-        const memory_type_index = findMemoryTypeRaw(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true });
-
-        const alloc_info: vk.MemoryAllocateInfo = .{
-            .allocation_size = self.size,
-            .memory_type_index = memory_type_index,
-            .p_next = @ptrCast(&alloc_flags),
-        };
-
-        self.memory = try dev.allocateMemory(&alloc_info, null);
-    }
-
-    pub fn deinit(self: *GlobalDeviceAllocator, dev: DeviceProxy) void {
-        if (self.memory != .null_handle) {
-            dev.freeMemory(self.memory, null);
-        }
-        for (&self.buckets) |*b| {
-            b.deinit(self.allocator);
-        }
-    }
-
-    fn bucketIndex(size: vk.DeviceSize) u5 {
-        if (size <= 16) return 4;
-        const bits = 64 - @clz(size - 1);
-        return @intCast(bits);
-    }
-
-    pub fn allocate(self: *GlobalDeviceAllocator, io: std.Io, size: vk.DeviceSize, alignment: vk.DeviceSize) !struct { offset: vk.DeviceSize, alloc_size: vk.DeviceSize } {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        const alloc_size = @as(vk.DeviceSize, 1) << bucketIndex(size);
-        const idx = bucketIndex(alloc_size);
-
-        if (self.buckets[idx].items.len > 0) {
-            const offset = self.buckets[idx].pop().?;
-            const aligned_offset = std.mem.alignForward(vk.DeviceSize, offset, alignment);
-            return .{ .offset = aligned_offset, .alloc_size = alloc_size };
-        }
-
-        const aligned_offset = std.mem.alignForward(vk.DeviceSize, self.bump_offset, alignment);
-        if (aligned_offset + alloc_size > self.size) {
-            return error.OutOfVideoMemory;
-        }
-        self.bump_offset = aligned_offset + alloc_size;
-        return .{ .offset = aligned_offset, .alloc_size = alloc_size };
-    }
-
-    pub fn free(self: *GlobalDeviceAllocator, io: std.Io, offset: vk.DeviceSize, alloc_size: vk.DeviceSize) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        const idx = bucketIndex(alloc_size);
-        self.buckets[idx].append(self.allocator, offset) catch {
-            std.log.err("GlobalDeviceAllocator.free: Failed to return offset {d} to bucket {d}", .{ offset, idx });
-        };
-    }
-};
-
 const CommandPoolReservoir = struct {
     pools: []vk.CommandPool = &.{},
     cmds: []vk.CommandBuffer = &.{},
     used: []bool = &.{},
     mutex: std.Io.Mutex = .init,
+    semaphore: std.Io.Semaphore = undefined,
 
     pub const Borrowed = struct {
         pool: vk.CommandPool,
@@ -310,6 +150,12 @@ const CommandPoolReservoir = struct {
         errdefer allocator.free(self.used);
 
         @memset(self.used, false);
+        self.semaphore = .{
+            .mutex = .init,
+            .cond = .init,
+            .permits = count,
+        };
+
         var i: usize = 0;
         errdefer {
             for (0..i) |j| {
@@ -344,9 +190,21 @@ const CommandPoolReservoir = struct {
         allocator.free(self.used);
     }
 
-    pub fn borrowPool(self: *CommandPoolReservoir, io: std.Io) ?Borrowed {
-        self.mutex.lockUncancelable(io);
+    pub fn borrowPool(self: *CommandPoolReservoir, io: std.Io) !Borrowed {
+        {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "CommandPoolReservoir_wait" });
+            defer zone.end();
+            try self.semaphore.wait(io);
+        }
+        errdefer self.semaphore.post(io);
+
+        {
+            const zone = tracy.Zone.begin(.{ .src = @src(), .name = "CommandPoolReservoir_lock" });
+            defer zone.end();
+            try self.mutex.lock(io);
+        }
         defer self.mutex.unlock(io);
+
         for (self.pools, 0..) |pool, i| {
             if (!self.used[i]) {
                 self.used[i] = true;
@@ -356,18 +214,21 @@ const CommandPoolReservoir = struct {
                 };
             }
         }
-        return null;
+        unreachable;
     }
 
     pub fn returnPool(self: *CommandPoolReservoir, io: std.Io, pool: vk.CommandPool) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        for (self.pools, 0..) |p, i| {
-            if (p == pool) {
-                self.used[i] = false;
-                return;
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            for (self.pools, 0..) |p, i| {
+                if (p == pool) {
+                    self.used[i] = false;
+                    break;
+                }
             }
         }
+        self.semaphore.post(io);
     }
 };
 
@@ -505,26 +366,36 @@ graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
 
 indirect_draw_buffers: []vk.Buffer = &.{},
-indirect_draw_memories: []vk.DeviceMemory = &.{},
-indirect_draw_buffers_mapped: [][*]u8 = &.{},
+indirect_draw_buffers_mapped: []?[*]u8 = &.{},
+indirect_draw_offsets: []vk.DeviceSize = &.{},
 
 chunk_data_buffers: []vk.Buffer = &.{},
-chunk_data_memories: []vk.DeviceMemory = &.{},
-chunk_data_buffers_mapped: [][*]u8 = &.{},
+chunk_data_buffers_mapped: []?[*]u8 = &.{},
+chunk_data_offsets: []vk.DeviceSize = &.{},
 
-max_draw_count: u32 = 100_000,
+draw_capacity: u32 = 4096,
+max_draw_indirect_count: u32 = 65_535,
 
 retired_meshes: std.ArrayList(RetiredMeshEntry) = undefined,
 
-staging_ring_buffer: StagingRingBuffer = .{},
-device_allocator: GlobalDeviceAllocator = .{},
+backing_allocator: VulkanBackingAllocator = undefined,
+gpu_only_gpa: std.heap.DebugAllocator(.{}) = .init,
+cpu_to_gpu_gpa: std.heap.DebugAllocator(.{}) = .init,
 pool_reservoir: CommandPoolReservoir = .{},
 
-upload_queue: std.Io.Queue(ChunkUploadRequest) = undefined,
-upload_queue_buf: [1024]ChunkUploadRequest = undefined,
-upload_queue_count: std.atomic.Value(u32) = .init(0),
+pending_uploads_queue: std.Io.Queue(PendingChunkUpload) = undefined,
+pending_uploads_queue_buffer: []PendingChunkUpload = &.{},
+peeked_upload: ?PendingChunkUpload = null,
 
-pending_uploads: std.ArrayList(PendingChunkUpload) = undefined,
+submission_batch: struct {
+    cmds: [batch_size]vk.CommandBuffer = undefined,
+    pools: [batch_size]vk.CommandPool = undefined,
+    opaque_meshes: [batch_size]?UploadResult = undefined,
+    transparent_meshes: [batch_size]?UploadResult = undefined,
+    chunk_positions: [batch_size]ChunkPos = undefined,
+    count: usize = 0,
+    mutex: std.Io.Mutex = .init,
+} = .{},
 
 camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
@@ -536,7 +407,6 @@ interface: Renderer,
 
 queue_mutex: std.Io.Mutex = .init,
 upload_mutex: std.Io.Mutex = .init,
-pending_uploads_mutex: std.Io.Mutex = .init,
 
 retired_mutex: std.Io.Mutex = .init,
 
@@ -610,8 +480,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     self.init_time_ns = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
 
     self.retired_meshes = .empty;
-    self.pending_uploads = .empty;
-    self.upload_queue = .init(&self.upload_queue_buf);
 
     self.vkb = .load(getProcAddr);
 
@@ -801,7 +669,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     const props = self.instance.getPhysicalDeviceProperties(self.pdev);
     self.props = props;
 
-    self.max_draw_count = if (props.limits.max_draw_indirect_count > 0) @min(100_000, props.limits.max_draw_indirect_count) else 65_535;
+    self.max_draw_indirect_count = if (props.limits.max_draw_indirect_count > 0) props.limits.max_draw_indirect_count else 65_535;
 
     const device_name = std.mem.sliceTo(&props.device_name, 0);
     std.log.info("VulkanRenderer.init: Selected physical device: {s}", .{device_name});
@@ -990,26 +858,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
         if (self.descriptor_pool != .null_handle) {
             self.dev.destroyDescriptorPool(self.descriptor_pool, null);
         }
-        if (self.indirect_draw_buffers.len > 0) {
-            for (self.indirect_draw_buffers) |buf| {
-                if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-            }
-        }
-        if (self.indirect_draw_memories.len > 0) {
-            for (self.indirect_draw_memories) |mem| {
-                if (mem != .null_handle) self.dev.freeMemory(mem, null);
-            }
-        }
-        if (self.chunk_data_buffers.len > 0) {
-            for (self.chunk_data_buffers) |buf| {
-                if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-            }
-        }
-        if (self.chunk_data_memories.len > 0) {
-            for (self.chunk_data_memories) |mem| {
-                if (mem != .null_handle) self.dev.freeMemory(mem, null);
-            }
-        }
+
         self.dev.destroyDevice(null);
         allocator.destroy(dev_wrapper_ptr);
         self.dev_wrapper = null;
@@ -1031,6 +880,18 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
         .queue_family_index = graphics_family,
     };
     self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
+
+    // Initialize backing allocator and GPAs
+    self.backing_allocator = VulkanBackingAllocator.init(self.dev, self.mem_props, io, allocator);
+    errdefer self.backing_allocator.deinit();
+
+    self.gpu_only_gpa = .init;
+    self.gpu_only_gpa.backing_allocator = self.backing_allocator.allocator(.gpu_only);
+    errdefer _ = self.gpu_only_gpa.deinit();
+
+    self.cpu_to_gpu_gpa = .init;
+    self.cpu_to_gpu_gpa.backing_allocator = self.backing_allocator.allocator(.cpu_to_gpu);
+    errdefer _ = self.cpu_to_gpu_gpa.deinit();
 
     try self.createSwapchain(io);
 
@@ -1089,17 +950,14 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
 
     self.transfer_semaphore_value = .init(0);
 
-    // Initialize staging ring buffer
-    try self.staging_ring_buffer.init(self.dev, self.mem_props);
-    errdefer self.staging_ring_buffer.deinit(self.dev);
-
-    // Initialize global device allocator
-    try self.device_allocator.init(self.dev, self.mem_props, allocator);
-    errdefer self.device_allocator.deinit(self.dev);
-
     // Initialize command pool reservoir
-    try self.pool_reservoir.init(self.dev, self.transfer_queue_family_index, 8, allocator);
+    try self.pool_reservoir.init(self.dev, self.transfer_queue_family_index, 512, allocator);
     errdefer self.pool_reservoir.deinit(self.dev, allocator);
+
+    self.pending_uploads_queue_buffer = try allocator.alloc(PendingChunkUpload, pending_queue_size);
+    errdefer allocator.free(self.pending_uploads_queue_buffer);
+    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(self.pending_uploads_queue_buffer);
+    self.peeked_upload = null;
 
     self.interface = .{
         .userdata = @ptrCast(self),
@@ -1122,16 +980,6 @@ pub fn getSurface(self: *VulkanRenderer) vk.SurfaceKHR {
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
-    self.upload_queue.close(io);
-
-    var req_buf: [1]ChunkUploadRequest = undefined;
-    while (true) {
-        const got = self.upload_queue.get(io, &req_buf, 1) catch 0;
-        if (got == 0) break;
-        self.allocator.free(req_buf[0].opaque_faces);
-        self.allocator.free(req_buf[0].transparent_faces);
-    }
-
     std.log.info("VulkanRenderer.deinit: Waiting for device idle...", .{});
     {
         self.queue_mutex.lockUncancelable(io);
@@ -1142,11 +990,26 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     std.log.info("VulkanRenderer.deinit: device is idle. Cleaning up Vulkan objects...", .{});
 
-    for (self.pending_uploads.items) |pending| {
-        if (pending.opaque_mesh) |opaque_m| self.destroyChunkMesh(io, opaque_m);
-        if (pending.transparent_mesh) |transparent| self.destroyChunkMesh(io, transparent);
+    // Flush any pending submission batch
+    {
+        self.submission_batch.mutex.lockUncancelable(io);
+        defer self.submission_batch.mutex.unlock(io);
+        self.submitBatchLocked(io) catch |err| {
+            std.log.err("VulkanRenderer.deinit: failed to flush submission batch: {any}", .{err});
+        };
     }
-    self.pending_uploads.deinit(self.allocator);
+
+    // Clean up remaining uploads in the queue and the peeked upload
+    if (self.peeked_upload) |pending| {
+        self.destroyPendingUpload(io, pending);
+    }
+    while (true) {
+        var buf: [1]PendingChunkUpload = undefined;
+        const got = self.pending_uploads_queue.getUncancelable(io, &buf, 0) catch 0;
+        if (got == 0) break;
+        self.destroyPendingUpload(io, buf[0]);
+    }
+    self.allocator.free(self.pending_uploads_queue_buffer);
 
     for (self.retired_meshes.items) |entry| {
         self.destroyChunkMesh(io, entry.mesh);
@@ -1186,8 +1049,9 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     // Destroy pools and allocators
     self.pool_reservoir.deinit(self.dev, self.allocator);
-    self.device_allocator.deinit(self.dev);
-    self.staging_ring_buffer.deinit(self.dev);
+    _ = self.gpu_only_gpa.deinit();
+    _ = self.cpu_to_gpu_gpa.deinit();
+    self.backing_allocator.deinit();
 
     if (self.transfer_semaphore != .null_handle) {
         self.dev.destroySemaphore(self.transfer_semaphore, null);
@@ -1228,46 +1092,144 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 }
 
 pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
-    var duped_opaque: []Mesher.Face = &.{};
-    var duped_transparent: []Mesher.Face = &.{};
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
+    defer zone.end();
 
-    const indexer = std.enums.EnumIndexer(World.Block);
+    const borrowed = try self.pool_reservoir.borrowPool(io);
+    const pool = borrowed.pool;
+    const cmd = borrowed.cmd;
+    errdefer self.pool_reservoir.returnPool(io, pool);
+
+    try self.dev.resetCommandPool(pool, .{});
+
+    const begin_info: vk.CommandBufferBeginInfo = .{
+        .flags = .{ .one_time_submit_bit = true },
+        .p_inheritance_info = null,
+    };
+    try self.dev.beginCommandBuffer(cmd, &begin_info);
+
+    var opaque_res: ?UploadResult = null;
+    var transparent_res: ?UploadResult = null;
+    errdefer {
+        if (opaque_res) |r| {
+            self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
+            self.gpu_only_gpa.allocator().free(r.mesh.slice);
+        }
+        if (transparent_res) |r| {
+            self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
+            self.gpu_only_gpa.allocator().free(r.mesh.slice);
+        }
+    }
 
     if (opaque_mesh.len > 0) {
-        duped_opaque = try self.allocator.dupe(Mesher.Face, opaque_mesh);
-        errdefer self.allocator.free(duped_opaque);
-        for (duped_opaque) |*face| {
-            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
-        }
+        opaque_res = try self.uploadMeshBuffer(opaque_mesh, cmd);
     }
-
     if (transparent_mesh.len > 0) {
-        duped_transparent = try self.allocator.dupe(Mesher.Face, transparent_mesh);
-        errdefer {
-            self.allocator.free(duped_transparent);
-            if (opaque_mesh.len > 0) self.allocator.free(duped_opaque);
-        }
-        for (duped_transparent) |*face| {
-            face.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
-        }
+        transparent_res = try self.uploadMeshBuffer(transparent_mesh, cmd);
     }
 
-    try self.upload_queue.putOne(io, .{
-        .chunk_pos = chunk_pos,
-        .opaque_faces = duped_opaque,
-        .transparent_faces = duped_transparent,
-    });
-    _ = self.upload_queue_count.fetchAdd(1, .monotonic);
+    try self.dev.endCommandBuffer(cmd);
 
-    try self.processPendingUploads(io);
+    {
+        const zone_batch = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk_lock_batch" });
+        self.submission_batch.mutex.lockUncancelable(io);
+        zone_batch.end();
+        defer self.submission_batch.mutex.unlock(io);
+
+        if (self.submission_batch.count == batch_size) {
+            try self.submitBatchLocked(io);
+        }
+
+        const count = self.submission_batch.count;
+        self.submission_batch.cmds[count] = cmd;
+        self.submission_batch.pools[count] = pool;
+        self.submission_batch.opaque_meshes[count] = opaque_res;
+        self.submission_batch.transparent_meshes[count] = transparent_res;
+        self.submission_batch.chunk_positions[count] = chunk_pos;
+        self.submission_batch.count += 1;
+    }
+}
+
+fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatchLocked" });
+    defer zone.end();
+
+    const count = self.submission_batch.count;
+    if (count == 0) return;
+
+    const next_val = blk: {
+        const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock_queue" });
+        self.queue_mutex.lockUncancelable(io);
+        zone_queue.end();
+        defer self.queue_mutex.unlock(io);
+
+        const next_val = self.transfer_semaphore_value.fetchAdd(1, .monotonic) + 1;
+
+        var cb_submit_infos: [batch_size]vk.CommandBufferSubmitInfo = undefined;
+        for (0..count) |i| {
+            cb_submit_infos[i] = .{
+                .command_buffer = self.submission_batch.cmds[i],
+                .device_mask = 0,
+            };
+        }
+
+        const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
+            .semaphore = self.transfer_semaphore,
+            .value = next_val,
+            .stage_mask = .{ .all_transfer_bit = true },
+            .device_index = 0,
+        };
+
+        const submit_info: vk.SubmitInfo2 = .{
+            .flags = .{},
+            .wait_semaphore_info_count = 0,
+            .p_wait_semaphore_infos = null,
+            .command_buffer_info_count = @intCast(count),
+            .p_command_buffer_infos = @ptrCast(&cb_submit_infos),
+            .signal_semaphore_info_count = 1,
+            .p_signal_semaphore_infos = @ptrCast(&semaphore_submit_info),
+        };
+
+        try self.dev.queueSubmit2(self.transfer_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
+        break :blk next_val;
+    };
+
+    for (0..count) |i| {
+        const opaque_res = self.submission_batch.opaque_meshes[i];
+        const transparent_res = self.submission_batch.transparent_meshes[i];
+        try self.pushPendingUpload(io, .{
+            .chunk_pos = self.submission_batch.chunk_positions[i],
+            .timeline_value = next_val,
+            .pool = self.submission_batch.pools[i],
+            .opaque_mesh = if (opaque_res) |r| r.mesh else null,
+            .transparent_mesh = if (transparent_res) |r| r.mesh else null,
+            .opaque_staging_slice = if (opaque_res) |r| r.staging_slice else null,
+            .transparent_staging_slice = if (transparent_res) |r| r.staging_slice else null,
+        });
+    }
+
+    self.submission_batch.count = 0;
+}
+
+fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "pushPendingUpload" });
+    defer zone.end();
+
+    while (true) {
+        if (try self.pending_uploads_queue.put(io, &.{pending}, 0) == 1) return;
+
+        // Queue is full, retire some uploads and try again
+        try self.retireCompletedUploads(io);
+
+        // Avoid tight-spinning
+        try std.Io.sleep(io, .fromMicroseconds(100), .awake);
+    }
 }
 
 fn vtableAddChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{ OutOfMemory, OutOfVideoMemory, Unexpected })!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.addChunk(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
         error.OutOfMemory => return error.OutOfMemory,
-        error.OutOfVideoMemory => return error.OutOfVideoMemory,
         else => return error.Unexpected,
     };
 }
@@ -1280,8 +1242,22 @@ fn vtableRemoveChunk(userdata: *anyopaque, io: std.Io, chunk_pos: ChunkPos) void
 }
 
 fn destroyChunkMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
-    if (mesh.buffer != .null_handle) self.dev.destroyBuffer(mesh.buffer, null);
-    self.device_allocator.free(io, mesh.alloc_offset, mesh.alloc_size);
+    _ = io;
+    self.gpu_only_gpa.allocator().free(mesh.slice);
+}
+
+fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) void {
+    if (pending.opaque_mesh) |opaque_m| self.destroyChunkMesh(io, opaque_m);
+    if (pending.transparent_mesh) |transparent| self.destroyChunkMesh(io, transparent);
+    self.freePendingUploadStaging(io, pending);
+}
+
+fn freePendingUploadStaging(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) void {
+    if (pending.opaque_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
+    if (pending.transparent_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
+    if (pending.pool != .null_handle) {
+        self.pool_reservoir.returnPool(io, pending.pool);
+    }
 }
 
 fn enqueueRetiredMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) !void {
@@ -1295,16 +1271,19 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) 
 }
 
 fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
-    self.pending_uploads_mutex.lockUncancelable(io);
-    defer self.pending_uploads_mutex.unlock(io);
-
-    if (self.pending_uploads.items.len == 0) return;
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "retireCompletedUploads" });
+    defer zone.end();
 
     const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer_semaphore);
 
-    var i: usize = 0;
-    while (i < self.pending_uploads.items.len) {
-        const pending = self.pending_uploads.items[i];
+    while (true) {
+        const pending = if (self.peeked_upload) |p| p else blk: {
+            var buf: [1]PendingChunkUpload = undefined;
+            const got = try self.pending_uploads_queue.get(io, &buf, 0);
+            if (got == 0) return; // Queue is empty, nothing to retire
+            break :blk buf[0];
+        };
+
         if (current_transfer_val >= pending.timeline_value) {
             inline for (.{
                 .{ .mesh = pending.opaque_mesh, .tag = .@"opaque" },
@@ -1324,72 +1303,55 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
                 }
             }
 
-            if (pending.pool != .null_handle) {
-                self.pool_reservoir.returnPool(io, pending.pool);
-            }
+            self.freePendingUploadStaging(io, pending);
 
-            _ = self.pending_uploads.swapRemove(i);
+            self.peeked_upload = null;
         } else {
-            i += 1;
+            self.peeked_upload = pending;
+            break;
         }
     }
 }
 
-fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Face, cmd: vk.CommandBuffer, current_val: u64) !ChunkMeshBuffer {
+const UploadResult = struct {
+    mesh: ChunkMeshBuffer,
+    staging_slice: []u8,
+};
+
+fn uploadMeshBuffer(self: *VulkanRenderer, faces: []const Mesher.Face, cmd: vk.CommandBuffer) !UploadResult {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "uploadMeshBuffer" });
+    defer zone.end();
+
     const buffer_size: vk.DeviceSize = @intCast(faces.len * @sizeOf(Mesher.Face));
-    const staging_offset = try self.staging_ring_buffer.allocate(io, buffer_size, self.dev, self.transfer_semaphore, current_val);
 
-    const mapped_dest = self.staging_ring_buffer.ptr + staging_offset;
-    const src_bytes = std.mem.sliceAsBytes(faces);
-    @memcpy(mapped_dest[0..buffer_size], src_bytes);
+    // Allocate dynamic staging buffer from cpu_to_gpu_gpa
+    const staging_slice = try self.cpu_to_gpu_gpa.allocator().alloc(u8, buffer_size);
+    errdefer self.cpu_to_gpu_gpa.allocator().free(staging_slice);
 
-    const usage: vk.BufferUsageFlags = .{
-        .transfer_dst_bit = true,
-        .storage_buffer_bit = true,
-        .shader_device_address_bit = true,
-    };
-
-    var queue_families: [2]u32 = undefined;
-    var sharing_mode: vk.SharingMode = .exclusive;
-    var queue_family_count: u32 = 0;
-    if (self.queue_family_index != self.transfer_queue_family_index) {
-        sharing_mode = .concurrent;
-        queue_families[0] = self.queue_family_index;
-        queue_families[1] = self.transfer_queue_family_index;
-        queue_family_count = 2;
+    const dest_faces = std.mem.bytesAsSlice(Mesher.Face, staging_slice);
+    const indexer = std.enums.EnumIndexer(World.Block);
+    for (faces, 0..) |face, i| {
+        dest_faces[i] = face;
+        dest_faces[i].block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
     }
 
-    const buffer_info: vk.BufferCreateInfo = .{
-        .flags = .{},
-        .size = buffer_size,
-        .usage = usage,
-        .sharing_mode = sharing_mode,
-        .queue_family_index_count = queue_family_count,
-        .p_queue_family_indices = &queue_families,
-    };
+    const staging_info = self.backing_allocator.getBufferAndOffset(staging_slice.ptr);
 
-    const buffer = try self.dev.createBuffer(&buffer_info, null);
-    errdefer self.dev.destroyBuffer(buffer, null);
+    // Allocate from our gpu_only_gpa
+    const slice = try self.gpu_only_gpa.allocator().alloc(u8, buffer_size);
+    errdefer self.gpu_only_gpa.allocator().free(slice);
 
-    const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
-    const alloc_res = try self.device_allocator.allocate(io, mem_reqs.size, mem_reqs.alignment);
-    errdefer self.device_allocator.free(io, alloc_res.offset, alloc_res.alloc_size);
-
-    try self.dev.bindBufferMemory(buffer, self.device_allocator.memory, alloc_res.offset);
-
-    const address_info: vk.BufferDeviceAddressInfo = .{
-        .buffer = buffer,
-    };
-    const device_address = self.dev.getBufferDeviceAddress(&address_info);
+    const buf_info = self.backing_allocator.getBufferAndOffset(slice.ptr);
+    const device_address = self.backing_allocator.getDeviceAddress(slice.ptr);
 
     const copy_region: vk.BufferCopy2 = .{
-        .src_offset = staging_offset,
-        .dst_offset = 0,
+        .src_offset = staging_info.offset,
+        .dst_offset = buf_info.offset,
         .size = buffer_size,
     };
     const copy_buffer_info: vk.CopyBufferInfo2 = .{
-        .src_buffer = self.staging_ring_buffer.buffer,
-        .dst_buffer = buffer,
+        .src_buffer = staging_info.buffer,
+        .dst_buffer = buf_info.buffer,
         .region_count = 1,
         .p_regions = @ptrCast(&copy_region),
     };
@@ -1402,8 +1364,8 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
         .dst_access_mask = .{ .transfer_write_bit = true },
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .buffer = buffer,
-        .offset = 0,
+        .buffer = buf_info.buffer,
+        .offset = buf_info.offset,
         .size = buffer_size,
     };
     const dependency_info: vk.DependencyInfo = .{
@@ -1417,109 +1379,25 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     };
     self.dev.cmdPipelineBarrier2(cmd, &dependency_info);
 
-    return .{
-        .buffer = buffer,
-        .alloc_offset = alloc_res.offset,
-        .alloc_size = alloc_res.alloc_size,
-        .device_address = device_address,
-        .face_count = @intCast(faces.len),
+    return UploadResult{
+        .mesh = ChunkMeshBuffer{
+            .buffer = buf_info.buffer,
+            .alloc_offset = buf_info.offset,
+            .alloc_size = buffer_size,
+            .device_address = device_address,
+            .face_count = @intCast(faces.len),
+            .slice = slice,
+        },
+        .staging_slice = staging_slice,
     };
-}
-
-fn uploadOnePending(self: *VulkanRenderer, io: std.Io, req: ChunkUploadRequest) !void {
-    defer {
-        self.allocator.free(req.opaque_faces);
-        self.allocator.free(req.transparent_faces);
-    }
-
-    const borrowed = blk: {
-        var first = true;
-        while (true) {
-            if (self.pool_reservoir.borrowPool(io)) |p| break :blk p;
-            try self.retireCompletedUploads(io);
-            if (self.pool_reservoir.borrowPool(io)) |p| break :blk p;
-            if (first) {
-                first = false;
-            } else {
-                try io.sleep(.fromMilliseconds(1), .awake);
-            }
-        }
-    };
-    const pool = borrowed.pool;
-    const cmd = borrowed.cmd;
-    errdefer self.pool_reservoir.returnPool(io, pool);
-
-    try self.dev.resetCommandPool(pool, .{});
-
-    const begin_info: vk.CommandBufferBeginInfo = .{
-        .flags = .{ .one_time_submit_bit = true },
-        .p_inheritance_info = null,
-    };
-    try self.dev.beginCommandBuffer(cmd, &begin_info);
-
-    const current_val = self.transfer_semaphore_value.load(.monotonic);
-    const next_val = current_val + 1;
-
-    const opaque_buffer = if (req.opaque_faces.len > 0) try self.uploadMeshBuffer(io, req.opaque_faces, cmd, current_val) else null;
-    const transparent_buffer = if (req.transparent_faces.len > 0) try self.uploadMeshBuffer(io, req.transparent_faces, cmd, current_val) else null;
-
-    try self.dev.endCommandBuffer(cmd);
-
-    _ = self.transfer_semaphore_value.fetchAdd(1, .monotonic);
-
-    const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
-        .semaphore = self.transfer_semaphore,
-        .value = next_val,
-        .stage_mask = .{ .all_transfer_bit = true },
-        .device_index = 0,
-    };
-    const command_buffer_submit_info: vk.CommandBufferSubmitInfo = .{
-        .command_buffer = cmd,
-        .device_mask = 0,
-    };
-
-    const submit_info: vk.SubmitInfo2 = .{
-        .flags = .{},
-        .wait_semaphore_info_count = 0,
-        .p_wait_semaphore_infos = null,
-        .command_buffer_info_count = 1,
-        .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
-        .signal_semaphore_info_count = 1,
-        .p_signal_semaphore_infos = @ptrCast(&semaphore_submit_info),
-    };
-
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-    try self.dev.queueSubmit2(self.transfer_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
-
-    self.pending_uploads_mutex.lockUncancelable(io);
-    defer self.pending_uploads_mutex.unlock(io);
-    try self.pending_uploads.append(self.allocator, .{
-        .chunk_pos = req.chunk_pos,
-        .timeline_value = next_val,
-        .pool = pool,
-        .opaque_mesh = opaque_buffer,
-        .transparent_mesh = transparent_buffer,
-    });
 }
 
 fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
-    self.upload_mutex.lockUncancelable(io);
-    defer self.upload_mutex.unlock(io);
-
-    const zone = tracy.Zone.begin(.{ .src = @src() });
-    defer zone.end();
-
-    var req_buf: [128]ChunkUploadRequest = undefined;
-    while (true) {
-        const count = self.upload_queue.get(io, &req_buf, 0) catch 0;
-        if (count == 0) break;
-
-        for (req_buf[0..count]) |req| {
-            try self.uploadOnePending(io, req);
-        }
+    {
+        self.submission_batch.mutex.lockUncancelable(io);
+        defer self.submission_batch.mutex.unlock(io);
+        try self.submitBatchLocked(io);
     }
-
     try self.retireCompletedUploads(io);
 }
 
@@ -1527,7 +1405,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
-    try self.retireCompletedUploads(io);
+    try self.processPendingUploads(io);
     try self.processRetiredMeshes(io);
 
     var current_frame = self.currentFrame();
@@ -1615,6 +1493,11 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     const elapsed_sec = @as(f32, @floatFromInt(now_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
+    const total_meshes = self.meshes.count(io);
+    if (total_meshes > self.draw_capacity) {
+        try self.growDrawCapacity(io, @intCast(total_meshes));
+    }
+
     const begin_info: vk.CommandBufferBeginInfo = .{
         .flags = .{ .one_time_submit_bit = true },
         .p_inheritance_info = null,
@@ -1672,24 +1555,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .extent = self.swapchain_extent,
     }});
 
-    const buffer_info: vk.DescriptorBufferInfo = .{
-        .buffer = self.chunk_data_buffers[current_frame],
-        .offset = 0,
-        .range = vk.WHOLE_SIZE,
-    };
-
-    const chunk_data_write: vk.WriteDescriptorSet = .{
-        .dst_set = self.descriptor_sets_per_frame[current_frame],
-        .dst_binding = 0,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .storage_buffer,
-        .p_image_info = undefined,
-        .p_buffer_info = @ptrCast(&buffer_info),
-        .p_texel_buffer_view = undefined,
-    };
-
-    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{chunk_data_write}, null);
+    self.updateFrameDescriptorSet(current_frame);
 
     var desc_set_arr: [1]vk.DescriptorSet = undefined;
     desc_set_arr[0] = self.descriptor_sets_per_frame[current_frame];
@@ -1885,9 +1751,12 @@ fn vtableDrawChunks(userdata: *anyopaque, io: std.Io, viewpos: @Vector(3, f64)) 
 }
 
 fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffer, current_frame: u32, playerPos: @Vector(3, f64), frustum: Frustum, is_transparent: bool, write_offset: u32) error{ DrawFailed, Canceled, OutOfMemory }!u32 {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "drawChunksReal" });
+    defer zone.end();
+
     const frame_idx = current_frame % @as(u32, @intCast(self.indirect_draw_buffers_mapped.len));
-    const indirect_mapped = self.indirect_draw_buffers_mapped[frame_idx];
-    const chunk_data_mapped = self.chunk_data_buffers_mapped[frame_idx];
+    var indirect_mapped = self.indirect_draw_buffers_mapped[frame_idx].?;
+    var chunk_data_mapped = self.chunk_data_buffers_mapped[frame_idx].?;
 
     var indirect_cmds: [*]vk.DrawIndirectCommand = @ptrCast(@alignCast(indirect_mapped));
     var chunk_data: [*]ChunkData = @ptrCast(@alignCast(chunk_data_mapped));
@@ -1913,6 +1782,16 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
             const relative_blockpos = chunk_blockpos - playerPos;
 
             const write_idx = write_offset + draw_count;
+            if (write_idx >= self.draw_capacity) {
+                self.growDrawCapacity(io, write_idx + 1) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.DrawFailed,
+                };
+                indirect_mapped = self.indirect_draw_buffers_mapped[frame_idx].?;
+                chunk_data_mapped = self.chunk_data_buffers_mapped[frame_idx].?;
+                indirect_cmds = @ptrCast(@alignCast(indirect_mapped));
+                chunk_data = @ptrCast(@alignCast(chunk_data_mapped));
+            }
 
             chunk_data[write_idx] = .{
                 .absolute_position = @bitCast(@as(@Vector(3, f32), @floatCast(chunk_blockpos))),
@@ -1929,7 +1808,7 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
             };
 
             draw_count += 1;
-            if (draw_count >= self.max_draw_count -| write_offset) break;
+            if (write_offset + draw_count >= self.max_draw_indirect_count) break;
         } else {
             culled += 1;
         }
@@ -1947,114 +1826,97 @@ fn drawChunksReal(self: *VulkanRenderer, io: std.Io, cmd_buffer: vk.CommandBuffe
 
     if (draw_count == 0) return 0;
 
-    const byte_offset: vk.DeviceSize = @intCast(write_offset * @sizeOf(vk.DrawIndirectCommand));
+    const byte_offset: vk.DeviceSize = self.indirect_draw_offsets[frame_idx] + @as(vk.DeviceSize, @intCast(write_offset * @sizeOf(vk.DrawIndirectCommand)));
     self.dev.cmdDrawIndirect(cmd_buffer, self.indirect_draw_buffers[frame_idx], byte_offset, draw_count, @sizeOf(vk.DrawIndirectCommand));
 
     return draw_count;
 }
 
-fn allocateIndirectBuffers(self: *VulkanRenderer) !void {
-    const num_frames = self.swapchain_images.len;
+fn updateFrameDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "updateFrameDescriptorSet" });
+    defer zone.end();
 
-    if (self.indirect_draw_buffers_mapped.len > 0) {
-        self.allocator.free(self.indirect_draw_buffers_mapped);
-        self.indirect_draw_buffers_mapped = &.{};
-    }
-    if (self.chunk_data_buffers_mapped.len > 0) {
-        self.allocator.free(self.chunk_data_buffers_mapped);
-        self.chunk_data_buffers_mapped = &.{};
-    }
+    const buffer_info: vk.DescriptorBufferInfo = .{
+        .buffer = self.chunk_data_buffers[frame_idx],
+        .offset = self.chunk_data_offsets[frame_idx],
+        .range = self.draw_capacity * @sizeOf(ChunkData),
+    };
 
-    self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
-    @memset(self.indirect_draw_buffers, .null_handle);
-    errdefer {
-        for (self.indirect_draw_buffers) |buf| {
-            if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-        }
-        if (self.indirect_draw_buffers.len > 0) self.allocator.free(self.indirect_draw_buffers);
-        self.indirect_draw_buffers = &.{};
-    }
-    self.indirect_draw_memories = try self.allocator.alloc(vk.DeviceMemory, num_frames);
-    @memset(self.indirect_draw_memories, .null_handle);
-    errdefer {
-        for (self.indirect_draw_memories) |mem| {
-            if (mem != .null_handle) self.dev.freeMemory(mem, null);
-        }
-        self.allocator.free(self.indirect_draw_memories);
-        self.indirect_draw_memories = &.{};
-    }
+    const chunk_data_write: vk.WriteDescriptorSet = .{
+        .dst_set = self.descriptor_sets_per_frame[frame_idx],
+        .dst_binding = 0,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .storage_buffer,
+        .p_image_info = undefined,
+        .p_buffer_info = @ptrCast(&buffer_info),
+        .p_texel_buffer_view = undefined,
+    };
 
-    const indirect_size: vk.DeviceSize = @intCast(self.max_draw_count * @sizeOf(vk.DrawIndirectCommand));
-    for (0..num_frames) |i| {
-        try self.createBuffer(indirect_size, .{ .indirect_buffer_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &self.indirect_draw_buffers[i], &self.indirect_draw_memories[i]);
-    }
-
-    self.indirect_draw_buffers_mapped = try self.allocator.alloc([*]u8, num_frames);
-    errdefer {
-        if (self.indirect_draw_buffers_mapped.len > 0) self.allocator.free(self.indirect_draw_buffers_mapped);
-        self.indirect_draw_buffers_mapped = &.{};
-    }
-    for (0..num_frames) |i| {
-        const mapped = try self.dev.mapMemory(self.indirect_draw_memories[i], 0, vk.WHOLE_SIZE, .{});
-        self.indirect_draw_buffers_mapped[i] = @ptrCast(@alignCast(mapped));
-    }
-
-    self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_frames);
-    @memset(self.chunk_data_buffers, .null_handle);
-    errdefer {
-        for (self.chunk_data_buffers) |buf| {
-            if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-        }
-        self.allocator.free(self.chunk_data_buffers);
-        self.chunk_data_buffers = &.{};
-    }
-    self.chunk_data_memories = try self.allocator.alloc(vk.DeviceMemory, num_frames);
-    @memset(self.chunk_data_memories, .null_handle);
-    errdefer {
-        for (self.chunk_data_memories) |mem| {
-            if (mem != .null_handle) self.dev.freeMemory(mem, null);
-        }
-        self.allocator.free(self.chunk_data_memories);
-        self.chunk_data_memories = &.{};
-    }
-
-    const chunk_data_size: vk.DeviceSize = @intCast(self.max_draw_count * @sizeOf(ChunkData));
-    for (0..num_frames) |i| {
-        try self.createBuffer(chunk_data_size, .{ .storage_buffer_bit = true }, .{ .host_visible_bit = true, .host_coherent_bit = true }, &self.chunk_data_buffers[i], &self.chunk_data_memories[i]);
-    }
-
-    self.chunk_data_buffers_mapped = try self.allocator.alloc([*]u8, num_frames);
-    errdefer {
-        if (self.chunk_data_buffers_mapped.len > 0) self.allocator.free(self.chunk_data_buffers_mapped);
-        self.chunk_data_buffers_mapped = &.{};
-    }
-    for (0..num_frames) |i| {
-        const mapped = try self.dev.mapMemory(self.chunk_data_memories[i], 0, vk.WHOLE_SIZE, .{});
-        self.chunk_data_buffers_mapped[i] = @ptrCast(@alignCast(mapped));
-    }
+    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{chunk_data_write}, null);
 }
 
-pub fn createBuffer(self: *VulkanRenderer, size: vk.DeviceSize, usage: vk.BufferUsageFlags, properties: vk.MemoryPropertyFlags, buffer: *vk.Buffer, memory: *vk.DeviceMemory) !void {
-    std.debug.assert(size != 0);
+fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
+    defer zone.end();
 
-    const buffer_info: vk.BufferCreateInfo = .{
-        .flags = .{},
-        .size = size,
-        .usage = usage,
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-    buffer.* = try self.dev.createBuffer(&buffer_info, null);
+    if (min_capacity <= self.draw_capacity) return;
 
-    const mem_reqs = self.dev.getBufferMemoryRequirements(buffer.*);
-    const alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = mem_reqs.size,
-        .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, properties),
-    };
-    errdefer self.dev.destroyBuffer(buffer.*, null);
-    memory.* = try self.dev.allocateMemory(&alloc_info, null);
-    try self.dev.bindBufferMemory(buffer.*, memory.*, 0);
+    var new_capacity = self.draw_capacity;
+    while (new_capacity < min_capacity) {
+        new_capacity *= 2;
+    }
+
+    std.log.info("VulkanRenderer: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
+
+    // Lock queue_mutex to serialize with any concurrent queue submissions or other deviceWaitIdle calls
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+
+    // Wait for the device to be idle before modifying/freeing active Vulkan memory buffers
+    try self.dev.deviceWaitIdle();
+
+    const old_draw_capacity = self.draw_capacity;
+    self.draw_capacity = new_capacity;
+
+    for (0..self.indirect_draw_buffers_mapped.len) |i| {
+        const old_chunk_data_mapped = self.chunk_data_buffers_mapped[i].?;
+        const old_indirect_mapped = self.indirect_draw_buffers_mapped[i].?;
+
+        // Allocate new larger slices
+        const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, new_capacity);
+        const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity);
+
+        // Copy any existing frame data gathered so far (e.g. from the old buffers)
+        if (min_capacity > 1) {
+            const old_chunk_slice = @as([*]ChunkData, @ptrCast(@alignCast(old_chunk_data_mapped)))[0 .. min_capacity - 1];
+            const old_indirect_slice = @as([*]vk.DrawIndirectCommand, @ptrCast(@alignCast(old_indirect_mapped)))[0 .. min_capacity - 1];
+            @memcpy(chunk_data_slice[0 .. min_capacity - 1], old_chunk_slice);
+            @memcpy(indirect_draw_slice[0 .. min_capacity - 1], old_indirect_slice);
+        }
+
+        // Free the old buffers
+        const chunk_typed_ptr: [*]ChunkData = @ptrCast(@alignCast(old_chunk_data_mapped));
+        self.cpu_to_gpu_gpa.allocator().free(chunk_typed_ptr[0..old_draw_capacity]);
+
+        const indirect_typed_ptr: [*]vk.DrawIndirectCommand = @ptrCast(@alignCast(old_indirect_mapped));
+        self.cpu_to_gpu_gpa.allocator().free(indirect_typed_ptr[0..old_draw_capacity]);
+
+        // Track new buffer/offsets
+        const chunk_data_info = self.backing_allocator.getBufferAndOffset(chunk_data_slice.ptr);
+        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(indirect_draw_slice.ptr);
+
+        self.chunk_data_buffers[i] = chunk_data_info.buffer;
+        self.chunk_data_buffers_mapped[i] = @ptrCast(chunk_data_slice.ptr);
+        self.chunk_data_offsets[i] = chunk_data_info.offset;
+
+        self.indirect_draw_buffers[i] = indirect_draw_info.buffer;
+        self.indirect_draw_buffers_mapped[i] = @ptrCast(indirect_draw_slice.ptr);
+        self.indirect_draw_offsets[i] = indirect_draw_info.offset;
+
+        // Update the descriptor set for this frame
+        self.updateFrameDescriptorSet(@intCast(i));
+    }
 }
 
 fn copyBuffer(self: *VulkanRenderer, io: std.Io, src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize) !void {
@@ -2154,27 +2016,34 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
     self.render_depth_image = .null_handle;
     self.render_depth_memory = .null_handle;
 
-    for (self.indirect_draw_buffers) |buf| if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
+    for (self.indirect_draw_buffers_mapped) |maybe_ptr| {
+        if (maybe_ptr) |ptr| {
+            const typed_ptr: [*]vk.DrawIndirectCommand = @ptrCast(@alignCast(ptr));
+            const slice = typed_ptr[0..self.draw_capacity];
+            self.cpu_to_gpu_gpa.allocator().free(slice);
+        }
+    }
+    for (self.chunk_data_buffers_mapped) |maybe_ptr| {
+        if (maybe_ptr) |ptr| {
+            const typed_ptr: [*]ChunkData = @ptrCast(@alignCast(ptr));
+            const slice = typed_ptr[0..self.draw_capacity];
+            self.cpu_to_gpu_gpa.allocator().free(slice);
+        }
+    }
+
     self.allocator.free(self.indirect_draw_buffers);
     self.indirect_draw_buffers = &.{};
-
-    for (self.indirect_draw_memories) |mem| if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    self.allocator.free(self.indirect_draw_memories);
-    self.indirect_draw_memories = &.{};
-
-    for (self.chunk_data_buffers) |buf| if (buf != .null_handle) self.dev.destroyBuffer(buf, null);
-    self.allocator.free(self.chunk_data_buffers);
-    self.chunk_data_buffers = &.{};
-
-    for (self.chunk_data_memories) |mem| if (mem != .null_handle) self.dev.freeMemory(mem, null);
-    self.allocator.free(self.chunk_data_memories);
-    self.chunk_data_memories = &.{};
-
     self.allocator.free(self.indirect_draw_buffers_mapped);
     self.indirect_draw_buffers_mapped = &.{};
+    self.allocator.free(self.indirect_draw_offsets);
+    self.indirect_draw_offsets = &.{};
 
+    self.allocator.free(self.chunk_data_buffers);
+    self.chunk_data_buffers = &.{};
     self.allocator.free(self.chunk_data_buffers_mapped);
     self.chunk_data_buffers_mapped = &.{};
+    self.allocator.free(self.chunk_data_offsets);
+    self.chunk_data_offsets = &.{};
 
     if (self.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.descriptor_pool, null);
@@ -2373,7 +2242,39 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     try self.createRenderTargets(io, actual_extent);
 
-    try self.allocateIndirectBuffers();
+    self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
+    @memset(self.indirect_draw_buffers, .null_handle);
+
+    self.indirect_draw_buffers_mapped = try self.allocator.alloc(?[*]u8, num_swapchain_images);
+    @memset(self.indirect_draw_buffers_mapped, null);
+
+    self.indirect_draw_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
+    @memset(self.indirect_draw_offsets, 0);
+
+    self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
+    @memset(self.chunk_data_buffers, .null_handle);
+
+    self.chunk_data_buffers_mapped = try self.allocator.alloc(?[*]u8, num_swapchain_images);
+    @memset(self.chunk_data_buffers_mapped, null);
+
+    self.chunk_data_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
+    @memset(self.chunk_data_offsets, 0);
+
+    for (0..num_swapchain_images) |i| {
+        const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, self.draw_capacity);
+        const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, self.draw_capacity);
+
+        const chunk_data_info = self.backing_allocator.getBufferAndOffset(chunk_data_slice.ptr);
+        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(indirect_draw_slice.ptr);
+
+        self.chunk_data_buffers[i] = chunk_data_info.buffer;
+        self.chunk_data_buffers_mapped[i] = @ptrCast(chunk_data_slice.ptr);
+        self.chunk_data_offsets[i] = chunk_data_info.offset;
+
+        self.indirect_draw_buffers[i] = indirect_draw_info.buffer;
+        self.indirect_draw_buffers_mapped[i] = @ptrCast(indirect_draw_slice.ptr);
+        self.indirect_draw_offsets[i] = indirect_draw_info.offset;
+    }
 
     // Recreate descriptor pool and sets if they were previously created (i.e., this is
     // a resize, not the initial creation — descriptor_set_layout doesn't exist yet at init)
