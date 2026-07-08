@@ -8,6 +8,7 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 pub const Implementation = opaque {};
 vtable: *const VTable,
 userdata: *Implementation,
+last_viewport: ?@Vector(2, u32) = null,
 
 pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
@@ -38,7 +39,10 @@ pub fn draw(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancel
 
 ///sets the viewport dimensions in pixels, this function should only be called on the main thread
 pub fn setViewport(self: *@This(), viewport_pixels: @Vector(2, u32)) !void {
-    try self.vtable.setViewport(self.userdata, viewport_pixels);
+    if (!std.meta.eql(self.last_viewport, viewport_pixels)) {
+        try self.vtable.setViewport(self.userdata, viewport_pixels);
+        self.last_viewport = viewport_pixels;
+    }
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {

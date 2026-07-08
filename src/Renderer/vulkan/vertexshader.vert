@@ -96,8 +96,8 @@ void main() {
     uint local_vertex = quad_indices[gl_VertexIndex % 6u];
 
     uint64_t val = getPackedData(face_in_chunk);
-    uvec3 pos     = decodePosition(val);
-    uvec3 lengths = decodeLengths(val);
+    uvec3 local_pos = decodePosition(val);
+    uvec3 lengths   = decodeLengths(val);
     uint block_type_local = decodeBlockType(val);
     side          = decodeSide(val);
     block_array_layer = block_type_local;
@@ -105,10 +105,11 @@ void main() {
     vec3 coords = CUBE_FACES[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
-    fragpos = vec3(pos) * scale + coords + absolute_position;
+    fragpos = vec3(local_pos) * scale + coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
-    if ((pos + absolute_position).y == 0.0 && side == 2 && block_type_local == 3u) { //TODO this is bad redo this and block surfaces
+    // TODO: Replace hardcoded surface animation with a data-driven block material system
+    if ((local_pos + absolute_position).y == 0.0 && side == 2 && block_type_local == 3u) {
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
         float safe_y = max(abs(fragpos.y), 1e-10);
@@ -122,7 +123,7 @@ void main() {
     }
 
     out_coords = coords;
-    vec3 view_pos = coords + vec3(pos) * scale + relative_position;
+    vec3 view_pos = coords + vec3(local_pos) * scale + relative_position;
     gl_Position = push_consts.pc.projview * vec4(view_pos, 1.0);
     view_space_depth = gl_Position.w;
 }

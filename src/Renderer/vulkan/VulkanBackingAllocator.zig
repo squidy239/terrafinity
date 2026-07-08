@@ -8,7 +8,6 @@ const log = std.log.scoped(.vulkan_backing_allocator);
 /// GpuBlock represents a discrete block of device memory allocated from Vulkan.
 /// It tracks both GPU and CPU-accessible pointers.
 pub const GpuBlock = struct {
-    // 64-bit fields grouped first to ensure optimal alignment with zero padding overhead
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
     size: usize, // Aligned len requested by the caller
@@ -21,8 +20,6 @@ pub const GpuBlock = struct {
 };
 
 comptime {
-    // Compile-time verification of GpuBlock field layout and alignment efficiency.
-    // Grouping 64-bit pointers and integers first minimizes struct packing padding.
     if (@sizeOf(GpuBlock) > 128) {
         @compileError("GpuBlock size is unexpectedly large; check member layouts.");
     }
@@ -47,17 +44,14 @@ pub const VulkanBackingAllocator = struct {
 
     mutex: std.Io.Mutex = .init,
 
-    // Store active blocks and inactive cached free blocks in arrays indexed by MemoryPool.
     blocks: [std.meta.fields(MemoryPool).len]std.ArrayListUnmanaged(GpuBlock) = .{ .empty, .empty },
     free_blocks: [std.meta.fields(MemoryPool).len]std.ArrayListUnmanaged(GpuBlock) = .{ .empty, .empty },
 
-    meta_allocator: std.mem.Allocator, // Standard CPU allocator for tracking metadata
+    meta_allocator: std.mem.Allocator,
 
-    // Minimum page size alignment to act like a page allocator
     pub const min_page_size: usize = 4096;
 
     comptime {
-        // Enforce that min_page_size is a power of two to guarantee correct behavior of std.mem.alignForward
         if (!std.math.isPowerOfTwo(min_page_size)) {
             @compileError("min_page_size must be a power of two for correct alignment math.");
         }
@@ -87,7 +81,6 @@ pub const VulkanBackingAllocator = struct {
         }
     }
 
-    // Standard Zig Allocator VTable implementation
     pub fn allocator(self: *VulkanBackingAllocator, pool: MemoryPool) std.mem.Allocator {
         return .{
             .ptr = self,
@@ -102,7 +95,6 @@ pub const VulkanBackingAllocator = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const ptr_val = @intFromPtr(ptr);
-        // Binary search the sorted blocks for O(log N) lookups
         if (self.findBlockBinarySearch(ptr_val)) |block| {
             const base = @intFromPtr(block.cpu_ptr);
             const offset = ptr_val - base;
@@ -170,7 +162,6 @@ pub const VulkanBackingAllocator = struct {
 
     fn insertBlockSorted(self: *VulkanBackingAllocator, block: GpuBlock) !void {
         const list = &self.blocks[@intFromEnum(block.pool)];
-        // Binary search to find the insertion point to keep list sorted by cpu_ptr
         const ptr_val = @intFromPtr(block.cpu_ptr);
         var low: usize = 0;
         var high: usize = list.items.len;
@@ -188,9 +179,10 @@ pub const VulkanBackingAllocator = struct {
 
     fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
         for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |mem_type, i| {
-            if ((type_filter & (@as(u32, 1) << @as(u5, @truncate(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
-                return @intCast(i);
-            }
+            const bit = @as(u32, 1) << @as(u5, @truncate(i));
+            const matches_type = type_filter & bit != 0;
+            const matches_props = mem_type.property_flags.contains(properties);
+            if (matches_type and matches_props) return @intCast(i);
         }
         return error.MemoryTypeNotFound;
     }
@@ -212,16 +204,12 @@ pub const VulkanBackingAllocator = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "VulkanBackingAllocator.allocBlock" });
         defer zone.end();
 
-        // Enforce large page size alignment (4096 bytes or greater) to act like a page allocator
         const aligned_len = std.mem.alignForward(usize, len, min_page_size);
-
-        // Lock the mutex for the entirety of allocation/retrieval to ensure thread-safety
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         const free_list = &self.free_blocks[@intFromEnum(pool)];
 
-        // 1. Check if we have an inactive/cached block that satisfies the request
         for (free_list.items, 0..) |block, idx| {
             if (block.size >= aligned_len and block.alignment.toByteUnits() >= ptr_align.toByteUnits()) {
                 const hit_zone = tracy.Zone.begin(.{ .src = @src(), .name = "allocBlock_cache_hit" });
@@ -236,11 +224,9 @@ pub const VulkanBackingAllocator = struct {
         const miss_zone = tracy.Zone.begin(.{ .src = @src(), .name = "allocBlock_cache_miss_real_alloc" });
         defer miss_zone.end();
 
-        // Over-allocate memory by adding the requested ptr_align to guarantee we can satisfy it if alignment is larger than the page size
         const alignment_bytes = ptr_align.toByteUnits();
         const alloc_size = if (alignment_bytes <= min_page_size) aligned_len else aligned_len + alignment_bytes;
 
-        // 2. Create Buffer with support for bidirectional GPU-to-CPU and CPU-to-GPU memory transfers
         const buffer = try self.dev.createBuffer(&.{
             .flags = .{},
             .size = alloc_size,
@@ -257,17 +243,14 @@ pub const VulkanBackingAllocator = struct {
         }, null);
         errdefer self.dev.destroyBuffer(buffer, null);
 
-        // 3. Get Memory Requirements
         const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
 
-        // 4. Find Memory Type
         const req_flags = switch (pool) {
             .gpu_only => vk.MemoryPropertyFlags{ .device_local_bit = true },
             .cpu_to_gpu => vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
         };
         const mem_type = try self.findMemoryType(mem_reqs.memory_type_bits, req_flags);
 
-        // 5. Allocate Device Memory with Buffer Device Address bit enabled
         var alloc_flags = vk.MemoryAllocateFlagsInfo{
             .flags = .{ .device_address_bit = true },
             .device_mask = 0,
@@ -279,23 +262,19 @@ pub const VulkanBackingAllocator = struct {
         }, null);
         errdefer self.dev.freeMemory(memory, null);
 
-        // 6. Bind buffer memory
         try self.dev.bindBufferMemory(buffer, memory, 0);
 
-        // 7. Get GPU Device Address
         const gpu_address = self.dev.getBufferDeviceAddress(&.{ .buffer = buffer });
 
-        // 8. Map or allocate shadow memory
-        var raw_cpu_ptr: [*]u8 = undefined;
-        if (pool == .cpu_to_gpu) {
-            const mapped = try self.dev.mapMemory(memory, 0, mem_reqs.size, .{});
-            raw_cpu_ptr = @ptrCast(mapped);
-        } else {
-            raw_cpu_ptr = self.meta_allocator.rawAlloc(mem_reqs.size, ptr_align, ret_addr) orelse return error.OutOfMemory;
-            if (std.debug.runtime_safety) {
-                @memset(raw_cpu_ptr[0..mem_reqs.size], 0xcc);
+        const raw_cpu_ptr: [*]u8 = blk: {
+            if (pool == .cpu_to_gpu) {
+                const mapped = try self.dev.mapMemory(memory, 0, mem_reqs.size, .{});
+                break :blk @ptrCast(mapped);
             }
-        }
+            const ptr = self.meta_allocator.rawAlloc(mem_reqs.size, ptr_align, ret_addr) orelse return error.OutOfMemory;
+            if (std.debug.runtime_safety) @memset(ptr[0..mem_reqs.size], 0xcc);
+            break :blk ptr;
+        };
         errdefer {
             if (pool == .gpu_only) {
                 self.meta_allocator.rawFree(raw_cpu_ptr[0..mem_reqs.size], ptr_align, ret_addr);
@@ -304,13 +283,11 @@ pub const VulkanBackingAllocator = struct {
             }
         }
 
-        // Align the returned pointer forward to satisfy ptr_align
         const cpu_ptr_addr = std.mem.alignForward(usize, @intFromPtr(raw_cpu_ptr), ptr_align.toByteUnits());
         const cpu_ptr: [*]u8 = @ptrFromInt(cpu_ptr_addr);
         const offset = cpu_ptr_addr - @intFromPtr(raw_cpu_ptr);
         const aligned_gpu_address = gpu_address + offset;
 
-        // Verify that pointer calculations do not exceed total mapped size bounds
         std.debug.assert(offset + aligned_len <= mem_reqs.size);
         std.debug.assert(std.mem.isAligned(cpu_ptr_addr, ptr_align.toByteUnits()));
 
@@ -330,21 +307,18 @@ pub const VulkanBackingAllocator = struct {
         return cpu_ptr;
     }
 
-    fn freeBlock(self: *VulkanBackingAllocator, pool: MemoryPool, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+    fn freeBlock(self: *VulkanBackingAllocator, pool: MemoryPool, buf: []u8, _: std.mem.Alignment, ret_addr: usize) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "VulkanBackingAllocator.freeBlock" });
         defer zone.end();
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        _ = buf_align;
 
         const list = &self.blocks[@intFromEnum(pool)];
         const free_list = &self.free_blocks[@intFromEnum(pool)];
 
-        // Find the block from its cpu_ptr using O(log N) binary search
         if (findBlockIndex(list.items, @intFromPtr(buf.ptr))) |idx| {
             const block = list.orderedRemove(idx);
-            // Append to free list instead of destroying resources to avoid kernel/driver allocation stalls
             free_list.append(self.meta_allocator, block) catch |err| {
                 log.warn("VulkanBackingAllocator: failed to cache freed block: {any}, destroying block resources", .{err});
                 self.destroyBlockResources(block, ret_addr);
@@ -371,21 +345,11 @@ fn allocCpuToGpu(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_
     };
 }
 
-fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-    _ = ctx;
-    _ = buf;
-    _ = buf_align;
-    _ = new_len;
-    _ = ret_addr;
+fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
     return false; // Resize in-place not supported by Vulkan buffers
 }
 
-fn remap(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-    _ = ctx;
-    _ = buf;
-    _ = buf_align;
-    _ = new_len;
-    _ = ret_addr;
+fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
     return null; // Remap not supported
 }
 

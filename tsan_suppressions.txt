@@ -7,3 +7,4 @@ race:entropy_common.c
 race:ZSTD_decodeLiteralsBlock
 race:ZSTD_decompressSequences_body
 race:ZSTD_decompressDCtx
+race:libVkLayer_khronos_validation

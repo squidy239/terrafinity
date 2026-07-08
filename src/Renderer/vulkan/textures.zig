@@ -260,7 +260,7 @@ pub const TextureArrayManager = struct {
                     .transfer_src_optimal,
                     texture_image,
                     .transfer_dst_optimal,
-                    &[_]vk.ImageBlit{blit_region},
+                    &.{blit_region},
                     .linear,
                 );
 
@@ -327,12 +327,12 @@ pub const TextureArrayManager = struct {
                 .dst_array_element = 0,
                 .descriptor_count = 1,
                 .descriptor_type = .combined_image_sampler,
-                .p_image_info = @ptrCast(&descriptor_image_info),
+                .p_image_info = (&descriptor_image_info)[0..1],
                 .p_buffer_info = undefined,
                 .p_texel_buffer_view = undefined,
             };
 
-            self.renderer.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
+            self.renderer.dev.updateDescriptorSets(&.{descriptor_write}, null);
         }
 
         self.texture_image = texture_image;
@@ -413,8 +413,7 @@ pub const TextureArrayManager = struct {
             @panic("Unsupported layout transition");
         }
 
-        const barrier_arr = [_]vk.ImageMemoryBarrier{barrier};
-        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, &barrier_arr);
+        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, &.{barrier});
     }
 
     /// Rebind the texture array to all per-frame descriptor sets (needed after swapchain
@@ -433,11 +432,11 @@ pub const TextureArrayManager = struct {
                 .dst_array_element = 0,
                 .descriptor_count = 1,
                 .descriptor_type = .combined_image_sampler,
-                .p_image_info = @ptrCast(&descriptor_image_info),
+                .p_image_info = (&descriptor_image_info)[0..1],
                 .p_buffer_info = undefined,
                 .p_texel_buffer_view = undefined,
             };
-            self.renderer.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
+            self.renderer.dev.updateDescriptorSets(&.{descriptor_write}, null);
         }
         self.renderer.updateDepthDescriptorSets();
     }

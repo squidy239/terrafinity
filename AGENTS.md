@@ -4,7 +4,8 @@
 
 - normal build: `zig build`
 - run and open to menu: `zig build run`
-- run and open to a game: `zig build run -Dtest_play`
+- run and open to a game: `zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
+- run and open a game with thread sanitizer, this should be used instead of the regular test play a lot of the time: `TSAN_OPTIONS="suppressions=tsan_suppressions.txt" zig build run -Dtest_play=10 -Dsanitize_thread=Normal`
 - format code: `zig fmt .`
 
 # Codebase Naming Conventions & Guidelines
@@ -148,11 +149,80 @@ Maintaining a high-quality codebase requires strict adherence to structural hygi
 - Note that inline actually restricts what the compiler is allowed to do. This can harm binary size, compilation speed, and even runtime performance.
 
 ## State and Mutation
-- **Proximity of State:** Declare variables exactly where they are needed, as close to their first usage as possible. Do not declare all variables at the top of a scope, as it artificially separates the context from the logic that uses it.
+- **Proximity of State:** Declare variables in the deepest scope where they are used, as close to their first usage as possible. Do not declare a variable in an outer scope if it is only consumed in a nested block; this reduces the reader's mental stack by narrowing the variable's lifetime and proving it has no effect on the code outside that block. 
 - **Explicit Over Implicit:** Never rely on hidden state or side effects. If a function mutates state, its name and signature must make that glaringly obvious.
 - **Constants Over Magic Values:** Avoid magic numbers or hardcoded string literals entirely. Bind them to properly named constants at the top of the file or within a dedicated namespace.
-- **Minimize Unsafe Casts:** Avoid things like ptrcast and aligncast if you can. Bitcast is safer and has less footguns so only ptrcast if their is a good reason.
-- **Use Capture Syntax:** Prefer capture syntax (`|variable|`) in most cases, unless their is a reason not to use it. For if statements with optionals, it removes a failure point (.?), and for loops it increces readability and removes the possibility of off by one and out of bounds issues. You can use multiple captures in loops and can capture pointers with `|*variable|`.
+- **Minimize Unsafe Casts:** Avoid things like ptrcast and aligncast if you can. Bitcast is safer and has less footguns so only ptrcast if their is a good reason. Ptrcasts are ALMOST NEVER the right solution, only use them for things like casting to/from opaque pointers.
+### Use Capture Syntax Over Index Variables
+
+Prefer capture syntax (`|variable|`) over index variables in `for` loops. Captures eliminate off-by-one errors, out-of-bounds risk, and make the loop's intent obvious.
+
+**Bad — index variable to index into arrays:**
+```zig
+for (0..items.len) |i| {
+    doSomething(items[i]);
+}
+```
+
+**Good — direct element capture:**
+```zig
+for (items) |item| {
+    doSomething(item);
+}
+```
+
+**Bad — index to mutate:**
+```zig
+for (0..items.len) |i| {
+    items[i] = generate();
+}
+```
+
+**Good — pointer capture for mutation:**
+```zig
+for (items) |*item| {
+    item.* = generate();
+}
+```
+
+**Bad — indexing into parallel arrays:**
+```zig
+for (0..count) |i| {
+    arr[i] = f(others[i]);
+}
+```
+
+**Good — zip parallel arrays with captures:**
+```zig
+for (arr, others[0..count]) |*dest, src| {
+    dest.* = f(src);
+}
+```
+
+**Good — multiple captured arrays:**
+```zig
+for (buffers, mapped, offsets) |*buf, *map, *off| {
+    buf.* = new_buf;
+    map.* = new_map;
+    off.* = new_off;
+}
+```
+
+**When you genuinely need an index** (e.g. calling an API that takes an index), use the `, 0..` capture instead of a range loop:
+```zig
+for (items, 0..) |item, i| {
+    externalApi(items[i], i);
+}
+```
+
+**`if` captures** unwrap optionals without introducing a `.?` failure point:
+```zig
+if (maybe_value) |value| {
+    // value is the unwrapped type, no .? needed
+}
+```
+
+**Rule:** If you find yourself writing `for (0..x.len) |i|`, ask whether you can capture the elements directly. Index variables should only appear when the numeric index itself is meaningful (e.g. bit positions, matrix dimensions, or API callbacks).
 - **Watch Out for Undefined:** Always initialize variables before using them, and avoid values that it is easy to forget are undefined. For example, you can not check a optional set as undefined to see if it is null. Use optionals instead of undefined where possible.
 
 ## Comptime Pointer Alignment and `@embedFile`
@@ -182,5 +252,91 @@ const module = try dev.createShaderModule(&.{
 
 **Takeaway:** When `@embedFile` data needs alignment casts, perform the cast at the call site or in an `inline` function that the compiler can fully resolve at comptime. Non-inline helper functions that accept `[]const u8` parameters will lose the alignment metadata.
 
+## Single-Item Slice Pattern (`(&x)[0..1]`)
+
+When a Vulkan (or other C) API expects a many-pointer (`[*]T` or `[]T`) to a single element, prefer `(&x)[0..1]` over two common anti-patterns:
+
+- **`@ptrCast(&x)`** — unsafe; suppresses type checking and can hide errors
+- **`&[1]T{x}`** — verbose; creates an anonymous temporary array
+
+The `(&x)[0..1]` syntax is safe, concise, and makes the intent ("this pointer represents exactly one element") explicit.
+
+```zig
+const foo: Foo = .{ .x = 1 };
+
+// ✓ CORRECT — single-item slice from pointer
+.p_single_foo = (&foo)[0..1];
+
+// ✗ WRONG — unsafe cast
+.p_single_foo = @ptrCast(&foo);
+
+// ✗ WRONG — verbose anonymous array
+.p_single_foo = &[1]Foo{foo};
+```
+
+For actual multi-element arrays, use `array[0..n]` instead of `@ptrCast(&array)` or `@ptrCast(&array[0])`:
+
+```zig
+var arr: [4]Foo = undefined;
+
+// ✓ CORRECT — many-pointer from array
+.p_arr = arr[0..count].ptr;
+
+// ✓ ALSO CORRECT — slice form (when field accepts a slice)
+.p_arr = arr[0..count];
+
+// ✗ WRONG — unsafe cast
+.p_arr = @ptrCast(&arr);
+
+// ✗ WRONG — pointer to first element
+.p_arr = @ptrCast(&arr[0]);
+```
+
+Note: For `var` (mutable) arrays, the slice `arr[0..n]` is `[]T` (mutable). If the field expects `?[*]const T`, use `.ptr` to get `[*]T` which coerces to `?[*]const T`. For `const` arrays or single-item `(&x)[0..1]` the slice is already `[]const T` and may coerce directly.
+
+## Prefer `: Type = .{vals}` Over `[_]Type{vals}`
+
+When declaring array literals, use an explicit type annotation with `.{}` syntax instead of repeating the type inside `[_]`:
+
+```zig
+// ✗ WRONG — type repeated in the literal
+const formats = [_]vk.Format{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
+
+// ✓ CORRECT — type annotates the binding, not the literal
+const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
+```
+
+This avoids redundancy and reads more naturally as "formats is an array of 2 Formats = ...".
+
+**Does not apply to:** `p_next` chains (which need `@ptrCast` to `*const c_void`) or output parameters (`&x` where the API expects `*T`).
+
+## Avoid `[1]` Arrays as Casting Workarounds
+
+Declaring a length-1 array solely to convert a single value to a pointer is a code smell. It adds unnecessary ceremony and hides the intent. Use the `(&x)[0..1]` pattern instead.
+
+```zig
+// ✗ WRONG — 1-element array workaround
+var desc_set: [1]vk.DescriptorSet = undefined;
+try dev.allocateDescriptorSets(&alloc_info, &desc_set);
+
+// ✓ CORRECT — single variable with slice
+var desc_set: vk.DescriptorSet = undefined;
+try dev.allocateDescriptorSets(&alloc_info, (&desc_set)[0..1]);
+```
+
+This applies everywhere: fence arrays, semaphore arrays, descriptor set arrays, command buffer arrays — wherever you find `[1]` used to smuggle a single value into a many-pointer parameter, replace it with a plain variable and `(&x)[0..1]`.
+
+Once a variable is a scalar, check if the temporary even needs to exist. If the destination is already allocated (like `array[i]`), pass `(&array[i])[0..1]` directly instead of bouncing through a local:
+
+```zig
+// ✗ WRONG — unnecessary temporary
+var desc_set: vk.DescriptorSet = undefined;
+try dev.allocateDescriptorSets(&info, (&desc_set)[0..1]);
+sets[i] = desc_set;
+
+// ✓ CORRECT — write directly into the destination
+try dev.allocateDescriptorSets(&info, (&sets[i])[0..1]);
+```
+
 # Modify this file with things you learned or changes you think would be beneficial
-- Whenever you learn something new that would fit well here and be usefull in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.
+- Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.

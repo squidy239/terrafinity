@@ -18,11 +18,7 @@ pub fn build(b: *std.Build) void {
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
-        switch (optimize) {
-            .Debug => "-O0",
-            .ReleaseSafe, .ReleaseFast => "-O",
-            .ReleaseSmall => "-Os",
-        },
+        "-O",
         "-Werror",
         "-o",
     };

@@ -274,8 +274,11 @@ pub fn main(init: std.process.Init) !void {
         var action_set = Key.ActionSet.empty;
         var visible: bool = false;
         while (running.load(.unordered)) {
+            const zone_update = tracy.Zone.begin(.{ .src = @src(), .name = "wio update" });
             wio.update();
+            zone_update.end();
             try handleEventsGame(io, &keymap, single_press, &action_set, &running, &window, &events, &visible, &game, frame_time.untilNow(io, .awake));
+
             frame_time = .now(io, .awake);
 
             if (options.test_play) |timeout| {
@@ -288,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
 
             // Only render and present if window is visible and should present
             if (!visible or !window.shouldPresent()) {
-                continue;
+                continue; //TODO move the vulkan init, swapchain, and window out of Renderer
             }
 
             // Update game state and submit Vulkan render commands (includes Vulkan presentation via vkQueuePresentKHR)
@@ -414,6 +417,9 @@ fn handleEventsGame(
     game: *Game,
     dt: std.Io.Duration,
 ) !void {
+    const zone_handle_events = tracy.Zone.begin(.{ .src = @src() });
+    defer zone_handle_events.end();
+
     win.enableRelativeMouse(.{ .unaccelerated = true });
 
     //set all single press buttons like escape to false

@@ -432,10 +432,12 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const fps = self.debug_menu.fps.load(.unordered);
     self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
 
+    const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
+
     var entities_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
     defer entities_future.cancel(io) catch {};
     try restartFutures(self, io, allocator);
-
+    asyncs.end();
     try self.player.physics.update(&self.world, io, allocator);
 
     self.player.physics.mutex.lockUncancelable(io);
