@@ -50,8 +50,6 @@ pub fn forEachChunk(self: *@This(), io: std.Io, userdata: *anyopaque, callback: 
 }
 
 pub const RenderOptions = struct {
-    /// Draws higher detail chunks over lower detail chunks. This makes LOD transitions very smooth, but can cause visual artifacts if you move faster than chunks can load.
-    draw_over: bool = true,
     fov: f32 = 90.0,
     day_length_sec: f32 = 60 * 5,
     gamma_correction: bool = false,

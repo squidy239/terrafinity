@@ -7,7 +7,6 @@ struct PushConstants {
     mat4 projview;
     vec3 sun_dir;
     float time;
-    int draw_over;
 };
 
 layout(push_constant) uniform PushConsts {
@@ -109,7 +108,7 @@ void main() {
     fragpos = vec3(pos) * scale + coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
-    if (false && side != 3 && block_type_local == 3u) {
+    if ((pos + absolute_position).y == 0.0 && side == 2 && block_type_local == 3u) { //TODO this is bad redo this and block surfaces
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
         float safe_y = max(abs(fragpos.y), 1e-10);

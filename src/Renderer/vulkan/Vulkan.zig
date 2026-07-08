@@ -222,7 +222,6 @@ const PushConstants = extern struct {
     projview: [16]f32,
     sun_dir: [3]f32,
     time: f32,
-    draw_over: i32,
 };
 
 fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
@@ -1477,7 +1476,6 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const aspect = @as(f32, @floatFromInt(self.viewport_pixels[0])) / @as(f32, @floatFromInt(self.viewport_pixels[1]));
 
     self.render_options_lock.lockSharedUncancelable(io);
-    const draw_over = self.render_options.draw_over;
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
@@ -1580,7 +1578,6 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         .projview = @splat(0),
         .sun_dir = sun_dir,
         .time = elapsed_sec,
-        .draw_over = @intFromBool(draw_over),
     };
 
     inline for (0..4) |row| {
@@ -2792,7 +2789,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
         },
     };
     self.render_depth_view = try self.dev.createImageView(&depth_view_info, null);
-    
+
     var depth_sampled_view_info = depth_view_info;
     depth_sampled_view_info.subresource_range.aspect_mask = .{ .depth_bit = true };
     self.render_depth_sampled_view = try self.dev.createImageView(&depth_sampled_view_info, null);

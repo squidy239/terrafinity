@@ -400,7 +400,6 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
     self.render_options_lock.lockSharedUncancelable(io);
-    const draw_over = self.render_options.draw_over;
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     self.render_options_lock.unlockShared(io);
@@ -428,7 +427,6 @@ fn drawChunks(self: *@This(), io: std.Io, playerPos: @Vector(3, f64), skyColor: 
     const elapsed_ns = now_ns -| self.init_time_ns;
     const elapsed_sec = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
     gl.Uniform1f(self.uniforms.chunks.time, elapsed_sec);
-    gl.Uniform1i(self.uniforms.chunks.draw_over, if (draw_over) gl.TRUE else gl.FALSE);
 
     const frustum = Frustum.extractFrustumPlanes(projview);
 
@@ -547,14 +545,12 @@ const ChunkUniformLocations = struct {
     projview: c_int,
     sun_dir: c_int,
     time: c_int,
-    draw_over: c_int,
 
     pub fn getLocations(shaderprogram: c_uint) @This() {
         return @This(){
             .projview = gl.GetUniformLocation(shaderprogram, "projview"),
             .sun_dir = gl.GetUniformLocation(shaderprogram, "sun_dir"),
             .time = gl.GetUniformLocation(shaderprogram, "time"),
-            .draw_over = gl.GetUniformLocation(shaderprogram, "draw_over"),
         };
     }
 };
