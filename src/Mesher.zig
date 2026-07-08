@@ -210,7 +210,8 @@ pub const MeshResult = enum(Tag) {
 };
 
 inline fn meshOne(one: Block, two: Block) MeshResult {
-    if (one == two or !one.isVisible() or !two.isTransparent()) return .none;
+    if (one == two or !one.isVisible()) return .none;
+    if (!two.isTransparent() and !one.isTransparent()) return .none;
     return if (one.isTransparent()) .transparent else .@"opaque";
 }
 
@@ -219,12 +220,12 @@ fn meshMany(comptime len: usize, one: @Vector(len, Block.Tag), ones_visible: @In
     const not_same: LenInt = @bitCast(one != two);
     if (not_same == 0) return .{ 0, 0 };
     const twos_transparent: LenInt = @bitCast(Block.isTransparentVector(len, two));
-    const valid_face = not_same & ones_visible & twos_transparent;
+    
+    const valid = not_same & ones_visible;
+    const transparent_faces = valid & ones_transparent;
+    const opaque_faces = valid & twos_transparent & ~ones_transparent;
 
-    return .{
-        (valid_face & ones_transparent),
-        (valid_face & ~ones_transparent),
-    };
+    return .{ transparent_faces, opaque_faces };
 }
 
 test "Compare meshMany vs meshOne" {

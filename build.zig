@@ -28,12 +28,24 @@ pub fn build(b: *std.Build) void {
     };
 
     const vert_cmd = b.addSystemCommand(&shader_cmd);
-    _ = vert_cmd.addOutputFileArg("src/Renderer/vulkan/vertexshader.spv");
+    const vert_spv = vert_cmd.addOutputFileArg("vertexshader.spv");
     vert_cmd.addFileArg(b.path("src/Renderer/vulkan/vertexshader.vert"));
 
     const frag_cmd = b.addSystemCommand(&shader_cmd);
-    _ = frag_cmd.addOutputFileArg("src/Renderer/vulkan/fragshader.spv");
+    const frag_spv = frag_cmd.addOutputFileArg("fragshader.spv");
     frag_cmd.addFileArg(b.path("src/Renderer/vulkan/fragshader.frag"));
+
+    const trans_frag_cmd = b.addSystemCommand(&shader_cmd);
+    const trans_frag_spv = trans_frag_cmd.addOutputFileArg("transparent_frag.spv");
+    trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/transparent_frag.frag"));
+
+    const comp_vert_cmd = b.addSystemCommand(&shader_cmd);
+    const comp_vert_spv = comp_vert_cmd.addOutputFileArg("composite_vert.spv");
+    comp_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/composite_vert.vert"));
+
+    const comp_frag_cmd = b.addSystemCommand(&shader_cmd);
+    const comp_frag_spv = comp_frag_cmd.addOutputFileArg("composite_frag.spv");
+    comp_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/composite_frag.frag"));
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -50,9 +62,18 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
-    // Make the executable depend on the shader compilation steps
     exe.step.dependOn(&vert_cmd.step);
     exe.step.dependOn(&frag_cmd.step);
+    exe.step.dependOn(&trans_frag_cmd.step);
+    exe.step.dependOn(&comp_vert_cmd.step);
+    exe.step.dependOn(&comp_frag_cmd.step);
+
+    exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
+    exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
+    exe.root_module.addAnonymousImport("trans_frag_spv", .{ .root_source_file = trans_frag_spv });
+    exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
+    exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
+
     var options: *std.Build.Step.Options = .create(b);
     options.addOption(?u32, "test_play", test_play);
     options.addOption(bool, "sanitize_thread", sanitize != .None);

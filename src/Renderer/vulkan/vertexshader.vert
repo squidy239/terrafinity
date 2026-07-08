@@ -14,12 +14,13 @@ layout(push_constant) uniform PushConsts {
     PushConstants pc;
 } push_consts;
 
-layout(location = 1) out vec3 coordss;
+layout(location = 1) out vec3 out_coords;
 layout(location = 2) out vec3 fragpos;
 layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
 layout(location = 6) flat out float scale;
+layout(location = 7) out float view_space_depth;
 
 struct ChunkData {
     vec3 absolute_position;
@@ -108,8 +109,8 @@ void main() {
     fragpos = vec3(pos) * scale + coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
-    if (block_type_local == 3u) {
-        float speed = 2000.0;
+    if (false && side != 3 && block_type_local == 3u) {
+        float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
         float safe_y = max(abs(fragpos.y), 1e-10);
         float safe_z = max(abs(fragpos.z), 1e-10);
@@ -118,8 +119,11 @@ void main() {
             (sin(fragpos.x) * sin(fragpos.y) * sin(fragpos.z)),
             400.0) / 400.0;
         coords.y -= bouncingMod(p * t * speed, 0.4);
+        coords.y = max(coords.y, -0.5);
     }
 
-    coordss = coords;
-    gl_Position = push_consts.pc.projview * vec4(coords + vec3(pos) * scale + relative_position, 1.0);
+    out_coords = coords;
+    vec3 view_pos = coords + vec3(pos) * scale + relative_position;
+    gl_Position = push_consts.pc.projview * vec4(view_pos, 1.0);
+    view_space_depth = gl_Position.w;
 }

@@ -9,7 +9,7 @@ layout(early_fragment_tests) in;
 
 layout(location = 0) out vec4 frag_color;
 
-layout(location = 1) in vec3 coordss;
+layout(location = 1) in vec3 in_coords;
 layout(location = 2) in vec3 fragpos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
@@ -49,7 +49,7 @@ const uvec2 texcoord_axes[6] = uvec2[](
 void main()
 {
     vec3 normal = face_normals[side];
-    vec2 texcoords = vec2(coordss[texcoord_axes[side][0]], coordss[texcoord_axes[side][1]]) * 2.0;
+    vec2 texcoords = vec2(in_coords[texcoord_axes[side][0]], in_coords[texcoord_axes[side][1]]) * 2.0;
 
     frag_color = texture(texture_array, vec3((texcoords + 1.0) / 2.0, float(block_array_layer)));
     frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);

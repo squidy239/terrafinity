@@ -439,6 +439,7 @@ pub const TextureArrayManager = struct {
             };
             self.renderer.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
         }
+        self.renderer.updateDepthDescriptorSets();
     }
 
     pub fn destroyTextureArray(self: *TextureArrayManager) void {
