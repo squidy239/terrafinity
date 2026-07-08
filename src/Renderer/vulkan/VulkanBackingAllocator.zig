@@ -236,8 +236,9 @@ pub const VulkanBackingAllocator = struct {
         const miss_zone = tracy.Zone.begin(.{ .src = @src(), .name = "allocBlock_cache_miss_real_alloc" });
         defer miss_zone.end();
 
-        // Over-allocate memory by adding the requested ptr_align to guarantee we can satisfy it
-        const alloc_size = aligned_len + ptr_align.toByteUnits();
+        // Over-allocate memory by adding the requested ptr_align to guarantee we can satisfy it if alignment is larger than the page size
+        const alignment_bytes = ptr_align.toByteUnits();
+        const alloc_size = if (alignment_bytes <= min_page_size) aligned_len else aligned_len + alignment_bytes;
 
         // 2. Create Buffer with support for bidirectional GPU-to-CPU and CPU-to-GPU memory transfers
         const buffer = try self.dev.createBuffer(&.{

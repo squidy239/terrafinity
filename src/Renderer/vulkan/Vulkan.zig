@@ -30,6 +30,9 @@ const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBacki
 const MemoryPool = @import("VulkanBackingAllocator.zig").MemoryPool;
 
 pub const cameraUp = @Vector(3, f32){ 0, 1, 0 };
+const skyHeight: f32 = 4096.0;
+const nearPlane: f32 = 0.01;
+const degreesPerCircle: f32 = 360.0;
 
 pub const FrameDebugStats = struct {
     frame_number: u64 = 0,
@@ -52,19 +55,13 @@ pub const FrameDebugStats = struct {
         const elapsed_f: f64 = @floatFromInt(self.elapsed_ns);
         const ms = elapsed_f / 1_000_000.0;
 
-        const opaque_drawn_f: f64 = @floatFromInt(self.opaque_drawn);
-        const opaque_candidates_f: f64 = @floatFromInt(self.opaque_candidates);
-        const opaque_visible_pct = if (self.opaque_candidates > 0)
-            opaque_drawn_f / opaque_candidates_f * 100.0
-        else
-            0.0;
-
-        const transparent_drawn_f: f64 = @floatFromInt(self.transparent_drawn);
-        const transparent_candidates_f: f64 = @floatFromInt(self.transparent_candidates);
-        const transparent_visible_pct = if (self.transparent_candidates > 0)
-            transparent_drawn_f / transparent_candidates_f * 100.0
-        else
-            0.0;
+        const pct = struct {
+            fn p(d: u32, c: u32) f64 {
+                return if (c > 0) @as(f64, @floatFromInt(d)) / @as(f64, @floatFromInt(c)) * 100.0 else 0.0;
+            }
+        };
+        const opaque_visible_pct = pct.p(self.opaque_drawn, self.opaque_candidates);
+        const transparent_visible_pct = pct.p(self.transparent_drawn, self.transparent_candidates);
 
         std.log.info("=== FRAME {d} DEBUG STATS ===", .{self.frame_number});
         std.log.info("Player pos=({d:.1}, {d:.1}, {d:.1})  Camera front=({d:.3}, {d:.3}, {d:.3})", .{
@@ -99,8 +96,7 @@ const RenderBufferKey = union(enum) {
 
     pub fn toPos(self: RenderBufferKey) ChunkPos {
         return switch (self) {
-            .@"opaque" => |pos| pos,
-            .transparent => |pos| pos,
+            inline .@"opaque", .transparent => |pos| pos,
         };
     }
 };
@@ -224,7 +220,7 @@ const PushConstants = extern struct {
     time: f32,
 };
 
-fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+inline fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
     for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
         if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
             return @intCast(i);
@@ -233,14 +229,14 @@ fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: 
     @panic("Failed to find suitable memory type");
 }
 
-fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, playerPos: @Vector(3, f64)) bool {
+fn cullChunk(frustum: *const Frustum, chunkpos: ChunkPos, player_pos: @Vector(3, f64)) bool {
     const scale = ChunkPos.toScale(chunkpos.level);
-    const chunkSizeBlocks: f64 = @floatCast(scale * @as(f32, ChunkSize));
+    const chunk_size_blocks: f64 = @floatCast(scale * @as(f32, ChunkSize));
     const chunk_pos_f: @Vector(3, f64) = @floatFromInt(chunkpos.position);
-    const chunkWorldPos = chunk_pos_f * @as(@Vector(3, f64), @splat(chunkSizeBlocks));
-    const relativeChunkPos: @Vector(3, f32) = @floatCast(chunkWorldPos - playerPos);
-    const chunkSizeVec: @Vector(3, f32) = @splat(@floatCast(chunkSizeBlocks));
-    return !frustum.boxInFrustum(.{ .max = relativeChunkPos + chunkSizeVec, .min = relativeChunkPos });
+    const chunk_world_pos = chunk_pos_f * @as(@Vector(3, f64), @splat(chunk_size_blocks));
+    const relative_chunk_pos: @Vector(3, f32) = @floatCast(chunk_world_pos - player_pos);
+    const chunk_size_vec: @Vector(3, f32) = @splat(@floatCast(chunk_size_blocks));
+    return !frustum.boxInFrustum(.{ .max = relative_chunk_pos + chunk_size_vec, .min = relative_chunk_pos });
 }
 
 fn makeInfReversedZProjRh(fovY_radians: f32, aspectWbyH: f32, zNear: f32) zm.Mat4f {
@@ -409,9 +405,8 @@ frame_stats: FrameDebugStats = .{},
 
 pub const RenderOptions = Renderer.RenderOptions;
 
-fn getDeletionQueueIndex(self: *VulkanRenderer) u32 {
-    const unbound = self.current_frame_idx.load(.monotonic);
-    return @intCast(unbound % self.in_flight_fences.len);
+inline fn getDeletionQueueIndex(self: *const VulkanRenderer) u32 {
+    return @intCast(self.current_frame_idx.load(.monotonic) % self.in_flight_fences.len);
 }
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
@@ -793,12 +788,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     self.dev_wrapper = dev_wrapper_ptr;
     self.dev = .init(self.dev_handle, dev_wrapper_ptr);
     errdefer {
-        if (self.command_pool != .null_handle) {
-            self.dev.destroyCommandPool(self.command_pool, null);
-        }
-        if (self.upload_command_pool != .null_handle) {
-            self.dev.destroyCommandPool(self.upload_command_pool, null);
-        }
+        destroyIfValidCommandPool(self.dev, &self.command_pool);
+        destroyIfValidCommandPool(self.dev, &self.upload_command_pool);
         if (self.swapchain != .null_handle) {
             for (self.swapchain_views) |view| {
                 if (view != .null_handle) self.dev.destroyImageView(view, null);
@@ -814,42 +805,16 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
             }
             self.dev.destroySwapchainKHR(self.swapchain, null);
         }
-        if (self.render_color_view != .null_handle) {
-            self.dev.destroyImageView(self.render_color_view, null);
-        }
-        if (self.render_depth_view != .null_handle) {
-            self.dev.destroyImageView(self.render_depth_view, null);
-        }
-        if (self.render_depth_sampled_view != .null_handle) {
-            self.dev.destroyImageView(self.render_depth_sampled_view, null);
-        }
-        if (self.render_color_image != .null_handle) {
-            self.dev.destroyImage(self.render_color_image, null);
-        }
-        if (self.render_color_memory != .null_handle) {
-            self.dev.freeMemory(self.render_color_memory, null);
-        }
-        if (self.render_depth_image != .null_handle) {
-            self.dev.destroyImage(self.render_depth_image, null);
-        }
-        if (self.render_depth_memory != .null_handle) {
-            self.dev.freeMemory(self.render_depth_memory, null);
-        }
-        if (self.pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.pipeline, null);
-        }
-        if (self.transparent_pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.transparent_pipeline, null);
-        }
-        if (self.pipeline_layout != .null_handle) {
-            self.dev.destroyPipelineLayout(self.pipeline_layout, null);
-        }
-        if (self.descriptor_set_layout != .null_handle) {
-            self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
-        }
-        if (self.descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.descriptor_pool, null);
-        }
+        destroyIfValidImageView(self.dev, &self.render_color_view);
+        destroyIfValidImageView(self.dev, &self.render_depth_view);
+        destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+        destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
+        destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
+        destroyIfValidPipeline(self.dev, &self.pipeline);
+        destroyIfValidPipeline(self.dev, &self.transparent_pipeline);
+        destroyIfValidPipelineLayout(self.dev, &self.pipeline_layout);
+        destroyIfValidDescriptorSetLayout(self.dev, &self.descriptor_set_layout);
+        if (self.descriptor_pool != .null_handle) self.dev.destroyDescriptorPool(self.descriptor_pool, null);
 
         self.dev.destroyDevice(null);
         allocator.destroy(dev_wrapper_ptr);
@@ -888,7 +853,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     try self.createSwapchain(io);
 
     try self.createDescriptorSetLayout();
-    try self.createDescriptorPoolAndSets(io, false);
+    try self.createDescriptorPoolAndSets();
 
     {
         self.texture_manager = .init(self, self.render_options.gamma_correction);
@@ -1026,26 +991,14 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.meshes.deinit(io, self.allocator);
 
     // Now call destroyOldSwapchainResources to clean up all swapchain and frame-dependent resources
-    self.destroyOldSwapchainResources(io);
+    self.destroyOldSwapchainResources();
 
     self.destroyOitPipelinesAndDescriptors();
 
-    if (self.pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.pipeline, null);
-        self.pipeline = .null_handle;
-    }
-    if (self.transparent_pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.transparent_pipeline, null);
-        self.transparent_pipeline = .null_handle;
-    }
-    if (self.pipeline_layout != .null_handle) {
-        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
-        self.pipeline_layout = .null_handle;
-    }
-    if (self.descriptor_set_layout != .null_handle) {
-        self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
-        self.descriptor_set_layout = .null_handle;
-    }
+    destroyIfValidPipeline(self.dev, &self.pipeline);
+    destroyIfValidPipeline(self.dev, &self.transparent_pipeline);
+    destroyIfValidPipelineLayout(self.dev, &self.pipeline_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.descriptor_set_layout);
 
     // Destroy pools and allocators
     self.pool_reservoir.deinit(self.dev, self.allocator);
@@ -1055,29 +1008,13 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     self.texture_manager.destroyTextureArray();
 
-    if (self.command_pool != .null_handle) {
-        self.dev.destroyCommandPool(self.command_pool, null);
-        self.command_pool = .null_handle;
-    }
-    if (self.upload_command_pool != .null_handle) {
-        self.dev.destroyCommandPool(self.upload_command_pool, null);
-        self.upload_command_pool = .null_handle;
-    }
+    destroyIfValidCommandPool(self.dev, &self.command_pool);
+    destroyIfValidCommandPool(self.dev, &self.upload_command_pool);
 
-    if (self.transfer_semaphore != .null_handle) {
-        self.dev.destroySemaphore(self.transfer_semaphore, null);
-        self.transfer_semaphore = .null_handle;
-    }
-    if (self.graphics_timeline_semaphore != .null_handle) {
-        self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
-        self.graphics_timeline_semaphore = .null_handle;
-    }
+    destroyIfValidSemaphore(self.dev, &self.transfer_semaphore);
+    destroyIfValidSemaphore(self.dev, &self.graphics_timeline_semaphore);
 
-    if (self.surface != .null_handle) {
-        self.instance.destroySurfaceKHR(self.surface, null);
-        self.surface = .null_handle;
-    }
-
+    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, null);
     self.dev.destroyDevice(null);
 
     if (self.instance_wrapper) |wrapper| {
@@ -1415,6 +1352,373 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
     try self.retireCompletedUploads(io);
 }
 
+inline fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuffer) void {
+    self.dev.cmdSetViewport(cmd, 0, &[_]vk.Viewport{.{
+        .x = 0.0,
+        .y = 0.0,
+        .width = @floatFromInt(self.swapchain_extent.width),
+        .height = @floatFromInt(self.swapchain_extent.height),
+        .min_depth = 0.0,
+        .max_depth = 1.0,
+    }});
+    self.dev.cmdSetScissor(cmd, 0, &[_]vk.Rect2D{.{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = self.swapchain_extent,
+    }});
+}
+
+inline fn makeImageBarrier(
+    image: vk.Image,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    src_access: vk.AccessFlags,
+    dst_access: vk.AccessFlags,
+    aspect: vk.ImageAspectFlags,
+) vk.ImageMemoryBarrier {
+    return .{
+        .old_layout = old_layout,
+        .new_layout = new_layout,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresource_range = .{
+            .aspect_mask = aspect,
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        .src_access_mask = src_access,
+        .dst_access_mask = dst_access,
+    };
+}
+
+inline fn cmdImageBarrier(
+    cmd: vk.CommandBuffer,
+    dev: DeviceProxy,
+    image: vk.Image,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    src_access: vk.AccessFlags,
+    dst_access: vk.AccessFlags,
+    aspect: vk.ImageAspectFlags,
+    src_stage: vk.PipelineStageFlags,
+    dst_stage: vk.PipelineStageFlags,
+) void {
+    const barrier = makeImageBarrier(image, old_layout, new_layout, src_access, dst_access, aspect);
+    dev.cmdPipelineBarrier(cmd, src_stage, dst_stage, .{}, null, null, &.{barrier});
+}
+
+inline fn destroyIfValidImageView(dev: DeviceProxy, view: *vk.ImageView) void {
+    if (view.* != .null_handle) {
+        dev.destroyImageView(view.*, null);
+        view.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory) void {
+    if (image.* != .null_handle) {
+        dev.destroyImage(image.*, null);
+        image.* = .null_handle;
+    }
+    if (memory.* != .null_handle) {
+        dev.freeMemory(memory.*, null);
+        memory.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidPipeline(dev: DeviceProxy, pipeline: *vk.Pipeline) void {
+    if (pipeline.* != .null_handle) {
+        dev.destroyPipeline(pipeline.*, null);
+        pipeline.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidPipelineLayout(dev: DeviceProxy, layout: *vk.PipelineLayout) void {
+    if (layout.* != .null_handle) {
+        dev.destroyPipelineLayout(layout.*, null);
+        layout.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidDescriptorSetLayout(dev: DeviceProxy, layout: *vk.DescriptorSetLayout) void {
+    if (layout.* != .null_handle) {
+        dev.destroyDescriptorSetLayout(layout.*, null);
+        layout.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidCommandPool(dev: DeviceProxy, pool: *vk.CommandPool) void {
+    if (pool.* != .null_handle) {
+        dev.destroyCommandPool(pool.*, null);
+        pool.* = .null_handle;
+    }
+}
+
+inline fn destroyIfValidSemaphore(dev: DeviceProxy, sem: *vk.Semaphore) void {
+    if (sem.* != .null_handle) {
+        dev.destroySemaphore(sem.*, null);
+        sem.* = .null_handle;
+    }
+}
+
+inline fn descriptorWriteImage(desc_set: vk.DescriptorSet, binding: u32, image_info: []const vk.DescriptorImageInfo) vk.WriteDescriptorSet {
+    return .{
+        .dst_set = desc_set,
+        .dst_binding = binding,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .combined_image_sampler,
+        .p_image_info = image_info.ptr,
+        .p_buffer_info = undefined,
+        .p_texel_buffer_view = undefined,
+    };
+}
+
+inline fn renderingAttachmentColor(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = view,
+        .image_layout = .color_attachment_optimal,
+        .resolve_mode = .{},
+        .resolve_image_view = .null_handle,
+        .resolve_image_layout = .undefined,
+        .load_op = load_op,
+        .store_op = .store,
+        .clear_value = .{ .color = .{ .float_32 = clear_color } },
+    };
+}
+
+inline fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = view,
+        .image_layout = layout,
+        .resolve_mode = .{},
+        .resolve_image_view = .null_handle,
+        .resolve_image_layout = .undefined,
+        .load_op = load_op,
+        .store_op = if (load_op == .load) .dont_care else .store,
+        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
+    };
+}
+
+fn acquireSwapchainImage(self: *VulkanRenderer, io: std.Io, current_frame: u32) !struct { image_index: u32, frame: u32 } {
+    var frame = current_frame;
+    const acquire_result = try self.dev.acquireNextImageKHR(
+        self.swapchain,
+        std.math.maxInt(u64),
+        self.image_acquired_semaphores[frame],
+        .null_handle,
+    );
+
+    if (acquire_result.result == .error_out_of_date_khr or acquire_result.result == .suboptimal_khr) {
+        if (acquire_result.result == .error_out_of_date_khr) {
+            try self.createSwapchain(io);
+        } else {
+            try self.recreateSwapchainOnly(io);
+        }
+        frame = self.currentFrame();
+        try self.dev.resetFences(&.{self.in_flight_fences[frame]});
+        const retry = try self.dev.acquireNextImageKHR(
+            self.swapchain,
+            std.math.maxInt(u64),
+            self.image_acquired_semaphores[frame],
+            .null_handle,
+        );
+        return .{ .image_index = retry.image_index, .frame = frame };
+    }
+    return .{ .image_index = acquire_result.image_index, .frame = frame };
+}
+
+fn submitFrame(self: *VulkanRenderer, io: std.Io, current_frame: u32, cmd_buffer: vk.CommandBuffer) !void {
+    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+    const wait_semaphores: [1]vk.Semaphore = .{self.image_acquired_semaphores[current_frame]};
+    const signal_sems = [_]vk.Semaphore{ self.render_complete_semaphores[current_frame], self.graphics_timeline_semaphore };
+    const signal_values = [_]u64{ 0, self.frame_number.load(.monotonic) };
+    const wait_values = [_]u64{0};
+    var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
+        .wait_semaphore_value_count = 1,
+        .p_wait_semaphore_values = @ptrCast(&wait_values),
+        .signal_semaphore_value_count = 2,
+        .p_signal_semaphore_values = @ptrCast(&signal_values),
+    };
+    const submit_info: vk.SubmitInfo = .{
+        .p_next = &timeline_submit_info,
+        .wait_semaphore_count = 1,
+        .p_wait_semaphores = @ptrCast(&wait_semaphores),
+        .p_wait_dst_stage_mask = @ptrCast(&wait_stages),
+        .command_buffer_count = 1,
+        .p_command_buffers = @ptrCast(&cmd_buffer),
+        .signal_semaphore_count = 2,
+        .p_signal_semaphores = @ptrCast(&signal_sems),
+    };
+    {
+        self.queue_mutex.lockUncancelable(io);
+        defer self.queue_mutex.unlock(io);
+        try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame]);
+    }
+}
+
+fn presentSwapchainImage(self: *VulkanRenderer, io: std.Io, current_frame: u32, image_index: u32) !void {
+    const present_info: vk.PresentInfoKHR = .{
+        .wait_semaphore_count = 1,
+        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
+        .swapchain_count = 1,
+        .p_swapchains = @ptrCast(&self.swapchain),
+        .p_image_indices = &.{image_index},
+        .p_results = null,
+    };
+    const present_result = blk: {
+        self.queue_mutex.lockUncancelable(io);
+        defer self.queue_mutex.unlock(io);
+        break :blk try self.dev.queuePresentKHR(self.present_queue, &present_info);
+    };
+    if (present_result == .success) {
+        const next_frame = (current_frame + 1) % @as(u32, @intCast(self.in_flight_fences.len));
+        self.current_frame_idx.store(next_frame, .monotonic);
+    } else if (present_result == .error_out_of_date_khr or present_result == .suboptimal_khr) {
+        try self.createSwapchain(io);
+    }
+}
+
+inline fn renderingInfo(
+    extent: vk.Extent2D,
+    color_attachments: []const vk.RenderingAttachmentInfo,
+    depth_attachment: ?*const vk.RenderingAttachmentInfo,
+) vk.RenderingInfo {
+    return .{
+        .flags = .{},
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .layer_count = 1,
+        .view_mask = 0,
+        .color_attachment_count = @intCast(color_attachments.len),
+        .p_color_attachments = color_attachments.ptr,
+        .p_depth_attachment = depth_attachment,
+        .p_stencil_attachment = null,
+    };
+}
+
+inline fn shaderStageCreateInfo(stage: vk.ShaderStageFlags, module: vk.ShaderModule) vk.PipelineShaderStageCreateInfo {
+    return .{
+        .flags = .{},
+        .stage = stage,
+        .module = module,
+        .p_name = "main",
+        .p_specialization_info = null,
+    };
+}
+
+inline fn pipelineInputAssembly() vk.PipelineInputAssemblyStateCreateInfo {
+    return .{ .topology = .triangle_list, .primitive_restart_enable = .false };
+}
+
+inline fn pipelineViewportState() vk.PipelineViewportStateCreateInfo {
+    return .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
+}
+
+inline fn pipelineRasterization(cull_back: bool) vk.PipelineRasterizationStateCreateInfo {
+    return .{
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .cull_mode = if (cull_back) .{ .back_bit = true } else .{},
+        .front_face = .clockwise,
+        .depth_bias_enable = .false,
+        .depth_bias_constant_factor = 0,
+        .depth_bias_clamp = 0,
+        .depth_bias_slope_factor = 0,
+        .line_width = 1,
+    };
+}
+
+inline fn pipelineMultisample() vk.PipelineMultisampleStateCreateInfo {
+    return .{
+        .rasterization_samples = .{ .@"1_bit" = true },
+        .sample_shading_enable = .false,
+        .min_sample_shading = 1,
+        .alpha_to_coverage_enable = .false,
+        .alpha_to_one_enable = .false,
+    };
+}
+
+inline fn pipelineDynamicState() struct { state: vk.PipelineDynamicStateCreateInfo, states: [2]vk.DynamicState } {
+    const states = [_]vk.DynamicState{ .viewport, .scissor };
+    return .{
+        .state = .{ .flags = .{}, .dynamic_state_count = states.len, .p_dynamic_states = &states },
+        .states = states,
+    };
+}
+
+inline fn pipelineVertexInput() vk.PipelineVertexInputStateCreateInfo {
+    return .{
+        .flags = .{},
+        .vertex_binding_description_count = 0,
+        .p_vertex_binding_descriptions = undefined,
+        .vertex_attribute_description_count = 0,
+        .p_vertex_attribute_descriptions = undefined,
+    };
+}
+
+inline fn colorSubresourceRange() vk.ImageSubresourceRange {
+    return .{
+        .aspect_mask = .{ .color_bit = true },
+        .base_mip_level = 0,
+        .level_count = 1,
+        .base_array_layer = 0,
+        .layer_count = 1,
+    };
+}
+
+inline fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageAspectFlags) vk.ImageViewCreateInfo {
+    return .{
+        .flags = .{},
+        .image = image,
+        .view_type = .@"2d",
+        .format = format,
+        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+        .subresource_range = .{
+            .aspect_mask = aspect,
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+    };
+}
+
+fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !struct { image: vk.Image, memory: vk.DeviceMemory, view: vk.ImageView } {
+    const image_info: vk.ImageCreateInfo = .{
+        .flags = .{},
+        .image_type = .@"2d",
+        .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
+        .mip_levels = 1,
+        .array_layers = 1,
+        .format = format,
+        .tiling = .optimal,
+        .initial_layout = .undefined,
+        .usage = usage,
+        .sharing_mode = .exclusive,
+        .samples = .{ .@"1_bit" = true },
+        .queue_family_index_count = 0,
+        .p_queue_family_indices = undefined,
+    };
+    const image = try self.dev.createImage(&image_info, null);
+    errdefer self.dev.destroyImage(image, null);
+
+    const mem_reqs = self.dev.getImageMemoryRequirements(image);
+    const alloc_info: vk.MemoryAllocateInfo = .{
+        .allocation_size = mem_reqs.size,
+        .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+    };
+    const memory = try self.dev.allocateMemory(&alloc_info, null);
+    errdefer self.dev.freeMemory(memory, null);
+    try self.dev.bindImageMemory(image, memory, 0);
+
+    const view = try self.dev.createImageView(&imageViewCreateInfo(image, format, aspect), null);
+    return .{ .image = image, .memory = memory, .view = view };
+}
+
 pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
@@ -1442,32 +1746,9 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
     }
 
-    var image_index: u32 = 0;
-    const acquire_result_res = try self.dev.acquireNextImageKHR(
-        self.swapchain,
-        std.math.maxInt(u64),
-        self.image_acquired_semaphores[current_frame],
-        .null_handle,
-    );
-
-    if (acquire_result_res.result == .error_out_of_date_khr or acquire_result_res.result == .suboptimal_khr) {
-        if (acquire_result_res.result == .error_out_of_date_khr) {
-            try self.createSwapchain(io);
-        } else {
-            try self.recreateSwapchainOnly(io);
-        }
-        current_frame = self.currentFrame();
-        try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
-        const acquire_result_res2 = try self.dev.acquireNextImageKHR(
-            self.swapchain,
-            std.math.maxInt(u64),
-            self.image_acquired_semaphores[current_frame],
-            .null_handle,
-        );
-        image_index = acquire_result_res2.image_index;
-    } else {
-        image_index = acquire_result_res.image_index;
-    }
+    const acquired = try self.acquireSwapchainImage(io, current_frame);
+    const image_index = acquired.image_index;
+    current_frame = acquired.frame;
 
     self.current_swapchain_image_index = image_index;
 
@@ -1491,16 +1772,16 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         up_vec,
     );
 
-    const projection = makeInfReversedZProjRh(fov, aspect, 0.01);
+    const projection = makeInfReversedZProjRh(fov, aspect, nearPlane);
     const projview: @Vector(16, f32) = @bitCast(projection.multiply(view).data);
 
     const blueSky = @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 };
     const greySky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@floatCast(@min(1.0, @max(0.0, viewpos[1] / 4096.0))))));
+    const skyColor = std.math.lerp(blueSky, greySky, @as(@Vector(4, f32), @splat(@floatCast(@min(1.0, @max(0.0, viewpos[1] / skyHeight))))));
 
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const now_ns_f = @as(f64, @floatFromInt(now_ns));
-    const sun_angle = @rem(now_ns_f / ((@as(f64, @max(0.001, day_length_sec)) * std.time.ns_per_s) / 360.0), 360.0);
+    const sun_angle = @rem(now_ns_f / ((@as(f64, @max(0.001, day_length_sec)) * std.time.ns_per_s) / degreesPerCircle), degreesPerCircle);
     const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
     const sun_dir: @Vector(3, f32) = .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
 
@@ -1517,56 +1798,14 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     };
     try self.dev.beginCommandBuffer(cmd_buffer, &begin_info);
 
-    const color_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.render_color_view,
-        .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .clear,
-        .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ skyColor[0], skyColor[1], skyColor[2], skyColor[3] } } },
-    };
+    const color_attachment = renderingAttachmentColor(self.render_color_view, .clear, .{ skyColor[0], skyColor[1], skyColor[2], skyColor[3] });
+    const depth_attachment = renderingAttachmentDepth(self.render_depth_view, .depth_stencil_attachment_optimal, .clear);
 
-    const depth_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.render_depth_view,
-        .image_layout = .depth_stencil_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .clear,
-        .store_op = .store,
-        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
-    };
-
-    const render_info: vk.RenderingInfo = .{
-        .flags = .{},
-        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent },
-        .layer_count = 1,
-        .view_mask = 0,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&color_attachment),
-        .p_depth_attachment = &depth_attachment,
-        .p_stencil_attachment = null,
-    };
-    self.dev.cmdBeginRendering(cmd_buffer, &render_info);
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain_extent, &.{color_attachment}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
 
-    self.dev.cmdSetViewport(cmd_buffer, 0, &[_]vk.Viewport{.{
-        .x = 0.0,
-        .y = 0.0,
-        .width = @floatFromInt(self.swapchain_extent.width),
-        .height = @floatFromInt(self.swapchain_extent.height),
-        .min_depth = 0.0,
-        .max_depth = 1.0,
-    }});
-    self.dev.cmdSetScissor(cmd_buffer, 0, &[_]vk.Rect2D{.{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = self.swapchain_extent,
-    }});
+    self.setViewportAndScissor(cmd_buffer);
 
     self.updateFrameDescriptorSet(current_frame);
 
@@ -1601,92 +1840,16 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     self.dev.cmdEndRendering(cmd_buffer);
 
     // Pipeline barrier transitioning render_depth_image access to read-only for transparency
-    const depth_to_read_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .depth_stencil_attachment_optimal,
-        .new_layout = .depth_stencil_read_only_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.render_depth_image,
-        .subresource_range = .{
-            .aspect_mask = depth_aspect_mask,
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .depth_stencil_attachment_write_bit = true },
-        .dst_access_mask = .{ .depth_stencil_attachment_read_bit = true },
-    };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{},
-        null,
-        null,
-        &[_]vk.ImageMemoryBarrier{depth_to_read_barrier},
-    );
+    cmdImageBarrier(cmd_buffer, self.dev, self.render_depth_image, .depth_stencil_attachment_optimal, .depth_stencil_read_only_optimal, .{ .depth_stencil_attachment_write_bit = true }, .{ .depth_stencil_attachment_read_bit = true }, depth_aspect_mask, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true });
 
     // Begin transparent rendering pass
-    const oit_accum_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.oit_accum_view,
-        .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .clear,
-        .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ 0.0, 0.0, 0.0, 1.0 } } },
-    };
-    const oit_reveal_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.oit_reveal_view,
-        .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .clear,
-        .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ 0.0, 0.0, 0.0, 0.0 } } },
-    };
-    const oit_depth_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.render_depth_view,
-        .image_layout = .depth_stencil_read_only_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .load,
-        .store_op = .dont_care,
-        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
-    };
-    const oit_color_attachments = [_]vk.RenderingAttachmentInfo{ oit_accum_attachment, oit_reveal_attachment };
-    const oit_render_info: vk.RenderingInfo = .{
-        .flags = .{},
-        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent },
-        .layer_count = 1,
-        .view_mask = 0,
-        .color_attachment_count = oit_color_attachments.len,
-        .p_color_attachments = &oit_color_attachments,
-        .p_depth_attachment = &oit_depth_attachment,
-        .p_stencil_attachment = null,
-    };
-    self.dev.cmdBeginRendering(cmd_buffer, &oit_render_info);
+    const oit_accum_attachment = renderingAttachmentColor(self.oit_accum_view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
+    const oit_reveal_attachment = renderingAttachmentColor(self.oit_reveal_view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
+    const oit_depth_attachment = renderingAttachmentDepth(self.render_depth_view, .depth_stencil_read_only_optimal, .load);
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain_extent, &.{ oit_accum_attachment, oit_reveal_attachment }, &oit_depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.transparent_pipeline);
-    self.dev.cmdSetViewport(cmd_buffer, 0, &[_]vk.Viewport{.{
-        .x = 0.0,
-        .y = 0.0,
-        .width = @floatFromInt(self.swapchain_extent.width),
-        .height = @floatFromInt(self.swapchain_extent.height),
-        .min_depth = 0.0,
-        .max_depth = 1.0,
-    }});
-    self.dev.cmdSetScissor(cmd_buffer, 0, &[_]vk.Rect2D{.{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = self.swapchain_extent,
-    }});
+    self.setViewportAndScissor(cmd_buffer);
 
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, &desc_set_arr, null);
     self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&pc));
@@ -1710,93 +1873,13 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
         self.frame_stats.log();
     }
 
-    // Transition render_color_image, oit_accum_image, and oit_reveal_image to shader read-only, and depth back to optimal
-    const color_to_read_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .color_attachment_optimal,
-        .new_layout = .shader_read_only_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.render_color_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .color_attachment_write_bit = true },
-        .dst_access_mask = .{ .shader_read_bit = true },
-    };
-    const accum_to_read_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .color_attachment_optimal,
-        .new_layout = .shader_read_only_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.oit_accum_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .color_attachment_write_bit = true },
-        .dst_access_mask = .{ .shader_read_bit = true },
-    };
-    const reveal_to_read_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .color_attachment_optimal,
-        .new_layout = .shader_read_only_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.oit_reveal_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .color_attachment_write_bit = true },
-        .dst_access_mask = .{ .shader_read_bit = true },
-    };
-    const swapchain_to_render_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .undefined,
-        .new_layout = .color_attachment_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.swapchain_images[image_index],
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{},
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    };
-    const depth_return_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .depth_stencil_read_only_optimal,
-        .new_layout = .depth_stencil_attachment_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.render_depth_image,
-        .subresource_range = .{
-            .aspect_mask = depth_aspect_mask,
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .depth_stencil_attachment_read_bit = true },
-        .dst_access_mask = .{ .depth_stencil_attachment_write_bit = true },
-    };
-    var pre_comp_barriers = [_]vk.ImageMemoryBarrier{
-        color_to_read_barrier,
-        accum_to_read_barrier,
-        reveal_to_read_barrier,
-        swapchain_to_render_barrier,
-        depth_return_barrier,
+    // Transition render targets to shader read-only for composition, swapchain to render, depth back to attachment
+    const pre_comp_barriers = [_]vk.ImageMemoryBarrier{
+        makeImageBarrier(self.render_color_image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.oit_accum_image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.oit_reveal_image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.swapchain_images[image_index], .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.render_depth_image, .depth_stencil_read_only_optimal, .depth_stencil_attachment_optimal, .{ .depth_stencil_attachment_read_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
     };
     self.dev.cmdPipelineBarrier(
         cmd_buffer,
@@ -1809,42 +1892,11 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
     );
 
     // Begin composition pass rendering directly onto swapchain image
-    const swapchain_attachment: vk.RenderingAttachmentInfo = .{
-        .s_type = .rendering_attachment_info,
-        .image_view = self.swapchain_views[image_index],
-        .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .dont_care,
-        .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ 0.0, 0.0, 0.0, 0.0 } } },
-    };
-    const comp_render_info: vk.RenderingInfo = .{
-        .flags = .{},
-        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent },
-        .layer_count = 1,
-        .view_mask = 0,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&swapchain_attachment),
-        .p_depth_attachment = null,
-        .p_stencil_attachment = null,
-    };
-    self.dev.cmdBeginRendering(cmd_buffer, &comp_render_info);
+    const swapchain_attachment = renderingAttachmentColor(self.swapchain_views[image_index], .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain_extent, &.{swapchain_attachment}, null));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.oit_composition_pipeline);
-    self.dev.cmdSetViewport(cmd_buffer, 0, &[_]vk.Viewport{.{
-        .x = 0.0,
-        .y = 0.0,
-        .width = @floatFromInt(self.swapchain_extent.width),
-        .height = @floatFromInt(self.swapchain_extent.height),
-        .min_depth = 0.0,
-        .max_depth = 1.0,
-    }});
-    self.dev.cmdSetScissor(cmd_buffer, 0, &[_]vk.Rect2D{.{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = self.swapchain_extent,
-    }});
+    self.setViewportAndScissor(cmd_buffer);
 
     var oit_desc_set_arr: [1]vk.DescriptorSet = undefined;
     oit_desc_set_arr[0] = self.oit_descriptor_sets_per_frame[current_frame];
@@ -1853,76 +1905,12 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     self.dev.cmdEndRendering(cmd_buffer);
 
-    // Transition swapchain back to present source and render targets back to color_attachment_optimal
-    const swapchain_to_present_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .color_attachment_optimal,
-        .new_layout = .present_src_khr,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.swapchain_images[image_index],
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .color_attachment_write_bit = true },
-        .dst_access_mask = .{ .color_attachment_read_bit = true },
-    };
-    const color_return_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .shader_read_only_optimal,
-        .new_layout = .color_attachment_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.render_color_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .shader_read_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    };
-    const accum_return_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .shader_read_only_optimal,
-        .new_layout = .color_attachment_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.oit_accum_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .shader_read_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    };
-    const reveal_return_barrier: vk.ImageMemoryBarrier = .{
-        .old_layout = .shader_read_only_optimal,
-        .new_layout = .color_attachment_optimal,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = self.oit_reveal_image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-        .src_access_mask = .{ .shader_read_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    };
-    var post_comp_barriers = [_]vk.ImageMemoryBarrier{
-        swapchain_to_present_barrier,
-        color_return_barrier,
-        accum_return_barrier,
-        reveal_return_barrier,
+    // Transition swapchain to present source and render targets back to color_attachment_optimal
+    const post_comp_barriers = [_]vk.ImageMemoryBarrier{
+        makeImageBarrier(self.swapchain_images[image_index], .color_attachment_optimal, .present_src_khr, .{ .color_attachment_write_bit = true }, .{ .color_attachment_read_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.render_color_image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.oit_accum_image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
+        makeImageBarrier(self.oit_reveal_image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
     };
     self.dev.cmdPipelineBarrier(
         cmd_buffer,
@@ -1936,61 +1924,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, viewpos: @Vector(3, f64)) !void {
 
     try self.dev.endCommandBuffer(cmd_buffer);
 
-    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-
-    const wait_semaphores: [1]vk.Semaphore = .{self.image_acquired_semaphores[current_frame]};
-
-    const signal_sems = [_]vk.Semaphore{ self.render_complete_semaphores[current_frame], self.graphics_timeline_semaphore };
-    const signal_values = [_]u64{ 0, self.frame_number.load(.monotonic) };
-
-    const wait_values = [_]u64{0};
-    var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
-        .wait_semaphore_value_count = 1,
-        .p_wait_semaphore_values = @ptrCast(&wait_values),
-        .signal_semaphore_value_count = 2,
-        .p_signal_semaphore_values = @ptrCast(&signal_values),
-    };
-
-    const submit_info: vk.SubmitInfo = .{
-        .p_next = &timeline_submit_info,
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&wait_semaphores),
-        .p_wait_dst_stage_mask = @ptrCast(&wait_stages),
-        .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&cmd_buffer),
-        .signal_semaphore_count = 2,
-        .p_signal_semaphores = @ptrCast(&signal_sems),
-    };
-
-    {
-        self.queue_mutex.lockUncancelable(io);
-        defer self.queue_mutex.unlock(io);
-
-        try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame]);
-    }
-
-    const present_info: vk.PresentInfoKHR = .{
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
-        .swapchain_count = 1,
-        .p_swapchains = @ptrCast(&self.swapchain),
-        .p_image_indices = &.{image_index},
-        .p_results = null,
-    };
-
-    const present_result = blk: {
-        self.queue_mutex.lockUncancelable(io);
-        defer self.queue_mutex.unlock(io);
-
-        break :blk try self.dev.queuePresentKHR(self.present_queue, &present_info);
-    };
-
-    if (present_result == .success) {
-        const next_frame = (current_frame + 1) % @as(u32, @intCast(self.in_flight_fences.len));
-        self.current_frame_idx.store(next_frame, .monotonic);
-    } else if (present_result == .error_out_of_date_khr or present_result == .suboptimal_khr) {
-        try self.createSwapchain(io);
-    }
+    try self.submitFrame(io, current_frame, cmd_buffer);
+    try self.presentSwapchainImage(io, current_frame, image_index);
 }
 
 fn vtableDrawChunks(userdata: *Renderer.Implementation, io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
@@ -2230,8 +2165,7 @@ fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
     try self.createSwapchainLocked(io);
 }
 
-fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
-    _ = io;
+fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
     self.dev.deviceWaitIdle() catch |err| {
         std.log.err("destroyOldSwapchainResources: deviceWaitIdle failed: {any}", .{err});
     };
@@ -2258,48 +2192,31 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
     self.render_complete_semaphores = &.{};
     self.in_flight_fences = &.{};
 
-    if (self.render_color_view != .null_handle) self.dev.destroyImageView(self.render_color_view, null);
-    if (self.render_depth_view != .null_handle) self.dev.destroyImageView(self.render_depth_view, null);
-    if (self.render_depth_sampled_view != .null_handle) self.dev.destroyImageView(self.render_depth_sampled_view, null);
-    if (self.render_color_image != .null_handle) self.dev.destroyImage(self.render_color_image, null);
-    if (self.render_color_memory != .null_handle) self.dev.freeMemory(self.render_color_memory, null);
-    if (self.render_depth_image != .null_handle) self.dev.destroyImage(self.render_depth_image, null);
-    if (self.render_depth_memory != .null_handle) self.dev.freeMemory(self.render_depth_memory, null);
-    self.render_color_view = .null_handle;
-    self.render_depth_view = .null_handle;
-    self.render_depth_sampled_view = .null_handle;
-    self.render_color_image = .null_handle;
-    self.render_color_memory = .null_handle;
-    self.render_depth_image = .null_handle;
-    self.render_depth_memory = .null_handle;
+    destroyIfValidImageView(self.dev, &self.render_color_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+    destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
+    destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
 
     for (self.indirect_draw_buffers_mapped) |maybe_ptr| {
-        if (maybe_ptr) |ptr| {
-            const typed_ptr: [*]vk.DrawIndirectCommand = @ptrCast(@alignCast(ptr));
-            const slice = typed_ptr[0..self.draw_capacity];
-            self.cpu_to_gpu_gpa.allocator().free(slice);
-        }
+        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(@as([*]vk.DrawIndirectCommand, @ptrCast(@alignCast(ptr)))[0..self.draw_capacity]);
     }
     for (self.chunk_data_buffers_mapped) |maybe_ptr| {
-        if (maybe_ptr) |ptr| {
-            const typed_ptr: [*]ChunkData = @ptrCast(@alignCast(ptr));
-            const slice = typed_ptr[0..self.draw_capacity];
-            self.cpu_to_gpu_gpa.allocator().free(slice);
-        }
+        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(@as([*]ChunkData, @ptrCast(@alignCast(ptr)))[0..self.draw_capacity]);
     }
 
     self.allocator.free(self.indirect_draw_buffers);
-    self.indirect_draw_buffers = &.{};
     self.allocator.free(self.indirect_draw_buffers_mapped);
-    self.indirect_draw_buffers_mapped = &.{};
     self.allocator.free(self.indirect_draw_offsets);
+    self.indirect_draw_buffers = &.{};
+    self.indirect_draw_buffers_mapped = &.{};
     self.indirect_draw_offsets = &.{};
 
     self.allocator.free(self.chunk_data_buffers);
-    self.chunk_data_buffers = &.{};
     self.allocator.free(self.chunk_data_buffers_mapped);
-    self.chunk_data_buffers_mapped = &.{};
     self.allocator.free(self.chunk_data_offsets);
+    self.chunk_data_buffers = &.{};
+    self.chunk_data_buffers_mapped = &.{};
     self.chunk_data_offsets = &.{};
 
     if (self.descriptor_pool != .null_handle) {
@@ -2313,18 +2230,10 @@ fn destroyOldSwapchainResources(self: *VulkanRenderer, io: std.Io) void {
 }
 
 fn destroyOitResources(self: *VulkanRenderer) void {
-    if (self.oit_accum_view != .null_handle) self.dev.destroyImageView(self.oit_accum_view, null);
-    if (self.oit_reveal_view != .null_handle) self.dev.destroyImageView(self.oit_reveal_view, null);
-    if (self.oit_accum_image != .null_handle) self.dev.destroyImage(self.oit_accum_image, null);
-    if (self.oit_accum_memory != .null_handle) self.dev.freeMemory(self.oit_accum_memory, null);
-    if (self.oit_reveal_image != .null_handle) self.dev.destroyImage(self.oit_reveal_image, null);
-    if (self.oit_reveal_memory != .null_handle) self.dev.freeMemory(self.oit_reveal_memory, null);
-    self.oit_accum_view = .null_handle;
-    self.oit_reveal_view = .null_handle;
-    self.oit_accum_image = .null_handle;
-    self.oit_accum_memory = .null_handle;
-    self.oit_reveal_image = .null_handle;
-    self.oit_reveal_memory = .null_handle;
+    destroyIfValidImageView(self.dev, &self.oit_accum_view);
+    destroyIfValidImageView(self.dev, &self.oit_reveal_view);
+    destroyIfValidImage(self.dev, &self.oit_accum_image, &self.oit_accum_memory);
+    destroyIfValidImage(self.dev, &self.oit_reveal_image, &self.oit_reveal_memory);
 
     if (self.oit_descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.oit_descriptor_pool, null);
@@ -2354,7 +2263,7 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
     const old_swapchain = self.swapchain;
 
     if (old_swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
-        self.destroyOldSwapchainResources(io);
+        self.destroyOldSwapchainResources();
     }
 
     const actual_extent = if (caps.current_extent.width != 0xFFFF_FFFF) caps.current_extent else vk.Extent2D{
@@ -2448,21 +2357,7 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     for (self.swapchain_images, 0..) |image, i| {
-        const view_info: vk.ImageViewCreateInfo = .{
-            .flags = .{},
-            .image = image,
-            .view_type = .@"2d",
-            .format = self.swapchain_format,
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-        self.swapchain_views[i] = try self.dev.createImageView(&view_info, null);
+        self.swapchain_views[i] = try self.dev.createImageView(&imageViewCreateInfo(image, self.swapchain_format, .{ .color_bit = true }), null);
     }
 
     const num_swapchain_images = self.swapchain_images.len;
@@ -2523,7 +2418,7 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
         self.cmd_buffers = &.{};
     }
 
-    try self.createRenderTargets(io, actual_extent);
+    try self.createRenderTargets(actual_extent);
 
     self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
     @memset(self.indirect_draw_buffers, .null_handle);
@@ -2562,7 +2457,7 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
     // Recreate descriptor pool and sets if they were previously created (i.e., this is
     // a resize, not the initial creation — descriptor_set_layout doesn't exist yet at init)
     if (self.descriptor_set_layout != .null_handle) {
-        try self.createDescriptorPoolAndSets(io, true);
+        try self.createDescriptorPoolAndSets();
         // Rebind the real block texture array to the new descriptor sets
         // (createDescriptorPoolAndSets writes the dummy white texture; overwrite with real one if loaded)
         if (self.texture_manager.texture_view != .null_handle) {
@@ -2601,118 +2496,33 @@ fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
     }
 }
 
-fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !void {
-    if (self.render_color_view != .null_handle) self.dev.destroyImageView(self.render_color_view, null);
-    if (self.render_depth_view != .null_handle) self.dev.destroyImageView(self.render_depth_view, null);
-    if (self.render_depth_sampled_view != .null_handle) self.dev.destroyImageView(self.render_depth_sampled_view, null);
-    if (self.render_color_image != .null_handle) self.dev.destroyImage(self.render_color_image, null);
-    if (self.render_color_memory != .null_handle) self.dev.freeMemory(self.render_color_memory, null);
-    if (self.render_depth_image != .null_handle) self.dev.destroyImage(self.render_depth_image, null);
-    if (self.render_depth_memory != .null_handle) self.dev.freeMemory(self.render_depth_memory, null);
-    self.render_color_view = .null_handle;
-    self.render_depth_view = .null_handle;
-    self.render_depth_sampled_view = .null_handle;
-    self.render_color_image = .null_handle;
-    self.render_color_memory = .null_handle;
-    self.render_depth_image = .null_handle;
-    self.render_depth_memory = .null_handle;
-
+fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
+    destroyIfValidImageView(self.dev, &self.render_color_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+    destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
+    destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
     self.destroyOitResources();
 
     errdefer {
-        if (self.render_color_view != .null_handle) {
-            self.dev.destroyImageView(self.render_color_view, null);
-            self.render_color_view = .null_handle;
-        }
-        if (self.render_depth_view != .null_handle) {
-            self.dev.destroyImageView(self.render_depth_view, null);
-            self.render_depth_view = .null_handle;
-        }
-        if (self.render_depth_sampled_view != .null_handle) {
-            self.dev.destroyImageView(self.render_depth_sampled_view, null);
-            self.render_depth_sampled_view = .null_handle;
-        }
-        if (self.render_color_image != .null_handle) {
-            self.dev.destroyImage(self.render_color_image, null);
-            self.render_color_image = .null_handle;
-        }
-        if (self.render_color_memory != .null_handle) {
-            self.dev.freeMemory(self.render_color_memory, null);
-            self.render_color_memory = .null_handle;
-        }
-        if (self.render_depth_image != .null_handle) {
-            self.dev.destroyImage(self.render_depth_image, null);
-            self.render_depth_image = .null_handle;
-        }
-        if (self.render_depth_memory != .null_handle) {
-            self.dev.freeMemory(self.render_depth_memory, null);
-            self.render_depth_memory = .null_handle;
-        }
+        destroyIfValidImageView(self.dev, &self.render_color_view);
+        destroyIfValidImageView(self.dev, &self.render_depth_view);
+        destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+        destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
+        destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
         self.destroyOitResources();
     }
 
-    const color_image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
-        .image_type = .@"2d",
-        .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
-        .mip_levels = 1,
-        .array_layers = 1,
-        .format = self.swapchain_format,
-        .tiling = .optimal,
-        .initial_layout = .undefined,
-        .usage = .{ .color_attachment_bit = true, .transfer_src_bit = true, .sampled_bit = true },
-        .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-    self.render_color_image = try self.dev.createImage(&color_image_info, null);
-    const color_mem_reqs = self.dev.getImageMemoryRequirements(self.render_color_image);
-    const color_alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = color_mem_reqs.size,
-        .memory_type_index = self.findMemoryType(color_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-    self.render_color_memory = try self.dev.allocateMemory(&color_alloc_info, null);
-    try self.dev.bindImageMemory(self.render_color_image, self.render_color_memory, 0);
+    const color = try self.createImageWithMemory(extent, self.swapchain_format, .{ .color_attachment_bit = true, .transfer_src_bit = true, .sampled_bit = true }, .{ .color_bit = true });
+    self.render_color_image = color.image;
+    self.render_color_memory = color.memory;
+    self.render_color_view = color.view;
 
     {
-        const cmd = try self.beginSingleTimeCommands(io);
-        const barrier: vk.ImageMemoryBarrier = .{
-            .old_layout = .undefined,
-            .new_layout = .color_attachment_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.render_color_image,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .color_attachment_write_bit = true },
-        };
-        const color_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &color_barrier_arr);
+        const cmd = try self.beginSingleTimeCommands();
+        cmdImageBarrier(cmd, self.dev, self.render_color_image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true });
         try self.endSingleTimeCommandsLocked(cmd);
     }
-
-    const color_view_info: vk.ImageViewCreateInfo = .{
-        .flags = .{},
-        .image = self.render_color_image,
-        .view_type = .@"2d",
-        .format = self.swapchain_format,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    self.render_color_view = try self.dev.createImageView(&color_view_info, null);
 
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
     var depth_format: vk.Format = .undefined;
@@ -2727,193 +2537,39 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
 
     const depth_has_stencil = self.depthHasStencil();
     const depth_aspect_mask: vk.ImageAspectFlags = if (depth_has_stencil) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
-    const depth_image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
-        .image_type = .@"2d",
-        .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
-        .mip_levels = 1,
-        .array_layers = 1,
-        .format = depth_format,
-        .tiling = .optimal,
-        .initial_layout = .undefined,
-        .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true },
-        .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-    self.render_depth_image = try self.dev.createImage(&depth_image_info, null);
-    const depth_mem_reqs = self.dev.getImageMemoryRequirements(self.render_depth_image);
-    const depth_alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = depth_mem_reqs.size,
-        .memory_type_index = self.findMemoryType(depth_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-    self.render_depth_memory = try self.dev.allocateMemory(&depth_alloc_info, null);
-    try self.dev.bindImageMemory(self.render_depth_image, self.render_depth_memory, 0);
+    const depth = try self.createImageWithMemory(extent, depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, depth_aspect_mask);
+    self.render_depth_image = depth.image;
+    self.render_depth_memory = depth.memory;
+    self.render_depth_view = depth.view;
+    self.render_depth_sampled_view = try self.dev.createImageView(&imageViewCreateInfo(depth.image, depth_format, .{ .depth_bit = true }), null);
 
     {
-        const cmd = try self.beginSingleTimeCommands(io);
-        const barrier: vk.ImageMemoryBarrier = .{
-            .old_layout = .undefined,
-            .new_layout = .depth_stencil_attachment_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.render_depth_image,
-            .subresource_range = .{
-                .aspect_mask = depth_aspect_mask,
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .depth_stencil_attachment_write_bit = true },
-        };
-        const depth_barrier_arr: [1]vk.ImageMemoryBarrier = .{barrier};
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{}, null, null, &depth_barrier_arr);
+        const cmd = try self.beginSingleTimeCommands();
+        cmdImageBarrier(cmd, self.dev, self.render_depth_image, .undefined, .depth_stencil_attachment_optimal, .{}, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true });
         try self.endSingleTimeCommandsLocked(cmd);
     }
 
-    const depth_view_info: vk.ImageViewCreateInfo = .{
-        .flags = .{},
-        .image = self.render_depth_image,
-        .view_type = .@"2d",
-        .format = depth_format,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = depth_aspect_mask,
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    self.render_depth_view = try self.dev.createImageView(&depth_view_info, null);
-
-    var depth_sampled_view_info = depth_view_info;
-    depth_sampled_view_info.subresource_range.aspect_mask = .{ .depth_bit = true };
-    self.render_depth_sampled_view = try self.dev.createImageView(&depth_sampled_view_info, null);
-
-    // Create WBOIT accumulation target
-    const accum_image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
-        .image_type = .@"2d",
-        .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
-        .mip_levels = 1,
-        .array_layers = 1,
-        .format = .r16g16b16a16_sfloat,
-        .tiling = .optimal,
-        .initial_layout = .undefined,
-        .usage = .{ .color_attachment_bit = true, .sampled_bit = true },
-        .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-    self.oit_accum_image = try self.dev.createImage(&accum_image_info, null);
-    const accum_mem_reqs = self.dev.getImageMemoryRequirements(self.oit_accum_image);
-    const accum_alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = accum_mem_reqs.size,
-        .memory_type_index = self.findMemoryType(accum_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-    self.oit_accum_memory = try self.dev.allocateMemory(&accum_alloc_info, null);
-    try self.dev.bindImageMemory(self.oit_accum_image, self.oit_accum_memory, 0);
-
-    // Create WBOIT revealage target
-    const reveal_image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
-        .image_type = .@"2d",
-        .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
-        .mip_levels = 1,
-        .array_layers = 1,
-        .format = .r16g16b16a16_sfloat,
-        .tiling = .optimal,
-        .initial_layout = .undefined,
-        .usage = .{ .color_attachment_bit = true, .sampled_bit = true },
-        .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
-    };
-    self.oit_reveal_image = try self.dev.createImage(&reveal_image_info, null);
-    const reveal_mem_reqs = self.dev.getImageMemoryRequirements(self.oit_reveal_image);
-    const reveal_alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = reveal_mem_reqs.size,
-        .memory_type_index = self.findMemoryType(reveal_mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-    self.oit_reveal_memory = try self.dev.allocateMemory(&reveal_alloc_info, null);
-    try self.dev.bindImageMemory(self.oit_reveal_image, self.oit_reveal_memory, 0);
+    // Create WBOIT targets
+    const oit_usage: vk.ImageUsageFlags = .{ .color_attachment_bit = true, .sampled_bit = true };
+    const oit_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const accum = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
+    self.oit_accum_image = accum.image;
+    self.oit_accum_memory = accum.memory;
+    self.oit_accum_view = accum.view;
+    const reveal = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
+    self.oit_reveal_image = reveal.image;
+    self.oit_reveal_memory = reveal.memory;
+    self.oit_reveal_view = reveal.view;
 
     {
-        const cmd = try self.beginSingleTimeCommands(io);
-        const barrier1: vk.ImageMemoryBarrier = .{
-            .old_layout = .undefined,
-            .new_layout = .color_attachment_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.oit_accum_image,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .color_attachment_write_bit = true },
+        const cmd = try self.beginSingleTimeCommands();
+        const barriers = [_]vk.ImageMemoryBarrier{
+            makeImageBarrier(self.oit_accum_image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, oit_aspect),
+            makeImageBarrier(self.oit_reveal_image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, oit_aspect),
         };
-        const barrier2: vk.ImageMemoryBarrier = .{
-            .old_layout = .undefined,
-            .new_layout = .color_attachment_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.oit_reveal_image,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .color_attachment_write_bit = true },
-        };
-        const barriers = [_]vk.ImageMemoryBarrier{ barrier1, barrier2 };
         self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &barriers);
         try self.endSingleTimeCommandsLocked(cmd);
     }
-
-    const accum_view_info: vk.ImageViewCreateInfo = .{
-        .flags = .{},
-        .image = self.oit_accum_image,
-        .view_type = .@"2d",
-        .format = .r16g16b16a16_sfloat,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    self.oit_accum_view = try self.dev.createImageView(&accum_view_info, null);
-
-    const reveal_view_info: vk.ImageViewCreateInfo = .{
-        .flags = .{},
-        .image = self.oit_reveal_image,
-        .view_type = .@"2d",
-        .format = .r16g16b16a16_sfloat,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    self.oit_reveal_view = try self.dev.createImageView(&reveal_view_info, null);
 
     if (self.oit_descriptor_sets_per_frame.len > 0) {
         self.updateOitDescriptorSets();
@@ -2936,29 +2592,17 @@ fn createDescriptorSetLayout(self: *VulkanRenderer) !void {
 
 pub fn updateDepthDescriptorSets(self: *VulkanRenderer) void {
     if (self.render_depth_view == .null_handle or self.texture_manager.sampler == .null_handle or self.descriptor_pool == .null_handle) return;
-    const depth_image_info = vk.DescriptorImageInfo{
+    const depth_image_info: vk.DescriptorImageInfo = .{
         .image_layout = .depth_stencil_read_only_optimal,
         .image_view = self.render_depth_sampled_view,
         .sampler = self.texture_manager.sampler,
     };
     for (self.descriptor_sets_per_frame) |desc_set| {
-        const descriptor_write = vk.WriteDescriptorSet{
-            .dst_set = desc_set,
-            .dst_binding = 2,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .combined_image_sampler,
-            .p_image_info = @ptrCast(&depth_image_info),
-            .p_buffer_info = undefined,
-            .p_texel_buffer_view = undefined,
-        };
-        self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptor_write}, null);
+        self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{descriptorWriteImage(desc_set, 2, &.{depth_image_info})}, null);
     }
 }
 
-fn createDescriptorPoolAndSets(self: *VulkanRenderer, io: std.Io, locked: bool) !void {
-    _ = io;
-    _ = locked;
+fn createDescriptorPoolAndSets(self: *VulkanRenderer) !void {
     const num_frames = self.swapchain_images.len;
     const pool_sizes: [2]vk.DescriptorPoolSize = .{
         .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) },
@@ -3018,35 +2662,10 @@ fn createPipeline(self: *VulkanRenderer) !void {
 }
 
 fn createTransparentPipeline(self: *VulkanRenderer) !void {
-    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{
-        .topology = .triangle_list,
-        .primitive_restart_enable = .false,
-    };
-    const pvsci: vk.PipelineViewportStateCreateInfo = .{
-        .viewport_count = 1,
-        .p_viewports = null,
-        .scissor_count = 1,
-        .p_scissors = null,
-    };
-    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{},
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
-    const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
-        .rasterization_samples = .{ .@"1_bit" = true },
-        .sample_shading_enable = .false,
-        .min_sample_shading = 1,
-        .alpha_to_coverage_enable = .false,
-        .alpha_to_one_enable = .false,
-    };
+    const piasci = pipelineInputAssembly();
+    const pvsci = pipelineViewportState();
+    const prsci = pipelineRasterization(false);
+    const pmsci = pipelineMultisample();
 
     // Attachment 0: Accumulation (RGB = Volumetric, A = WBOIT Reveal)
     const pcbas_accum: vk.PipelineColorBlendAttachmentState = .{
@@ -3081,12 +2700,7 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .p_attachments = @ptrCast(&pcbas_arr),
         .blend_constants = .{ 0, 0, 0, 0 },
     };
-    const dynstate: [2]vk.DynamicState = .{ .viewport, .scissor };
-    const pdsci: vk.PipelineDynamicStateCreateInfo = .{
-        .flags = .{},
-        .dynamic_state_count = dynstate.len,
-        .p_dynamic_states = &dynstate,
-    };
+    const dyn = pipelineDynamicState();
     const depth_stencil_state: vk.PipelineDepthStencilStateCreateInfo = .{
         .flags = .{},
         .depth_test_enable = .true,
@@ -3099,45 +2713,15 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
-    const vert_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = vertex_shader_spv.len,
-        .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)),
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(vert_module, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len, .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(frag_module, null);
+    const pssci = [_]vk.PipelineShaderStageCreateInfo{
+        shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
+        shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
     };
-    const vert_shader_module = try self.dev.createShaderModule(&vert_shader_info, null);
-    defer self.dev.destroyShaderModule(vert_shader_module, null);
-
-    const frag_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = transparent_frag_spv.len,
-        .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)),
-    };
-    const frag_shader_module = try self.dev.createShaderModule(&frag_shader_info, null);
-    defer self.dev.destroyShaderModule(frag_shader_module, null);
-
-    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
-        .{
-            .flags = .{},
-            .stage = .{ .vertex_bit = true },
-            .module = vert_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-        .{
-            .flags = .{},
-            .stage = .{ .fragment_bit = true },
-            .module = frag_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-    };
-    const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
-        .flags = .{},
-        .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = undefined,
-        .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = undefined,
-    };
+    const vertex_input_info = pipelineVertexInput();
     const target_formats = [_]vk.Format{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
     const rendering_info: vk.PipelineRenderingCreateInfo = .{
         .view_mask = 0,
@@ -3159,7 +2743,7 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .p_multisample_state = &pmsci,
         .p_depth_stencil_state = &depth_stencil_state,
         .p_color_blend_state = &pcbsci,
-        .p_dynamic_state = &pdsci,
+        .p_dynamic_state = &dyn.state,
         .layout = self.pipeline_layout,
         .render_pass = .null_handle,
         .subpass = 0,
@@ -3224,35 +2808,10 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         self.oit_sampler = .null_handle;
     }
 
-    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{
-        .topology = .triangle_list,
-        .primitive_restart_enable = .false,
-    };
-    const pvsci: vk.PipelineViewportStateCreateInfo = .{
-        .viewport_count = 1,
-        .p_viewports = null,
-        .scissor_count = 1,
-        .p_scissors = null,
-    };
-    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{},
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
-    const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
-        .rasterization_samples = .{ .@"1_bit" = true },
-        .sample_shading_enable = .false,
-        .min_sample_shading = 1,
-        .alpha_to_coverage_enable = .false,
-        .alpha_to_one_enable = .false,
-    };
+    const piasci = pipelineInputAssembly();
+    const pvsci = pipelineViewportState();
+    const prsci = pipelineRasterization(false);
+    const pmsci = pipelineMultisample();
     const pcbas: vk.PipelineColorBlendAttachmentState = .{
         .blend_enable = .false,
         .src_color_blend_factor = .one,
@@ -3270,12 +2829,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .p_attachments = @ptrCast(&pcbas),
         .blend_constants = .{ 0, 0, 0, 0 },
     };
-    const dynstate: [2]vk.DynamicState = .{ .viewport, .scissor };
-    const pdsci: vk.PipelineDynamicStateCreateInfo = .{
-        .flags = .{},
-        .dynamic_state_count = dynstate.len,
-        .p_dynamic_states = &dynstate,
-    };
+    const dyn = pipelineDynamicState();
     const depth_stencil_state: vk.PipelineDepthStencilStateCreateInfo = .{
         .flags = .{},
         .depth_test_enable = .false,
@@ -3288,45 +2842,15 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
-    const vert_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = composite_vert_spv.len,
-        .p_code = @ptrCast(@alignCast(composite_vert_spv.ptr)),
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_vert_spv.len, .p_code = @ptrCast(@alignCast(composite_vert_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(vert_module, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_frag_spv.len, .p_code = @ptrCast(@alignCast(composite_frag_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(frag_module, null);
+    const pssci = [_]vk.PipelineShaderStageCreateInfo{
+        shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
+        shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
     };
-    const vert_shader_module = try self.dev.createShaderModule(&vert_shader_info, null);
-    defer self.dev.destroyShaderModule(vert_shader_module, null);
-
-    const frag_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = composite_frag_spv.len,
-        .p_code = @ptrCast(@alignCast(composite_frag_spv.ptr)),
-    };
-    const frag_shader_module = try self.dev.createShaderModule(&frag_shader_info, null);
-    defer self.dev.destroyShaderModule(frag_shader_module, null);
-
-    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
-        .{
-            .flags = .{},
-            .stage = .{ .vertex_bit = true },
-            .module = vert_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-        .{
-            .flags = .{},
-            .stage = .{ .fragment_bit = true },
-            .module = frag_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-    };
-    const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
-        .flags = .{},
-        .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = undefined,
-        .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = undefined,
-    };
+    const vertex_input_info = pipelineVertexInput();
     const rendering_info: vk.PipelineRenderingCreateInfo = .{
         .view_mask = 0,
         .color_attachment_count = 1,
@@ -3347,7 +2871,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .p_multisample_state = &pmsci,
         .p_depth_stencil_state = &depth_stencil_state,
         .p_color_blend_state = &pcbsci,
-        .p_dynamic_state = &pdsci,
+        .p_dynamic_state = &dyn.state,
         .layout = self.oit_composition_layout,
         .render_pass = .null_handle,
         .subpass = 0,
@@ -3363,18 +2887,9 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
 }
 
 fn destroyOitPipelinesAndDescriptors(self: *VulkanRenderer) void {
-    if (self.oit_composition_pipeline != .null_handle) {
-        self.dev.destroyPipeline(self.oit_composition_pipeline, null);
-        self.oit_composition_pipeline = .null_handle;
-    }
-    if (self.oit_composition_layout != .null_handle) {
-        self.dev.destroyPipelineLayout(self.oit_composition_layout, null);
-        self.oit_composition_layout = .null_handle;
-    }
-    if (self.oit_descriptor_set_layout != .null_handle) {
-        self.dev.destroyDescriptorSetLayout(self.oit_descriptor_set_layout, null);
-        self.oit_descriptor_set_layout = .null_handle;
-    }
+    destroyIfValidPipeline(self.dev, &self.oit_composition_pipeline);
+    destroyIfValidPipelineLayout(self.dev, &self.oit_composition_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.oit_descriptor_set_layout);
     if (self.oit_sampler != .null_handle) {
         self.dev.destroySampler(self.oit_sampler, null);
         self.oit_sampler = .null_handle;
@@ -3424,94 +2939,27 @@ fn createOitDescriptorPoolAndSets(self: *VulkanRenderer) !void {
 
 fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     const num_frames = self.swapchain_images.len;
+    const image_infos = [_]vk.DescriptorImageInfo{
+        .{ .sampler = self.oit_sampler, .image_view = self.render_color_view, .image_layout = .shader_read_only_optimal },
+        .{ .sampler = self.oit_sampler, .image_view = self.oit_accum_view, .image_layout = .shader_read_only_optimal },
+        .{ .sampler = self.oit_sampler, .image_view = self.oit_reveal_view, .image_layout = .shader_read_only_optimal },
+    };
     for (0..num_frames) |i| {
         const desc_set = self.oit_descriptor_sets_per_frame[i];
-
-        const opaque_info: vk.DescriptorImageInfo = .{
-            .sampler = self.oit_sampler,
-            .image_view = self.render_color_view,
-            .image_layout = .shader_read_only_optimal,
+        const writes = [_]vk.WriteDescriptorSet{
+            descriptorWriteImage(desc_set, 0, image_infos[0..1]),
+            descriptorWriteImage(desc_set, 1, image_infos[1..2]),
+            descriptorWriteImage(desc_set, 2, image_infos[2..3]),
         };
-
-        const accum_info: vk.DescriptorImageInfo = .{
-            .sampler = self.oit_sampler,
-            .image_view = self.oit_accum_view,
-            .image_layout = .shader_read_only_optimal,
-        };
-
-        const reveal_info: vk.DescriptorImageInfo = .{
-            .sampler = self.oit_sampler,
-            .image_view = self.oit_reveal_view,
-            .image_layout = .shader_read_only_optimal,
-        };
-
-        const writes: [3]vk.WriteDescriptorSet = .{
-            .{
-                .dst_set = desc_set,
-                .dst_binding = 0,
-                .dst_array_element = 0,
-                .descriptor_count = 1,
-                .descriptor_type = .combined_image_sampler,
-                .p_image_info = @ptrCast(&opaque_info),
-                .p_buffer_info = undefined,
-                .p_texel_buffer_view = undefined,
-            },
-            .{
-                .dst_set = desc_set,
-                .dst_binding = 1,
-                .dst_array_element = 0,
-                .descriptor_count = 1,
-                .descriptor_type = .combined_image_sampler,
-                .p_image_info = @ptrCast(&accum_info),
-                .p_buffer_info = undefined,
-                .p_texel_buffer_view = undefined,
-            },
-            .{
-                .dst_set = desc_set,
-                .dst_binding = 2,
-                .dst_array_element = 0,
-                .descriptor_count = 1,
-                .descriptor_type = .combined_image_sampler,
-                .p_image_info = @ptrCast(&reveal_info),
-                .p_buffer_info = undefined,
-                .p_texel_buffer_view = undefined,
-            },
-        };
-
         self.dev.updateDescriptorSets(&writes, null);
     }
 }
 
 fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write_enable: bool) !vk.Pipeline {
-    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{
-        .topology = .triangle_list,
-        .primitive_restart_enable = .false,
-    };
-    const pvsci: vk.PipelineViewportStateCreateInfo = .{
-        .viewport_count = 1,
-        .p_viewports = null,
-        .scissor_count = 1,
-        .p_scissors = null,
-    };
-    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{ .back_bit = true },
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
-    const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
-        .rasterization_samples = .{ .@"1_bit" = true },
-        .sample_shading_enable = .false,
-        .min_sample_shading = 1,
-        .alpha_to_coverage_enable = .false,
-        .alpha_to_one_enable = .false,
-    };
+    const piasci = pipelineInputAssembly();
+    const pvsci = pipelineViewportState();
+    const prsci = pipelineRasterization(true);
+    const pmsci = pipelineMultisample();
     const pcbas: vk.PipelineColorBlendAttachmentState = .{
         .blend_enable = if (blend_enable) .true else .false,
         .src_color_blend_factor = .src_alpha,
@@ -3529,12 +2977,7 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .p_attachments = @ptrCast(&pcbas),
         .blend_constants = .{ 0, 0, 0, 0 },
     };
-    const dynstate: [2]vk.DynamicState = .{ .viewport, .scissor };
-    const pdsci: vk.PipelineDynamicStateCreateInfo = .{
-        .flags = .{},
-        .dynamic_state_count = dynstate.len,
-        .p_dynamic_states = &dynstate,
-    };
+    const dyn = pipelineDynamicState();
     const depth_stencil_state: vk.PipelineDepthStencilStateCreateInfo = .{
         .flags = .{},
         .depth_test_enable = .true,
@@ -3547,43 +2990,15 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .min_depth_bounds = 0.0,
         .max_depth_bounds = 1.0,
     };
-    const vert_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = vertex_shader_spv.len,
-        .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)),
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(vert_module, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len, .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)) }, null);
+    defer self.dev.destroyShaderModule(frag_module, null);
+    const pssci = [_]vk.PipelineShaderStageCreateInfo{
+        shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
+        shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
     };
-    const vert_shader_module = try self.dev.createShaderModule(&vert_shader_info, null);
-    errdefer self.dev.destroyShaderModule(vert_shader_module, null);
-    const frag_shader_info: vk.ShaderModuleCreateInfo = .{
-        .flags = .{},
-        .code_size = fragment_shader_spv.len,
-        .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)),
-    };
-    const frag_shader_module = try self.dev.createShaderModule(&frag_shader_info, null);
-    errdefer self.dev.destroyShaderModule(frag_shader_module, null);
-    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
-        .{
-            .flags = .{},
-            .stage = .{ .vertex_bit = true },
-            .module = vert_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-        .{
-            .flags = .{},
-            .stage = .{ .fragment_bit = true },
-            .module = frag_shader_module,
-            .p_name = "main",
-            .p_specialization_info = null,
-        },
-    };
-    const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
-        .flags = .{},
-        .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = undefined,
-        .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = undefined,
-    };
+    const vertex_input_info = pipelineVertexInput();
     const rendering_info: vk.PipelineRenderingCreateInfo = .{
         .view_mask = 0,
         .color_attachment_count = 1,
@@ -3604,7 +3019,7 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
         .p_multisample_state = &pmsci,
         .p_depth_stencil_state = &depth_stencil_state,
         .p_color_blend_state = &pcbsci,
-        .p_dynamic_state = &pdsci,
+        .p_dynamic_state = &dyn.state,
         .layout = self.pipeline_layout,
         .render_pass = .null_handle,
         .subpass = 0,
@@ -3615,18 +3030,16 @@ fn createGraphicsPipeline(self: *VulkanRenderer, blend_enable: bool, depth_write
     if (self.dev.createGraphicsPipelines(.null_handle, &.{gpci}, null, (&pipeline)[0..1])) |res| {
         if (res != .success) return error.PipelineCreationFailed;
     } else |err| return err;
-    self.dev.destroyShaderModule(vert_shader_module, null);
-    self.dev.destroyShaderModule(frag_shader_module, null);
     return pipeline;
 }
 
-fn currentFrame(self: *VulkanRenderer) u32 {
-    const num_frames = self.in_flight_fences.len;
-    return if (num_frames > 0) @intCast(self.current_frame_idx.load(.monotonic) % num_frames) else 0;
+inline fn currentFrame(self: *const VulkanRenderer) u32 {
+    return @intCast(self.current_frame_idx.load(.monotonic) % self.in_flight_fences.len);
 }
 
 fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}!void {
-    const result = self.dev.waitForFences(fences, .true, 2000000000) catch return error.DrawFailed;
+    const timeout_ns: u64 = 2 * std.time.ns_per_s;
+    const result = self.dev.waitForFences(fences, .true, timeout_ns) catch return error.DrawFailed;
     if (result != .success) return error.DrawFailed;
 }
 
@@ -3650,8 +3063,7 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
     }
 }
 
-pub fn beginSingleTimeCommands(self: *VulkanRenderer, io: std.Io) !vk.CommandBuffer {
-    _ = io;
+pub fn beginSingleTimeCommands(self: *VulkanRenderer) !vk.CommandBuffer {
     const alloc_info: vk.CommandBufferAllocateInfo = .{
         .level = .primary,
         .command_pool = self.upload_command_pool,
@@ -3696,24 +3108,6 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
     try self.endSingleTimeCommandsLocked(cmd);
 }
 
-pub fn present(self: *VulkanRenderer, io: std.Io) !void {
-    const current_frame = self.currentFrame();
-
-    const present_info: vk.PresentInfoKHR = .{
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&self.render_complete_semaphores[current_frame]),
-        .swapchain_count = 1,
-        .p_swapchains = @ptrCast(&self.swapchain),
-        .p_image_indices = &.{self.current_swapchain_image_index},
-        .p_results = null,
-    };
-
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-
-    _ = try self.dev.queuePresentKHR(self.present_queue, &present_info);
-}
-
 fn vtableSetViewport(userdata: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
     self.viewport_pixels = viewport_pixels;
@@ -3727,12 +3121,12 @@ fn vtableSetViewport(userdata: *Renderer.Implementation, viewport_pixels: @Vecto
         self.swapchain_needs_recreate = true;
     }
 }
-fn vtableUpdateCameraDirection(userdata: *Renderer.Implementation, viewDir: @Vector(3, f32)) void {
+fn vtableUpdateCameraDirection(userdata: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(userdata));
-    // Convert viewDir (pitch, yaw, _) to a unit direction vector, matching OpenGL.
-    self.camera_front[0] = @sin(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
-    self.camera_front[1] = @sin(std.math.degreesToRadians(viewDir[0]));
-    self.camera_front[2] = @cos(std.math.degreesToRadians(viewDir[1])) * @cos(std.math.degreesToRadians(viewDir[0]));
+    // Convert view_dir (pitch, yaw, _) to a unit direction vector, matching OpenGL.
+    self.camera_front[0] = @sin(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
+    self.camera_front[1] = @sin(std.math.degreesToRadians(view_dir[0]));
+    self.camera_front[2] = @cos(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
     self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
 }
 

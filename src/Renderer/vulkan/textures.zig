@@ -122,7 +122,7 @@ pub const TextureArrayManager = struct {
         for (entry_names) |name| {
             const dot = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
             const block_name = name[0..dot];
-            const block_type = std.meta.stringToEnum(Block, block_name).?;
+            const block_type = std.meta.stringToEnum(Block, block_name) orelse continue;
             const layer = indexer.indexOf(block_type);
 
             const texture_file = try textures_path.openFile(io, name, .{});
@@ -190,7 +190,7 @@ pub const TextureArrayManager = struct {
         errdefer self.renderer.dev.freeMemory(memory, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
-        const cmd = try self.renderer.beginSingleTimeCommands(io);
+        const cmd = try self.renderer.beginSingleTimeCommands();
         errdefer self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
         try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, 0, image_count);
