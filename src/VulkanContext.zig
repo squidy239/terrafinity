@@ -266,15 +266,27 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.props = self.instance.getPhysicalDeviceProperties(self.pdev);
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
+    const ext_props = try self.instance.enumerateDeviceExtensionPropertiesAlloc(self.pdev, null, allocator);
+    defer allocator.free(ext_props);
+    var has_push_desc = false;
+    for (ext_props) |ext| {
+        const name = std.mem.sliceTo(&ext.extension_name, 0);
+        if (std.mem.eql(u8, name, "VK_KHR_push_descriptor")) {
+            has_push_desc = true;
+        }
+    }
+    std.log.info("Physical device supports VK_KHR_push_descriptor: {}", .{has_push_desc});
+
     const qfamilies = try self.selectQueueFamilies(allocator);
     self.queue_family_index = qfamilies.graphics;
     self.present_queue_family_index = qfamilies.present;
     self.transfer_queue_family_index = qfamilies.transfer;
 
-    const device_extensions: [3][*:0]const u8 = .{
+    const device_extensions: [4][*:0]const u8 = .{
         vk.extensions.khr_swapchain.name,
         vk.extensions.khr_dynamic_rendering.name,
         vk.extensions.ext_robustness_2.name,
+        vk.extensions.khr_push_descriptor.name,
     };
 
     const queue_priority: f32 = 1.0;

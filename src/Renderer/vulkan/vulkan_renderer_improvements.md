@@ -28,11 +28,6 @@ This document outlines potential architectural and design improvements for the V
 *   **Improvement:** Transition to a fully bindless design using `VK_EXT_descriptor_indexing`. Bind a single, giant global array of textures (`sampler2D textures[]`) to descriptor set 0, and pass texture indices to shaders via vertex/push constants or storage buffers.
 *   **Impact:** Eliminates descriptor set rebinding during drawing, simplifying shader logic and rendering state management.
 
-### Push Descriptors
-*   **Current State:** Classic descriptor pools (`vkCreateDescriptorPool`) are used to allocate per-frame descriptor sets.
-*   **Improvement:** Adopt `VK_KHR_push_descriptors` to push descriptor updates directly into the command buffer.
-*   **Impact:** Bypasses descriptor allocation, pooling, and management overhead for resources that change frequently or are frame-local.
-
 ---
 
 ## Memory Management & Resource Allocation

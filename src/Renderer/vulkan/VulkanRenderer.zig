@@ -339,12 +339,12 @@ const SwapchainState = struct {
 };
 
 const GraphicsState = struct {
-    descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
-    pipeline_layout: vk.PipelineLayout = .null_handle,
+    opaque_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
+    transparent_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
+    opaque_pipeline_layout: vk.PipelineLayout = .null_handle,
+    transparent_pipeline_layout: vk.PipelineLayout = .null_handle,
     pipeline: vk.Pipeline = .null_handle,
     transparent_pipeline: vk.Pipeline = .null_handle,
-    descriptor_pool: vk.DescriptorPool = .null_handle,
-    descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
 };
 
 const CullState = struct {
@@ -553,7 +553,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
         try self.allocateIndirectBuffers(i);
     }
 
-    if (self.graphics_state.pipeline_layout != .null_handle) {
+    if (self.graphics_state.opaque_pipeline_layout != .null_handle) {
         if (self.graphics_state.pipeline != .null_handle) {
             self.dev.destroyPipeline(self.graphics_state.pipeline, null);
             self.graphics_state.pipeline = .null_handle;
@@ -562,21 +562,17 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
             self.dev.destroyPipeline(self.graphics_state.transparent_pipeline, null);
             self.graphics_state.transparent_pipeline = .null_handle;
         }
-        self.dev.destroyPipelineLayout(self.graphics_state.pipeline_layout, null);
-        self.graphics_state.pipeline_layout = .null_handle;
+        self.dev.destroyPipelineLayout(self.graphics_state.opaque_pipeline_layout, null);
+        self.graphics_state.opaque_pipeline_layout = .null_handle;
+        self.dev.destroyPipelineLayout(self.graphics_state.transparent_pipeline_layout, null);
+        self.graphics_state.transparent_pipeline_layout = .null_handle;
         try self.createPipeline();
         try self.createTransparentPipeline();
     }
 
-    if (self.graphics_state.descriptor_set_layout != .null_handle) {
-        try self.createDescriptorSetLayoutAndPool();
-        // Initialize descriptors for all frames since they start null after pool recreation
-        for (0..num_swapchain_images) |i| {
-            self.updateFrameDescriptorSet(@intCast(i));
-        }
-        if (self.texture_manager.texture_view != .null_handle) {
-            self.texture_manager.rebindDescriptorSets();
-        }
+    if (self.graphics_state.opaque_descriptor_set_layout != .null_handle) {
+        try self.createOpaqueDescriptorSetLayout();
+        try self.createTransparentDescriptorSetLayout();
     }
 
     // The cull descriptor sets also reference the indirect, chunk_data, count, and stats buffers.
@@ -591,7 +587,6 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     if (self.oit.descriptor_set_layout != .null_handle) {
         self.destroyOitPipelinesAndDescriptors();
         try self.createOitPipelinesAndDescriptors();
-        self.updateDepthDescriptorSets();
     }
 }
 
@@ -600,12 +595,6 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     destroyRenderTarget(self.dev, &self.render_depth);
     destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
     self.frame_buffers.deinit(self.allocator, self.cpu_to_gpu_gpa.allocator(), self.gpu_only_gpa.allocator(), self.draw_capacity);
-    if (self.graphics_state.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.graphics_state.descriptor_pool, null);
-        self.graphics_state.descriptor_pool = .null_handle;
-    }
-    self.allocator.free(self.graphics_state.descriptor_sets_per_frame);
-    self.graphics_state.descriptor_sets_per_frame = &.{};
     self.destroyOitResources();
 }
 
@@ -673,7 +662,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
 
     try self.recreateSwapchainResourcesLocked(io);
 
-    try self.createDescriptorSetLayoutAndPool();
+    try self.createOpaqueDescriptorSetLayout();
+    try self.createTransparentDescriptorSetLayout();
     try self.createCullDescriptorSetLayoutAndPool();
 
     try self.loadDefaultTextures(io, allocator);
@@ -682,8 +672,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     try self.createTransparentPipeline();
     try self.createCullPipeline();
     try self.createOitPipelinesAndDescriptors();
-
-    self.updateDepthDescriptorSets();
 
     self.meshes = .init;
 
@@ -757,9 +745,11 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     destroyIfValidPipeline(self.dev, &self.graphics_state.pipeline);
     destroyIfValidPipeline(self.dev, &self.graphics_state.transparent_pipeline);
     destroyIfValidPipeline(self.dev, &self.cull.pipeline);
-    destroyIfValidPipelineLayout(self.dev, &self.graphics_state.pipeline_layout);
+    destroyIfValidPipelineLayout(self.dev, &self.graphics_state.opaque_pipeline_layout);
+    destroyIfValidPipelineLayout(self.dev, &self.graphics_state.transparent_pipeline_layout);
     destroyIfValidPipelineLayout(self.dev, &self.cull.pipeline_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.descriptor_set_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.opaque_descriptor_set_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.transparent_descriptor_set_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.cull.descriptor_set_layout);
 
     if (self.cull.descriptor_pool != .null_handle) {
@@ -1505,10 +1495,44 @@ fn recordOpaquePass(
 
     self.setViewportAndScissor(cmd_buffer);
 
-    const desc_set: vk.DescriptorSet = self.graphics_state.descriptor_sets_per_frame[current_frame];
-    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.pipeline_layout, 0, (&desc_set)[0..1], null);
+    const buffer_info: vk.DescriptorBufferInfo = .{
+        .buffer = self.frame_buffers.chunk_data[current_frame],
+        .offset = self.frame_buffers.chunk_data_offsets[current_frame],
+        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
+    };
+    const texture_image_info: vk.DescriptorImageInfo = .{
+        .image_layout = .shader_read_only_optimal,
+        .image_view = self.texture_manager.texture_view,
+        .sampler = self.texture_manager.sampler,
+    };
+    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
+    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
+    const writes: [2]vk.WriteDescriptorSet = .{
+        .{
+            .dst_set = .null_handle,
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .storage_buffer,
+            .p_image_info = (&dummy_image_info)[0..1],
+            .p_buffer_info = (&buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        },
+        .{
+            .dst_set = .null_handle,
+            .dst_binding = 1,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_image_info = (&texture_image_info)[0..1],
+            .p_buffer_info = (&dummy_buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        },
+    };
+    self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.opaque_pipeline_layout, 0, &writes);
 
-    self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
+    self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.opaque_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
 
     if (total_candidates > 0) {
         const opaque_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame];
@@ -1544,9 +1568,58 @@ fn recordTransparentPass(
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);
     self.setViewportAndScissor(cmd_buffer);
 
-    const desc_set: vk.DescriptorSet = self.graphics_state.descriptor_sets_per_frame[current_frame];
-    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.pipeline_layout, 0, (&desc_set)[0..1], null);
-    self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
+    const buffer_info: vk.DescriptorBufferInfo = .{
+        .buffer = self.frame_buffers.chunk_data[current_frame],
+        .offset = self.frame_buffers.chunk_data_offsets[current_frame],
+        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
+    };
+    const texture_image_info: vk.DescriptorImageInfo = .{
+        .image_layout = .shader_read_only_optimal,
+        .image_view = self.texture_manager.texture_view,
+        .sampler = self.texture_manager.sampler,
+    };
+    const depth_image_info: vk.DescriptorImageInfo = .{
+        .image_layout = .depth_stencil_read_only_optimal,
+        .image_view = self.render_depth_sampled_view,
+        .sampler = self.texture_manager.sampler,
+    };
+    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
+    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
+    const writes: [3]vk.WriteDescriptorSet = .{
+        .{
+            .dst_set = .null_handle,
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .storage_buffer,
+            .p_image_info = (&dummy_image_info)[0..1],
+            .p_buffer_info = (&buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        },
+        .{
+            .dst_set = .null_handle,
+            .dst_binding = 1,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_image_info = (&texture_image_info)[0..1],
+            .p_buffer_info = (&dummy_buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        },
+        .{
+            .dst_set = .null_handle,
+            .dst_binding = 2,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_image_info = (&depth_image_info)[0..1],
+            .p_buffer_info = (&dummy_buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        },
+    };
+    self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 0, &writes);
+    self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.transparent_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
 
     if (total_candidates > 0) {
         const transparent_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame] + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
@@ -1769,30 +1842,6 @@ fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, view_pos: @
     };
 }
 
-fn updateFrameDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "updateFrameDescriptorSet" });
-    defer zone.end();
-
-    const buffer_info: vk.DescriptorBufferInfo = .{
-        .buffer = self.frame_buffers.chunk_data[frame_idx],
-        .offset = self.frame_buffers.chunk_data_offsets[frame_idx],
-        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
-    };
-
-    const chunk_data_write: vk.WriteDescriptorSet = .{
-        .dst_set = self.graphics_state.descriptor_sets_per_frame[frame_idx],
-        .dst_binding = 0,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .storage_buffer,
-        .p_image_info = undefined,
-        .p_buffer_info = (&buffer_info)[0..1],
-        .p_texel_buffer_view = undefined,
-    };
-
-    self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{chunk_data_write}, null);
-}
-
 fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
     defer zone.end();
@@ -1914,7 +1963,6 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
 
     // Stage 4 — update descriptors with the correct (new) draw_capacity
     for (0..num_frames) |i| {
-        self.updateFrameDescriptorSet(@intCast(i));
         self.updateCullDescriptorSet(@intCast(i));
     }
 }
@@ -2054,27 +2102,30 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         self.updateOitDescriptorSets();
     }
 
-    self.updateDepthDescriptorSets();
-
     std.log.info("VulkanRenderer.createRenderTargets: SUCCESS - Created render targets: color {any}, depth {any}, accum {any}, reveal {any}\n", .{ self.render_color.image, self.render_depth.image, self.oit.accum.image, self.oit.reveal.image });
 }
 
-fn createDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
-    if (self.graphics_state.descriptor_set_layout == .null_handle) {
+fn createOpaqueDescriptorSetLayout(self: *VulkanRenderer) !void {
+    if (self.graphics_state.opaque_descriptor_set_layout == .null_handle) {
+        const bindings: [2]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        };
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        self.graphics_state.opaque_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    }
+}
+
+fn createTransparentDescriptorSetLayout(self: *VulkanRenderer) !void {
+    if (self.graphics_state.transparent_descriptor_set_layout == .null_handle) {
         const bindings: [3]vk.DescriptorSetLayoutBinding = .{
             .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-        self.graphics_state.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        self.graphics_state.transparent_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
-
-    const pool_sizes: [2]vk.DescriptorPoolSize = .{
-        .{ .type = .storage_buffer, .descriptor_count = @intCast(self.swapchain.images.len) },
-        .{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.swapchain.images.len * 2) },
-    };
-    try self.createFrameDescriptorPool(&self.graphics_state.descriptor_pool, self.graphics_state.descriptor_set_layout, &self.graphics_state.descriptor_sets_per_frame, &pool_sizes);
 }
 
 fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
@@ -2148,27 +2199,6 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
         };
     }
     self.dev.updateDescriptorSets(&writes, null);
-}
-
-pub fn updateDepthDescriptorSets(self: *VulkanRenderer) void {
-    if (self.render_depth.view == .null_handle or self.texture_manager.sampler == .null_handle or self.graphics_state.descriptor_pool == .null_handle) return;
-    const depth_image_info: vk.DescriptorImageInfo = .{
-        .image_layout = .depth_stencil_read_only_optimal,
-        .image_view = self.render_depth_sampled_view,
-        .sampler = self.texture_manager.sampler,
-    };
-    for (self.graphics_state.descriptor_sets_per_frame) |desc_set| {
-        self.dev.updateDescriptorSets(&[_]vk.WriteDescriptorSet{.{
-            .dst_set = desc_set,
-            .dst_binding = 2,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .combined_image_sampler,
-            .p_image_info = (&depth_image_info)[0..1],
-            .p_buffer_info = undefined,
-            .p_texel_buffer_view = undefined,
-        }}, null);
-    }
 }
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
@@ -2298,11 +2328,11 @@ fn createPipeline(self: *VulkanRenderer) !void {
     const layout_info: vk.PipelineLayoutCreateInfo = .{
         .flags = .{},
         .set_layout_count = 1,
-        .p_set_layouts = (&self.graphics_state.descriptor_set_layout)[0..1],
+        .p_set_layouts = (&self.graphics_state.opaque_descriptor_set_layout)[0..1],
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
     };
-    self.graphics_state.pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+    self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
 
     const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
@@ -2331,10 +2361,24 @@ fn createPipeline(self: *VulkanRenderer) !void {
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
-    self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, self.depth_format, depth_stencil, &.{blend}, true, self.graphics_state.pipeline_layout);
+    self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, self.depth_format, depth_stencil, &.{blend}, true, self.graphics_state.opaque_pipeline_layout);
 }
 
 fn createTransparentPipeline(self: *VulkanRenderer) !void {
+    const pc_range: vk.PushConstantRange = .{
+        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+        .offset = 0,
+        .size = @sizeOf(PushConstants),
+    };
+    const layout_info: vk.PipelineLayoutCreateInfo = .{
+        .flags = .{},
+        .set_layout_count = 1,
+        .p_set_layouts = (&self.graphics_state.transparent_descriptor_set_layout)[0..1],
+        .push_constant_range_count = 1,
+        .p_push_constant_ranges = (&pc_range)[0..1],
+    };
+    self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+
     const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
     const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len, .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)) }, null);
@@ -2357,7 +2401,7 @@ fn createTransparentPipeline(self: *VulkanRenderer) !void {
         .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
     };
     const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
-    self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, false, self.graphics_state.pipeline_layout);
+    self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, false, self.graphics_state.transparent_pipeline_layout);
 }
 
 fn createCullPipeline(self: *VulkanRenderer) !void {
