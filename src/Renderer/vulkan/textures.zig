@@ -322,7 +322,7 @@ pub const TextureArrayManager = struct {
             .sampler = sampler,
         };
 
-        for (self.renderer.descriptor_sets_per_frame) |desc_set| {
+        for (self.renderer.graphics_state.descriptor_sets_per_frame) |desc_set| {
             const descriptor_write = vk.WriteDescriptorSet{
                 .dst_set = desc_set,
                 .dst_binding = 1,
@@ -427,7 +427,7 @@ pub const TextureArrayManager = struct {
             .image_view = self.texture_view,
             .sampler = self.sampler,
         };
-        for (self.renderer.descriptor_sets_per_frame) |desc_set| {
+        for (self.renderer.graphics_state.descriptor_sets_per_frame) |desc_set| {
             const descriptor_write = vk.WriteDescriptorSet{
                 .dst_set = desc_set,
                 .dst_binding = 1,

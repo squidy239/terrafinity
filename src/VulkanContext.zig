@@ -43,6 +43,12 @@ command_pool: vk.CommandPool,
 upload_command_pool: vk.CommandPool = .null_handle,
 cmd_buffers: []vk.CommandBuffer = &.{},
 
+image_acquired_semaphores: []vk.Semaphore = &.{},
+render_complete_semaphores: []vk.Semaphore = &.{},
+in_flight_fences: []vk.Fence = &.{},
+current_frame_idx: std.atomic.Value(u32) = .init(0),
+current_swapchain_image_index: u32 = 0,
+
 swapchain: vk.SwapchainKHR = .null_handle,
 swapchain_format: vk.Format = .b8g8r8a8_srgb,
 swapchain_images: []vk.Image = &.{},
@@ -51,20 +57,12 @@ swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 swapchain_needs_recreate: bool = false,
 present_mode: PresentMode = .mailbox,
 
-image_acquired_semaphores: []vk.Semaphore = &.{},
-render_complete_semaphores: []vk.Semaphore = &.{},
-in_flight_fences: []vk.Fence = &.{},
-current_frame_idx: std.atomic.Value(u32) = .init(0),
-current_swapchain_image_index: u32 = 0,
-
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
-
 transfer_semaphore: vk.Semaphore = .null_handle,
 transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 frame_number: std.atomic.Value(u64) = .init(1),
-
 queue_mutex: std.Io.Mutex = .init,
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
@@ -74,26 +72,88 @@ fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () voi
     ));
 }
 
-fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags) vk.ImageViewCreateInfo {
-    return .{
-        .flags = .{},
-        .image = image,
-        .view_type = .@"2d",
-        .format = format,
-        .components = .{
-            .r = .identity,
-            .g = .identity,
-            .b = .identity,
-            .a = .identity,
-        },
-        .subresource_range = .{
-            .aspect_mask = aspect_mask,
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
+
+fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.PhysicalDevice {
+    var pdev_count: u32 = 0;
+    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
+    const pdevs = try allocator.alloc(vk.PhysicalDevice, pdev_count);
+    defer allocator.free(pdevs);
+    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, pdevs.ptr);
+
+    var selected_pdev: vk.PhysicalDevice = .null_handle;
+    var best_score: u32 = 0;
+
+    for (pdevs) |pdev| {
+        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{ .dynamic_rendering = .false, .p_next = null };
+        var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{ .synchronization_2 = .false, .p_next = @ptrCast(&dynamic_rendering_features) };
+        var features12: vk.PhysicalDeviceVulkan12Features = .{
+            .draw_indirect_count = .false, .descriptor_indexing = .false,
+            .runtime_descriptor_array = .false, .descriptor_binding_partially_bound = .false,
+            .buffer_device_address = .false, .timeline_semaphore = .false,
+            .p_next = @ptrCast(&sync2_features),
+        };
+        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false }, .p_next = @ptrCast(&features12) };
+        self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
+
+        const required = features2.features.multi_draw_indirect == .true and
+            features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
+            features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
+            features12.buffer_device_address == .true and features12.timeline_semaphore == .true and
+            sync2_features.synchronization_2 == .true and dynamic_rendering_features.dynamic_rendering == .true;
+        if (!required) continue;
+
+        var has_graphics = false;
+        var has_present = false;
+        const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
+        defer allocator.free(queue_families);
+        for (queue_families, 0..) |qf, i| {
+            const family: u32 = @intCast(i);
+            if (!has_graphics and qf.queue_flags.graphics_bit) has_graphics = true;
+            if (!has_present and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(pdev, family, self.surface)) == .true) has_present = true;
+        }
+        if (!has_graphics or !has_present) continue;
+
+        const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, allocator);
+        defer allocator.free(surface_formats);
+        const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, allocator);
+        defer allocator.free(present_modes);
+        if (surface_formats.len == 0 or present_modes.len == 0) continue;
+
+        const props = self.instance.getPhysicalDeviceProperties(pdev);
+        var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
+        if (options.sanitize_thread) {
+            const device_name = std.mem.sliceTo(&props.device_name, 0);
+            if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) score = 1;
+        }
+        if (score > best_score) {
+            best_score = score;
+            selected_pdev = pdev;
+        }
+    }
+    if (selected_pdev == .null_handle) return error.NoSuitablePhysicalDevice;
+    return selected_pdev;
+}
+
+fn selectQueueFamilies(self: *VulkanContext, allocator: std.mem.Allocator) !struct { graphics: u32, present: u32, transfer: u32 } {
+    const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.pdev, allocator);
+    defer allocator.free(queue_families);
+    var graphics_family: u32 = 0;
+    var present_family: u32 = 0;
+    var transfer_family: ?u32 = null;
+    var transfer_score: u8 = 0;
+    for (queue_families, 0..) |qf, i| {
+        const family: u32 = @intCast(i);
+        if (graphics_family == 0 and qf.queue_flags.graphics_bit) graphics_family = family;
+        if (present_family == 0 and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) present_family = family;
+        if (qf.queue_flags.transfer_bit) {
+            const score: u8 = if (!qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) 3 else if (!qf.queue_flags.graphics_bit) 2 else 1;
+            if (score > transfer_score) {
+                transfer_family = family;
+                transfer_score = score;
+            }
+        }
+    }
+    return .{ .graphics = graphics_family, .present = present_family, .transfer = transfer_family orelse graphics_family };
 }
 
 pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
@@ -105,7 +165,6 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.* = .{
         .allocator = allocator,
         .window = window,
-
         .vkb = undefined,
         .instance_handle = undefined,
         .instance_wrapper = undefined,
@@ -201,142 +260,14 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.surface = surface;
     errdefer self.instance.destroySurfaceKHR(self.surface, null);
 
-    var pdev_count: u32 = 0;
-    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
-
-    const pdevs = try allocator.alloc(vk.PhysicalDevice, pdev_count);
-    defer allocator.free(pdevs);
-
-    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, pdevs.ptr);
-
-    var selected_pdev: vk.PhysicalDevice = .null_handle;
-    var best_device_score: u32 = 0;
-    for (pdevs) |pdev| {
-        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
-            .dynamic_rendering = .false,
-            .p_next = null,
-        };
-        var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{
-            .synchronization_2 = .false,
-            .p_next = @ptrCast(&dynamic_rendering_features),
-        };
-        var features12: vk.PhysicalDeviceVulkan12Features = .{
-            .draw_indirect_count = .false,
-            .descriptor_indexing = .false,
-            .runtime_descriptor_array = .false,
-            .descriptor_binding_partially_bound = .false,
-            .buffer_device_address = .false,
-            .timeline_semaphore = .false,
-            .p_next = @ptrCast(&sync2_features),
-        };
-        var features2: vk.PhysicalDeviceFeatures2 = .{
-            .features = .{ .multi_draw_indirect = .false },
-            .p_next = @ptrCast(&features12),
-        };
-
-        self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
-
-        if (features2.features.multi_draw_indirect == .true and
-            features12.draw_indirect_count == .true and
-            features12.descriptor_indexing == .true and
-            features12.runtime_descriptor_array == .true and
-            features12.descriptor_binding_partially_bound == .true and
-            features12.buffer_device_address == .true and
-            features12.timeline_semaphore == .true and
-            sync2_features.synchronization_2 == .true and
-            dynamic_rendering_features.dynamic_rendering == .true)
-        {
-            var has_graphics = false;
-            var has_present = false;
-            const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
-            defer allocator.free(queue_families);
-
-            for (queue_families, 0..) |qf, i| {
-                const family: u32 = @intCast(i);
-                if (!has_graphics and qf.queue_flags.graphics_bit) {
-                    has_graphics = true;
-                }
-                if (!has_present) {
-                    const supported = try self.instance.getPhysicalDeviceSurfaceSupportKHR(pdev, family, self.surface);
-                    if (supported == .true) {
-                        has_present = true;
-                    }
-                }
-            }
-
-            if (has_graphics and has_present) {
-                const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, allocator);
-                defer allocator.free(surface_formats);
-
-                const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, allocator);
-                defer allocator.free(present_modes);
-
-                if (surface_formats.len > 0 and present_modes.len > 0) {
-                    const props = self.instance.getPhysicalDeviceProperties(pdev);
-                    var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
-
-                    // ThreadSanitizer has known internal runtime crashes/assertion failures
-                    // (tsan_interceptors_posix.cpp:2156 "((thr->slot)) != (0)") when using
-                    // NVIDIA proprietary driver-level threads. If TSan is enabled, we avoid
-                    // selecting NVIDIA GPUs to allow thread sanitization verification to succeed.
-                    if (options.sanitize_thread) {
-                        const device_name = std.mem.sliceTo(&props.device_name, 0);
-                        if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) {
-                            score = 1;
-                        }
-                    }
-
-                    if (score > best_device_score) {
-                        best_device_score = score;
-                        selected_pdev = pdev;
-                    }
-                }
-            }
-        }
-    }
-
-    if (selected_pdev == .null_handle) {
-        return error.NoSuitablePhysicalDevice;
-    }
-
-    self.pdev = selected_pdev;
+    self.pdev = try self.selectPhysicalDevice(allocator);
     self.props = self.instance.getPhysicalDeviceProperties(self.pdev);
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
-    const queue_priority: f32 = 1.0;
-    var graphics_family: u32 = 0;
-    var present_family: u32 = 0;
-
-    const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.pdev, allocator);
-    defer allocator.free(queue_families);
-
-    for (queue_families, 0..) |qf, i| {
-        const family: u32 = @intCast(i);
-        if (graphics_family == 0 and qf.queue_flags.graphics_bit) {
-            graphics_family = family;
-        }
-        if (present_family == 0 and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) {
-            present_family = family;
-        }
-    }
-
-    var transfer_family: ?u32 = null;
-    var transfer_score: u8 = 0;
-    for (queue_families, 0..) |qf, i| {
-        const family: u32 = @intCast(i);
-        if (qf.queue_flags.transfer_bit) {
-            const score: u8 = if (!qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) 3 else if (!qf.queue_flags.graphics_bit) 2 else 1;
-            if (score > transfer_score) {
-                transfer_family = family;
-                transfer_score = score;
-            }
-        }
-    }
-    const final_transfer_family = transfer_family orelse graphics_family;
-
-    self.queue_family_index = graphics_family;
-    self.present_queue_family_index = present_family;
-    self.transfer_queue_family_index = final_transfer_family;
+    const qfamilies = try self.selectQueueFamilies(allocator);
+    self.queue_family_index = qfamilies.graphics;
+    self.present_queue_family_index = qfamilies.present;
+    self.transfer_queue_family_index = qfamilies.transfer;
 
     const device_extensions: [3][*:0]const u8 = .{
         vk.extensions.khr_swapchain.name,
@@ -344,9 +275,10 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         vk.extensions.ext_robustness_2.name,
     };
 
+    const queue_priority: f32 = 1.0;
     var queue_create_infos: [3]vk.DeviceQueueCreateInfo = undefined;
     var queue_count: u32 = 0;
-    for ([_]u32{ graphics_family, present_family, final_transfer_family }) |f| {
+    for ([_]u32{ qfamilies.graphics, qfamilies.present, qfamilies.transfer }) |f| {
         for (queue_create_infos[0..queue_count]) |q| {
             if (q.queue_family_index == f) break;
         } else {
@@ -423,20 +355,20 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         self.dev_wrapper = null;
     }
 
-    self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
-    self.present_queue = if (graphics_family == present_family) self.graphics_queue else self.dev.getDeviceQueue(present_family, 0);
-    self.transfer_queue = self.dev.getDeviceQueue(final_transfer_family, 0);
+    self.graphics_queue = self.dev.getDeviceQueue(qfamilies.graphics, 0);
+    self.present_queue = if (qfamilies.graphics == qfamilies.present) self.graphics_queue else self.dev.getDeviceQueue(qfamilies.present, 0);
+    self.transfer_queue = self.dev.getDeviceQueue(qfamilies.transfer, 0);
 
     const pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true },
-        .queue_family_index = graphics_family,
+        .queue_family_index = qfamilies.graphics,
     };
     self.command_pool = try self.dev.createCommandPool(&pool_info, null);
     errdefer self.dev.destroyCommandPool(self.command_pool, null);
 
     const upload_pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
-        .queue_family_index = graphics_family,
+        .queue_family_index = qfamilies.graphics,
     };
     self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
     errdefer self.dev.destroyCommandPool(self.upload_command_pool, null);
@@ -488,6 +420,36 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.allocator.destroy(self);
 }
 
+fn destroySwapchainSyncResources(self: *VulkanContext) void {
+    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.in_flight_fences) |fence| if (fence != .null_handle) self.dev.destroyFence(fence, null);
+    self.allocator.free(self.image_acquired_semaphores);
+    self.allocator.free(self.render_complete_semaphores);
+    self.allocator.free(self.in_flight_fences);
+    self.image_acquired_semaphores = &.{};
+    self.render_complete_semaphores = &.{};
+    self.in_flight_fences = &.{};
+}
+
+fn allocateSwapchainSyncResources(self: *VulkanContext, num_images: u32) !void {
+    self.image_acquired_semaphores = try self.allocator.alloc(vk.Semaphore, num_images);
+    @memset(self.image_acquired_semaphores, .null_handle);
+    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, num_images);
+    @memset(self.render_complete_semaphores, .null_handle);
+    self.in_flight_fences = try self.allocator.alloc(vk.Fence, num_images);
+    @memset(self.in_flight_fences, .null_handle);
+    errdefer self.destroySwapchainSyncResources();
+
+    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
+    const fence_create_info: vk.FenceCreateInfo = .{ .flags = .{ .signaled_bit = true } };
+    for (self.image_acquired_semaphores, self.render_complete_semaphores, self.in_flight_fences) |*acq, *complete, *fence| {
+        acq.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+        fence.* = try self.dev.createFence(&fence_create_info, null);
+    }
+}
+
 fn destroySwapchainResources(self: *VulkanContext) void {
     self.dev.deviceWaitIdle() catch {};
 
@@ -503,22 +465,9 @@ fn destroySwapchainResources(self: *VulkanContext) void {
         self.cmd_buffers = &.{};
     }
 
-    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    for (self.in_flight_fences) |fence| if (fence != .null_handle) self.dev.destroyFence(fence, null);
-    self.allocator.free(self.image_acquired_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
-    self.allocator.free(self.in_flight_fences);
-    self.image_acquired_semaphores = &.{};
-    self.render_complete_semaphores = &.{};
-    self.in_flight_fences = &.{};
+    self.destroySwapchainSyncResources();
 }
 
-pub fn createSwapchain(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-    try self.createSwapchainLocked(io, gamma_correction);
-}
 
 pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
     _ = io;
@@ -632,52 +581,19 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     }
 
     for (self.swapchain_images, 0..) |image, i| {
-        self.swapchain_views[i] = try self.dev.createImageView(&imageViewCreateInfo(image, self.swapchain_format, .{ .color_bit = true }), null);
+        self.swapchain_views[i] = try self.dev.createImageView(&.{
+            .flags = .{},
+            .image = image,
+            .view_type = .@"2d",
+            .format = self.swapchain_format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
+        }, null);
     }
+
+    try self.allocateSwapchainSyncResources(@intCast(self.swapchain_images.len));
 
     const num_swapchain_images = self.swapchain_images.len;
-
-    self.image_acquired_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.image_acquired_semaphores, .null_handle);
-    errdefer {
-        for (self.image_acquired_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
-        self.image_acquired_semaphores = &.{};
-    }
-
-    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.render_complete_semaphores, .null_handle);
-    errdefer {
-        for (self.render_complete_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
-        self.render_complete_semaphores = &.{};
-    }
-
-    self.in_flight_fences = try self.allocator.alloc(vk.Fence, num_swapchain_images);
-    @memset(self.in_flight_fences, .null_handle);
-    errdefer {
-        for (self.in_flight_fences) |fence| {
-            if (fence != .null_handle) self.dev.destroyFence(fence, null);
-        }
-        if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
-        self.in_flight_fences = &.{};
-    }
-
-    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
-    const fence_create_info: vk.FenceCreateInfo = .{
-        .flags = .{ .signaled_bit = true },
-    };
-
-    for (self.image_acquired_semaphores, self.render_complete_semaphores, self.in_flight_fences) |*acquire_sem, *complete_sem, *fence| {
-        acquire_sem.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-        complete_sem.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-        fence.* = try self.dev.createFence(&fence_create_info, null);
-    }
-
     const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
         .command_pool = self.command_pool,
         .level = .primary,
