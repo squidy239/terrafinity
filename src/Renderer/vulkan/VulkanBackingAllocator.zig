@@ -91,11 +91,11 @@ pub const VulkanBackingAllocator = struct {
         };
     }
 
-    pub fn getDeviceAddress(self: *VulkanBackingAllocator, ptr: *anyopaque) vk.DeviceAddress {
+    pub fn getDeviceAddress(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) vk.DeviceAddress {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const ptr_val = @intFromPtr(ptr);
-        if (self.findBlockBinarySearch(ptr_val)) |block| {
+        if (self.findBlockBinarySearch(pool, ptr_val)) |block| {
             const base = @intFromPtr(block.cpu_ptr);
             const offset = ptr_val - base;
             return block.gpu_address + offset;
@@ -103,11 +103,11 @@ pub const VulkanBackingAllocator = struct {
         std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{ptr_val});
     }
 
-    pub fn getBufferAndOffset(self: *VulkanBackingAllocator, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
+    pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const ptr_val = @intFromPtr(ptr);
-        if (self.findBlockBinarySearch(ptr_val)) |block| {
+        if (self.findBlockBinarySearch(pool, ptr_val)) |block| {
             const base = @intFromPtr(block.raw_cpu_ptr);
             const offset = ptr_val - base;
             return .{ .buffer = block.buffer, .offset = @intCast(offset) };
@@ -115,11 +115,9 @@ pub const VulkanBackingAllocator = struct {
         std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{ptr_val});
     }
 
-    pub inline fn findBlockBinarySearch(self: *const VulkanBackingAllocator, ptr_val: usize) ?GpuBlock {
-        for (self.blocks) |list| {
-            if (searchList(list.items, ptr_val)) |block| return block;
-        }
-        return null;
+    pub inline fn findBlockBinarySearch(self: *const VulkanBackingAllocator, pool: MemoryPool, ptr_val: usize) ?GpuBlock {
+        const list = self.blocks[@intFromEnum(pool)];
+        return searchList(list.items, ptr_val);
     }
 
     inline fn searchList(list: []const GpuBlock, ptr_val: usize) ?GpuBlock {

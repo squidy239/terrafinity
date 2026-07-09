@@ -183,7 +183,6 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     }
 
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
-    errdefer allocator.destroy(instance_wrapper_ptr);
 
     instance_wrapper_ptr.* = .load(self.instance_handle, getProcAddr);
     self.instance_wrapper = instance_wrapper_ptr;
@@ -411,10 +410,10 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
 
     self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
 
-    const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
-    errdefer allocator.destroy(dev_wrapper_ptr);
-
     const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
+
+    const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
+
     dev_wrapper_ptr.* = .load(self.dev_handle, gdpa);
     self.dev_wrapper = dev_wrapper_ptr;
     self.dev = .init(self.dev_handle, dev_wrapper_ptr);
@@ -462,11 +461,12 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
+    self.destroySwapchainResources();
+
     if (self.swapchain != .null_handle) {
         self.dev.destroySwapchainKHR(self.swapchain, null);
         self.swapchain = .null_handle;
     }
-    self.destroySwapchainResources();
 
     self.dev.destroyCommandPool(self.command_pool, null);
     if (self.upload_command_pool != .null_handle) self.dev.destroyCommandPool(self.upload_command_pool, null);
@@ -584,7 +584,12 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     const qfi: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
     const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
 
-    errdefer if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, null);
+    errdefer {
+        if (old_swapchain != .null_handle) {
+            self.dev.destroySwapchainKHR(old_swapchain, null);
+            self.swapchain = .null_handle;
+        }
+    }
 
     self.swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
@@ -722,28 +727,34 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, current_frame_idx: u32, cmd
     const wait_semaphore: vk.Semaphore = self.image_acquired_semaphores[current_frame_idx];
     const signal_sems: [2]vk.Semaphore = .{ self.render_complete_semaphores[current_frame_idx], self.graphics_timeline_semaphore };
     const signal_values: [2]u64 = .{ 0, self.frame_number.load(.monotonic) };
-    const wait_value: u64 = 0;
-    var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
-        .wait_semaphore_value_count = 1,
-        .p_wait_semaphore_values = (&wait_value)[0..1],
-        .signal_semaphore_value_count = 2,
-        .p_signal_semaphore_values = signal_values[0..],
-    };
-    const submit_info: vk.SubmitInfo = .{
-        .p_next = &timeline_submit_info,
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = (&wait_semaphore)[0..1],
-        .p_wait_dst_stage_mask = (&wait_stage)[0..1],
-        .command_buffer_count = 1,
-        .p_command_buffers = (&cmd_buffer)[0..1],
-        .signal_semaphore_count = 2,
-        .p_signal_semaphores = signal_sems[0..],
-    };
+    // Wait for transfer queue to complete before culling reads mesh data.
+    var wait_sems: [2]vk.Semaphore = .{ wait_semaphore, self.transfer_semaphore };
+    var wait_stages: [2]vk.PipelineStageFlags = .{ wait_stage, .{ .compute_shader_bit = true } };
+    var wait_values: [2]u64 = .{ 0, 0 };
     {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
         zone_lock.end();
         defer self.queue_mutex.unlock(io);
+
+        wait_values[1] = self.transfer_semaphore_value.load(.monotonic);
+
+        var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
+            .wait_semaphore_value_count = 2,
+            .p_wait_semaphore_values = &wait_values,
+            .signal_semaphore_value_count = 2,
+            .p_signal_semaphore_values = &signal_values,
+        };
+        const submit_info: vk.SubmitInfo = .{
+            .p_next = &timeline_submit_info,
+            .wait_semaphore_count = 2,
+            .p_wait_semaphores = &wait_sems,
+            .p_wait_dst_stage_mask = &wait_stages,
+            .command_buffer_count = 1,
+            .p_command_buffers = (&cmd_buffer)[0..1],
+            .signal_semaphore_count = 2,
+            .p_signal_semaphores = &signal_sems,
+        };
 
         const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit" });
         defer zone_submit.end();

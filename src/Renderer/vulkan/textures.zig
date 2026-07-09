@@ -3,7 +3,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const zigimg = @import("zigimg");
 
-const VulkanRenderer = @import("Vulkan.zig");
+const VulkanRenderer = @import("VulkanRenderer.zig");
 const Block = @import("../../main.zig").Block;
 
 pub const TextureArrayManager = struct {
@@ -108,7 +108,7 @@ pub const TextureArrayManager = struct {
         const mapped_slice = try self.renderer.cpu_to_gpu_gpa.allocator().alloc(u8, total_staging_size);
         defer self.renderer.cpu_to_gpu_gpa.allocator().free(mapped_slice);
 
-        const info = self.renderer.backing_allocator.getBufferAndOffset(mapped_slice.ptr);
+        const info = self.renderer.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mapped_slice.ptr);
         const staging_buffer = info.buffer;
         const staging_offset = info.offset;
 
@@ -190,8 +190,9 @@ pub const TextureArrayManager = struct {
         errdefer self.renderer.dev.freeMemory(memory, null);
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
-        const cmd = try self.renderer.beginSingleTimeCommands();
-        errdefer self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
+        var cmd = try self.renderer.beginSingleTimeCommands();
+        errdefer if (cmd != .null_handle)
+            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
         try self.transitionImageLayout(cmd, texture_image, .undefined, .transfer_dst_optimal, 0, 1, 0, image_count);
 
@@ -273,6 +274,7 @@ pub const TextureArrayManager = struct {
         try self.transitionImageLayout(cmd, texture_image, .transfer_src_optimal, .shader_read_only_optimal, if (num_mip_levels > 1) num_mip_levels - 1 else 0, 1, 0, image_count);
 
         try self.renderer.endSingleTimeCommands(io, cmd);
+        cmd = .null_handle;
 
         const view_info = vk.ImageViewCreateInfo{
             .flags = .{},

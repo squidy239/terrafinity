@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Mesher = @import("Mesher.zig");
 pub const OpenGl = @import("Renderer/opengl/OpenGl.zig");
-pub const Vulkan = @import("Renderer/vulkan/Vulkan.zig");
+pub const Vulkan = @import("Renderer/vulkan/VulkanRenderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const ChunkPos = @import("world/World.zig").ChunkPos;
 
