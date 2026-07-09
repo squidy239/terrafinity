@@ -10,6 +10,7 @@ const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 const zm = @import("zm");
 const options = @import("options");
+const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 
 const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const Mesher = @import("../../Mesher.zig");
@@ -245,6 +246,8 @@ fn makeInfReversedZProjRh(fov_y_radians: f32, aspect_w_by_h: f32, z_near: f32) z
 
 pub const VulkanRenderer = @This();
 
+vk_ctx: *VulkanContext,
+
 allocator: std.mem.Allocator,
 window: *wio.Window,
 surface: vk.SurfaceKHR = .null_handle,
@@ -305,8 +308,6 @@ texture_manager: textures.TextureArrayManager = undefined,
 image_acquired_semaphores: []vk.Semaphore = &.{},
 render_complete_semaphores: []vk.Semaphore = &.{},
 in_flight_fences: []vk.Fence = &.{},
-current_frame_idx: std.atomic.Value(u32) = .init(0),
-current_swapchain_image_index: u32 = 0,
 
 descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 pipeline_layout: vk.PipelineLayout = .null_handle,
@@ -315,7 +316,6 @@ transparent_pipeline: vk.Pipeline = .null_handle,
 descriptor_pool: vk.DescriptorPool = .null_handle,
 descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
 
-io: std.Io = undefined,
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
 
@@ -372,418 +372,196 @@ retired_mutex: std.Io.Mutex = .init,
 retire_mutex: std.Io.Mutex = .init,
 
 init_time_ns: u64 = 0,
-frame_number: std.atomic.Value(u64) = .init(0),
 frame_stats: FrameDebugStats = .{},
 
 pub const RenderOptions = Renderer.RenderOptions;
 
-fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
-    return @ptrCast(wio.vkGetInstanceProcAddr(
-        (@intFromEnum(instance)),
-        procname,
-    ));
+fn updateSwapchainFields(self: *VulkanRenderer) void {
+    self.swapchain = self.vk_ctx.swapchain;
+    self.swapchain_format = self.vk_ctx.swapchain_format;
+    self.swapchain_images = self.vk_ctx.swapchain_images;
+    self.swapchain_views = self.vk_ctx.swapchain_views;
+    self.swapchain_extent = self.vk_ctx.swapchain_extent;
+    self.cmd_buffers = self.vk_ctx.cmd_buffers;
+    self.image_acquired_semaphores = self.vk_ctx.image_acquired_semaphores;
+    self.render_complete_semaphores = self.vk_ctx.render_complete_semaphores;
+    self.in_flight_fences = self.vk_ctx.in_flight_fences;
 }
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
-    std.log.info("VulkanRenderer.init: Starting Vulkan initialization...", .{});
+fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
+    const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, self.draw_capacity);
+    const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, self.draw_capacity);
+
+    const chunk_data_info = self.backing_allocator.getBufferAndOffset(chunk_data_slice.ptr);
+    const indirect_draw_info = self.backing_allocator.getBufferAndOffset(indirect_draw_slice.ptr);
+
+    self.chunk_data_buffers[i] = chunk_data_info.buffer;
+    self.chunk_data_buffers_mapped[i] = chunk_data_slice.ptr;
+    self.chunk_data_offsets[i] = chunk_data_info.offset;
+
+    self.indirect_draw_buffers[i] = indirect_draw_info.buffer;
+    self.indirect_draw_buffers_mapped[i] = indirect_draw_slice.ptr;
+    self.indirect_draw_offsets[i] = indirect_draw_info.offset;
+}
+
+fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
+    self.render_options_lock.lockSharedUncancelable(io);
+    const gamma_correction = self.render_options.gamma_correction;
+    const present_mode = self.render_options.present_mode;
+    self.render_options_lock.unlockShared(io);
+    self.vk_ctx.present_mode = present_mode;
+    try self.vk_ctx.createSwapchainLocked(io, gamma_correction);
+
+    self.destroyRendererSwapchainResources();
+
+    self.updateSwapchainFields();
+
+    const actual_extent = self.swapchain_extent;
+    self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
+
+    try self.createRenderTargets(actual_extent);
+
+    const num_swapchain_images = self.swapchain_images.len;
+    self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
+    self.indirect_draw_buffers_mapped = try self.allocator.alloc(?[*]vk.DrawIndirectCommand, num_swapchain_images);
+    self.indirect_draw_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
+    self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
+    self.chunk_data_buffers_mapped = try self.allocator.alloc(?[*]ChunkData, num_swapchain_images);
+    self.chunk_data_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
+
+    @memset(self.indirect_draw_buffers_mapped, null);
+    @memset(self.chunk_data_buffers_mapped, null);
+
+    for (0..num_swapchain_images) |i| {
+        try self.allocateIndirectBuffers(i);
+    }
+
+    if (self.pipeline_layout != .null_handle) {
+        if (self.pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.pipeline, null);
+            self.pipeline = .null_handle;
+        }
+        if (self.transparent_pipeline != .null_handle) {
+            self.dev.destroyPipeline(self.transparent_pipeline, null);
+            self.transparent_pipeline = .null_handle;
+        }
+        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        self.pipeline_layout = .null_handle;
+        try self.createPipeline();
+        try self.createTransparentPipeline();
+    }
+
+    if (self.descriptor_set_layout != .null_handle) {
+        try self.createDescriptorPoolAndSets();
+        if (self.texture_manager.texture_view != .null_handle) {
+            self.texture_manager.rebindDescriptorSets();
+        }
+    }
+
+    if (self.oit_descriptor_set_layout != .null_handle) {
+        self.destroyOitPipelinesAndDescriptors();
+        try self.createOitPipelinesAndDescriptors();
+
+        if (self.oit_descriptor_pool != .null_handle) {
+            self.dev.destroyDescriptorPool(self.oit_descriptor_pool, null);
+            self.oit_descriptor_pool = .null_handle;
+        }
+        if (self.oit_descriptor_sets_per_frame.len > 0) {
+            self.allocator.free(self.oit_descriptor_sets_per_frame);
+            self.oit_descriptor_sets_per_frame = &.{};
+        }
+        try self.createOitDescriptorPoolAndSets();
+        self.updateOitDescriptorSets();
+        self.updateDepthDescriptorSets();
+    }
+}
+
+fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
+    destroyIfValidImageView(self.dev, &self.render_color_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_view);
+    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+    destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
+    destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
+
+    for (self.indirect_draw_buffers_mapped) |maybe_ptr| {
+        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(ptr[0..self.draw_capacity]);
+    }
+    for (self.chunk_data_buffers_mapped) |maybe_ptr| {
+        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(ptr[0..self.draw_capacity]);
+    }
+
+    self.allocator.free(self.indirect_draw_buffers);
+    self.allocator.free(self.indirect_draw_buffers_mapped);
+    self.allocator.free(self.indirect_draw_offsets);
+    self.indirect_draw_buffers = &.{};
+    self.indirect_draw_buffers_mapped = &.{};
+    self.indirect_draw_offsets = &.{};
+
+    self.allocator.free(self.chunk_data_buffers);
+    self.allocator.free(self.chunk_data_buffers_mapped);
+    self.allocator.free(self.chunk_data_offsets);
+    self.chunk_data_buffers = &.{};
+    self.chunk_data_buffers_mapped = &.{};
+    self.chunk_data_offsets = &.{};
+
+    if (self.descriptor_pool != .null_handle) {
+        self.dev.destroyDescriptorPool(self.descriptor_pool, null);
+        self.descriptor_pool = .null_handle;
+    }
+    self.allocator.free(self.descriptor_sets_per_frame);
+    self.descriptor_sets_per_frame = &.{};
+
+    self.destroyOitResources();
+}
+
+fn recreateSwapchain(self: *VulkanRenderer, io: std.Io) !void {
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+    try self.recreateSwapchainResourcesLocked(io);
+}
+
+pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
+    std.log.info("VulkanRenderer.init: Starting renderer-specific Vulkan initialization...", .{});
 
     const self = try allocator.create(VulkanRenderer);
     errdefer allocator.destroy(self);
 
     self.* = .{
-        .allocator = undefined,
-        .window = undefined,
-        .vkb = undefined,
-        .instance_handle = undefined,
-        .instance_wrapper = undefined,
-        .instance = undefined,
-        .pdev = undefined,
-        .props = undefined,
-        .mem_props = undefined,
-        .dev_handle = undefined,
-        .dev_wrapper = undefined,
-        .dev = undefined,
-        .graphics_queue = undefined,
-        .present_queue = undefined,
-        .queue_family_index = undefined,
-        .present_queue_family_index = undefined,
-        .command_pool = undefined,
-        .meshes = undefined,
-        .interface = undefined,
+        .vk_ctx = vk_ctx,
+        .allocator = allocator,
+        .window = vk_ctx.window,
+        .surface = vk_ctx.surface,
+        .vkb = vk_ctx.vkb,
+        .instance_handle = vk_ctx.instance_handle,
+        .instance_wrapper = vk_ctx.instance_wrapper,
+        .instance = vk_ctx.instance,
+        .pdev = vk_ctx.pdev,
+        .props = vk_ctx.props,
+        .mem_props = vk_ctx.mem_props,
+        .dev_handle = vk_ctx.dev_handle,
+        .dev_wrapper = vk_ctx.dev_wrapper,
+        .dev = vk_ctx.dev,
+        .graphics_queue = vk_ctx.graphics_queue,
+        .present_queue = vk_ctx.present_queue,
+        .queue_family_index = vk_ctx.queue_family_index,
+        .present_queue_family_index = vk_ctx.present_queue_family_index,
+        .command_pool = vk_ctx.command_pool,
+        .upload_command_pool = vk_ctx.upload_command_pool,
         .render_options = render_options,
         .render_options_lock = render_options_lock,
+        .meshes = undefined,
+        .interface = undefined,
     };
 
-    std.log.info("VulkanRenderer.init: Allocated VulkanRenderer struct", .{});
-
-    self.allocator = allocator;
-    self.window = window;
-    self.io = io;
     self.init_time_ns = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
-
     self.retired_meshes = .empty;
 
-    self.vkb = .load(getProcAddr);
+    self.max_draw_indirect_count = if (self.props.limits.max_draw_indirect_count > 0) self.props.limits.max_draw_indirect_count else 65_535;
 
-    const app_info: vk.ApplicationInfo = .{
-        .p_application_name = "Terrafinity",
-        .application_version = vk.makeApiVersion(0, 1, 0, 0).toU32(),
-        .p_engine_name = "No Engine",
-        .engine_version = vk.makeApiVersion(0, 1, 0, 0).toU32(),
-        .api_version = vk.API_VERSION_1_3.toU32(),
-    };
-
-    var enabled_layers: std.ArrayList([*:0]const u8) = .empty;
-    defer enabled_layers.deinit(allocator);
-
-    const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
-    defer allocator.free(layers);
-
-    var has_validation_layer: bool = false;
-    for (layers) |layer| {
-        const name = std.mem.sliceTo(&layer.layer_name, 0);
-        if (std.mem.eql(u8, name, "VK_LAYER_KHRONOS_validation")) {
-            try enabled_layers.append(allocator, "VK_LAYER_KHRONOS_validation");
-            has_validation_layer = true;
-        }
-    }
-
-    var extension_names: std.ArrayList([*:0]const u8) = .empty;
-    defer extension_names.deinit(allocator);
-
-    const wio_extensions = wio.getRequiredVulkanInstanceExtensions();
-    for (wio_extensions) |ext| {
-        try extension_names.append(allocator, ext);
-    }
-
-    var has_portability = false;
-    const extensions = try self.vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
-    defer allocator.free(extensions);
-    for (extensions) |extension| {
-        const name = std.mem.sliceTo(&extension.extension_name, 0);
-        if (std.mem.eql(u8, name, "VK_KHR_portability_enumeration")) {
-            try extension_names.append(allocator, "VK_KHR_portability_enumeration");
-            has_portability = true;
-        }
-    }
-
-    const instance_create_info: vk.InstanceCreateInfo = .{
-        .s_type = .instance_create_info,
-        .flags = .{ .enumerate_portability_bit_khr = has_portability },
-        .p_application_info = &app_info,
-        .enabled_layer_count = @intCast(enabled_layers.items.len),
-        .pp_enabled_layer_names = if (enabled_layers.items.len > 0) @ptrCast(enabled_layers.items.ptr) else null,
-        .enabled_extension_count = @intCast(extension_names.items.len),
-        .pp_enabled_extension_names = if (extension_names.items.len > 0) @ptrCast(extension_names.items.ptr) else null,
-    };
-
-    self.instance_handle = try self.vkb.createInstance(&instance_create_info, null);
-    errdefer {
-        var local_wrapper = InstanceWrapper.load(self.instance_handle, getProcAddr);
-        const local_instance = InstanceProxy.init(self.instance_handle, &local_wrapper);
-        local_instance.destroyInstance(null);
-    }
-    std.log.info("VulkanRenderer.init: Created Vulkan instance successfully", .{});
-
-    const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
-    errdefer allocator.destroy(instance_wrapper_ptr);
-
-    instance_wrapper_ptr.* = .load(self.instance_handle, getProcAddr);
-    self.instance_wrapper = instance_wrapper_ptr;
-    self.instance = .init(self.instance_handle, instance_wrapper_ptr);
-    errdefer {
-        self.instance.destroyInstance(null);
-        allocator.destroy(instance_wrapper_ptr);
-        self.instance_wrapper = null;
-    }
-
-    var surface: vk.SurfaceKHR = .null_handle;
-    const result: vk.Result = @enumFromInt(window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface)));
-    if (result != .success) {
-        std.log.err("VulkanRenderer.init: Failed to create Vulkan surface with result: {any}", .{result});
-        return error.SurfaceCreationFailed;
-    }
-    self.surface = surface;
-    errdefer self.instance.destroySurfaceKHR(self.surface, null);
-    std.log.info("VulkanRenderer.init: Created Vulkan surface successfully", .{});
-
-    var pdev_count: u32 = 0;
-    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
-
-    const pdevs = try allocator.alloc(vk.PhysicalDevice, pdev_count);
-    defer allocator.free(pdevs);
-
-    _ = try self.instance.enumeratePhysicalDevices(&pdev_count, pdevs.ptr);
-
-    var selected_pdev: vk.PhysicalDevice = .null_handle;
-    var best_device_score: u32 = 0;
-    for (pdevs) |pdev| {
-        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
-            .dynamic_rendering = .false,
-            .p_next = null,
-        };
-        var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{
-            .synchronization_2 = .false,
-            .p_next = @ptrCast(&dynamic_rendering_features),
-        };
-        var features12: vk.PhysicalDeviceVulkan12Features = .{
-            .draw_indirect_count = .false,
-            .descriptor_indexing = .false,
-            .runtime_descriptor_array = .false,
-            .descriptor_binding_partially_bound = .false,
-            .buffer_device_address = .false,
-            .timeline_semaphore = .false,
-            .p_next = @ptrCast(&sync2_features),
-        };
-        var features2: vk.PhysicalDeviceFeatures2 = .{
-            .features = .{ .multi_draw_indirect = .false },
-            .p_next = @ptrCast(&features12),
-        };
-
-        self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
-
-        if (features2.features.multi_draw_indirect == .true and
-            features12.draw_indirect_count == .true and
-            features12.descriptor_indexing == .true and
-            features12.runtime_descriptor_array == .true and
-            features12.descriptor_binding_partially_bound == .true and
-            features12.buffer_device_address == .true and
-            features12.timeline_semaphore == .true and
-            sync2_features.synchronization_2 == .true and
-            dynamic_rendering_features.dynamic_rendering == .true)
-        {
-            var has_graphics = false;
-            var has_present = false;
-            const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
-            defer allocator.free(queue_families);
-
-            for (queue_families, 0..) |qf, i| {
-                const family: u32 = @intCast(i);
-                if (!has_graphics and qf.queue_flags.graphics_bit) {
-                    has_graphics = true;
-                }
-                if (!has_present) {
-                    const supported = try self.instance.getPhysicalDeviceSurfaceSupportKHR(pdev, family, self.surface);
-                    if (supported == .true) {
-                        has_present = true;
-                    }
-                }
-            }
-
-            if (has_graphics and has_present) {
-                const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, allocator);
-                defer allocator.free(surface_formats);
-
-                const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, allocator);
-                defer allocator.free(present_modes);
-
-                if (surface_formats.len > 0 and present_modes.len > 0) {
-                    const props = self.instance.getPhysicalDeviceProperties(pdev);
-                    var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
-
-                    // ThreadSanitizer has known internal runtime crashes/assertion failures
-                    // (tsan_interceptors_posix.cpp:2156 "((thr->slot)) != (0)") when using
-                    // NVIDIA proprietary driver-level threads. If TSan is enabled, we avoid
-                    // selecting NVIDIA GPUs to allow thread sanitization verification to succeed.
-                    if (options.sanitize_thread) {
-                        const device_name = std.mem.sliceTo(&props.device_name, 0);
-                        if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) {
-                            score = 1;
-                        }
-                    }
-
-                    if (score > best_device_score) {
-                        best_device_score = score;
-                        selected_pdev = pdev;
-                    }
-                }
-            }
-        }
-    }
-
-    if (selected_pdev == .null_handle) {
-        std.log.err("VulkanRenderer.init: Step 10 - No suitable physical device found", .{});
-        return error.NoSuitablePhysicalDevice;
-    }
-
-    self.pdev = selected_pdev;
-
-    const props = self.instance.getPhysicalDeviceProperties(self.pdev);
-    self.props = props;
-
-    self.max_draw_indirect_count = if (props.limits.max_draw_indirect_count > 0) props.limits.max_draw_indirect_count else 65_535;
-
-    const device_name = std.mem.sliceTo(&props.device_name, 0);
-    std.log.info("VulkanRenderer.init: Selected physical device: {s}", .{device_name});
-
-    const queue_priority: f32 = 1.0;
-
-    var graphics_family: u32 = 0;
-    var present_family: u32 = 0;
-
-    const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.pdev, allocator);
-    defer allocator.free(queue_families);
-
-    for (queue_families, 0..) |qf, i| {
-        const family: u32 = @intCast(i);
-        if (graphics_family == 0 and qf.queue_flags.graphics_bit) {
-            graphics_family = family;
-        }
-        if (present_family == 0 and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) {
-            present_family = family;
-        }
-    }
-
-    var transfer_family: ?u32 = null;
-    var transfer_score: u8 = 0;
-    for (queue_families, 0..) |qf, i| {
-        const family: u32 = @intCast(i);
-        if (qf.queue_flags.transfer_bit) {
-            const score: u8 = if (!qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) 3 else if (!qf.queue_flags.graphics_bit) 2 else 1;
-            if (score > transfer_score) {
-                transfer_family = family;
-                transfer_score = score;
-            }
-        }
-    }
-    const final_transfer_family = transfer_family orelse graphics_family;
-
-    self.queue_family_index = graphics_family;
-    self.present_queue_family_index = present_family;
-    self.transfer_queue_family_index = final_transfer_family;
-
-    const device_extensions: [3][*:0]const u8 = .{
-        vk.extensions.khr_swapchain.name,
-        vk.extensions.khr_dynamic_rendering.name,
-        vk.extensions.ext_robustness_2.name,
-    };
-
-    var queue_create_infos: [3]vk.DeviceQueueCreateInfo = undefined;
-    var queue_count: u32 = 0;
-    for ([_]u32{ graphics_family, present_family, final_transfer_family }) |f| {
-        for (queue_create_infos[0..queue_count]) |q| {
-            if (q.queue_family_index == f) break;
-        } else {
-            queue_create_infos[queue_count] = .{
-                .flags = .{},
-                .queue_family_index = f,
-                .queue_count = 1,
-                .p_queue_priorities = (&queue_priority)[0..1],
-            };
-            queue_count += 1;
-        }
-    }
-
-    var robustness2_features: vk.PhysicalDeviceRobustness2FeaturesEXT = .{
-        .robust_buffer_access_2 = .false,
-        .robust_image_access_2 = .false,
-        .null_descriptor = .true,
-    };
-    var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{
-        .dynamic_rendering = .true,
-        .p_next = @ptrCast(&robustness2_features),
-    };
-    var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{
-        .synchronization_2 = .true,
-        .p_next = @ptrCast(&dynamic_rendering_features),
-    };
-    var features12: vk.PhysicalDeviceVulkan12Features = .{
-        .draw_indirect_count = .true,
-        .descriptor_indexing = .true,
-        .runtime_descriptor_array = .true,
-        .descriptor_binding_partially_bound = .true,
-        .buffer_device_address = .true,
-        .timeline_semaphore = .true,
-        .p_next = @ptrCast(&sync2_features),
-    };
-
-    var features11: vk.PhysicalDeviceVulkan11Features = .{
-        .shader_draw_parameters = .true,
-        .p_next = @ptrCast(&features12),
-    };
-
-    var features: vk.PhysicalDeviceFeatures2 = .{
-        .features = .{
-            .multi_draw_indirect = .true,
-            .shader_int_64 = .true,
-            .independent_blend = .true,
-        },
-        .p_next = @ptrCast(&features11),
-    };
-
-    const device_info: vk.DeviceCreateInfo = .{
-        .s_type = .device_create_info,
-        .flags = .{},
-        .queue_create_info_count = @intCast(queue_count),
-        .p_queue_create_infos = queue_create_infos[0..queue_count].ptr,
-        .enabled_layer_count = 0,
-        .pp_enabled_layer_names = null,
-        .enabled_extension_count = device_extensions.len,
-        .pp_enabled_extension_names = device_extensions[0..],
-        .p_enabled_features = null,
-        .p_next = @ptrCast(&features),
-    };
-
-    self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
-    std.log.info("VulkanRenderer.init: Created logical device successfully", .{});
-
-    const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
-    errdefer allocator.destroy(dev_wrapper_ptr);
-
-    const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
-    dev_wrapper_ptr.* = .load(self.dev_handle, gdpa);
-    self.dev_wrapper = dev_wrapper_ptr;
-    self.dev = .init(self.dev_handle, dev_wrapper_ptr);
-    errdefer {
-        destroyIfValidCommandPool(self.dev, &self.command_pool);
-        destroyIfValidCommandPool(self.dev, &self.upload_command_pool);
-        if (self.swapchain != .null_handle) {
-            for (self.swapchain_views) |view| {
-                if (view != .null_handle) self.dev.destroyImageView(view, null);
-            }
-            for (self.image_acquired_semaphores) |sem| {
-                if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-            }
-            for (self.render_complete_semaphores) |sem| {
-                if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-            }
-            for (self.in_flight_fences) |fence| {
-                if (fence != .null_handle) self.dev.destroyFence(fence, null);
-            }
-            self.dev.destroySwapchainKHR(self.swapchain, null);
-        }
-        destroyIfValidImageView(self.dev, &self.render_color_view);
-        destroyIfValidImageView(self.dev, &self.render_depth_view);
-        destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
-        destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
-        destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
-        destroyIfValidPipeline(self.dev, &self.pipeline);
-        destroyIfValidPipeline(self.dev, &self.transparent_pipeline);
-        destroyIfValidPipelineLayout(self.dev, &self.pipeline_layout);
-        destroyIfValidDescriptorSetLayout(self.dev, &self.descriptor_set_layout);
-        if (self.descriptor_pool != .null_handle) self.dev.destroyDescriptorPool(self.descriptor_pool, null);
-
-        self.dev.destroyDevice(null);
-        allocator.destroy(dev_wrapper_ptr);
-        self.dev_wrapper = null;
-    }
-
-    self.graphics_queue = self.dev.getDeviceQueue(graphics_family, 0);
-    self.present_queue = if (graphics_family == present_family) self.graphics_queue else self.dev.getDeviceQueue(present_family, 0);
-
-    self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
-
-    const pool_info: vk.CommandPoolCreateInfo = .{
-        .flags = .{ .reset_command_buffer_bit = true },
-        .queue_family_index = graphics_family,
-    };
-    self.command_pool = try self.dev.createCommandPool(&pool_info, null);
-
-    const upload_pool_info: vk.CommandPoolCreateInfo = .{
-        .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
-        .queue_family_index = graphics_family,
-    };
-    self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
+    self.transfer_queue_family_index = vk_ctx.transfer_queue_family_index;
+    self.transfer_queue = vk_ctx.transfer_queue;
+    self.transfer_semaphore = vk_ctx.transfer_semaphore;
+    self.graphics_timeline_semaphore = vk_ctx.graphics_timeline_semaphore;
 
     self.backing_allocator = VulkanBackingAllocator.init(self.dev, self.mem_props, io, allocator);
     errdefer self.backing_allocator.deinit();
@@ -796,7 +574,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     self.cpu_to_gpu_gpa.backing_allocator = self.backing_allocator.allocator(.cpu_to_gpu);
     errdefer _ = self.cpu_to_gpu_gpa.deinit();
 
-    try self.createSwapchain(io);
+    try self.recreateSwapchainResourcesLocked(io);
 
     try self.createDescriptorSetLayout();
     try self.createDescriptorPoolAndSets();
@@ -829,31 +607,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
     self.updateOitDescriptorSets();
     self.updateDepthDescriptorSets();
 
-    // Indirect buffers are already allocated by createSwapchain above (line 685).
-    // Do NOT call allocateIndirectBuffers again here — that would leak the first
-    // batch of Vulkan buffers/memory and their Zig slice allocations.
-
-    self.queue_family_index = graphics_family;
-    self.present_queue_family_index = present_family;
     self.meshes = .init;
-
-    self.transfer_queue = self.dev.getDeviceQueue(self.transfer_queue_family_index, 0);
-
-    var sem_type_create_info: vk.SemaphoreTypeCreateInfo = .{
-        .semaphore_type = .timeline,
-        .initial_value = 0,
-    };
-    const sem_create_info: vk.SemaphoreCreateInfo = .{
-        .p_next = @ptrCast(&sem_type_create_info),
-        .flags = .{},
-    };
-    self.transfer_semaphore = try self.dev.createSemaphore(&sem_create_info, null);
-    errdefer self.dev.destroySemaphore(self.transfer_semaphore, null);
-
-    self.graphics_timeline_semaphore = try self.dev.createSemaphore(&sem_create_info, null);
-    errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
-
-    self.transfer_semaphore_value = .init(0);
 
     try self.pool_reservoir.init(self.dev, self.transfer_queue_family_index, 512, allocator);
     errdefer self.pool_reservoir.deinit(self.dev, allocator);
@@ -878,29 +632,20 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, window: *wio.Window, rende
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
-    std.log.info("VulkanRenderer.deinit: Waiting for device idle...", .{});
-    {
-        self.queue_mutex.lockUncancelable(io);
-        defer self.queue_mutex.unlock(io);
-        self.dev.deviceWaitIdle() catch |err| {
-            std.log.err("VulkanRenderer.deinit: deviceWaitIdle failed: {any}", .{err});
-        };
-        if (self.swapchain != .null_handle) {
-            self.dev.destroySwapchainKHR(self.swapchain, null);
-            self.swapchain = .null_handle;
-        }
-        self.dev.deviceWaitIdle() catch {};
-        if (self.present_queue != .null_handle) {
-            self.dev.queueWaitIdle(self.present_queue) catch {};
-        }
-    }
-    std.log.info("VulkanRenderer.deinit: device is idle and swapchain is destroyed. Cleaning up Vulkan objects...", .{});
+    std.log.info("VulkanRenderer.deinit: Flushing pending uploads and waiting for device idle...", .{});
 
     {
         self.submission_batch.mutex.lockUncancelable(io);
         defer self.submission_batch.mutex.unlock(io);
         self.submitBatchLocked(io) catch |err| {
             std.log.err("VulkanRenderer.deinit: failed to flush submission batch: {any}", .{err});
+        };
+    }
+    {
+        self.queue_mutex.lockUncancelable(io);
+        defer self.queue_mutex.unlock(io);
+        self.dev.deviceWaitIdle() catch |err| {
+            std.log.err("VulkanRenderer.deinit: deviceWaitIdle failed: {any}", .{err});
         };
     }
 
@@ -927,7 +672,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     self.meshes.deinit(io, self.allocator);
 
-    self.destroyOldSwapchainResources();
+    self.destroyRendererSwapchainResources();
 
     self.destroyOitPipelinesAndDescriptors();
 
@@ -942,25 +687,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.backing_allocator.deinit();
 
     self.texture_manager.destroyTextureArray();
-
-    destroyIfValidCommandPool(self.dev, &self.command_pool);
-    destroyIfValidCommandPool(self.dev, &self.upload_command_pool);
-
-    destroyIfValidSemaphore(self.dev, &self.transfer_semaphore);
-    destroyIfValidSemaphore(self.dev, &self.graphics_timeline_semaphore);
-
-    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, null);
-    self.dev.destroyDevice(null);
-
-    if (self.instance_wrapper) |wrapper| {
-        self.instance.destroyInstance(null);
-        self.allocator.destroy(wrapper);
-        self.instance_wrapper = null;
-    }
-    if (self.dev_wrapper) |wrapper| {
-        self.allocator.destroy(wrapper);
-        self.dev_wrapper = null;
-    }
 
     self.allocator.destroy(self);
 }
@@ -1147,7 +873,7 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) 
 
     try self.retired_meshes.append(self.allocator, .{
         .mesh = mesh,
-        .graphics_timeline_value = self.frame_number.load(.monotonic),
+        .graphics_timeline_value = self.vk_ctx.frame_number.load(.monotonic),
     });
 }
 
@@ -1426,112 +1152,6 @@ inline fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, l
     };
 }
 
-fn acquireSwapchainImage(self: *VulkanRenderer, io: std.Io, current_frame: u32) !struct { image_index: u32, frame: u32 } {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "acquireSwapchainImage" });
-    defer zone.end();
-
-    var frame = current_frame;
-    const acquire_result = blk: {
-        const zone_acquire = tracy.Zone.begin(.{ .src = @src(), .name = "acquireNextImage" });
-        defer zone_acquire.end();
-        break :blk try self.dev.acquireNextImageKHR(
-            self.swapchain,
-            std.math.maxInt(u64),
-            self.image_acquired_semaphores[frame],
-            .null_handle,
-        );
-    };
-
-    if (acquire_result.result == .error_out_of_date_khr or acquire_result.result == .suboptimal_khr) {
-        if (acquire_result.result == .error_out_of_date_khr) {
-            try self.createSwapchain(io);
-        } else {
-            try self.recreateSwapchainOnly(io);
-        }
-        frame = self.currentFrame();
-        try self.dev.resetFences(&.{self.in_flight_fences[frame]});
-        const retry = blk: {
-            const zone_acquire = tracy.Zone.begin(.{ .src = @src(), .name = "acquireNextImage_retry" });
-            defer zone_acquire.end();
-            break :blk try self.dev.acquireNextImageKHR(
-                self.swapchain,
-                std.math.maxInt(u64),
-                self.image_acquired_semaphores[frame],
-                .null_handle,
-            );
-        };
-        return .{ .image_index = retry.image_index, .frame = frame };
-    }
-    return .{ .image_index = acquire_result.image_index, .frame = frame };
-}
-
-fn submitFrame(self: *VulkanRenderer, io: std.Io, current_frame: u32, cmd_buffer: vk.CommandBuffer) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame" });
-    defer zone.end();
-
-    const wait_stage: vk.PipelineStageFlags = .{ .color_attachment_output_bit = true };
-    const wait_semaphore: vk.Semaphore = self.image_acquired_semaphores[current_frame];
-    const signal_sems: [2]vk.Semaphore = .{ self.render_complete_semaphores[current_frame], self.graphics_timeline_semaphore };
-    const signal_values: [2]u64 = .{ 0, self.frame_number.load(.monotonic) };
-    const wait_value: u64 = 0;
-    var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
-        .wait_semaphore_value_count = 1,
-        .p_wait_semaphore_values = (&wait_value)[0..1],
-        .signal_semaphore_value_count = 2,
-        .p_signal_semaphore_values = signal_values[0..],
-    };
-    const submit_info: vk.SubmitInfo = .{
-        .p_next = &timeline_submit_info,
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = (&wait_semaphore)[0..1],
-        .p_wait_dst_stage_mask = (&wait_stage)[0..1],
-        .command_buffer_count = 1,
-        .p_command_buffers = (&cmd_buffer)[0..1],
-        .signal_semaphore_count = 2,
-        .p_signal_semaphores = signal_sems[0..],
-    };
-    {
-        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame_lock_queue" });
-        self.queue_mutex.lockUncancelable(io);
-        zone_lock.end();
-        defer self.queue_mutex.unlock(io);
-
-        const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit" });
-        defer zone_submit.end();
-        try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame]);
-    }
-}
-
-fn presentSwapchainImage(self: *VulkanRenderer, io: std.Io, current_frame: u32, image_index: u32) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage" });
-    defer zone.end();
-
-    const present_info: vk.PresentInfoKHR = .{
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = (&self.render_complete_semaphores[current_frame])[0..1],
-        .swapchain_count = 1,
-        .p_swapchains = (&self.swapchain)[0..1],
-        .p_image_indices = &.{image_index},
-        .p_results = null,
-    };
-    const present_result = blk: {
-        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage_lock_queue" });
-        self.queue_mutex.lockUncancelable(io);
-        zone_lock.end();
-        defer self.queue_mutex.unlock(io);
-
-        const zone_present = tracy.Zone.begin(.{ .src = @src(), .name = "queuePresent" });
-        defer zone_present.end();
-        break :blk try self.dev.queuePresentKHR(self.present_queue, &present_info);
-    };
-    if (present_result == .success) {
-        const next_frame = (current_frame + 1) % @as(u32, @intCast(self.in_flight_fences.len));
-        self.current_frame_idx.store(next_frame, .monotonic);
-    } else if (present_result == .error_out_of_date_khr or present_result == .suboptimal_khr) {
-        try self.createSwapchain(io);
-    }
-}
-
 inline fn renderingInfo(
     extent: vk.Extent2D,
     color_attachments: []const vk.RenderingAttachmentInfo,
@@ -1623,25 +1243,39 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
     const fence_reset: vk.Fence = self.in_flight_fences[current_frame];
     try self.dev.resetFences((&fence_reset)[0..1]);
 
-    if (self.swapchain_needs_recreate) {
+    if (self.swapchain_needs_recreate or self.vk_ctx.swapchain_needs_recreate) {
         self.swapchain_needs_recreate = false;
+        self.vk_ctx.swapchain_needs_recreate = false;
         {
             const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "draw_recreateSwapchain_lock" });
             self.queue_mutex.lockUncancelable(io);
             zone_lock.end();
             defer self.queue_mutex.unlock(io);
             try self.dev.deviceWaitIdle();
-            try self.createSwapchainLocked(io);
+            try self.recreateSwapchainResourcesLocked(io);
         }
         current_frame = self.currentFrame();
         try self.dev.resetFences(&.{self.in_flight_fences[current_frame]});
     }
 
-    const acquired = try self.acquireSwapchainImage(io, current_frame);
+    const acquired = blk: {
+        const zone_acq = tracy.Zone.begin(.{ .src = @src(), .name = "draw_acquireSwapchainImage" });
+        defer zone_acq.end();
+        break :blk self.vk_ctx.acquireSwapchainImage(current_frame) catch |err| switch (err) {
+            error.OutOfDate => {
+                try self.recreateSwapchain(io);
+                const cf = self.currentFrame();
+                try self.dev.resetFences(&.{self.in_flight_fences[cf]});
+                break :blk try self.vk_ctx.acquireSwapchainImage(cf);
+            },
+            else => return err,
+        };
+    };
+    self.updateSwapchainFields();
     const image_index = acquired.image_index;
     current_frame = acquired.frame;
 
-    self.current_swapchain_image_index = image_index;
+    self.vk_ctx.current_swapchain_image_index = image_index;
 
     const cmd_buffer = self.cmd_buffers[current_frame];
 
@@ -1750,8 +1384,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
 
-    const frame_num = self.frame_number.load(.monotonic) + 1;
-    self.frame_number.store(frame_num, .monotonic);
+    const frame_num = self.vk_ctx.frame_number.load(.monotonic) + 1;
+    self.vk_ctx.frame_number.store(frame_num, .monotonic);
     self.frame_stats.frame_number = frame_num;
     self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
@@ -1809,8 +1443,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
 
     try self.dev.endCommandBuffer(cmd_buffer);
 
-    try self.submitFrame(io, current_frame, cmd_buffer);
-    try self.presentSwapchainImage(io, current_frame, image_index);
+    try self.vk_ctx.submitFrame(io, current_frame, cmd_buffer);
+    try self.vk_ctx.presentSwapchainImage(io, current_frame, image_index);
 }
 
 fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
@@ -1982,87 +1616,6 @@ pub inline fn depthHasStencil(self: *const VulkanRenderer) bool {
     return self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
 }
 
-fn recreateSwapchainOnly(self: *VulkanRenderer, io: std.Io) !void {
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-
-    {
-        const zone_wait = tracy.Zone.begin(.{ .src = @src(), .name = "recreateSwapchain_deviceWaitIdle" });
-        defer zone_wait.end();
-        try self.dev.deviceWaitIdle();
-    }
-
-    try self.createSwapchainLocked(io);
-}
-
-fn destroyOldSwapchainResources(self: *VulkanRenderer) void {
-    {
-        const zone_wait = tracy.Zone.begin(.{ .src = @src(), .name = "destroyOldSwapchainResources_deviceWaitIdle" });
-        defer zone_wait.end();
-        self.dev.deviceWaitIdle() catch |err| {
-            std.log.err("destroyOldSwapchainResources: deviceWaitIdle failed: {any}", .{err});
-        };
-    }
-
-    for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
-    self.allocator.free(self.swapchain_images);
-    self.allocator.free(self.swapchain_views);
-    self.swapchain_images = &.{};
-    self.swapchain_views = &.{};
-
-    if (self.cmd_buffers.len > 0) {
-        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-        self.allocator.free(self.cmd_buffers);
-        self.cmd_buffers = &.{};
-    }
-
-    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-    for (self.in_flight_fences) |fence| if (fence != .null_handle) self.dev.destroyFence(fence, null);
-    self.allocator.free(self.image_acquired_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
-    self.allocator.free(self.in_flight_fences);
-    self.image_acquired_semaphores = &.{};
-    self.render_complete_semaphores = &.{};
-    self.in_flight_fences = &.{};
-
-    destroyIfValidImageView(self.dev, &self.render_color_view);
-    destroyIfValidImageView(self.dev, &self.render_depth_view);
-    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
-    destroyIfValidImage(self.dev, &self.render_color_image, &self.render_color_memory);
-    destroyIfValidImage(self.dev, &self.render_depth_image, &self.render_depth_memory);
-
-    for (self.indirect_draw_buffers_mapped) |maybe_ptr| {
-        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(ptr[0..self.draw_capacity]);
-    }
-    for (self.chunk_data_buffers_mapped) |maybe_ptr| {
-        if (maybe_ptr) |ptr| self.cpu_to_gpu_gpa.allocator().free(ptr[0..self.draw_capacity]);
-    }
-
-    self.allocator.free(self.indirect_draw_buffers);
-    self.allocator.free(self.indirect_draw_buffers_mapped);
-    self.allocator.free(self.indirect_draw_offsets);
-    self.indirect_draw_buffers = &.{};
-    self.indirect_draw_buffers_mapped = &.{};
-    self.indirect_draw_offsets = &.{};
-
-    self.allocator.free(self.chunk_data_buffers);
-    self.allocator.free(self.chunk_data_buffers_mapped);
-    self.allocator.free(self.chunk_data_offsets);
-    self.chunk_data_buffers = &.{};
-    self.chunk_data_buffers_mapped = &.{};
-    self.chunk_data_offsets = &.{};
-
-    if (self.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.descriptor_pool, null);
-        self.descriptor_pool = .null_handle;
-    }
-    self.allocator.free(self.descriptor_sets_per_frame);
-    self.descriptor_sets_per_frame = &.{};
-
-    self.destroyOitResources();
-}
-
 fn destroyOitResources(self: *VulkanRenderer) void {
     destroyIfValidImageView(self.dev, &self.oit_accum_view);
     destroyIfValidImageView(self.dev, &self.oit_reveal_view);
@@ -2076,253 +1629,6 @@ fn destroyOitResources(self: *VulkanRenderer) void {
     if (self.oit_descriptor_sets_per_frame.len > 0) {
         self.allocator.free(self.oit_descriptor_sets_per_frame);
         self.oit_descriptor_sets_per_frame = &.{};
-    }
-}
-
-fn createSwapchain(self: *VulkanRenderer, io: std.Io) !void {
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-    try self.createSwapchainLocked(io);
-}
-
-fn createSwapchainLocked(self: *VulkanRenderer, io: std.Io) !void {
-    if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
-        return error.InvalidWindowSize;
-    }
-
-    std.log.info("VulkanRenderer.createSwapchain: Starting swapchain creation...", .{});
-
-    const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
-
-    const old_swapchain = self.swapchain;
-
-    if (old_swapchain != .null_handle or self.swapchain_images.len > 0 or self.render_color_image != .null_handle) {
-        self.destroyOldSwapchainResources();
-    }
-
-    const actual_extent = if (caps.current_extent.width != 0xFFFF_FFFF) caps.current_extent else vk.Extent2D{
-        .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, @min(caps.max_image_extent.width, 3840)),
-        .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, @min(caps.max_image_extent.height, 2160)),
-    };
-
-    self.swapchain_extent = actual_extent;
-    self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
-
-    const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(surface_formats);
-
-    self.render_options_lock.lockSharedUncancelable(io);
-    const gamma_correction = self.render_options.gamma_correction;
-    self.render_options_lock.unlockShared(io);
-
-    const target_formats: []const vk.Format = if (gamma_correction)
-        &[_]vk.Format{ .b8g8r8a8_srgb, .r8g8b8a8_srgb }
-    else
-        &[_]vk.Format{ .b8g8r8a8_unorm, .r8g8b8a8_unorm };
-
-    var surface_format = surface_formats[0];
-    blk: for (target_formats) |tf| {
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == tf) {
-                surface_format = sfmt;
-                break :blk;
-            }
-        }
-    }
-    self.swapchain_format = surface_format.format;
-
-    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(present_modes);
-
-    var present_mode: vk.PresentModeKHR = .fifo_khr;
-    for (present_modes) |pm| {
-        if (pm == .mailbox_khr or pm == .immediate_khr) {
-            present_mode = pm;
-            break;
-        }
-    }
-
-    const raw_count = @max(caps.min_image_count + 1, @as(u32, 2));
-    const image_count = if (caps.max_image_count > 0) @min(raw_count, caps.max_image_count) else raw_count;
-
-    const qfi: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
-    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
-
-    errdefer if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, null);
-
-    self.swapchain = try self.dev.createSwapchainKHR(&.{
-        .surface = self.surface,
-        .min_image_count = image_count,
-        .image_format = self.swapchain_format,
-        .image_color_space = surface_format.color_space,
-        .image_extent = actual_extent,
-        .image_array_layers = 1,
-        .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
-        .image_sharing_mode = sharing_mode,
-        .queue_family_index_count = if (sharing_mode == .concurrent) @as(u32, qfi.len) else 0,
-        .p_queue_family_indices = if (sharing_mode == .concurrent) &qfi else null,
-        .pre_transform = caps.current_transform,
-        .composite_alpha = .{ .opaque_bit_khr = true },
-        .present_mode = present_mode,
-        .clipped = .true,
-        .old_swapchain = old_swapchain,
-    }, null);
-    if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, null);
-
-    errdefer {
-        self.dev.destroySwapchainKHR(self.swapchain, null);
-        self.swapchain = .null_handle;
-    }
-
-    self.swapchain_images = try self.dev.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
-    errdefer {
-        self.allocator.free(self.swapchain_images);
-        self.swapchain_images = &.{};
-    }
-
-    self.swapchain_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
-    @memset(self.swapchain_views, .null_handle);
-    errdefer {
-        for (self.swapchain_views) |view| {
-            if (view != .null_handle) self.dev.destroyImageView(view, null);
-        }
-        self.allocator.free(self.swapchain_views);
-        self.swapchain_views = &.{};
-    }
-
-    for (self.swapchain_images, 0..) |image, i| {
-        self.swapchain_views[i] = try self.dev.createImageView(&imageViewCreateInfo(image, self.swapchain_format, .{ .color_bit = true }), null);
-    }
-
-    const num_swapchain_images = self.swapchain_images.len;
-
-    self.image_acquired_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.image_acquired_semaphores, .null_handle);
-    errdefer {
-        for (self.image_acquired_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
-        self.image_acquired_semaphores = &.{};
-    }
-
-    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, num_swapchain_images);
-    @memset(self.render_complete_semaphores, .null_handle);
-    errdefer {
-        for (self.render_complete_semaphores) |sem| {
-            if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
-        }
-        if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
-        self.render_complete_semaphores = &.{};
-    }
-
-    self.in_flight_fences = try self.allocator.alloc(vk.Fence, num_swapchain_images);
-    @memset(self.in_flight_fences, .null_handle);
-    errdefer {
-        for (self.in_flight_fences) |fence| {
-            if (fence != .null_handle) self.dev.destroyFence(fence, null);
-        }
-        if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
-        self.in_flight_fences = &.{};
-    }
-
-    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
-    const fence_create_info: vk.FenceCreateInfo = .{
-        .flags = .{ .signaled_bit = true },
-    };
-
-    for (self.image_acquired_semaphores, self.render_complete_semaphores, self.in_flight_fences) |*acquire_sem, *complete_sem, *fence| {
-        acquire_sem.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-        complete_sem.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-        fence.* = try self.dev.createFence(&fence_create_info, null);
-    }
-
-    const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
-        .command_pool = self.command_pool,
-        .level = .primary,
-        .command_buffer_count = @intCast(num_swapchain_images),
-    };
-
-    self.cmd_buffers = try self.allocator.alloc(vk.CommandBuffer, num_swapchain_images);
-    errdefer self.allocator.free(self.cmd_buffers);
-    try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
-    errdefer {
-        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-        self.allocator.free(self.cmd_buffers);
-        self.cmd_buffers = &.{};
-    }
-
-    try self.createRenderTargets(actual_extent);
-
-    self.indirect_draw_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.indirect_draw_buffers_mapped = try self.allocator.alloc(?[*]vk.DrawIndirectCommand, num_swapchain_images);
-    self.indirect_draw_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-    self.chunk_data_buffers = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.chunk_data_buffers_mapped = try self.allocator.alloc(?[*]ChunkData, num_swapchain_images);
-    self.chunk_data_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-
-    for (
-        self.chunk_data_buffers,
-        self.chunk_data_buffers_mapped,
-        self.chunk_data_offsets,
-        self.indirect_draw_buffers,
-        self.indirect_draw_buffers_mapped,
-        self.indirect_draw_offsets,
-    ) |*chunk_buf, *chunk_map, *chunk_off, *indirect_buf, *indirect_map, *indirect_off| {
-        const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, self.draw_capacity);
-        const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, self.draw_capacity);
-
-        const chunk_data_info = self.backing_allocator.getBufferAndOffset(chunk_data_slice.ptr);
-        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(indirect_draw_slice.ptr);
-
-        chunk_buf.* = chunk_data_info.buffer;
-        chunk_map.* = chunk_data_slice.ptr;
-        chunk_off.* = chunk_data_info.offset;
-
-        indirect_buf.* = indirect_draw_info.buffer;
-        indirect_map.* = indirect_draw_slice.ptr;
-        indirect_off.* = indirect_draw_info.offset;
-    }
-
-    // Recreate descriptor pool and sets if they were previously created (i.e., this is
-    // a resize, not the initial creation — descriptor_set_layout doesn't exist yet at init)
-    if (self.descriptor_set_layout != .null_handle) {
-        try self.createDescriptorPoolAndSets();
-        // Rebind the real block texture array to the new descriptor sets
-        // (createDescriptorPoolAndSets writes the dummy white texture; overwrite with real one if loaded)
-        if (self.texture_manager.texture_view != .null_handle) {
-            self.texture_manager.rebindDescriptorSets();
-        }
-    }
-
-    // Recreate pipelines with the current swapchain format (only if they already exist)
-    if (self.pipeline_layout != .null_handle) {
-        if (self.pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.pipeline, null);
-            self.pipeline = .null_handle;
-        }
-        if (self.transparent_pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.transparent_pipeline, null);
-            self.transparent_pipeline = .null_handle;
-        }
-        self.dev.destroyPipelineLayout(self.pipeline_layout, null);
-        self.pipeline_layout = .null_handle;
-        try self.createPipeline();
-        try self.createTransparentPipeline();
-
-        self.destroyOitPipelinesAndDescriptors();
-        try self.createOitPipelinesAndDescriptors();
-
-        if (self.oit_descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.oit_descriptor_pool, null);
-            self.oit_descriptor_pool = .null_handle;
-        }
-        if (self.oit_descriptor_sets_per_frame.len > 0) {
-            self.allocator.free(self.oit_descriptor_sets_per_frame);
-            self.oit_descriptor_sets_per_frame = &.{};
-        }
-        try self.createOitDescriptorPoolAndSets();
-        self.updateOitDescriptorSets();
     }
 }
 
@@ -2736,8 +2042,8 @@ fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     }
 }
 
-inline fn currentFrame(self: *const VulkanRenderer) u32 {
-    return @intCast(self.current_frame_idx.load(.monotonic) % self.in_flight_fences.len);
+fn currentFrame(self: *const VulkanRenderer) u32 {
+    return @intCast(self.vk_ctx.currentFrame() % self.in_flight_fences.len);
 }
 
 fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}!void {
@@ -2827,11 +2133,11 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
 
 fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.viewport_pixels = viewport_pixels;
-    if (viewport_pixels[0] != self.swapchain_extent.width or
-        viewport_pixels[1] != self.swapchain_extent.height)
+    if (viewport_pixels[0] != self.viewport_pixels[0] or
+        viewport_pixels[1] != self.viewport_pixels[1])
     {
-        self.swapchain_extent = .{
+        self.viewport_pixels = viewport_pixels;
+        self.vk_ctx.swapchain_extent = .{
             .width = viewport_pixels[0],
             .height = viewport_pixels[1],
         };

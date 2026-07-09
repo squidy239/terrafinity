@@ -6,6 +6,7 @@ const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Entity = @import("entity/Entity.zig");
 const EntityRegistry = @import("entity/EntityRegistry.zig");
@@ -340,7 +341,7 @@ pub fn init(
     game_options: *Options,
     game_options_lock: *std.Io.RwLock,
     folder: []const u8,
-    window: *wio.Window,
+    vk_ctx: *VulkanContext,
 ) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
@@ -359,7 +360,7 @@ pub fn init(
         .entity_registry = .init(),
     };
 
-    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, window, @ptrCast(&game.options.render_options), game.options_lock);
+    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, vk_ctx, &game.options.render_options, game.options_lock);
     errdefer game.vulkan_renderer.deinit(io);
 
     game.renderer = game.vulkan_renderer.interface;

@@ -9,6 +9,7 @@ pub const tracy_impl = @import("tracy_impl");
 const wio = @import("wio");
 const wio_backend = @import("wio-backend");
 pub const zm = @import("zm");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 pub const Entity = @import("entity/Entity.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
@@ -71,6 +72,9 @@ pub fn main(init: std.process.Init) !void {
 
         window.setMode(.maximized);
 
+        var vk_ctx = try VulkanContext.init(gpa, &window);
+        defer vk_ctx.deinit(io);
+
         var ui_context = try window.glCreateContext(.{ .options = gl_options });
         defer ui_context.destroy();
         window.glMakeContextCurrent(ui_context);
@@ -116,6 +120,7 @@ pub fn main(init: std.process.Init) !void {
         var ui: Ui = .{
             .proc_table = &proc_table,
             .window = &window,
+            .vk_ctx = vk_ctx,
             .config = &config,
             .config_lock = &config_lock,
             .game = &game,
@@ -245,6 +250,9 @@ pub fn main(init: std.process.Init) !void {
 
         window.setMode(.maximized);
 
+        var vk_ctx = try VulkanContext.init(gpa, &window);
+        defer vk_ctx.deinit(io);
+
         var keymap = Key.Map.init(gpa);
         defer keymap.map.deinit();
 
@@ -266,7 +274,7 @@ pub fn main(init: std.process.Init) !void {
         try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
 
         var game: Game = undefined;
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window);
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, vk_ctx);
         defer game.deinit(io);
 
         var frame_time: std.Io.Timestamp = .now(io, .awake);
@@ -289,9 +297,11 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // Only render and present if window is visible and should present
-            if (!visible or !window.shouldPresent()) {
-                continue; //TODO move the vulkan init, swapchain, and window out of Renderer
+            // Only render if window is visible (e.g. not minimized).
+            // Wayland's shouldPresent() is intentionally not checked here —
+            // Vulkan's present mode (mailbox/fifo/immediate) handles frame pacing.
+            if (!visible) {
+                continue;
             }
 
             // Update game state and submit Vulkan render commands (includes Vulkan presentation via vkQueuePresentKHR)

@@ -4,6 +4,7 @@ const dvui = @import("dvui");
 const gl = @import("gl");
 const wio = @import("wio");
 const zigimg = @import("zigimg");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Config = @import("main.zig").Config;
 const EntityTypes = @import("entity/EntityTypes.zig");
@@ -18,6 +19,7 @@ const Ui = @This();
 
 proc_table: *const gl.ProcTable,
 window: *wio.Window,
+vk_ctx: *VulkanContext,
 ui_context: *wio.GlContext,
 gl_options: wio.GlOptions,
 config: *Config,
@@ -374,7 +376,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window);
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx);
     std.log.info("opening game\n", .{});
 }
 
