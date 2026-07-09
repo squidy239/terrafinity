@@ -37,7 +37,6 @@ const InputChunk = extern struct {
     scale: f32,
     face_count: u32,
     is_transparent: u32,
-    _pad3: u32 = 0,
     address: u64 align(8),
 };
 
@@ -225,7 +224,8 @@ const CommandPoolReservoir = struct {
         return null;
     }
 
-    pub fn returnPool(self: *CommandPoolReservoir, pool: vk.CommandPool) void {
+    pub fn returnPool(self: *CommandPoolReservoir, dev: DeviceProxy, pool: vk.CommandPool) void {
+        dev.resetCommandPool(pool, .{}) catch |err| @panic(@errorName(err));
         for (self.pools, 0..) |p, i| {
             if (p == pool) {
                 self.used[i].store(false, .release);
@@ -239,7 +239,6 @@ const ChunkData = extern struct {
     absolute_position: [4]f32 align(16),
     relative_position: [4]f32 align(16),
     scale: f32,
-    _pad3: u32 = 0,
     address: u64 align(8),
 };
 
@@ -249,20 +248,25 @@ const PushConstants = extern struct {
     time: f32,
 };
 
-fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
         if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
             return @intCast(i);
         }
     }
-    @panic("Failed to find suitable memory type");
+    return error.MemoryTypeNotFound;
 }
 
 fn computeViewProjection(self: *const VulkanRenderer, aspect: f32, fov_radians: f32) struct { projview: @Vector(16, f32), frustum: Frustum } {
     const up_vec: zm.vec.Vec3f = .{ .data = [3]f32{ camera_up[0], camera_up[1], camera_up[2] } };
+    const camera_front_val = @Vector(3, f32){
+        self.camera_front_x.load(.monotonic),
+        self.camera_front_y.load(.monotonic),
+        self.camera_front_z.load(.monotonic),
+    };
     const view = zm.matrix.Mat4f.lookAtRH(
         .{ .data = @Vector(3, f32){ 0, 0, 0 } },
-        .{ .data = self.camera_front },
+        .{ .data = camera_front_val },
         up_vec,
     );
     const projection = makeInfReversedZProjRh(fov_radians, aspect, near_plane);
@@ -327,7 +331,7 @@ const SwapchainState = struct {
     images: []vk.Image = &.{},
     views: []vk.ImageView = &.{},
     extent: vk.Extent2D = .{ .width = 800, .height = 600 },
-    needs_recreate: bool = false,
+    needs_recreate: std.atomic.Value(bool) = .init(false),
     cmd_buffers: []vk.CommandBuffer = &.{},
     image_acquired_semaphores: []vk.Semaphore = &.{},
     render_complete_semaphores: []vk.Semaphore = &.{},
@@ -371,10 +375,19 @@ const PerFrameBuffers = struct {
         for (self.chunk_data_mapped) |ptr| if (ptr) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
         for (self.count_slices) |slice| gpu_only_gpa.free(slice);
         for (self.stats_slices) |slice| cpu_to_gpu_gpa.free(slice);
-        allocator.free(self.indirect_draw); allocator.free(self.indirect_draw_mapped); allocator.free(self.indirect_draw_offsets);
-        allocator.free(self.chunk_data); allocator.free(self.chunk_data_mapped); allocator.free(self.chunk_data_offsets);
-        allocator.free(self.count); allocator.free(self.count_slices); allocator.free(self.count_offsets);
-        allocator.free(self.stats); allocator.free(self.stats_mapped); allocator.free(self.stats_offsets); allocator.free(self.stats_slices);
+        allocator.free(self.indirect_draw);
+        allocator.free(self.indirect_draw_mapped);
+        allocator.free(self.indirect_draw_offsets);
+        allocator.free(self.chunk_data);
+        allocator.free(self.chunk_data_mapped);
+        allocator.free(self.chunk_data_offsets);
+        allocator.free(self.count);
+        allocator.free(self.count_slices);
+        allocator.free(self.count_offsets);
+        allocator.free(self.stats);
+        allocator.free(self.stats_mapped);
+        allocator.free(self.stats_offsets);
+        allocator.free(self.stats_slices);
         self.* = .{};
     }
 };
@@ -423,7 +436,9 @@ submission_batch: struct {
     count: usize = 0,
     mutex: std.Io.Mutex = .init,
 } = .{},
-camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
+camera_front_x: std.atomic.Value(f32) = .init(0),
+camera_front_y: std.atomic.Value(f32) = .init(0),
+camera_front_z: std.atomic.Value(f32) = .init(1),
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
 render_options: *const RenderOptions,
 render_options_lock: *std.Io.RwLock,
@@ -432,7 +447,6 @@ interface: Renderer,
 retire_mutex: std.Io.Mutex = .init,
 init_time_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
-
 
 fn updateSwapchainFields(self: *VulkanRenderer) void {
     self.swapchain.handle = self.vk_ctx.swapchain;
@@ -594,7 +608,6 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     self.graphics_state.descriptor_sets_per_frame = &.{};
     self.destroyOitResources();
 }
-
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
     std.log.info("VulkanRenderer.init: Starting renderer-specific Vulkan initialization...", .{});
@@ -796,7 +809,7 @@ pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_m
     const borrowed = borrowed_opt.?;
     const pool = borrowed.pool;
     const cmd = borrowed.cmd;
-    errdefer self.pool_reservoir.returnPool(pool);
+    errdefer self.pool_reservoir.returnPool(self.dev, pool);
 
     try self.dev.resetCommandPool(pool, .{});
 
@@ -899,7 +912,7 @@ fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
     var i: usize = 0;
     errdefer {
         for (i..count) |j| {
-            self.pool_reservoir.returnPool(self.submission_batch.pools[j]);
+            self.pool_reservoir.returnPool(self.dev, self.submission_batch.pools[j]);
             if (self.submission_batch.opaque_meshes[j]) |r| {
                 self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
                 self.gpu_only_gpa.allocator().free(r.mesh.slice);
@@ -960,14 +973,12 @@ fn freePendingUploadStaging(self: *VulkanRenderer, pending: PendingChunkUpload) 
     if (pending.opaque_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
     if (pending.transparent_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
     if (pending.pool != .null_handle) {
-        self.pool_reservoir.returnPool(pending.pool);
+        self.pool_reservoir.returnPool(self.dev, pending.pool);
     }
 }
 
-fn enqueueRetiredMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer, gpu_index: u32) !void {
-    self.retire_mutex.lockUncancelable(io);
-    defer self.retire_mutex.unlock(io);
-
+fn enqueueRetiredMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer, gpu_index: u32) !void {
+    // Caller (retireCompletedUploads) already holds retire_mutex.
     try self.retired_meshes.append(self.allocator, .{
         .mesh = mesh,
         .gpu_index = gpu_index,
@@ -1020,7 +1031,6 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
                         .scale = ChunkPos.toScale(pending.chunk_pos.level),
                         .face_count = new_mesh.face_count,
                         .is_transparent = if (item.tag == .transparent) 1 else 0,
-                        ._pad3 = 0,
                         .address = new_mesh.device_address,
                     };
 
@@ -1039,14 +1049,14 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
                         // Defer index free: store gpu_index in the retired entry so it's only
                         // returned to the pool after the GPU has finished referencing it.
                         const old_index = old_mesh.gpu_index;
-                        try self.enqueueRetiredMesh(io, old_mesh, old_index);
+                        try self.enqueueRetiredMesh(old_mesh, old_index);
                     }
                 } else {
                     const existing = self.meshes.fetchRemove(io, key);
                     if (existing) |old_mesh| {
                         self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
                         const old_index = old_mesh.gpu_index;
-                        try self.enqueueRetiredMesh(io, old_mesh, old_index);
+                        try self.enqueueRetiredMesh(old_mesh, old_index);
                     }
                 }
             }
@@ -1105,8 +1115,8 @@ fn uploadMeshBuffer(self: *VulkanRenderer, faces: []const Mesher.Face, cmd: vk.C
     const buffer_barrier: vk.BufferMemoryBarrier2 = .{
         .src_stage_mask = .{ .all_transfer_bit = true },
         .src_access_mask = .{ .transfer_write_bit = true },
-        .dst_stage_mask = .{ .all_transfer_bit = true },
-        .dst_access_mask = .{ .transfer_write_bit = true },
+        .dst_stage_mask = .{ .all_commands_bit = true },
+        .dst_access_mask = .{ .shader_read_bit = true },
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .buffer = buf_info.buffer,
@@ -1347,7 +1357,7 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
     const mem_reqs = self.dev.getImageMemoryRequirements(image);
     const alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = mem_reqs.size,
-        .memory_type_index = self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+        .memory_type_index = try self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
     const memory = try self.dev.allocateMemory(&alloc_info, null);
     errdefer self.dev.freeMemory(memory, null);
@@ -1636,9 +1646,9 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
     const fence_reset: vk.Fence = self.swapchain.in_flight_fences[current_frame];
     try self.dev.resetFences((&fence_reset)[0..1]);
 
-    if (self.swapchain.needs_recreate or self.vk_ctx.swapchain_needs_recreate) {
-        self.swapchain.needs_recreate = false;
-        self.vk_ctx.swapchain_needs_recreate = false;
+    if (self.swapchain.needs_recreate.load(.monotonic) or self.vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
+        self.swapchain.needs_recreate.store(false, .monotonic);
+        self.vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
         {
             const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "draw_recreateSwapchain_lock" });
             self.vk_ctx.queue_mutex.lockUncancelable(io);
@@ -1656,9 +1666,10 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
         defer zone_acq.end();
         break :blk self.vk_ctx.acquireSwapchainImage(current_frame) catch |err| switch (err) {
             error.OutOfDate => {
-                    self.vk_ctx.queue_mutex.lockUncancelable(io);
-                    defer self.vk_ctx.queue_mutex.unlock(io);
-                    try self.recreateSwapchainResourcesLocked(io);
+                self.vk_ctx.queue_mutex.lockUncancelable(io);
+                defer self.vk_ctx.queue_mutex.unlock(io);
+                _ = self.dev.queueWaitIdle(self.graphics_queue) catch {};
+                try self.recreateSwapchainResourcesLocked(io);
                 const cf = self.currentFrame();
                 try self.dev.resetFences(&.{self.swapchain.in_flight_fences[cf]});
                 break :blk try self.vk_ctx.acquireSwapchainImage(cf);
@@ -1731,7 +1742,11 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
     self.frame_stats.frame_number = frame_num;
     self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
-    self.frame_stats.camera_front = self.camera_front;
+    self.frame_stats.camera_front = .{
+        self.camera_front_x.load(.monotonic),
+        self.camera_front_y.load(.monotonic),
+        self.camera_front_z.load(.monotonic),
+    };
     self.frame_stats.elapsed_ns = frame_elapsed_ns;
 
     if (frame_num % 60 == 0) {
@@ -1789,7 +1804,11 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
         new_capacity *= 2;
     }
     // Clamp to device limit: maxDrawCount in vkCmdDrawIndirectCount must be ≤ maxDrawIndirectCount.
-    new_capacity = @min(new_capacity, self.max_draw_indirect_count);
+    const clamped_capacity = @min(new_capacity, self.max_draw_indirect_count);
+    if (clamped_capacity < new_capacity) {
+        std.log.warn("VulkanRenderer: draw capacity clamped to device limit {d} (requested {d}). Some chunks may not render!", .{ self.max_draw_indirect_count, new_capacity });
+    }
+    new_capacity = clamped_capacity;
 
     std.log.info("VulkanRenderer: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
@@ -1934,8 +1953,6 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
 
     const current_frame_num = self.vk_ctx.frame_number.load(.monotonic);
     {
-        self.retire_mutex.lockUncancelable(io);
-        defer self.retire_mutex.unlock(io);
         try self.retired_candidate_slices.append(self.allocator, .{
             .slice = old_slice,
             .graphics_timeline_value = current_frame_num,
@@ -1950,7 +1967,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     }
 }
 
-pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) u32 {
+pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     return findMemoryTypeRaw(self.vk_ctx.mem_props, type_filter, properties);
 }
 
@@ -2043,13 +2060,15 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 }
 
 fn createDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
-    const bindings: [3]vk.DescriptorSetLayoutBinding = .{
-        .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-    };
-    var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-    self.graphics_state.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    if (self.graphics_state.descriptor_set_layout == .null_handle) {
+        const bindings: [3]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        };
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        self.graphics_state.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    }
 
     const pool_sizes: [2]vk.DescriptorPoolSize = .{
         .{ .type = .storage_buffer, .descriptor_count = @intCast(self.swapchain.images.len) },
@@ -2059,14 +2078,16 @@ fn createDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
 }
 
 fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
-    const bindings: [4]vk.DescriptorSetLayoutBinding = .{
-        .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 1, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 3, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
-    };
-    const layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-    self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    if (self.cull.descriptor_set_layout == .null_handle) {
+        const bindings: [4]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 1, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 3, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
+        };
+        const layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    }
 
     const num_frames = self.swapchain.images.len;
     const pool_sizes: [1]vk.DescriptorPoolSize = .{
@@ -2105,8 +2126,6 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
         self.updateCullDescriptorSet(@intCast(i));
     }
 }
-
-
 
 fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
     const infos: [4]vk.DescriptorBufferInfo = .{
@@ -2182,7 +2201,6 @@ fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, la
         try self.dev.allocateDescriptorSets(&alloc_info, (&set.*)[0..1]);
     }
 }
-
 
 fn buildGraphicsPipeline(
     self: *VulkanRenderer,
@@ -2388,29 +2406,25 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
 }
 
 fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
-    const bindings: [3]vk.DescriptorSetLayoutBinding = .{
-        .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-    };
-    var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-    self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
-    errdefer {
-        self.dev.destroyDescriptorSetLayout(self.oit.descriptor_set_layout, null);
-        self.oit.descriptor_set_layout = .null_handle;
+    if (self.oit.descriptor_set_layout == .null_handle) {
+        const bindings: [3]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        };
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
-    const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{
-        .flags = .{},
-        .set_layout_count = 1,
-        .p_set_layouts = (&self.oit.descriptor_set_layout)[0..1],
-        .push_constant_range_count = 0,
-        .p_push_constant_ranges = null,
-    };
-    self.oit.composition_layout = try self.dev.createPipelineLayout(&pipeline_layout_info, null);
-    errdefer {
-        self.dev.destroyPipelineLayout(self.oit.composition_layout, null);
-        self.oit.composition_layout = .null_handle;
+    if (self.oit.composition_layout == .null_handle) {
+        const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{
+            .flags = .{},
+            .set_layout_count = 1,
+            .p_set_layouts = (&self.oit.descriptor_set_layout)[0..1],
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = null,
+        };
+        self.oit.composition_layout = try self.dev.createPipelineLayout(&pipeline_layout_info, null);
     }
 
     const sampler_info = vk.SamplerCreateInfo{
@@ -2485,7 +2499,6 @@ fn destroyOitPipelinesAndDescriptors(self: *VulkanRenderer) void {
         self.oit.sampler = .null_handle;
     }
 }
-
 
 fn currentFrame(self: *const VulkanRenderer) u32 {
     return @intCast(self.vk_ctx.currentFrame() % self.swapchain.in_flight_fences.len);
@@ -2590,7 +2603,6 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
     try self.endSingleTimeCommandsLocked(cmd);
 }
 
-
 fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     if (viewport_pixels[0] != self.viewport_pixels[0] or
@@ -2601,15 +2613,19 @@ fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vect
             .width = viewport_pixels[0],
             .height = viewport_pixels[1],
         };
-        self.swapchain.needs_recreate = true;
+        self.swapchain.needs_recreate.store(true, .monotonic);
     }
 }
 fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.camera_front[0] = @sin(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
-    self.camera_front[1] = @sin(std.math.degreesToRadians(view_dir[0]));
-    self.camera_front[2] = @cos(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
-    self.camera_front = zm.Vec3f.norm(.{ .data = self.camera_front }).data;
+    var front: @Vector(3, f32) = undefined;
+    front[0] = @sin(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
+    front[1] = @sin(std.math.degreesToRadians(view_dir[0]));
+    front[2] = @cos(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0]));
+    const norm = zm.Vec3f.norm(.{ .data = front }).data;
+    self.camera_front_x.store(norm[0], .monotonic);
+    self.camera_front_y.store(norm[1], .monotonic);
+    self.camera_front_z.store(norm[2], .monotonic);
 }
 
 fn vtableForEachChunk(user_data: *Renderer.Implementation, io: std.Io, callback_user_data: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
@@ -2640,11 +2656,11 @@ test "findMemoryType" {
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
     mem_types[2] = .{ .property_flags = .{ .host_visible_bit = true, .host_cached_bit = true }, .heap_index = 0 };
     var mem_props: vk.PhysicalDeviceMemoryProperties = .{ .memory_type_count = 3, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
-    try std.testing.expectEqual(@as(u32, 0), findMemoryTypeRaw(mem_props, 0b111, .{ .host_visible_bit = true, .host_coherent_bit = true }));
+    try std.testing.expectEqual(@as(u32, 0), try findMemoryTypeRaw(mem_props, 0b111, .{ .host_visible_bit = true, .host_coherent_bit = true }));
     mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
     mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
     mem_props = .{ .memory_type_count = 2, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
-    try std.testing.expectEqual(@as(u32, 1), findMemoryTypeRaw(mem_props, 0b11, .{ .device_local_bit = true }));
+    try std.testing.expectEqual(@as(u32, 1), try findMemoryTypeRaw(mem_props, 0b11, .{ .device_local_bit = true }));
 }
 
 test "ChunkData size" {

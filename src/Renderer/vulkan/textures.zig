@@ -184,7 +184,7 @@ pub const TextureArrayManager = struct {
         const mem_reqs = self.renderer.dev.getImageMemoryRequirements(texture_image);
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_reqs.size,
-            .memory_type_index = self.renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+            .memory_type_index = try self.renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
         };
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
         errdefer self.renderer.dev.freeMemory(memory, null);

@@ -54,7 +54,7 @@ swapchain_format: vk.Format = .b8g8r8a8_srgb,
 swapchain_images: []vk.Image = &.{},
 swapchain_views: []vk.ImageView = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
-swapchain_needs_recreate: bool = false,
+swapchain_needs_recreate: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 present_mode: PresentMode = .mailbox,
 
 transfer_queue: vk.Queue = undefined,
@@ -72,7 +72,6 @@ fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () voi
     ));
 }
 
-
 fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.PhysicalDevice {
     var pdev_count: u32 = 0;
     _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
@@ -87,9 +86,12 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{ .dynamic_rendering = .false, .p_next = null };
         var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{ .synchronization_2 = .false, .p_next = @ptrCast(&dynamic_rendering_features) };
         var features12: vk.PhysicalDeviceVulkan12Features = .{
-            .draw_indirect_count = .false, .descriptor_indexing = .false,
-            .runtime_descriptor_array = .false, .descriptor_binding_partially_bound = .false,
-            .buffer_device_address = .false, .timeline_semaphore = .false,
+            .draw_indirect_count = .false,
+            .descriptor_indexing = .false,
+            .runtime_descriptor_array = .false,
+            .descriptor_binding_partially_bound = .false,
+            .buffer_device_address = .false,
+            .timeline_semaphore = .false,
             .p_next = @ptrCast(&sync2_features),
         };
         var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false }, .p_next = @ptrCast(&features12) };
@@ -467,7 +469,6 @@ fn destroySwapchainResources(self: *VulkanContext) void {
 
     self.destroySwapchainSyncResources();
 }
-
 
 pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
     _ = io;
