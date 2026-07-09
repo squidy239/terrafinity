@@ -22,9 +22,10 @@ layout(location = 6) flat out float scale;
 layout(location = 7) out float view_space_depth;
 
 struct ChunkData {
-    vec3 absolute_position;
-    vec3 relative_position;
+    vec4 absolute_position;
+    vec4 relative_position;
     float scale;
+    uint pad3;
     uint64_t address;
 };
 
@@ -87,8 +88,8 @@ float bouncingMod(float x, float n) {
 
 void main() {
     ChunkData chunk = chunks[gl_InstanceIndex];
-    vec3 relative_position = chunk.relative_position;
-    vec3 absolute_position = chunk.absolute_position;
+    vec3 relative_position = chunk.relative_position.xyz;
+    vec3 absolute_position = chunk.absolute_position.xyz;
     scale = chunk.scale;
 
     uint face_in_chunk = gl_VertexIndex / 6u;

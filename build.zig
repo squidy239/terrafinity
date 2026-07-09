@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) void {
     const comp_frag_spv = comp_frag_cmd.addOutputFileArg("composite_frag.spv");
     comp_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/composite_frag.frag"));
 
+    const cull_cmd = b.addSystemCommand(&shader_cmd);
+    const cull_spv = cull_cmd.addOutputFileArg("cull.spv");
+    cull_cmd.addFileArg(b.path("src/Renderer/vulkan/cull.comp"));
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -63,12 +67,14 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&trans_frag_cmd.step);
     exe.step.dependOn(&comp_vert_cmd.step);
     exe.step.dependOn(&comp_frag_cmd.step);
+    exe.step.dependOn(&cull_cmd.step);
 
     exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
     exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
     exe.root_module.addAnonymousImport("trans_frag_spv", .{ .root_source_file = trans_frag_spv });
     exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
     exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
+    exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
 
     var options: *std.Build.Step.Options = .create(b);
     options.addOption(?u32, "test_play", test_play);

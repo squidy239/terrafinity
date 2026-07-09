@@ -1,0 +1,126 @@
+#version 460 core
+#extension GL_ARB_gpu_shader_int64 : require
+
+layout(local_size_x = 64) in;
+
+struct InputChunk {
+    vec4 absolute_position;
+    vec4 relative_position; // Ignored/unused now, computed dynamically
+    float scale;
+    uint face_count;
+    uint is_transparent;
+    uint pad3;
+    uint64_t address;
+};
+
+struct ChunkData {
+    vec4 absolute_position;
+    vec4 relative_position;
+    float scale;
+    uint pad3;
+    uint64_t address;
+};
+
+struct DrawIndirectCommand {
+    uint vertex_count;
+    uint instance_count;
+    uint first_vertex;
+    uint first_instance;
+};
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    InputChunk candidate_chunks[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputIndirectBuffer {
+    DrawIndirectCommand out_indirect[];
+};
+
+layout(std430, binding = 2) writeonly buffer OutputChunkBuffer {
+    ChunkData out_chunks[];
+};
+
+layout(std430, binding = 3) buffer CountBuffer {
+    uint opaque_count;
+    uint transparent_count;
+};
+
+layout(push_constant) uniform PushConsts {
+    vec4 planes[6];
+    vec4 player_pos;
+    uint total_candidates;
+    uint draw_capacity;
+} pc;
+
+bool boxInFrustum(vec3 bmin, vec3 bmax) {
+    for (int i = 0; i < 6; i++) {
+        vec4 plane = pc.planes[i];
+        vec3 p = vec3(
+            (plane.x > 0.0) ? bmax.x : bmin.x,
+            (plane.y > 0.0) ? bmax.y : bmin.y,
+            (plane.z > 0.0) ? bmax.z : bmin.z
+        );
+        if (dot(plane.xyz, p) + plane.w < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint g_idx = gl_GlobalInvocationID.x;
+    if (g_idx >= pc.total_candidates) return;
+
+    InputChunk chunk = candidate_chunks[g_idx];
+
+    // If face_count is 0, the chunk slot is inactive/freed
+    if (chunk.face_count == 0u) return;
+
+    // Compute relative position dynamically inside the shader
+    vec3 relative_position = chunk.absolute_position.xyz - pc.player_pos.xyz;
+
+    // Compute bounding box
+    float scale = chunk.scale;
+    float chunk_size_blocks = scale * 32.0;
+    vec3 bmin = relative_position;
+    vec3 bmax = relative_position + vec3(chunk_size_blocks);
+
+    if (boxInFrustum(bmin, bmax)) {
+        if (chunk.is_transparent == 0u) {
+            uint idx = atomicAdd(opaque_count, 1u);
+            if (idx < pc.draw_capacity) {
+                out_indirect[idx] = DrawIndirectCommand(
+                    chunk.face_count * 6u,
+                    1u,
+                    0u,
+                    idx
+                );
+                out_chunks[idx] = ChunkData(
+                    chunk.absolute_position,
+                    vec4(relative_position, 1.0),
+                    chunk.scale,
+                    0u,
+                    chunk.address
+                );
+            }
+        } else {
+            uint idx = atomicAdd(transparent_count, 1u);
+            if (idx < pc.draw_capacity) {
+                uint out_idx = pc.draw_capacity + idx;
+                out_indirect[out_idx] = DrawIndirectCommand(
+                    chunk.face_count * 6u,
+                    1u,
+                    0u,
+                    out_idx
+                );
+                out_chunks[out_idx] = ChunkData(
+                    chunk.absolute_position,
+                    vec4(relative_position, 1.0),
+                    chunk.scale,
+                    0u,
+                    chunk.address
+                );
+            }
+        }
+    }
+}

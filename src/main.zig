@@ -241,8 +241,8 @@ pub fn main(init: std.process.Init) !void {
                 window.glSwapBuffers();
                 sw.end();
             }
-            tracy.frameMark(null);
         }
+        window.disableRelativeMouse();
     } else {
         // Pure Vulkan window for test_play mode
         window = try wio.Window.create(.{ .title = "terrafinity", .event_fn_data = &events });
@@ -297,10 +297,8 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // Only render if window is visible (e.g. not minimized).
-            // Wayland's shouldPresent() is intentionally not checked here —
-            // Vulkan's present mode (mailbox/fifo/immediate) handles frame pacing.
             if (!visible) {
+                wio.wait(.{ .timeout_ns = 1 * std.time.ns_per_ms });
                 continue;
             }
 
@@ -309,6 +307,7 @@ pub fn main(init: std.process.Init) !void {
 
             tracy.frameMark(null);
         }
+        window.disableRelativeMouse();
     }
 }
 

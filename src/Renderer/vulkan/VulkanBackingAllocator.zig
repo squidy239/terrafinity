@@ -235,7 +235,7 @@ pub const VulkanBackingAllocator = struct {
                 .transfer_dst_bit = true,
                 .shader_device_address_bit = true,
                 .storage_buffer_bit = true,
-                .indirect_buffer_bit = (pool == .cpu_to_gpu),
+                .indirect_buffer_bit = true,
             },
             .sharing_mode = .exclusive,
             .queue_family_index_count = 0,

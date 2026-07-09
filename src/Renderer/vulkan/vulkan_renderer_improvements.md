@@ -6,21 +6,10 @@ This document outlines potential architectural and design improvements for the V
 
 ## GPU-Driven Rendering & Culling
 
-### GPU Frustum Culling via Compute Shaders
-*   **Current State:** Frustum culling is done on the CPU per-chunk using a basic bounding box test in `cullChunk`.
-*   **Improvement:** Move frustum culling to a compute shader. The compute shader reads the full list of active chunks, tests their bounding boxes against the view frustum on the GPU, and writes visible commands into the `indirect_draw_buffer` using atomic counters.
-*   **Impact:** Drastically reduces CPU overhead and eliminates the need to map/unmap or copy chunk metadata back and forth from host-visible memory every frame.
-
 ### Hierarchical Z-Buffer (HZB) Occlusion Culling
 *   **Current State:** The renderer has no occlusion culling, meaning chunks behind large mountains or underground are still fully processed and submitted for rendering.
 *   **Improvement:** Generate a low-resolution depth mip-chain (Hierarchical Z-Buffer) from the previous frame's depth buffer. Before drawing, run a compute shader that projects each chunk's bounding box onto the HZB and discards invisible chunks before submitting them to `vkCmdDrawIndirect`.
 *   **Impact:** Significant fill-rate and vertex processing savings in dense block environments.
-
-### Multi-Draw Indirect (MDI) Consolidation
-*   **Current State:** Chunks are drawn using individual loops or grouped structures, mapping one draw call per visible mesh buffer.
-*   **Improvement:** Consolidate opaque and transparent draws into a single, global `vkCmdDrawIndexedIndirect` or `vkCmdDrawIndirectCount` call using a single giant buffer or a set of unified buffers.
-*   **Impact:** Eliminates state switches and allows submitting the entire scene in one or two Vulkan commands.
-
 ---
 
 ## Advanced Transparency & Geometry Processing
@@ -81,11 +70,6 @@ This document outlines potential architectural and design improvements for the V
 
 ## Advanced Post-Processing & Lighting
 
-### Reversed-Z Infinite Depth Buffer
-*   **Current State:** Implements custom projection matrices.
-*   **Improvement:** Ensure depth testing uses a **Reversed-Z** buffer configuration (mapping Near to 1.0 and Far to 0.0) combined with a floating-point depth format (e.g., `D32_SFLOAT`).
-*   **Impact:** Drastically reduces precision artifacts (z-fighting) at far horizons, crucial for infinite block terrains.
-
 ### Deferred Clustered Shading
 *   **Current State:** Forward-pass rendering.
 *   **Improvement:** Transition to a deferred or clustered forward rendering path. Write material properties (normals, albedo, depth) to a G-Buffer or cluster point lights in screen space.
@@ -104,11 +88,6 @@ This document outlines potential architectural and design improvements for the V
 ---
 
 ## Swapchain & Presentation
-
-### Mailbox Presentation Mode (Triple Buffering)
-*   **Current State:** Classic double/triple buffering via Fifo/Relaxed presentation.
-*   **Improvement:** Dynamically query and prefer `VK_PRESENT_MODE_MAILBOX_KHR` over `FIFO` when V-Sync is desired without latency penalties.
-*   **Impact:** Extremely low-latency, tear-free rendering on supported hardware.
 
 ### Dynamic Resolution Scaling (DRS)
 *   **Current State:** Render target is sized exactly to the window swapchain size.
