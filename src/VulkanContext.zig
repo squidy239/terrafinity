@@ -546,7 +546,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         });
     }
 
-
     const min_for_mode: u32 = switch (present_mode) {
         .mailbox_khr => @max(caps.min_image_count, 3),
         .immediate_khr => @max(caps.min_image_count, 2),
@@ -672,42 +671,39 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, current_frame_idx: u32, cmd
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame" });
     defer zone.end();
 
-    const wait_stage: vk.PipelineStageFlags = .{ .color_attachment_output_bit = true };
-    const wait_semaphore: vk.Semaphore = self.image_acquired_semaphores[current_frame_idx];
-    const signal_sems: [2]vk.Semaphore = .{ self.render_complete_semaphores[current_frame_idx], self.graphics_timeline_semaphore };
-    const signal_values: [2]u64 = .{ 0, self.frame_number.load(.monotonic) };
-    // Wait for transfer queue to complete before culling reads mesh data.
-    var wait_sems: [2]vk.Semaphore = .{ wait_semaphore, self.transfer_semaphore };
-    var wait_stages: [2]vk.PipelineStageFlags = .{ wait_stage, .{ .compute_shader_bit = true } };
-    var wait_values: [2]u64 = .{ 0, 0 };
+    const current_transfer_val = self.transfer_semaphore_value.load(.monotonic);
+
+    const wait_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
+        .{ .semaphore = self.image_acquired_semaphores[current_frame_idx], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .compute_shader_bit = true }, .device_index = 0 },
+    };
+
+    const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
+        .{ .semaphore = self.render_complete_semaphores[current_frame_idx], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.graphics_timeline_semaphore, .value = self.frame_number.load(.monotonic), .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
+    };
+
+    const cmd_buffer_info: vk.CommandBufferSubmitInfo = .{ .command_buffer = cmd_buffer, .device_mask = 0 };
+
+    const submit_info: vk.SubmitInfo2 = .{
+        .flags = .{},
+        .wait_semaphore_info_count = wait_semaphore_infos.len,
+        .p_wait_semaphore_infos = &wait_semaphore_infos,
+        .command_buffer_info_count = 1,
+        .p_command_buffer_infos = (&cmd_buffer_info)[0..1],
+        .signal_semaphore_info_count = signal_semaphore_infos.len,
+        .p_signal_semaphore_infos = &signal_semaphore_infos,
+    };
+
     {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
         zone_lock.end();
         defer self.queue_mutex.unlock(io);
 
-        wait_values[1] = self.transfer_semaphore_value.load(.monotonic);
-
-        var timeline_submit_info: vk.TimelineSemaphoreSubmitInfo = .{
-            .wait_semaphore_value_count = 2,
-            .p_wait_semaphore_values = &wait_values,
-            .signal_semaphore_value_count = 2,
-            .p_signal_semaphore_values = &signal_values,
-        };
-        const submit_info: vk.SubmitInfo = .{
-            .p_next = &timeline_submit_info,
-            .wait_semaphore_count = 2,
-            .p_wait_semaphores = &wait_sems,
-            .p_wait_dst_stage_mask = &wait_stages,
-            .command_buffer_count = 1,
-            .p_command_buffers = (&cmd_buffer)[0..1],
-            .signal_semaphore_count = 2,
-            .p_signal_semaphores = &signal_sems,
-        };
-
-        const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit" });
+        const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit2" });
         defer zone_submit.end();
-        try self.dev.queueSubmit(self.graphics_queue, &[_]vk.SubmitInfo{submit_info}, self.in_flight_fences[current_frame_idx]);
+        try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], self.in_flight_fences[current_frame_idx]);
     }
 }
 

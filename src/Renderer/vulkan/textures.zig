@@ -178,16 +178,25 @@ pub const TextureArrayManager = struct {
             .p_queue_family_indices = undefined,
         };
 
-        const texture_image = try self.renderer.dev.createImage(&image_info, null);
-        errdefer self.renderer.dev.destroyImage(texture_image, null);
+        var mem_reqs2: vk.MemoryRequirements2 = .{
+            .memory_requirements = undefined,
+        };
+        self.renderer.dev.getDeviceImageMemoryRequirements(&.{
+            .p_create_info = &image_info,
+            .plane_aspect = .{},
+        }, &mem_reqs2);
+        const mem_reqs = mem_reqs2.memory_requirements;
 
-        const mem_reqs = self.renderer.dev.getImageMemoryRequirements(texture_image);
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_reqs.size,
             .memory_type_index = try self.renderer.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
         };
         const memory = try self.renderer.dev.allocateMemory(&alloc_info, null);
         errdefer self.renderer.dev.freeMemory(memory, null);
+
+        const texture_image = try self.renderer.dev.createImage(&image_info, null);
+        errdefer self.renderer.dev.destroyImage(texture_image, null);
+
         try self.renderer.dev.bindImageMemory(texture_image, memory, 0);
 
         var cmd = try self.renderer.beginSingleTimeCommands();

@@ -566,8 +566,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
         self.graphics_state.opaque_pipeline_layout = .null_handle;
         self.dev.destroyPipelineLayout(self.graphics_state.transparent_pipeline_layout, null);
         self.graphics_state.transparent_pipeline_layout = .null_handle;
-        try self.createPipeline();
-        try self.createTransparentPipeline();
+        try self.createGraphicsPipelines();
     }
 
     if (self.graphics_state.opaque_descriptor_set_layout != .null_handle) {
@@ -668,8 +667,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
 
     try self.loadDefaultTextures(io, allocator);
 
-    try self.createPipeline();
-    try self.createTransparentPipeline();
+    try self.createGraphicsPipelines();
     try self.createCullPipeline();
     try self.createOitPipelinesAndDescriptors();
 
@@ -1167,15 +1165,21 @@ inline fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuff
     }});
 }
 
-inline fn makeImageBarrier(
+inline fn makeImageBarrier2(
     image: vk.Image,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
-    src_access: vk.AccessFlags,
-    dst_access: vk.AccessFlags,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
     aspect: vk.ImageAspectFlags,
-) vk.ImageMemoryBarrier {
+) vk.ImageMemoryBarrier2 {
     return .{
+        .src_stage_mask = src_stage,
+        .src_access_mask = src_access,
+        .dst_stage_mask = dst_stage,
+        .dst_access_mask = dst_access,
         .old_layout = old_layout,
         .new_layout = new_layout,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1188,25 +1192,53 @@ inline fn makeImageBarrier(
             .base_array_layer = 0,
             .layer_count = 1,
         },
-        .src_access_mask = src_access,
-        .dst_access_mask = dst_access,
     };
 }
 
-inline fn cmdImageBarrier(
+inline fn cmdImageBarrier2(
     cmd: vk.CommandBuffer,
     dev: DeviceProxy,
     image: vk.Image,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
-    src_access: vk.AccessFlags,
-    dst_access: vk.AccessFlags,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
     aspect: vk.ImageAspectFlags,
-    src_stage: vk.PipelineStageFlags,
-    dst_stage: vk.PipelineStageFlags,
 ) void {
-    const barrier = makeImageBarrier(image, old_layout, new_layout, src_access, dst_access, aspect);
-    dev.cmdPipelineBarrier(cmd, src_stage, dst_stage, .{}, null, null, &.{barrier});
+    const barrier = makeImageBarrier2(image, old_layout, new_layout, src_stage, src_access, dst_stage, dst_access, aspect);
+    dev.cmdPipelineBarrier2(cmd, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = 1,
+        .p_image_memory_barriers = (&barrier)[0..1],
+    });
+}
+
+inline fn makeBufferBarrier2(
+    buffer: vk.Buffer,
+    offset: vk.DeviceSize,
+    size: vk.DeviceSize,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
+) vk.BufferMemoryBarrier2 {
+    return .{
+        .src_stage_mask = src_stage,
+        .src_access_mask = src_access,
+        .dst_stage_mask = dst_stage,
+        .dst_access_mask = dst_access,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .buffer = buffer,
+        .offset = offset,
+        .size = size,
+    };
 }
 
 inline fn destroyIfValidImageView(dev: DeviceProxy, view: *vk.ImageView) void {
@@ -1341,16 +1373,25 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
         .queue_family_index_count = 0,
         .p_queue_family_indices = undefined,
     };
-    const image = try self.dev.createImage(&image_info, null);
-    errdefer self.dev.destroyImage(image, null);
+    var mem_reqs2: vk.MemoryRequirements2 = .{
+        .memory_requirements = undefined,
+    };
+    self.dev.getDeviceImageMemoryRequirements(&.{
+        .p_create_info = &image_info,
+        .plane_aspect = .{},
+    }, &mem_reqs2);
+    const mem_reqs = mem_reqs2.memory_requirements;
 
-    const mem_reqs = self.dev.getImageMemoryRequirements(image);
     const alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = mem_reqs.size,
         .memory_type_index = try self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
     const memory = try self.dev.allocateMemory(&alloc_info, null);
     errdefer self.dev.freeMemory(memory, null);
+
+    const image = try self.dev.createImage(&image_info, null);
+    errdefer self.dev.destroyImage(image, null);
+
     try self.dev.bindImageMemory(image, memory, 0);
 
     const view = try self.dev.createImageView(&imageViewCreateInfo(image, format, aspect), null);
@@ -1360,24 +1401,24 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
 fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32, frustum: Frustum, total_candidates: u32, view_pos: @Vector(3, f64)) void {
     self.dev.cmdFillBuffer(cmd_buffer, self.frame_buffers.count[current_frame], self.frame_buffers.count_offsets[current_frame], @sizeOf(CullCount), 0);
 
-    const fill_barrier: vk.BufferMemoryBarrier = .{
-        .src_access_mask = .{ .transfer_write_bit = true },
-        .dst_access_mask = .{ .shader_read_bit = true, .shader_write_bit = true },
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .buffer = self.frame_buffers.count[current_frame],
-        .offset = self.frame_buffers.count_offsets[current_frame],
-        .size = @sizeOf(CullCount),
-    };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .transfer_bit = true },
+    const fill_barrier = makeBufferBarrier2(
+        self.frame_buffers.count[current_frame],
+        self.frame_buffers.count_offsets[current_frame],
+        @sizeOf(CullCount),
+        .{ .all_transfer_bit = true },
+        .{ .transfer_write_bit = true },
         .{ .compute_shader_bit = true },
-        .{},
-        null,
-        (&fill_barrier)[0..1],
-        null,
+        .{ .shader_read_bit = true, .shader_write_bit = true },
     );
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = (&fill_barrier)[0..1],
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    });
 
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
     self.dev.cmdBindDescriptorSets(cmd_buffer, .compute, self.cull.pipeline_layout, 0, (&self.cull.descriptor_sets_per_frame[current_frame])[0..1], null);
@@ -1405,44 +1446,20 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     const group_count = (total_candidates + (cull_workgroup_size - 1)) / cull_workgroup_size;
     self.dev.cmdDispatch(cmd_buffer, group_count, 1, 1);
 
-    const buffer_barriers: [3]vk.BufferMemoryBarrier = .{
-        .{
-            .src_access_mask = .{ .shader_write_bit = true },
-            .dst_access_mask = .{ .indirect_command_read_bit = true },
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .buffer = self.frame_buffers.indirect_draw[current_frame],
-            .offset = self.frame_buffers.indirect_draw_offsets[current_frame],
-            .size = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand),
-        },
-        .{
-            .src_access_mask = .{ .shader_write_bit = true },
-            .dst_access_mask = .{ .shader_read_bit = true },
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .buffer = self.frame_buffers.chunk_data[current_frame],
-            .offset = self.frame_buffers.chunk_data_offsets[current_frame],
-            .size = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
-        },
-        .{
-            .src_access_mask = .{ .shader_write_bit = true },
-            .dst_access_mask = .{ .indirect_command_read_bit = true, .transfer_read_bit = true },
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .buffer = self.frame_buffers.count[current_frame],
-            .offset = self.frame_buffers.count_offsets[current_frame],
-            .size = @sizeOf(CullCount),
-        },
+    const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
+        makeBufferBarrier2(self.frame_buffers.indirect_draw[current_frame], self.frame_buffers.indirect_draw_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.chunk_data[current_frame], self.frame_buffers.chunk_data_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.count[current_frame], self.frame_buffers.count_offsets[current_frame], @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
     };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .compute_shader_bit = true },
-        .{ .draw_indirect_bit = true, .vertex_shader_bit = true, .transfer_bit = true },
-        .{},
-        null,
-        &buffer_barriers,
-        null,
-    );
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = buffer_barriers.len,
+        .p_buffer_memory_barriers = &buffer_barriers,
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    });
 
     const region: vk.BufferCopy = .{
         .src_offset = self.frame_buffers.count_offsets[current_frame],
@@ -1451,24 +1468,24 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     };
     self.dev.cmdCopyBuffer(cmd_buffer, self.frame_buffers.count[current_frame], self.frame_buffers.stats[current_frame], (&region)[0..1]);
 
-    const host_barrier: vk.BufferMemoryBarrier = .{
-        .src_access_mask = .{ .transfer_write_bit = true },
-        .dst_access_mask = .{ .host_read_bit = true },
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .buffer = self.frame_buffers.stats[current_frame],
-        .offset = self.frame_buffers.stats_offsets[current_frame],
-        .size = @sizeOf(CullCount),
-    };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .transfer_bit = true },
+    const host_barrier = makeBufferBarrier2(
+        self.frame_buffers.stats[current_frame],
+        self.frame_buffers.stats_offsets[current_frame],
+        @sizeOf(CullCount),
+        .{ .all_transfer_bit = true },
+        .{ .transfer_write_bit = true },
         .{ .host_bit = true },
-        .{},
-        null,
-        (&host_barrier)[0..1],
-        null,
+        .{ .host_read_bit = true },
     );
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = (&host_barrier)[0..1],
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    });
 }
 
 fn recordOpaquePass(
@@ -1492,6 +1509,10 @@ fn recordOpaquePass(
     self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{color_attachment}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.pipeline);
+
+    self.dev.cmdSetCullMode(cmd_buffer, .{ .back_bit = true });
+    self.dev.cmdSetDepthCompareOp(cmd_buffer, .greater);
+    self.dev.cmdSetDepthWriteEnable(cmd_buffer, .true);
 
     self.setViewportAndScissor(cmd_buffer);
 
@@ -1550,7 +1571,18 @@ fn recordOpaquePass(
     }
 
     self.dev.cmdEndRendering(cmd_buffer);
-    cmdImageBarrier(cmd_buffer, self.dev, self.render_depth.image, .depth_stencil_attachment_optimal, .depth_stencil_read_only_optimal, .{ .depth_stencil_attachment_write_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true }, depth_aspect_mask, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true });
+    cmdImageBarrier2(
+        cmd_buffer,
+        self.dev,
+        self.render_depth.image,
+        .depth_stencil_attachment_optimal,
+        .depth_stencil_read_only_optimal,
+        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+        .{ .depth_stencil_attachment_write_bit = true },
+        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true },
+        .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true },
+        depth_aspect_mask,
+    );
 }
 
 fn recordTransparentPass(
@@ -1566,6 +1598,10 @@ fn recordTransparentPass(
     self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{ oit_accum_attachment, oit_reveal_attachment }, &oit_depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);
+
+    self.dev.cmdSetCullMode(cmd_buffer, .{});
+    self.dev.cmdSetDepthCompareOp(cmd_buffer, .greater_or_equal);
+    self.dev.cmdSetDepthWriteEnable(cmd_buffer, .false);
     self.setViewportAndScissor(cmd_buffer);
 
     const buffer_info: vk.DescriptorBufferInfo = .{
@@ -1646,22 +1682,23 @@ fn recordCompositionPass(
     current_frame: u32,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
-    const pre_comp_barriers: [5]vk.ImageMemoryBarrier = .{
-        makeImageBarrier(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_write_bit = true }, .{ .shader_read_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.swapchain.images[image_index], .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.render_depth.image, .depth_stencil_read_only_optimal, .depth_stencil_attachment_optimal, .{ .depth_stencil_attachment_read_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
+    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = .{
+        makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
+        makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
+        makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
+        makeImageBarrier2(self.swapchain.images[image_index], .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.render_depth.image, .depth_stencil_read_only_optimal, .depth_stencil_attachment_optimal, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_read_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
     };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{ .color_attachment_output_bit = true, .fragment_shader_bit = true, .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{},
-        null,
-        null,
-        &pre_comp_barriers,
-    );
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = pre_comp_barriers.len,
+        .p_image_memory_barriers = &pre_comp_barriers,
+    });
 
     const swapchain_attachment = renderingAttachmentColor(self.swapchain.views[image_index], .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
     self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{swapchain_attachment}, null));
@@ -1675,21 +1712,21 @@ fn recordCompositionPass(
 
     self.dev.cmdEndRendering(cmd_buffer);
 
-    const post_comp_barriers: [4]vk.ImageMemoryBarrier = .{
-        makeImageBarrier(self.swapchain.images[image_index], .color_attachment_optimal, .present_src_khr, .{ .color_attachment_write_bit = true }, .{ .color_attachment_read_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.render_color.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.oit.accum.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
-        makeImageBarrier(self.oit.reveal.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .shader_read_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }),
+    const post_comp_barriers: [4]vk.ImageMemoryBarrier2 = .{
+        makeImageBarrier2(self.swapchain.images[image_index], .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_read_bit = true }, color_aspect),
+        makeImageBarrier2(self.render_color.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.oit.accum.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.oit.reveal.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
     };
-    self.dev.cmdPipelineBarrier(
-        cmd_buffer,
-        .{ .color_attachment_output_bit = true, .fragment_shader_bit = true },
-        .{ .color_attachment_output_bit = true },
-        .{},
-        null,
-        null,
-        &post_comp_barriers,
-    );
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = post_comp_barriers.len,
+        .p_image_memory_barriers = &post_comp_barriers,
+    });
 }
 
 pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void {
@@ -2055,7 +2092,18 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
     {
         const cmd = try self.beginSingleTimeCommands();
-        cmdImageBarrier(cmd, self.dev, self.render_color.image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .color_bit = true }, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true });
+        cmdImageBarrier2(
+            cmd,
+            self.dev,
+            self.render_color.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .top_of_pipe_bit = true },
+            .{},
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            .{ .color_bit = true },
+        );
         try self.endSingleTimeCommandsLocked(cmd);
     }
 
@@ -2077,7 +2125,18 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
     {
         const cmd = try self.beginSingleTimeCommands();
-        cmdImageBarrier(cmd, self.dev, self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{}, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask, .{ .top_of_pipe_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true });
+        cmdImageBarrier2(
+            cmd,
+            self.dev,
+            self.render_depth.image,
+            .undefined,
+            .depth_stencil_attachment_optimal,
+            .{ .top_of_pipe_bit = true },
+            .{},
+            .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+            .{ .depth_stencil_attachment_write_bit = true },
+            depth_aspect_mask,
+        );
         try self.endSingleTimeCommandsLocked(cmd);
     }
 
@@ -2090,11 +2149,30 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
     {
         const cmd = try self.beginSingleTimeCommands();
-        const barriers: [2]vk.ImageMemoryBarrier = .{
-            makeImageBarrier(self.oit.accum.image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, oit_aspect),
-            makeImageBarrier(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, oit_aspect),
-        };
-        self.dev.cmdPipelineBarrier(cmd, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &barriers);
+        cmdImageBarrier2(
+            cmd,
+            self.dev,
+            self.oit.accum.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .top_of_pipe_bit = true },
+            .{},
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            oit_aspect,
+        );
+        cmdImageBarrier2(
+            cmd,
+            self.dev,
+            self.oit.reveal.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .top_of_pipe_bit = true },
+            .{},
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            oit_aspect,
+        );
         try self.endSingleTimeCommandsLocked(cmd);
     }
 
@@ -2240,7 +2318,6 @@ fn buildGraphicsPipeline(
     depth_format: vk.Format,
     depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
     blend_attachments: []const vk.PipelineColorBlendAttachmentState,
-    cull_back: bool,
     layout: vk.PipelineLayout,
 ) !vk.Pipeline {
     const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = .triangle_list, .primitive_restart_enable = .false };
@@ -2249,7 +2326,7 @@ fn buildGraphicsPipeline(
         .depth_clamp_enable = .false,
         .rasterizer_discard_enable = .false,
         .polygon_mode = .fill,
-        .cull_mode = if (cull_back) .{ .back_bit = true } else .{},
+        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
         .front_face = .clockwise,
         .depth_bias_enable = .false,
         .depth_bias_constant_factor = 0,
@@ -2271,8 +2348,22 @@ fn buildGraphicsPipeline(
         .p_attachments = blend_attachments.ptr,
         .blend_constants = .{ 0, 0, 0, 0 },
     };
-    const dyn_states: [2]vk.DynamicState = .{ .viewport, .scissor };
-    const dyn: vk.PipelineDynamicStateCreateInfo = .{ .flags = .{}, .dynamic_state_count = dyn_states.len, .p_dynamic_states = &dyn_states };
+
+    var dyn_states_buf: [5]vk.DynamicState = undefined;
+    var dyn_states = std.ArrayList(vk.DynamicState).initBuffer(&dyn_states_buf);
+    dyn_states.appendAssumeCapacity(.viewport);
+    dyn_states.appendAssumeCapacity(.scissor);
+    dyn_states.appendAssumeCapacity(.cull_mode);
+    if (depth_stencil_state != null) {
+        dyn_states.appendAssumeCapacity(.depth_compare_op);
+        dyn_states.appendAssumeCapacity(.depth_write_enable);
+    }
+    const dyn: vk.PipelineDynamicStateCreateInfo = .{
+        .flags = .{},
+        .dynamic_state_count = @intCast(dyn_states.items.len),
+        .p_dynamic_states = dyn_states.items.ptr,
+    };
+
     const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
         .vertex_binding_description_count = 0,
@@ -2284,7 +2375,18 @@ fn buildGraphicsPipeline(
         shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
         shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
     };
+
+    var pipeline_feedback: vk.PipelineCreationFeedback = undefined;
+    var stage_feedbacks: [2]vk.PipelineCreationFeedback = undefined;
+
+    var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{
+        .p_pipeline_creation_feedback = &pipeline_feedback,
+        .pipeline_stage_creation_feedback_count = 2,
+        .p_pipeline_stage_creation_feedbacks = &stage_feedbacks,
+    };
+
     const rendering_info: vk.PipelineRenderingCreateInfo = .{
+        .p_next = &feedback_info,
         .view_mask = 0,
         .color_attachment_count = @intCast(color_formats.len),
         .p_color_attachment_formats = color_formats.ptr,
@@ -2313,95 +2415,102 @@ fn buildGraphicsPipeline(
         .base_pipeline_index = -1,
     };
     var pipeline: vk.Pipeline = undefined;
-    if (self.dev.createGraphicsPipelines(.null_handle, &.{gpci}, null, (&pipeline)[0..1])) |res| {
+    if (self.dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], null, (&pipeline)[0..1])) |res| {
         if (res != .success) return error.PipelineCreationFailed;
     } else |err| return err;
+
+    if (pipeline_feedback.flags.valid_bit) {
+        std.log.info("Vulkan: Pipeline compilation took {d:.3} ms (cached: {})", .{
+            @as(f64, @floatFromInt(pipeline_feedback.duration)) / 1_000_000.0,
+            pipeline_feedback.flags.application_pipeline_cache_hit_bit,
+        });
+    }
+
     return pipeline;
 }
 
-fn createPipeline(self: *VulkanRenderer) !void {
+fn createGraphicsPipelines(self: *VulkanRenderer) !void {
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
         .offset = 0,
         .size = @sizeOf(PushConstants),
     };
-    const layout_info: vk.PipelineLayoutCreateInfo = .{
-        .flags = .{},
-        .set_layout_count = 1,
-        .p_set_layouts = (&self.graphics_state.opaque_descriptor_set_layout)[0..1],
-        .push_constant_range_count = 1,
-        .p_push_constant_ranges = (&pc_range)[0..1],
-    };
-    self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
 
     const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len, .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)) }, null);
-    defer self.dev.destroyShaderModule(frag_module, null);
 
-    const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
-        .flags = .{},
-        .depth_test_enable = .true,
-        .depth_write_enable = .true,
-        .depth_compare_op = .greater,
-        .depth_bounds_test_enable = .false,
-        .stencil_test_enable = .false,
-        .front = undefined,
-        .back = undefined,
-        .min_depth_bounds = 0.0,
-        .max_depth_bounds = 1.0,
-    };
-    const blend: vk.PipelineColorBlendAttachmentState = .{
-        .blend_enable = .false,
-        .src_color_blend_factor = .src_alpha,
-        .dst_color_blend_factor = .one_minus_src_alpha,
-        .color_blend_op = .add,
-        .src_alpha_blend_factor = .src_alpha,
-        .dst_alpha_blend_factor = .one_minus_src_alpha,
-        .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-    };
-    self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, self.depth_format, depth_stencil, &.{blend}, true, self.graphics_state.opaque_pipeline_layout);
-}
+    // 1. Opaque Pipeline
+    {
+        const layout_info: vk.PipelineLayoutCreateInfo = .{
+            .flags = .{},
+            .set_layout_count = 1,
+            .p_set_layouts = (&self.graphics_state.opaque_descriptor_set_layout)[0..1],
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = (&pc_range)[0..1],
+        };
+        self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
 
-fn createTransparentPipeline(self: *VulkanRenderer) !void {
-    const pc_range: vk.PushConstantRange = .{
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-        .offset = 0,
-        .size = @sizeOf(PushConstants),
-    };
-    const layout_info: vk.PipelineLayoutCreateInfo = .{
-        .flags = .{},
-        .set_layout_count = 1,
-        .p_set_layouts = (&self.graphics_state.transparent_descriptor_set_layout)[0..1],
-        .push_constant_range_count = 1,
-        .p_push_constant_ranges = (&pc_range)[0..1],
-    };
-    self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len, .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)) }, null);
+        defer self.dev.destroyShaderModule(frag_module, null);
 
-    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
-    defer self.dev.destroyShaderModule(vert_module, null);
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len, .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)) }, null);
-    defer self.dev.destroyShaderModule(frag_module, null);
+        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+            .flags = .{},
+            .depth_test_enable = .true,
+            .depth_write_enable = .true,
+            .depth_compare_op = .greater,
+            .depth_bounds_test_enable = .false,
+            .stencil_test_enable = .false,
+            .front = undefined,
+            .back = undefined,
+            .min_depth_bounds = 0.0,
+            .max_depth_bounds = 1.0,
+        };
+        const blend: vk.PipelineColorBlendAttachmentState = .{
+            .blend_enable = .false,
+            .src_color_blend_factor = .src_alpha,
+            .dst_color_blend_factor = .one_minus_src_alpha,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .src_alpha,
+            .dst_alpha_blend_factor = .one_minus_src_alpha,
+            .alpha_blend_op = .add,
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        };
+        self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, self.depth_format, depth_stencil, &.{blend}, self.graphics_state.opaque_pipeline_layout);
+    }
 
-    const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
-        .flags = .{},
-        .depth_test_enable = .true,
-        .depth_write_enable = .false,
-        .depth_compare_op = .greater_or_equal,
-        .depth_bounds_test_enable = .false,
-        .stencil_test_enable = .false,
-        .front = undefined,
-        .back = undefined,
-        .min_depth_bounds = 0.0,
-        .max_depth_bounds = 1.0,
-    };
-    const blend_attachments: [2]vk.PipelineColorBlendAttachmentState = .{
-        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-    };
-    const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
-    self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, false, self.graphics_state.transparent_pipeline_layout);
+    // 2. Transparent Pipeline
+    {
+        const layout_info: vk.PipelineLayoutCreateInfo = .{
+            .flags = .{},
+            .set_layout_count = 1,
+            .p_set_layouts = (&self.graphics_state.transparent_descriptor_set_layout)[0..1],
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = (&pc_range)[0..1],
+        };
+        self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+
+        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len, .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)) }, null);
+        defer self.dev.destroyShaderModule(frag_module, null);
+
+        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+            .flags = .{},
+            .depth_test_enable = .true,
+            .depth_write_enable = .false,
+            .depth_compare_op = .greater_or_equal,
+            .depth_bounds_test_enable = .false,
+            .stencil_test_enable = .false,
+            .front = undefined,
+            .back = undefined,
+            .min_depth_bounds = 0.0,
+            .max_depth_bounds = 1.0,
+        };
+        const blend_attachments: [2]vk.PipelineColorBlendAttachmentState = .{
+            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
+            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
+        };
+        const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
+        self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, self.graphics_state.transparent_pipeline_layout);
+    }
 }
 
 fn createCullPipeline(self: *VulkanRenderer) !void {
@@ -2510,7 +2619,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
-    self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, .undefined, null, &.{blend}, false, self.oit.composition_layout);
+    self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, .undefined, null, &.{blend}, self.oit.composition_layout);
 
     const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.swapchain.images.len * 3) };
     try self.createFrameDescriptorPool(&self.oit.descriptor_pool, self.oit.descriptor_set_layout, &self.oit.descriptor_sets_per_frame, (&pool_size)[0..1]);

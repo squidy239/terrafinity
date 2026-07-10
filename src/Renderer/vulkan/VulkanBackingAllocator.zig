@@ -225,7 +225,7 @@ pub const VulkanBackingAllocator = struct {
         const alignment_bytes = ptr_align.toByteUnits();
         const alloc_size = if (alignment_bytes <= min_page_size) aligned_len else aligned_len + alignment_bytes;
 
-        const buffer = try self.dev.createBuffer(&.{
+        const buffer_info = vk.BufferCreateInfo{
             .flags = .{},
             .size = alloc_size,
             .usage = .{
@@ -238,10 +238,15 @@ pub const VulkanBackingAllocator = struct {
             .sharing_mode = .exclusive,
             .queue_family_index_count = 0,
             .p_queue_family_indices = undefined,
-        }, null);
-        errdefer self.dev.destroyBuffer(buffer, null);
+        };
 
-        const mem_reqs = self.dev.getBufferMemoryRequirements(buffer);
+        var mem_reqs2: vk.MemoryRequirements2 = .{
+            .memory_requirements = undefined,
+        };
+        self.dev.getDeviceBufferMemoryRequirements(&.{
+            .p_create_info = &buffer_info,
+        }, &mem_reqs2);
+        const mem_reqs = mem_reqs2.memory_requirements;
 
         const req_flags = switch (pool) {
             .gpu_only => vk.MemoryPropertyFlags{ .device_local_bit = true },
@@ -259,6 +264,9 @@ pub const VulkanBackingAllocator = struct {
             .p_next = @ptrCast(&alloc_flags),
         }, null);
         errdefer self.dev.freeMemory(memory, null);
+
+        const buffer = try self.dev.createBuffer(&buffer_info, null);
+        errdefer self.dev.destroyBuffer(buffer, null);
 
         try self.dev.bindBufferMemory(buffer, memory, 0);
 
