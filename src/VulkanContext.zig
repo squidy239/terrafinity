@@ -539,9 +539,29 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
             break;
         }
     }
+    if (present_mode != requested_mode) {
+        std.log.warn("Present mode '{s}' not available, using fallback '{s}' instead", .{
+            @tagName(requested_mode),
+            @tagName(present_mode),
+        });
+    }
 
-    const raw_count = @max(caps.min_image_count + 1, @as(u32, 2));
+
+    const min_for_mode: u32 = switch (present_mode) {
+        .mailbox_khr => @max(caps.min_image_count, 3),
+        .immediate_khr => @max(caps.min_image_count, 2),
+        else => caps.min_image_count,
+    };
+    const raw_count = @max(min_for_mode + 1, @as(u32, 2));
     const image_count = if (caps.max_image_count > 0) @min(raw_count, caps.max_image_count) else raw_count;
+
+    std.log.info("Swapchain: present_mode={s}, requested={s}, images={d} (min={d}, max={d})", .{
+        @tagName(present_mode),
+        @tagName(requested_mode),
+        image_count,
+        caps.min_image_count,
+        caps.max_image_count,
+    });
 
     const qfi: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
     const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
@@ -716,5 +736,9 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
     if (present_result == .success) {
         const next_frame = (current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
         self.current_frame_idx.store(next_frame, .monotonic);
+    } else if (present_result == .suboptimal_khr) {
+        const next_frame = (current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
+        self.current_frame_idx.store(next_frame, .monotonic);
+        self.swapchain_needs_recreate.store(true, .release);
     }
 }
