@@ -32,18 +32,27 @@ const composite_frag_spv: []const u8 = @embedFile("comp_frag_spv");
 const cull_shader_spv: []const u8 = @embedFile("cull_spv");
 
 const InputChunk = extern struct {
+    address: u64 align(8),
     absolute_position: [4]f32 align(16),
     relative_position: [4]f32 align(16),
     scale: f32,
     face_count: u32,
     is_transparent: u32,
-    address: u64 align(8),
 };
+
+comptime {
+    if (@sizeOf(InputChunk) != 64) @compileError("InputChunk size mismatch with GLSL layout (expected 64, got " ++ @typeName(@TypeOf(@sizeOf(InputChunk))) ++ ")");
+}
 
 const CullCount = extern struct {
     opaque_count: u32,
     transparent_count: u32,
 };
+
+comptime {
+    // Must match GLSL CountBuffer (uint + uint) in cull.comp
+    if (@sizeOf(CullCount) != 8) @compileError("CullCount size mismatch");
+}
 
 const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 const cull_workgroup_size: u32 = 64;
@@ -236,11 +245,20 @@ const CommandPoolReservoir = struct {
 };
 
 const ChunkData = extern struct {
+    address: u64 align(8),
     absolute_position: [4]f32 align(16),
     relative_position: [4]f32 align(16),
     scale: f32,
-    address: u64 align(8),
 };
+
+comptime {
+    if (@sizeOf(ChunkData) != 64) @compileError("ChunkData size mismatch with GLSL layout (expected 64)");
+}
+
+comptime {
+    // PushConstants: mat4(64) + vec3(12) + float(4) = 80
+    if (@sizeOf(PushConstants) != 80) @compileError("PushConstants size mismatch with GLSL layout");
+}
 
 const PushConstants = extern struct {
     projview: [16]f32,
@@ -445,6 +463,7 @@ render_options_lock: *std.Io.RwLock,
 interface: Renderer,
 
 retire_mutex: std.Io.Mutex = .init,
+num_in_flight: u32 = 0,
 init_time_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
@@ -529,6 +548,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     try self.createRenderTargets(actual_extent);
 
     const num_swapchain_images = self.swapchain.images.len;
+    self.num_in_flight = @intCast(num_swapchain_images);
     self.frame_buffers.indirect_draw = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
     self.frame_buffers.indirect_draw_mapped = try self.allocator.alloc(?[*]vk.DrawIndirectCommand, num_swapchain_images);
     self.frame_buffers.indirect_draw_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
@@ -874,6 +894,14 @@ fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
             };
         }
 
+        const current_graphics_val = self.vk_ctx.frame_number.load(.monotonic);
+        const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
+            .semaphore = self.transfer.graphics_timeline_semaphore,
+            .value = current_graphics_val,
+            .stage_mask = .{ .all_transfer_bit = true },
+            .device_index = 0,
+        };
+
         const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
             .semaphore = self.transfer.semaphore,
             .value = next_val,
@@ -883,8 +911,8 @@ fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
 
         const submit_info: vk.SubmitInfo2 = .{
             .flags = .{},
-            .wait_semaphore_info_count = 0,
-            .p_wait_semaphore_infos = null,
+            .wait_semaphore_info_count = if (current_graphics_val > 0) 1 else 0,
+            .p_wait_semaphore_infos = (&wait_semaphore_info)[0..1],
             .command_buffer_info_count = @intCast(count),
             .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
             .signal_semaphore_info_count = 1,
@@ -967,10 +995,13 @@ fn freePendingUploadStaging(self: *VulkanRenderer, pending: PendingChunkUpload) 
 
 fn enqueueRetiredMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer, gpu_index: u32) !void {
     // Caller (retireCompletedUploads) already holds retire_mutex.
+    // Add num_in_flight to the timeline value so we don't free the old address until
+    // every frame that could have copied it into its chunk_data buffer has completed.
+    const retire_frame = self.vk_ctx.frame_number.load(.acquire);
     try self.retired_meshes.append(self.allocator, .{
         .mesh = mesh,
         .gpu_index = gpu_index,
-        .graphics_timeline_value = self.vk_ctx.frame_number.load(.acquire),
+        .graphics_timeline_value = retire_frame + self.num_in_flight,
     });
 }
 
@@ -1087,6 +1118,28 @@ fn uploadMeshBuffer(self: *VulkanRenderer, faces: []const Mesher.Face, cmd: vk.C
     const buf_info = self.backing_allocator.getBufferAndOffset(.gpu_only, slice.ptr);
     const device_address = self.backing_allocator.getDeviceAddress(.gpu_only, slice.ptr);
 
+    const pre_copy_barrier: vk.BufferMemoryBarrier2 = .{
+        .src_stage_mask = .{ .all_transfer_bit = true },
+        .src_access_mask = .{ .transfer_write_bit = true, .transfer_read_bit = true },
+        .dst_stage_mask = .{ .all_transfer_bit = true },
+        .dst_access_mask = .{ .transfer_write_bit = true },
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .buffer = buf_info.buffer,
+        .offset = 0,
+        .size = vk.WHOLE_SIZE,
+    };
+    const pre_dependency_info: vk.DependencyInfo = .{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = (&pre_copy_barrier)[0..1],
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    };
+    self.dev.cmdPipelineBarrier2(cmd, &pre_dependency_info);
+
     const copy_region: vk.BufferCopy2 = .{
         .src_offset = staging_info.offset,
         .dst_offset = buf_info.offset,
@@ -1103,8 +1156,8 @@ fn uploadMeshBuffer(self: *VulkanRenderer, faces: []const Mesher.Face, cmd: vk.C
     const buffer_barrier: vk.BufferMemoryBarrier2 = .{
         .src_stage_mask = .{ .all_transfer_bit = true },
         .src_access_mask = .{ .transfer_write_bit = true },
-        .dst_stage_mask = .{ .all_commands_bit = true },
-        .dst_access_mask = .{ .shader_read_bit = true },
+        .dst_stage_mask = .{ .all_transfer_bit = true },
+        .dst_access_mask = .{ .transfer_write_bit = true, .transfer_read_bit = true },
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .buffer = buf_info.buffer,
@@ -1308,7 +1361,7 @@ inline fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, l
         .resolve_image_view = .null_handle,
         .resolve_image_layout = .undefined,
         .load_op = load_op,
-        .store_op = if (load_op == .load) .dont_care else .store,
+        .store_op = if (load_op == .load) .none else .store,
         .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
     };
 }
@@ -1499,6 +1552,66 @@ fn recordOpaquePass(
     frustum: Frustum,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
+    // Frame-start synchronization to prevent cross-frame race conditions on the shared render targets.
+    const pre_dispatch_mem_barrier: vk.MemoryBarrier2 = .{
+        .src_stage_mask = .{ .all_commands_bit = true },
+        .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+        .dst_stage_mask = .{ .all_commands_bit = true },
+        .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+    };
+    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const pre_dispatch_img_barriers: [4]vk.ImageMemoryBarrier2 = .{
+        makeImageBarrier2(
+            self.render_color.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .all_commands_bit = true },
+            .{ .memory_read_bit = true, .memory_write_bit = true },
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            color_aspect,
+        ),
+        makeImageBarrier2(
+            self.oit.accum.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .all_commands_bit = true },
+            .{ .memory_read_bit = true, .memory_write_bit = true },
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            color_aspect,
+        ),
+        makeImageBarrier2(
+            self.oit.reveal.image,
+            .undefined,
+            .color_attachment_optimal,
+            .{ .all_commands_bit = true },
+            .{ .memory_read_bit = true, .memory_write_bit = true },
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            color_aspect,
+        ),
+        makeImageBarrier2(
+            self.render_depth.image,
+            .undefined,
+            .depth_stencil_attachment_optimal,
+            .{ .all_commands_bit = true },
+            .{ .memory_read_bit = true, .memory_write_bit = true },
+            .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+            .{ .depth_stencil_attachment_write_bit = true },
+            depth_aspect_mask,
+        ),
+    };
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 1,
+        .p_memory_barriers = (&pre_dispatch_mem_barrier)[0..1],
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = pre_dispatch_img_barriers.len,
+        .p_image_memory_barriers = &pre_dispatch_img_barriers,
+    });
+
     if (total_candidates > 0) {
         self.dispatchCulling(cmd_buffer, current_frame, frustum, total_candidates, view_pos);
     }
@@ -1682,13 +1795,13 @@ fn recordCompositionPass(
     current_frame: u32,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
+    _ = depth_aspect_mask;
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = .{
+    const pre_comp_barriers: [4]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
-        makeImageBarrier2(self.swapchain.images[image_index], .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        makeImageBarrier2(self.render_depth.image, .depth_stencil_read_only_optimal, .depth_stencil_attachment_optimal, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_read_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
+        makeImageBarrier2(self.swapchain.images[image_index], .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1712,11 +1825,8 @@ fn recordCompositionPass(
 
     self.dev.cmdEndRendering(cmd_buffer);
 
-    const post_comp_barriers: [4]vk.ImageMemoryBarrier2 = .{
+    const post_comp_barriers: [1]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.swapchain.images[image_index], .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_read_bit = true }, color_aspect),
-        makeImageBarrier2(self.render_color.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        makeImageBarrier2(self.oit.accum.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        makeImageBarrier2(self.oit.reveal.image, .shader_read_only_optimal, .color_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1738,8 +1848,10 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
 
     var current_frame = self.currentFrame();
 
-    const fence_wait: vk.Fence = self.swapchain.in_flight_fences[current_frame];
-    try self.waitFences((&fence_wait)[0..1]);
+    // Ensure prior frames have finished utilizing the shared render targets.
+    for (self.swapchain.in_flight_fences) |fence| {
+        try self.waitFences((&fence)[0..1]);
+    }
 
     if (self.frame_buffers.stats_mapped[current_frame]) |counts_ptr| {
         const opaque_count = counts_ptr[0].opaque_count;
@@ -2040,7 +2152,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     {
         try self.retired_candidate_slices.append(self.allocator, .{
             .slice = old_slice,
-            .graphics_timeline_value = current_frame_num,
+            .graphics_timeline_value = current_frame_num + self.num_in_flight,
         });
     }
 
@@ -2257,6 +2369,8 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
 }
 
 fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
+    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const infos: [4]vk.DescriptorBufferInfo = .{
         .{ .buffer = self.persistent.buffer, .offset = self.persistent.offset, .range = self.persistent.slice.len * @sizeOf(InputChunk) },
         .{ .buffer = self.frame_buffers.indirect_draw[frame_idx], .offset = self.frame_buffers.indirect_draw_offsets[frame_idx], .range = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand) },
@@ -2271,9 +2385,9 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
             .dst_array_element = 0,
             .descriptor_count = 1,
             .descriptor_type = .storage_buffer,
-            .p_image_info = undefined,
+            .p_image_info = (&dummy_image_info)[0..1],
             .p_buffer_info = (&info)[0..1],
-            .p_texel_buffer_view = undefined,
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
         };
     }
     self.dev.updateDescriptorSets(&writes, null);
@@ -2367,9 +2481,9 @@ fn buildGraphicsPipeline(
     const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
         .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = undefined,
+        .p_vertex_binding_descriptions = null,
         .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = undefined,
+        .p_vertex_attribute_descriptions = null,
     };
     const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
         shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
@@ -2627,6 +2741,8 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
 }
 
 fn updateOitDescriptorSets(self: *VulkanRenderer) void {
+    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const num_frames = self.swapchain.images.len;
     const image_infos: [3]vk.DescriptorImageInfo = .{
         .{ .sampler = self.oit.sampler, .image_view = self.render_color.view, .image_layout = .shader_read_only_optimal },
@@ -2635,9 +2751,9 @@ fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     };
     for (self.oit.descriptor_sets_per_frame[0..num_frames]) |desc_set| {
         const writes: [3]vk.WriteDescriptorSet = .{
-            .{ .dst_set = desc_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[0..1], .p_buffer_info = undefined, .p_texel_buffer_view = undefined },
-            .{ .dst_set = desc_set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[1..2], .p_buffer_info = undefined, .p_texel_buffer_view = undefined },
-            .{ .dst_set = desc_set, .dst_binding = 2, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[2..3], .p_buffer_info = undefined, .p_texel_buffer_view = undefined },
+            .{ .dst_set = desc_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[0..1], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
+            .{ .dst_set = desc_set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[1..2], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
+            .{ .dst_set = desc_set, .dst_binding = 2, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[2..3], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
         };
         self.dev.updateDescriptorSets(&writes, null);
     }
@@ -2735,10 +2851,10 @@ pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer)
         .command_buffer_count = 1,
         .p_command_buffers = (&cmd)[0..1],
         .wait_semaphore_count = 0,
-        .p_wait_semaphores = undefined,
-        .p_wait_dst_stage_mask = undefined,
+        .p_wait_semaphores = null,
+        .p_wait_dst_stage_mask = null,
         .signal_semaphore_count = 0,
-        .p_signal_semaphores = undefined,
+        .p_signal_semaphores = null,
     };
 
     try self.dev.queueSubmit(self.graphics_queue, &.{submit_info}, .null_handle);
@@ -2818,5 +2934,5 @@ test "findMemoryType" {
 
 test "ChunkData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(ChunkData));
 }

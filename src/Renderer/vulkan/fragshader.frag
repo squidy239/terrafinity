@@ -10,7 +10,6 @@ layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
 layout(binding = 1) uniform sampler2DArray texture_array;
-layout(location = 6) flat in float scale;
 
 struct PushConstants {
     mat4 projview;

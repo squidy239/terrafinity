@@ -4,21 +4,19 @@
 layout(local_size_x = 64) in;
 
 struct InputChunk {
+    uint64_t address;
     vec4 absolute_position;
     vec4 relative_position; // Ignored/unused now, computed dynamically
     float scale;
     uint face_count;
     uint is_transparent;
-    uint pad3;
-    uint64_t address;
 };
 
 struct ChunkData {
+    uint64_t address;
     vec4 absolute_position;
     vec4 relative_position;
     float scale;
-    uint pad3;
-    uint64_t address;
 };
 
 struct DrawIndirectCommand {
@@ -96,11 +94,10 @@ void main() {
                     idx
                 );
                 out_chunks[idx] = ChunkData(
+                    chunk.address,
                     chunk.absolute_position,
                     vec4(relative_position, 1.0),
-                    chunk.scale,
-                    0u,
-                    chunk.address
+                    chunk.scale
                 );
             }
         } else {
@@ -114,11 +111,10 @@ void main() {
                     out_idx
                 );
                 out_chunks[out_idx] = ChunkData(
+                    chunk.address,
                     chunk.absolute_position,
                     vec4(relative_position, 1.0),
-                    chunk.scale,
-                    0u,
-                    chunk.address
+                    chunk.scale
                 );
             }
         }

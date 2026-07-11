@@ -26,6 +26,8 @@ instance_handle: vk.Instance,
 instance_wrapper: ?*InstanceWrapper,
 instance: InstanceProxy,
 
+debug_callback: vk.DebugUtilsMessengerEXT,
+
 pdev: vk.PhysicalDevice,
 props: vk.PhysicalDeviceProperties,
 mem_props: vk.PhysicalDeviceMemoryProperties,
@@ -165,6 +167,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     errdefer allocator.destroy(self);
 
     self.* = .{
+        .debug_callback = .null_handle,
         .allocator = allocator,
         .window = window,
         .vkb = undefined,
@@ -216,6 +219,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     }
 
     var has_portability = false;
+    var has_debug_utils = false;
     const extensions = try self.vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
     defer allocator.free(extensions);
     for (extensions) |extension| {
@@ -223,6 +227,10 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         if (std.mem.eql(u8, name, "VK_KHR_portability_enumeration")) {
             try extension_names.append(allocator, "VK_KHR_portability_enumeration");
             has_portability = true;
+        }
+        if (std.mem.eql(u8, name, "VK_EXT_debug_utils")) {
+            try extension_names.append(allocator, "VK_EXT_debug_utils");
+            has_debug_utils = true;
         }
     }
 
@@ -253,6 +261,26 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         allocator.destroy(instance_wrapper_ptr);
         self.instance_wrapper = null;
     }
+
+    const callback_create_info: vk.DebugUtilsMessengerCreateInfoEXT = .{
+        .message_severity = .{
+            .info_bit_ext = true,
+            .verbose_bit_ext = true,
+            .error_bit_ext = true,
+            .warning_bit_ext = true,
+        },
+        .message_type = .{
+            .device_address_binding_bit_ext = true,
+            .validation_bit_ext = true,
+            .performance_bit_ext = true,
+            .general_bit_ext = true,
+        },
+        .pfn_user_callback = &debugCallback,
+    };
+    if (has_debug_utils) {
+        self.debug_callback = try self.instance.createDebugUtilsMessengerEXT(&callback_create_info, null);
+    }
+    errdefer if (has_debug_utils) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
 
     var surface: vk.SurfaceKHR = .null_handle;
     const result: vk.Result = @enumFromInt(window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface)));
@@ -424,6 +452,10 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.dev.destroyDevice(null);
 
     if (self.instance_wrapper) |wrapper| {
+        if (self.debug_callback != .null_handle) {
+            self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
+            self.debug_callback = .null_handle;
+        }
         self.instance.destroyInstance(null);
         self.allocator.destroy(wrapper);
     }
@@ -737,4 +769,26 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
         self.current_frame_idx.store(next_frame, .monotonic);
         self.swapchain_needs_recreate.store(true, .release);
     }
+}
+
+const vklog = std.log.scoped(.vulkan);
+
+fn debugCallback(
+    message_severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+    message_types: vk.DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
+    p_user_data: ?*anyopaque,
+) callconv(vk.vulkan_call_conv) vk.Bool32 {
+    _ = p_user_data;
+    _ = message_types;
+    if (message_severity.error_bit_ext) {
+        vklog.err("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
+    } else if (message_severity.warning_bit_ext) {
+        vklog.warn("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
+    } else if (message_severity.info_bit_ext) {
+        vklog.info("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
+    } else if (message_severity.verbose_bit_ext) {
+        vklog.debug("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
+    }
+    return .false;
 }

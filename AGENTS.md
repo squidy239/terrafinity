@@ -1,11 +1,12 @@
 # Agent Guide
 
 ## Commands
+Use these full commands without modification after each change and ensure the play test runs without errors:
 
 - normal build: `zig build`
 - run and open to menu: `zig build run`
-- run and open to a game: `zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
-- run and open a game with thread sanitizer, this should be used instead of the regular test play a lot of the time: `TSAN_OPTIONS="suppressions=tsan_suppressions.txt" zig build run -Dtest_play=10 -Dsanitize_thread=Normal`
+- run and open to a game: `export VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT && export VK_VALIDATION_VALIDATE_SYNC=1 && zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
+- run and open a game with thread sanitizer, this should be used instead of the regular test play when it works (not on nvidia drivers, test to see): `export VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT && export VK_VALIDATION_VALIDATE_SYNC=1 && TSAN_OPTIONS="suppressions=tsan_suppressions.txt" zig build run -Dtest_play=10 -Dsanitize_thread=Normal`
 - format code: `zig fmt .`
 
 # Codebase Naming Conventions & Guidelines

@@ -14,11 +14,12 @@ pub fn build(b: *std.Build) void {
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
     // Compile shaders using glslc
-
+    
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
+        if (optimize == .Debug or optimize == .ReleaseSafe) "-g" else "-Werror", //This compile errors if I leave the else blank, so I repeat the flag
         "-Werror",
         "-o",
     };
