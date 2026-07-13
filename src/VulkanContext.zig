@@ -157,6 +157,11 @@ fn selectQueueFamilies(self: *VulkanContext, allocator: std.mem.Allocator) !stru
             }
         }
     }
+    if (present_family != graphics_family and
+        (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, graphics_family, self.surface)) == .true)
+    {
+        present_family = graphics_family;
+    }
     return .{ .graphics = graphics_family, .present = present_family, .transfer = transfer_family orelse graphics_family };
 }
 
@@ -594,9 +599,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         caps.max_image_count,
     });
 
-    const qfi: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
-    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
-
     errdefer {
         if (old_swapchain != .null_handle) {
             self.dev.destroySwapchainKHR(old_swapchain, null);
@@ -612,9 +614,9 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         .image_extent = actual_extent,
         .image_array_layers = 1,
         .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
-        .image_sharing_mode = sharing_mode,
-        .queue_family_index_count = if (sharing_mode == .concurrent) @as(u32, qfi.len) else 0,
-        .p_queue_family_indices = if (sharing_mode == .concurrent) &qfi else null,
+        .image_sharing_mode = .exclusive,
+        .queue_family_index_count = 0,
+        .p_queue_family_indices = null,
         .pre_transform = caps.current_transform,
         .composite_alpha = .{ .opaque_bit_khr = true },
         .present_mode = present_mode,
@@ -678,6 +680,29 @@ pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
 
+pub const FrameContext = struct {
+    frame_index: u32,
+    image_index: u32,
+    cmd_buffer: vk.CommandBuffer,
+};
+
+pub fn beginFrame(self: *VulkanContext) !FrameContext {
+    const timeout: u64 = 2 * std.time.ns_per_s;
+    const current_frame = self.currentFrame() % @as(u32, @intCast(self.in_flight_fences.len));
+    {
+        const wait_result = try self.dev.waitForFences((&self.in_flight_fences[current_frame])[0..1], .true, timeout);
+        if (wait_result != .success) return error.DrawFailed;
+    }
+    try self.dev.resetFences((&self.in_flight_fences[current_frame])[0..1]);
+    const acquire = try self.acquireSwapchainImage(current_frame);
+    self.current_swapchain_image_index = acquire.image_index;
+    return .{
+        .frame_index = acquire.frame,
+        .image_index = acquire.image_index,
+        .cmd_buffer = self.cmd_buffers[acquire.frame],
+    };
+}
+
 pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !struct { image_index: u32, frame: u32 } {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "acquireSwapchainImage" });
     defer zone.end();
@@ -739,8 +764,8 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, current_frame_idx: u32, cmd
     }
 }
 
-pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx: u32, image_index: u32) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage" });
+pub fn present(self: *VulkanContext, io: std.Io, current_frame_idx: u32, image_index: u32) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "present" });
     defer zone.end();
 
     const present_info: vk.PresentInfoKHR = .{
@@ -752,7 +777,7 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
         .p_results = null,
     };
     const present_result = blk: {
-        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage_lock_queue" });
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "present_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
         zone_lock.end();
         defer self.queue_mutex.unlock(io);
@@ -767,7 +792,7 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
     } else if (present_result == .suboptimal_khr) {
         const next_frame = (current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
         self.current_frame_idx.store(next_frame, .monotonic);
-        self.swapchain_needs_recreate.store(true, .release);
+        self.swapchain_needs_recreate.store(true, .monotonic);
     }
 }
 

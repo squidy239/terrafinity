@@ -145,57 +145,106 @@ pub fn main(init: std.process.Init) !void {
             frame_time = .now(io, .awake);
 
             if (ui.menu_state.ingame) {
-                // Update game state and submit Vulkan render commands first (includes Vulkan presentation via vkQueuePresentKHR)
-                try game.frame(io, gpa);
-
-                // Draw UI overlay on top of the 3D scene using OpenGL interop shared texture
-                const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
-                defer dw.end();
-
-                // Render dvui UI to the shared FBO that Vulkan will incorporate
-                try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-                var menu_changed: bool = false;
-                {
-                    const ov = dvui.overlay(@src(), .{ .expand = .both });
-                    defer ov.deinit();
-
-                    if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
-                    if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
-                    if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
-                    if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
-                        var error_buffer: [65536]u8 = undefined;
-                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
-
-                        switch (err) {
-                            error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                            error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-                            else => error_writer.print("{any}", .{err}) catch unreachable,
-                        }
-
-                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
-                        break :err false;
+                if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
+                    vk_ctx.queue_mutex.lockUncancelable(io);
+                    defer vk_ctx.queue_mutex.unlock(io);
+                    vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch {};
+                    game.vulkan_renderer.recreateSwapchainResourcesLocked(io) catch |err| {
+                        std.log.err("swapchain recreation failed: {}", .{err});
+                        continue;
                     };
-                    if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
-                    if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
-                        var error_buffer: [65536]u8 = undefined;
-                        var error_writer: std.Io.Writer = .fixed(&error_buffer);
-
-                        switch (err) {
-                            error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
-                            error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                            else => error_writer.print("{any}", .{err}) catch unreachable,
-                        }
-
-                        dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
-                        break :err false;
-                    };
+                    vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
                 }
-                _ = try ui_window.end(.{});
 
-                // Vulkan already presented via vkQueuePresentKHR in game.frame() - no glSwapBuffers() needed here
+                const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
+                    error.OutOfDate => {
+                        vk_ctx.queue_mutex.lockUncancelable(io);
+                        defer vk_ctx.queue_mutex.unlock(io);
+                        vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch {};
+                        game.vulkan_renderer.recreateSwapchainResourcesLocked(io) catch continue;
+                        continue;
+                    },
+                    error.DrawFailed => {
+                        std.log.err("beginFrame failed: draw error", .{});
+                        continue;
+                    },
+                    else => {
+                        std.log.err("beginFrame failed: {}", .{err});
+                        continue;
+                    },
+                };
+
+                game.vulkan_renderer.setupFrame(
+                    frame_ctx.frame_index,
+                    frame_ctx.cmd_buffer,
+                    vk_ctx.swapchain_images[frame_ctx.image_index],
+                    vk_ctx.swapchain_views[frame_ctx.image_index],
+                );
+
+                game.frame(io, gpa, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height }) catch |err| {
+                    std.log.err("game.frame failed: {}", .{err});
+                    continue;
+                };
+
+                {
+                    const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+                    defer dw.end();
+
+                    ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds()) catch {};
+                    var menu_changed: bool = false;
+                    {
+                        const ov = dvui.overlay(@src(), .{ .expand = .both });
+                        defer ov.deinit();
+
+                        if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) ui.debugInfo(io) catch {};
+                        if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
+                        if (ui.menu_state.esc and !menu_changed) menu_changed = ui.escMenu(io) catch false;
+                        if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
+                            var error_buffer: [65536]u8 = undefined;
+                            var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                            switch (err) {
+                                error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+                                error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                                error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+                                else => error_writer.print("{any}", .{err}) catch unreachable,
+                            }
+
+                            dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
+                            break :err false;
+                        };
+                        if (ui.menu_state.settings and !menu_changed) menu_changed = ui.settingsMenu(io) catch false;
+                        if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
+                            var error_buffer: [65536]u8 = undefined;
+                            var error_writer: std.Io.Writer = .fixed(&error_buffer);
+
+                            switch (err) {
+                                error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+                                error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+                                else => error_writer.print("{any}", .{err}) catch unreachable,
+                            }
+
+                            dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
+                            break :err false;
+                        };
+                    }
+                    _ = ui_window.end(.{}) catch {};
+                }
+
+                vk_ctx.submitFrame(io, frame_ctx.frame_index, frame_ctx.cmd_buffer) catch |err| {
+                    std.log.err("submitFrame failed: {}", .{err});
+                    continue;
+                };
+
+                vk_ctx.present(io, frame_ctx.frame_index, frame_ctx.image_index) catch |err| {
+                    if (err == error.OutOfDate) {
+                        vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+                    } else {
+                        std.log.err("present failed: {}", .{err});
+                    }
+                    continue;
+                };
             } else {
-                // UI only mode: draw and present with OpenGL context for menus
                 const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
                 defer dw.end();
                 try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
@@ -236,7 +285,6 @@ pub fn main(init: std.process.Init) !void {
                 }
                 _ = try ui_window.end(.{});
 
-                // Present with OpenGL context for menus
                 const sw = tracy.Zone.begin(.{ .src = @src(), .name = "swap" });
                 window.glSwapBuffers();
                 sw.end();
@@ -244,7 +292,6 @@ pub fn main(init: std.process.Init) !void {
         }
         window.disableRelativeMouse();
     } else {
-        // Pure Vulkan window for test_play mode
         window = try wio.Window.create(.{ .title = "terrafinity", .event_fn_data = &events });
         defer window.destroy();
 
@@ -302,8 +349,60 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
 
-            // Update game state and submit Vulkan render commands (includes Vulkan presentation via vkQueuePresentKHR)
-            try game.frame(io, gpa);
+            if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
+                vk_ctx.queue_mutex.lockUncancelable(io);
+                defer vk_ctx.queue_mutex.unlock(io);
+                vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch {};
+                game.vulkan_renderer.recreateSwapchainResourcesLocked(io) catch |err| {
+                    std.log.err("swapchain recreation failed: {}", .{err});
+                    continue;
+                };
+                vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
+            }
+
+            const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
+                error.OutOfDate => {
+                    vk_ctx.queue_mutex.lockUncancelable(io);
+                    defer vk_ctx.queue_mutex.unlock(io);
+                    vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch {};
+                    game.vulkan_renderer.recreateSwapchainResourcesLocked(io) catch continue;
+                    continue;
+                },
+                error.DrawFailed => {
+                    std.log.err("beginFrame failed: draw error", .{});
+                    continue;
+                },
+                else => {
+                    std.log.err("beginFrame failed: {}", .{err});
+                    continue;
+                },
+            };
+
+            game.vulkan_renderer.setupFrame(
+                frame_ctx.frame_index,
+                frame_ctx.cmd_buffer,
+                vk_ctx.swapchain_images[frame_ctx.image_index],
+                vk_ctx.swapchain_views[frame_ctx.image_index],
+            );
+
+            game.frame(io, gpa, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height }) catch |err| {
+                std.log.err("game.frame failed: {}", .{err});
+                continue;
+            };
+
+            vk_ctx.submitFrame(io, frame_ctx.frame_index, frame_ctx.cmd_buffer) catch |err| {
+                std.log.err("submitFrame failed: {}", .{err});
+                continue;
+            };
+
+            vk_ctx.present(io, frame_ctx.frame_index, frame_ctx.image_index) catch |err| {
+                if (err == error.OutOfDate) {
+                    vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+                } else {
+                    std.log.err("present failed: {}", .{err});
+                }
+                continue;
+            };
 
             tracy.frameMark(null);
         }

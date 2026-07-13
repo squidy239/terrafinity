@@ -425,7 +425,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.* = undefined;
 }
 
-pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, viewport: @Vector(2, u32)) !void {
     const now: std.Io.Timestamp = .now(io, .awake);
     const frame_time = self.last_frametime.durationTo(now);
     self.last_frametime = now;
@@ -445,7 +445,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const player_pos_updated = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
 
-    try self.renderer.draw(io, player_pos_updated);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, player_pos_updated);
     try self.handleErrors();
     try entities_future.await(io);
 }

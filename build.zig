@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
     // Compile shaders using glslc
-    
+
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",

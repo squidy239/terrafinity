@@ -343,19 +343,6 @@ const PersistentCandidates = struct {
     slice: []InputChunk = &.{},
 };
 
-const SwapchainState = struct {
-    handle: vk.SwapchainKHR = .null_handle,
-    format: vk.Format = .b8g8r8a8_srgb,
-    images: []vk.Image = &.{},
-    views: []vk.ImageView = &.{},
-    extent: vk.Extent2D = .{ .width = 800, .height = 600 },
-    needs_recreate: std.atomic.Value(bool) = .init(false),
-    cmd_buffers: []vk.CommandBuffer = &.{},
-    image_acquired_semaphores: []vk.Semaphore = &.{},
-    render_complete_semaphores: []vk.Semaphore = &.{},
-    in_flight_fences: []vk.Fence = &.{},
-};
-
 const GraphicsState = struct {
     opaque_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     transparent_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
@@ -417,7 +404,11 @@ allocator: std.mem.Allocator,
 dev: DeviceProxy,
 graphics_queue: vk.Queue,
 upload_command_pool: vk.CommandPool = .null_handle,
-swapchain: SwapchainState = .{},
+
+current_frame: u32 = 0,
+output_cmd_buffer: vk.CommandBuffer = .null_handle,
+output_color_image: vk.Image = .null_handle,
+output_color_view: vk.ImageView = .null_handle,
 render_color: RenderTarget = .{},
 render_depth: RenderTarget = .{},
 render_depth_sampled_view: vk.ImageView = .null_handle,
@@ -467,16 +458,11 @@ num_in_flight: u32 = 0,
 init_time_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
-fn updateSwapchainFields(self: *VulkanRenderer) void {
-    self.swapchain.handle = self.vk_ctx.swapchain;
-    self.swapchain.format = self.vk_ctx.swapchain_format;
-    self.swapchain.images = self.vk_ctx.swapchain_images;
-    self.swapchain.views = self.vk_ctx.swapchain_views;
-    self.swapchain.extent = self.vk_ctx.swapchain_extent;
-    self.swapchain.cmd_buffers = self.vk_ctx.cmd_buffers;
-    self.swapchain.image_acquired_semaphores = self.vk_ctx.image_acquired_semaphores;
-    self.swapchain.render_complete_semaphores = self.vk_ctx.render_complete_semaphores;
-    self.swapchain.in_flight_fences = self.vk_ctx.in_flight_fences;
+pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.CommandBuffer, output_image: vk.Image, output_view: vk.ImageView) void {
+    self.current_frame = frame_index;
+    self.output_cmd_buffer = cmd_buffer;
+    self.output_color_image = output_image;
+    self.output_color_view = output_view;
 }
 
 fn loadDefaultTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
@@ -530,7 +516,7 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
     self.frame_buffers.stats_slices[i] = stats_slice;
 }
 
-fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
+pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     self.render_options_lock.lockSharedUncancelable(io);
     const gamma_correction = self.render_options.gamma_correction;
     const present_mode = self.render_options.present_mode;
@@ -540,14 +526,12 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     self.destroyRendererSwapchainResources();
 
-    self.updateSwapchainFields();
-
-    const actual_extent = self.swapchain.extent;
+    const actual_extent = self.vk_ctx.swapchain_extent;
     self.viewport_pixels = .{ actual_extent.width, actual_extent.height };
 
     try self.createRenderTargets(actual_extent);
 
-    const num_swapchain_images = self.swapchain.images.len;
+    const num_swapchain_images = self.vk_ctx.swapchain_images.len;
     self.num_in_flight = @intCast(num_swapchain_images);
     self.frame_buffers.indirect_draw = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
     self.frame_buffers.indirect_draw_mapped = try self.allocator.alloc(?[*]vk.DrawIndirectCommand, num_swapchain_images);
@@ -1203,18 +1187,18 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
     try self.retireCompletedUploads(io);
 }
 
-inline fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuffer) void {
+inline fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
     self.dev.cmdSetViewport(cmd, 0, &[_]vk.Viewport{.{
         .x = 0.0,
         .y = 0.0,
-        .width = @floatFromInt(self.swapchain.extent.width),
-        .height = @floatFromInt(self.swapchain.extent.height),
+        .width = @floatFromInt(extent.width),
+        .height = @floatFromInt(extent.height),
         .min_depth = 0.0,
         .max_depth = 1.0,
     }});
     self.dev.cmdSetScissor(cmd, 0, &[_]vk.Rect2D{.{
         .offset = .{ .x = 0, .y = 0 },
-        .extent = self.swapchain.extent,
+        .extent = extent,
     }});
 }
 
@@ -1544,6 +1528,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
 fn recordOpaquePass(
     self: *VulkanRenderer,
     cmd_buffer: vk.CommandBuffer,
+    extent: vk.Extent2D,
     current_frame: u32,
     total_candidates: u32,
     pc: PushConstants,
@@ -1619,7 +1604,7 @@ fn recordOpaquePass(
     const color_attachment = renderingAttachmentColor(self.render_color.view, .clear, .{ sky_color[0], sky_color[1], sky_color[2], sky_color[3] });
     const depth_attachment = renderingAttachmentDepth(self.render_depth.view, .depth_stencil_attachment_optimal, .clear);
 
-    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{color_attachment}, &depth_attachment));
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{color_attachment}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.pipeline);
 
@@ -1627,7 +1612,7 @@ fn recordOpaquePass(
     self.dev.cmdSetDepthCompareOp(cmd_buffer, .greater);
     self.dev.cmdSetDepthWriteEnable(cmd_buffer, .true);
 
-    self.setViewportAndScissor(cmd_buffer);
+    self.setViewportAndScissor(cmd_buffer, extent);
 
     const buffer_info: vk.DescriptorBufferInfo = .{
         .buffer = self.frame_buffers.chunk_data[current_frame],
@@ -1701,6 +1686,7 @@ fn recordOpaquePass(
 fn recordTransparentPass(
     self: *VulkanRenderer,
     cmd_buffer: vk.CommandBuffer,
+    extent: vk.Extent2D,
     current_frame: u32,
     total_candidates: u32,
     pc: PushConstants,
@@ -1708,14 +1694,14 @@ fn recordTransparentPass(
     const oit_accum_attachment = renderingAttachmentColor(self.oit.accum.view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
     const oit_reveal_attachment = renderingAttachmentColor(self.oit.reveal.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
     const oit_depth_attachment = renderingAttachmentDepth(self.render_depth.view, .depth_stencil_read_only_optimal, .load);
-    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{ oit_accum_attachment, oit_reveal_attachment }, &oit_depth_attachment));
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{ oit_accum_attachment, oit_reveal_attachment }, &oit_depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);
 
     self.dev.cmdSetCullMode(cmd_buffer, .{});
     self.dev.cmdSetDepthCompareOp(cmd_buffer, .greater_or_equal);
     self.dev.cmdSetDepthWriteEnable(cmd_buffer, .false);
-    self.setViewportAndScissor(cmd_buffer);
+    self.setViewportAndScissor(cmd_buffer, extent);
 
     const buffer_info: vk.DescriptorBufferInfo = .{
         .buffer = self.frame_buffers.chunk_data[current_frame],
@@ -1791,7 +1777,9 @@ fn recordTransparentPass(
 fn recordCompositionPass(
     self: *VulkanRenderer,
     cmd_buffer: vk.CommandBuffer,
-    image_index: u32,
+    extent: vk.Extent2D,
+    output_image: vk.Image,
+    output_view: vk.ImageView,
     current_frame: u32,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
@@ -1801,7 +1789,7 @@ fn recordCompositionPass(
         makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
-        makeImageBarrier2(self.swapchain.images[image_index], .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(output_image, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1813,11 +1801,11 @@ fn recordCompositionPass(
         .p_image_memory_barriers = &pre_comp_barriers,
     });
 
-    const swapchain_attachment = renderingAttachmentColor(self.swapchain.views[image_index], .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
-    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(self.swapchain.extent, &.{swapchain_attachment}, null));
+    const swapchain_attachment = renderingAttachmentColor(output_view, .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{swapchain_attachment}, null));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.oit.composition_pipeline);
-    self.setViewportAndScissor(cmd_buffer);
+    self.setViewportAndScissor(cmd_buffer, extent);
 
     const oit_desc_set: vk.DescriptorSet = self.oit.descriptor_sets_per_frame[current_frame];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.oit.composition_layout, 0, (&oit_desc_set)[0..1], null);
@@ -1826,7 +1814,7 @@ fn recordCompositionPass(
     self.dev.cmdEndRendering(cmd_buffer);
 
     const post_comp_barriers: [1]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(self.swapchain.images[image_index], .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_read_bit = true }, color_aspect),
+        makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_read_bit = true }, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1839,19 +1827,16 @@ fn recordCompositionPass(
     });
 }
 
-pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void {
+pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view_pos: @Vector(3, f64)) !void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
     try self.processPendingUploads(io);
     try self.processRetiredMeshes(io);
 
-    var current_frame = self.currentFrame();
-
-    // Ensure prior frames have finished utilizing the shared render targets.
-    for (self.swapchain.in_flight_fences) |fence| {
-        try self.waitFences((&fence)[0..1]);
-    }
+    const current_frame = self.current_frame;
+    const cmd_buffer = self.output_cmd_buffer;
+    const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
     if (self.frame_buffers.stats_mapped[current_frame]) |counts_ptr| {
         const opaque_count = counts_ptr[0].opaque_count;
@@ -1865,49 +1850,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
         self.frame_stats.transparent_culled = total_count -| transparent_count;
     }
 
-    const fence_reset: vk.Fence = self.swapchain.in_flight_fences[current_frame];
-    try self.dev.resetFences((&fence_reset)[0..1]);
-
-    if (self.swapchain.needs_recreate.load(.monotonic) or self.vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
-        self.swapchain.needs_recreate.store(false, .monotonic);
-        self.vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
-        {
-            const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "draw_recreateSwapchain_lock" });
-            self.vk_ctx.queue_mutex.lockUncancelable(io);
-            zone_lock.end();
-            defer self.vk_ctx.queue_mutex.unlock(io);
-            try self.dev.queueWaitIdle(self.graphics_queue);
-            try self.recreateSwapchainResourcesLocked(io);
-        }
-        current_frame = self.currentFrame();
-        try self.dev.resetFences(&.{self.swapchain.in_flight_fences[current_frame]});
-    }
-
-    const acquired = blk: {
-        const zone_acq = tracy.Zone.begin(.{ .src = @src(), .name = "draw_acquireSwapchainImage" });
-        defer zone_acq.end();
-        break :blk self.vk_ctx.acquireSwapchainImage(current_frame) catch |err| switch (err) {
-            error.OutOfDate => {
-                self.vk_ctx.queue_mutex.lockUncancelable(io);
-                defer self.vk_ctx.queue_mutex.unlock(io);
-                _ = self.dev.queueWaitIdle(self.graphics_queue) catch {};
-                try self.recreateSwapchainResourcesLocked(io);
-                const cf = self.currentFrame();
-                try self.dev.resetFences(&.{self.swapchain.in_flight_fences[cf]});
-                break :blk try self.vk_ctx.acquireSwapchainImage(cf);
-            },
-            else => return err,
-        };
-    };
-    self.updateSwapchainFields();
-    const image_index = acquired.image_index;
-    current_frame = acquired.frame;
-
-    self.vk_ctx.current_swapchain_image_index = image_index;
-
-    const cmd_buffer = self.swapchain.cmd_buffers[current_frame];
-
-    const aspect = @as(f32, @floatFromInt(self.viewport_pixels[0])) / @as(f32, @floatFromInt(self.viewport_pixels[1]));
+    const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
 
     {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "draw_lock_render_options" });
@@ -1953,8 +1896,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
     const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
     const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
 
-    self.recordOpaquePass(cmd_buffer, current_frame, total_candidates, pc, sky_color, view_pos, vp.frustum, depth_aspect_mask);
-    self.recordTransparentPass(cmd_buffer, current_frame, total_candidates, pc);
+    self.recordOpaquePass(cmd_buffer, extent, current_frame, total_candidates, pc, sky_color, view_pos, vp.frustum, depth_aspect_mask);
+    self.recordTransparentPass(cmd_buffer, extent, current_frame, total_candidates, pc);
 
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
@@ -1975,17 +1918,14 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64)) !void 
         self.frame_stats.log();
     }
 
-    self.recordCompositionPass(cmd_buffer, image_index, current_frame, depth_aspect_mask);
+    self.recordCompositionPass(cmd_buffer, extent, self.output_color_image, self.output_color_view, current_frame, depth_aspect_mask);
 
     try self.dev.endCommandBuffer(cmd_buffer);
-
-    try self.vk_ctx.submitFrame(io, current_frame, cmd_buffer);
-    try self.vk_ctx.presentSwapchainImage(io, current_frame, image_index);
 }
 
-fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.draw(io, view_pos) catch |err| switch (err) {
+    self.draw(io, target, view_pos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.DrawFailed,
     };
@@ -2158,7 +2098,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
 
     try self.index_pool.grow(io, self.allocator, @intCast(new_capacity));
 
-    const num_frames = self.swapchain.images.len;
+    const num_frames = self.vk_ctx.swapchain_images.len;
     for (0..num_frames) |i| {
         self.updateCullDescriptorSet(@intCast(i));
     }
@@ -2199,7 +2139,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
         self.destroyOitResources();
     }
 
-    const color = try self.createImageWithMemory(extent, self.swapchain.format, .{ .color_attachment_bit = true, .transfer_src_bit = true, .sampled_bit = true }, .{ .color_bit = true });
+    const color = try self.createImageWithMemory(extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .transfer_src_bit = true, .sampled_bit = true }, .{ .color_bit = true });
     self.render_color = color;
 
     {
@@ -2330,7 +2270,7 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
         self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
-    const num_frames = self.swapchain.images.len;
+    const num_frames = self.vk_ctx.swapchain_images.len;
     const pool_sizes: [1]vk.DescriptorPoolSize = .{
         .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames * 4) },
     };
@@ -2394,7 +2334,7 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
 }
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
-    const num_frames = self.swapchain.images.len;
+    const num_frames = self.vk_ctx.swapchain_images.len;
     const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
         .max_sets = @intCast(num_frames),
@@ -2589,7 +2529,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
             .alpha_blend_op = .add,
             .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
         };
-        self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, self.depth_format, depth_stencil, &.{blend}, self.graphics_state.opaque_pipeline_layout);
+        self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, self.depth_format, depth_stencil, &.{blend}, self.graphics_state.opaque_pipeline_layout);
     }
 
     // 2. Transparent Pipeline
@@ -2733,9 +2673,9 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
-    self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.swapchain.format}, .undefined, null, &.{blend}, self.oit.composition_layout);
+    self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{blend}, self.oit.composition_layout);
 
-    const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.swapchain.images.len * 3) };
+    const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.vk_ctx.swapchain_images.len * 3) };
     try self.createFrameDescriptorPool(&self.oit.descriptor_pool, self.oit.descriptor_set_layout, &self.oit.descriptor_sets_per_frame, (&pool_size)[0..1]);
     self.updateOitDescriptorSets();
 }
@@ -2743,7 +2683,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
 fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const num_frames = self.swapchain.images.len;
+    const num_frames = self.vk_ctx.swapchain_images.len;
     const image_infos: [3]vk.DescriptorImageInfo = .{
         .{ .sampler = self.oit.sampler, .image_view = self.render_color.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.accum.view, .image_layout = .shader_read_only_optimal },
@@ -2767,19 +2707,6 @@ fn destroyOitPipelinesAndDescriptors(self: *VulkanRenderer) void {
         self.dev.destroySampler(self.oit.sampler, null);
         self.oit.sampler = .null_handle;
     }
-}
-
-fn currentFrame(self: *const VulkanRenderer) u32 {
-    return @intCast(self.vk_ctx.currentFrame() % self.swapchain.in_flight_fences.len);
-}
-
-fn waitFences(self: *VulkanRenderer, fences: []const vk.Fence) error{DrawFailed}!void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "waitFences" });
-    defer zone.end();
-
-    const timeout_ns: u64 = 2 * std.time.ns_per_s;
-    const result = self.dev.waitForFences(fences, .true, timeout_ns) catch return error.DrawFailed;
-    if (result != .success) return error.DrawFailed;
 }
 
 fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
@@ -2882,7 +2809,7 @@ fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vect
             .width = viewport_pixels[0],
             .height = viewport_pixels[1],
         };
-        self.swapchain.needs_recreate.store(true, .monotonic);
+        self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
     }
 }
 fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {

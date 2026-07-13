@@ -260,8 +260,9 @@ fn ensureContext(self: *@This()) !void {
     gl.makeProcTableCurrent(self.proc_table);
 }
 
-fn vtableDrawChunks(userdata: *Renderer.Implementation, io: std.Io, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
+fn vtableDrawChunks(userdata: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, viewpos: @Vector(3, f64)) error{DrawFailed}!void {
     const self: *OpenGLRenderer = @ptrCast(@alignCast(userdata));
+    _ = target;
     gl.makeProcTableCurrent(self.proc_table);
     self.window.glMakeContextCurrent(self.draw_context);
     gl.BindFramebuffer(gl.FRAMEBUFFER, self.fbo);
