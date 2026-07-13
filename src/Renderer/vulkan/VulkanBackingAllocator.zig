@@ -234,6 +234,7 @@ pub const VulkanBackingAllocator = struct {
                 .shader_device_address_bit = true,
                 .storage_buffer_bit = true,
                 .indirect_buffer_bit = true,
+                .vertex_buffer_bit = true,
             },
             .sharing_mode = .exclusive,
             .queue_family_index_count = 0,

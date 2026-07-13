@@ -13,23 +13,17 @@ layout(push_constant) uniform PushConsts {
     PushConstants pc;
 } push_consts;
 
+layout(location = 0) in uvec2 in_address;
+layout(location = 1) in vec4 in_absolute_position;
+layout(location = 2) in vec4 in_relative_position;
+layout(location = 3) in float in_scale;
+
 layout(location = 1) out vec3 out_coords;
 layout(location = 2) out vec3 fragpos;
 layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
 layout(location = 7) out float view_space_depth;
-
-struct ChunkData {
-    uint64_t address;
-    vec4 absolute_position;
-    vec4 relative_position;
-    float scale;
-};
-
-layout(std430, binding = 0) buffer chunks_buffer {
-    ChunkData chunks[];
-};
 
 layout(buffer_reference, std430) buffer MeshFaces {
     uint64_t faces[];
@@ -85,16 +79,16 @@ float bouncingMod(float x, float n) {
 }
 
 void main() {
-    ChunkData chunk = chunks[gl_InstanceIndex];
-    vec3 relative_position = chunk.relative_position.xyz;
-    vec3 absolute_position = chunk.absolute_position.xyz;
-    float scale = chunk.scale;
+    uint64_t chunk_address = packUint2x32(in_address);
+    vec3 relative_position = in_relative_position.xyz;
+    vec3 absolute_position = in_absolute_position.xyz;
+    float scale = in_scale;
 
     uint face_in_chunk = gl_VertexIndex / 6u;
     const uint quad_indices[6] = uint[6](0u, 1u, 2u, 0u, 2u, 3u);
     uint local_vertex = quad_indices[gl_VertexIndex % 6u];
 
-    uint64_t val = getPackedData(chunk.address, face_in_chunk);
+    uint64_t val = getPackedData(chunk_address, face_in_chunk);
     uvec3 local_pos = decodePosition(val);
     uvec3 lengths   = decodeLengths(val);
     uint block_type_local = decodeBlockType(val);

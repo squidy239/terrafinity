@@ -1494,7 +1494,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
 
     const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
         makeBufferBarrier2(self.frame_buffers.indirect_draw[current_frame], self.frame_buffers.indirect_draw_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
-        makeBufferBarrier2(self.frame_buffers.chunk_data[current_frame], self.frame_buffers.chunk_data_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.chunk_data[current_frame], self.frame_buffers.chunk_data_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_input_bit = true }, .{ .vertex_attribute_read_bit = true }),
         makeBufferBarrier2(self.frame_buffers.count[current_frame], self.frame_buffers.count_offsets[current_frame], @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
@@ -1624,33 +1624,17 @@ fn recordOpaquePass(
 
     self.setViewportAndScissor(cmd_buffer, extent);
 
-    const buffer_info: vk.DescriptorBufferInfo = .{
-        .buffer = self.frame_buffers.chunk_data[current_frame],
-        .offset = self.frame_buffers.chunk_data_offsets[current_frame],
-        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
-    };
     const texture_image_info: vk.DescriptorImageInfo = .{
         .image_layout = .shader_read_only_optimal,
         .image_view = self.texture_manager.texture_view,
         .sampler = self.texture_manager.sampler,
     };
-    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const writes: [2]vk.WriteDescriptorSet = .{
+    const writes: [1]vk.WriteDescriptorSet = .{
         .{
             .dst_set = .null_handle,
             .dst_binding = 0,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .storage_buffer,
-            .p_image_info = (&dummy_image_info)[0..1],
-            .p_buffer_info = (&buffer_info)[0..1],
-            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-        },
-        .{
-            .dst_set = .null_handle,
-            .dst_binding = 1,
             .dst_array_element = 0,
             .descriptor_count = 1,
             .descriptor_type = .combined_image_sampler,
@@ -1666,6 +1650,10 @@ fn recordOpaquePass(
     if (total_candidates > 0) {
         const opaque_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame];
         const opaque_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame];
+
+        const chunk_data_buffer = self.frame_buffers.chunk_data[current_frame];
+        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.chunk_data_offsets[current_frame];
+        self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&chunk_data_buffer)[0..1], (&chunk_data_offset)[0..1]);
 
         self.dev.cmdDrawIndirectCount(
             cmd_buffer,
@@ -1713,11 +1701,6 @@ fn recordTransparentPass(
     self.dev.cmdSetDepthWriteEnable(cmd_buffer, .false);
     self.setViewportAndScissor(cmd_buffer, extent);
 
-    const buffer_info: vk.DescriptorBufferInfo = .{
-        .buffer = self.frame_buffers.chunk_data[current_frame],
-        .offset = self.frame_buffers.chunk_data_offsets[current_frame],
-        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
-    };
     const texture_image_info: vk.DescriptorImageInfo = .{
         .image_layout = .shader_read_only_optimal,
         .image_view = self.texture_manager.texture_view,
@@ -1728,23 +1711,12 @@ fn recordTransparentPass(
         .image_view = self.render_depth_sampled_view,
         .sampler = self.texture_manager.sampler,
     };
-    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const writes: [3]vk.WriteDescriptorSet = .{
+    const writes: [2]vk.WriteDescriptorSet = .{
         .{
             .dst_set = .null_handle,
             .dst_binding = 0,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .storage_buffer,
-            .p_image_info = (&dummy_image_info)[0..1],
-            .p_buffer_info = (&buffer_info)[0..1],
-            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-        },
-        .{
-            .dst_set = .null_handle,
-            .dst_binding = 1,
             .dst_array_element = 0,
             .descriptor_count = 1,
             .descriptor_type = .combined_image_sampler,
@@ -1754,7 +1726,7 @@ fn recordTransparentPass(
         },
         .{
             .dst_set = .null_handle,
-            .dst_binding = 2,
+            .dst_binding = 1,
             .dst_array_element = 0,
             .descriptor_count = 1,
             .descriptor_type = .combined_image_sampler,
@@ -1769,6 +1741,10 @@ fn recordTransparentPass(
     if (total_candidates > 0) {
         const transparent_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame] + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
         const transparent_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame] + @as(vk.DeviceSize, 4);
+
+        const chunk_data_buffer = self.frame_buffers.chunk_data[current_frame];
+        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.chunk_data_offsets[current_frame];
+        self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&chunk_data_buffer)[0..1], (&chunk_data_offset)[0..1]);
 
         self.dev.cmdDrawIndirectCount(
             cmd_buffer,
@@ -2183,9 +2159,8 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
 fn createOpaqueDescriptorSetLayout(self: *VulkanRenderer) !void {
     if (self.graphics_state.opaque_descriptor_set_layout == .null_handle) {
-        const bindings: [2]vk.DescriptorSetLayoutBinding = .{
-            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
-            .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        const bindings: [1]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
         var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] };
         self.graphics_state.opaque_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
@@ -2194,10 +2169,9 @@ fn createOpaqueDescriptorSetLayout(self: *VulkanRenderer) !void {
 
 fn createTransparentDescriptorSetLayout(self: *VulkanRenderer) !void {
     if (self.graphics_state.transparent_descriptor_set_layout == .null_handle) {
-        const bindings: [3]vk.DescriptorSetLayoutBinding = .{
-            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
+        const bindings: [2]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-            .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
         var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] };
         self.graphics_state.transparent_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
@@ -2364,12 +2338,23 @@ fn buildGraphicsPipeline(
         .p_dynamic_states = dyn_states.items.ptr,
     };
 
+    const instance_binding: vk.VertexInputBindingDescription = .{
+        .binding = 0,
+        .stride = @sizeOf(ChunkData),
+        .input_rate = .instance,
+    };
+    const instance_attributes: [4]vk.VertexInputAttributeDescription = .{
+        .{ .location = 0, .binding = 0, .format = .r32g32_uint, .offset = 0 },
+        .{ .location = 1, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = 16 },
+        .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = 32 },
+        .{ .location = 3, .binding = 0, .format = .r32_sfloat, .offset = 48 },
+    };
     const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
-        .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = null,
-        .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = null,
+        .vertex_binding_description_count = 1,
+        .p_vertex_binding_descriptions = (&instance_binding)[0..1],
+        .vertex_attribute_description_count = instance_attributes.len,
+        .p_vertex_attribute_descriptions = &instance_attributes,
     };
     const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
         shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),

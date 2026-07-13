@@ -816,18 +816,17 @@ fn debugCallback(
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
     switch (cb_data.message_id_number) {
-        //TODO add the ids of false positives
         else => {},
     }
-    
+
     if (message_severity.error_bit_ext) {
-        vklog.err("Id: {d}, {s}", .{cb_data.message_id_number, msg});
+        vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.warning_bit_ext) {
-        vklog.warn("Id: {d}, {s}", .{cb_data.message_id_number, msg});
+        vklog.warn("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.info_bit_ext) {
-        vklog.info("Id: {d}, {s}", .{cb_data.message_id_number, msg});
+        vklog.info("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.verbose_bit_ext) {
-        vklog.debug("Id: {d}, {s}", .{cb_data.message_id_number, msg});
+        vklog.debug("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     }
     return .false;
 }

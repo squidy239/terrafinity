@@ -11,8 +11,8 @@ layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
 layout(location = 7) in float view_space_depth;
-layout(binding = 1) uniform sampler2DArray texture_array;
-layout(binding = 2) uniform sampler2D opaque_depth_texture;
+layout(binding = 0) uniform sampler2DArray texture_array;
+layout(binding = 1) uniform sampler2D opaque_depth_texture;
 
 struct PushConstants {
     mat4 projview;
