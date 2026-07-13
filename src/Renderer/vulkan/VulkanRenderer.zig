@@ -1903,7 +1903,6 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
 
     const frame_num = self.vk_ctx.frame_number.load(.monotonic) + 1;
-    self.vk_ctx.frame_number.store(frame_num, .release);
     self.frame_stats.frame_number = frame_num;
     self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
