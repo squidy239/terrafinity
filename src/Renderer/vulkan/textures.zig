@@ -375,7 +375,7 @@ pub const TextureArrayManager = struct {
             source_stage = .{ .transfer_bit = true };
             dest_stage = .{ .transfer_bit = true };
         } else if (old_layout == .transfer_src_optimal and new_layout == .shader_read_only_optimal) {
-            barrier.src_access_mask = .{ .transfer_read_bit = true };
+            barrier.src_access_mask = .{ .transfer_read_bit = true, .transfer_write_bit = true };
             barrier.dst_access_mask = .{ .shader_read_bit = true };
             source_stage = .{ .transfer_bit = true };
             dest_stage = .{ .fragment_shader_bit = true };

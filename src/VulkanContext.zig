@@ -1,4 +1,7 @@
 const std = @import("std");
+
+const options = @import("options");
+const tracy = @import("tracy");
 const vk = @import("vulkan");
 const BaseWrapper = vk.BaseWrapper;
 const InstanceWrapper = vk.InstanceWrapper;
@@ -6,8 +9,6 @@ const DeviceWrapper = vk.DeviceWrapper;
 const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
-const options = @import("options");
-const tracy = @import("tracy");
 
 pub const PresentMode = enum {
     vsync,
@@ -49,7 +50,6 @@ image_acquired_semaphores: []vk.Semaphore = &.{},
 render_complete_semaphores: []vk.Semaphore = &.{},
 in_flight_fences: []vk.Fence = &.{},
 current_frame_idx: std.atomic.Value(u32) = .init(0),
-current_swapchain_image_index: u32 = 0,
 
 swapchain: vk.SwapchainKHR = .null_handle,
 swapchain_format: vk.Format = .b8g8r8a8_srgb,
@@ -85,7 +85,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
     var best_score: u32 = 0;
 
     for (pdevs) |pdev| {
-        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{ .dynamic_rendering = .false, .p_next = null };
+        var robustness2_features: vk.PhysicalDeviceRobustness2FeaturesEXT = .{ .robust_buffer_access_2 = .false, .robust_image_access_2 = .false, .null_descriptor = .false, .p_next = null };
+        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{ .dynamic_rendering = .false, .p_next = @ptrCast(&robustness2_features) };
         var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{ .synchronization_2 = .false, .p_next = @ptrCast(&dynamic_rendering_features) };
         var features12: vk.PhysicalDeviceVulkan12Features = .{
             .draw_indirect_count = .false,
@@ -96,14 +97,16 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             .timeline_semaphore = .false,
             .p_next = @ptrCast(&sync2_features),
         };
-        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false }, .p_next = @ptrCast(&features12) };
+        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false, .shader_int_64 = .false, .independent_blend = .false }, .p_next = @ptrCast(&features12) };
         self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
 
         const required = features2.features.multi_draw_indirect == .true and
+            features2.features.shader_int_64 == .true and features2.features.independent_blend == .true and
             features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
             features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
             features12.buffer_device_address == .true and features12.timeline_semaphore == .true and
-            sync2_features.synchronization_2 == .true and dynamic_rendering_features.dynamic_rendering == .true;
+            sync2_features.synchronization_2 == .true and dynamic_rendering_features.dynamic_rendering == .true and
+            robustness2_features.null_descriptor == .true;
         if (!required) continue;
 
         var has_graphics = false;
@@ -141,14 +144,14 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
 fn selectQueueFamilies(self: *VulkanContext, allocator: std.mem.Allocator) !struct { graphics: u32, present: u32, transfer: u32 } {
     const queue_families = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.pdev, allocator);
     defer allocator.free(queue_families);
-    var graphics_family: u32 = 0;
-    var present_family: u32 = 0;
+    var graphics_family: u32 = std.math.maxInt(u32);
+    var present_family: u32 = std.math.maxInt(u32);
     var transfer_family: ?u32 = null;
     var transfer_score: u8 = 0;
     for (queue_families, 0..) |qf, i| {
         const family: u32 = @intCast(i);
-        if (graphics_family == 0 and qf.queue_flags.graphics_bit) graphics_family = family;
-        if (present_family == 0 and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) present_family = family;
+        if (graphics_family == std.math.maxInt(u32) and qf.queue_flags.graphics_bit) graphics_family = family;
+        if (present_family == std.math.maxInt(u32) and (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, family, self.surface)) == .true) present_family = family;
         if (qf.queue_flags.transfer_bit) {
             const score: u8 = if (!qf.queue_flags.graphics_bit and !qf.queue_flags.compute_bit) 3 else if (!qf.queue_flags.graphics_bit) 2 else 1;
             if (score > transfer_score) {
@@ -156,6 +159,11 @@ fn selectQueueFamilies(self: *VulkanContext, allocator: std.mem.Allocator) !stru
                 transfer_score = score;
             }
         }
+    }
+    if (present_family != graphics_family and
+        (try self.instance.getPhysicalDeviceSurfaceSupportKHR(self.pdev, graphics_family, self.surface)) == .true)
+    {
+        present_family = graphics_family;
     }
     return .{ .graphics = graphics_family, .present = present_family, .transfer = transfer_family orelse graphics_family };
 }
@@ -245,11 +253,11 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     };
 
     self.instance_handle = try self.vkb.createInstance(&instance_create_info, null);
-    errdefer {
+    errdefer if (self.instance_wrapper == null) {
         var local_wrapper = InstanceWrapper.load(self.instance_handle, getProcAddr);
         const local_instance = InstanceProxy.init(self.instance_handle, &local_wrapper);
         local_instance.destroyInstance(null);
-    }
+    };
 
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
 
@@ -310,12 +318,22 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.present_queue_family_index = qfamilies.present;
     self.transfer_queue_family_index = qfamilies.transfer;
 
-    const device_extensions: [4][*:0]const u8 = .{
-        vk.extensions.khr_swapchain.name,
-        vk.extensions.khr_dynamic_rendering.name,
-        vk.extensions.ext_robustness_2.name,
-        vk.extensions.khr_push_descriptor.name,
-    };
+    var device_extensions: []const [*:0]const u8 = &.{};
+    if (has_push_desc) {
+        device_extensions = &.{
+            vk.extensions.khr_swapchain.name,
+            vk.extensions.khr_dynamic_rendering.name,
+            vk.extensions.ext_robustness_2.name,
+            vk.extensions.khr_push_descriptor.name,
+        };
+    } else {
+        std.log.warn("VK_KHR_push_descriptor not supported, device creation will likely fail", .{});
+        device_extensions = &.{
+            vk.extensions.khr_swapchain.name,
+            vk.extensions.khr_dynamic_rendering.name,
+            vk.extensions.ext_robustness_2.name,
+        };
+    }
 
     const queue_priority: f32 = 1.0;
     var queue_create_infos: [3]vk.DeviceQueueCreateInfo = undefined;
@@ -376,8 +394,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .p_queue_create_infos = queue_create_infos[0..queue_count].ptr,
         .enabled_layer_count = 0,
         .pp_enabled_layer_names = null,
-        .enabled_extension_count = device_extensions.len,
-        .pp_enabled_extension_names = device_extensions[0..],
+        .enabled_extension_count = @intCast(device_extensions.len),
+        .pp_enabled_extension_names = device_extensions.ptr,
         .p_enabled_features = null,
         .p_next = @ptrCast(&features),
     };
@@ -470,9 +488,9 @@ fn destroySwapchainSyncResources(self: *VulkanContext) void {
     for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     for (self.in_flight_fences) |fence| if (fence != .null_handle) self.dev.destroyFence(fence, null);
-    self.allocator.free(self.image_acquired_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
-    self.allocator.free(self.in_flight_fences);
+    if (self.image_acquired_semaphores.len > 0) self.allocator.free(self.image_acquired_semaphores);
+    if (self.render_complete_semaphores.len > 0) self.allocator.free(self.render_complete_semaphores);
+    if (self.in_flight_fences.len > 0) self.allocator.free(self.in_flight_fences);
     self.image_acquired_semaphores = &.{};
     self.render_complete_semaphores = &.{};
     self.in_flight_fences = &.{};
@@ -497,11 +515,11 @@ fn allocateSwapchainSyncResources(self: *VulkanContext, num_images: u32) !void {
 }
 
 fn destroySwapchainResources(self: *VulkanContext) void {
-    self.dev.deviceWaitIdle() catch {};
+    self.dev.deviceWaitIdle() catch |err| std.log.err("deviceWaitIdle failed: {}", .{err});
 
     for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
-    self.allocator.free(self.swapchain_images);
-    self.allocator.free(self.swapchain_views);
+    if (self.swapchain_images.len > 0) self.allocator.free(self.swapchain_images);
+    if (self.swapchain_views.len > 0) self.allocator.free(self.swapchain_views);
     self.swapchain_images = &.{};
     self.swapchain_views = &.{};
 
@@ -514,8 +532,7 @@ fn destroySwapchainResources(self: *VulkanContext) void {
     self.destroySwapchainSyncResources();
 }
 
-pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
-    _ = io;
+pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void {
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
@@ -530,9 +547,9 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         self.destroySwapchainResources();
     }
 
-    const actual_extent = if (caps.current_extent.width != 0xFFFF_FFFF) caps.current_extent else vk.Extent2D{
-        .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, @min(caps.max_image_extent.width, 3840)),
-        .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, @min(caps.max_image_extent.height, 2160)),
+    const actual_extent = if (!(caps.current_extent.width == 0xFFFFFFFF and caps.current_extent.height == 0xFFFFFFFF)) caps.current_extent else vk.Extent2D{
+        .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
+        .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
     };
 
     self.swapchain_extent = actual_extent;
@@ -594,16 +611,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         caps.max_image_count,
     });
 
-    const qfi: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
-    const sharing_mode: vk.SharingMode = if (self.queue_family_index != self.present_queue_family_index) .concurrent else .exclusive;
-
-    errdefer {
-        if (old_swapchain != .null_handle) {
-            self.dev.destroySwapchainKHR(old_swapchain, null);
-            self.swapchain = .null_handle;
-        }
-    }
-
+    const queue_family_indices: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
     self.swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
         .min_image_count = image_count,
@@ -612,9 +620,9 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         .image_extent = actual_extent,
         .image_array_layers = 1,
         .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
-        .image_sharing_mode = sharing_mode,
-        .queue_family_index_count = if (sharing_mode == .concurrent) @as(u32, qfi.len) else 0,
-        .p_queue_family_indices = if (sharing_mode == .concurrent) &qfi else null,
+        .image_sharing_mode = if (self.queue_family_index == self.present_queue_family_index) .exclusive else .concurrent,
+        .queue_family_index_count = if (self.queue_family_index == self.present_queue_family_index) 0 else 2,
+        .p_queue_family_indices = if (self.queue_family_index == self.present_queue_family_index) null else &queue_family_indices,
         .pre_transform = caps.current_transform,
         .composite_alpha = .{ .opaque_bit_khr = true },
         .present_mode = present_mode,
@@ -678,6 +686,28 @@ pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
 
+pub const FrameContext = struct {
+    frame_index: u32,
+    image_index: u32,
+    cmd_buffer: vk.CommandBuffer,
+};
+
+pub fn beginFrame(self: *VulkanContext) !FrameContext {
+    const timeout: u64 = 2 * std.time.ns_per_s;
+    const current_frame = self.currentFrame();
+    {
+        const wait_result = try self.dev.waitForFences((&self.in_flight_fences[current_frame])[0..1], .true, timeout);
+        if (wait_result != .success) return error.DrawFailed;
+    }
+    try self.dev.resetFences((&self.in_flight_fences[current_frame])[0..1]);
+    const acquire = try self.acquireSwapchainImage(current_frame);
+    return .{
+        .frame_index = acquire.frame,
+        .image_index = acquire.image_index,
+        .cmd_buffer = self.cmd_buffers[acquire.frame],
+    };
+}
+
 pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !struct { image_index: u32, frame: u32 } {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "acquireSwapchainImage" });
     defer zone.end();
@@ -707,12 +737,12 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, current_frame_idx: u32, cmd
 
     const wait_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
         .{ .semaphore = self.image_acquired_semaphores[current_frame_idx], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
-        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .compute_shader_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
     const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
         .{ .semaphore = self.render_complete_semaphores[current_frame_idx], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
-        .{ .semaphore = self.graphics_timeline_semaphore, .value = self.frame_number.load(.monotonic), .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.graphics_timeline_semaphore, .value = self.frame_number.load(.acquire), .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
     const cmd_buffer_info: vk.CommandBufferSubmitInfo = .{ .command_buffer = cmd_buffer, .device_mask = 0 };
@@ -739,8 +769,8 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, current_frame_idx: u32, cmd
     }
 }
 
-pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx: u32, image_index: u32) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage" });
+pub fn present(self: *VulkanContext, io: std.Io, current_frame_idx: u32, image_index: u32) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "present" });
     defer zone.end();
 
     const present_info: vk.PresentInfoKHR = .{
@@ -752,7 +782,7 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
         .p_results = null,
     };
     const present_result = blk: {
-        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "presentSwapchainImage_lock_queue" });
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "present_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
         zone_lock.end();
         defer self.queue_mutex.unlock(io);
@@ -767,7 +797,7 @@ pub fn presentSwapchainImage(self: *VulkanContext, io: std.Io, current_frame_idx
     } else if (present_result == .suboptimal_khr) {
         const next_frame = (current_frame_idx + 1) % @as(u32, @intCast(self.in_flight_fences.len));
         self.current_frame_idx.store(next_frame, .monotonic);
-        self.swapchain_needs_recreate.store(true, .release);
+        self.swapchain_needs_recreate.store(true, .monotonic);
     }
 }
 
@@ -782,7 +812,7 @@ fn debugCallback(
     _ = p_user_data;
     _ = message_types;
     if (message_severity.error_bit_ext) {
-        vklog.err("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
+        std.debug.panic("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
     } else if (message_severity.warning_bit_ext) {
         vklog.warn("{s}", .{(p_callback_data orelse return .false).p_message orelse return .false});
     } else if (message_severity.info_bit_ext) {

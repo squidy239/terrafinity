@@ -339,5 +339,24 @@ sets[i] = desc_set;
 try dev.allocateDescriptorSets(&info, (&sets[i])[0..1]);
 ```
 
+## Per-Frame Fence Wait Pattern
+
+In a multi-buffered Vulkan render loop, wait for **only the current frame's fence**, not all in-flight fences. Each swapchain image slot maps to one fence; waiting for all of them is overly conservative and introduces dependency on ALL prior submissions completing, which can cause hangs.
+
+```zig
+// ✓ CORRECT — wait only for the current ring-buffer slot's fence
+const current_frame = self.currentFrame();
+_ = try self.dev.waitForFences((&self.in_flight_fences[current_frame])[0..1], .true, timeout);
+try self.dev.resetFences((&self.in_flight_fences[current_frame])[0..1]);
+
+// ✗ WRONG — waiting for every fence makes frame N+1 wait for frame 1's fence
+// which may not be signaled yet (even though that slot's resources are not reused yet)
+for (self.in_flight_fences) |fence| {
+    _ = try self.dev.waitForFences((&fence)[0..1], .true, timeout);
+}
+```
+
+This is especially important after swapchain recreation: the new fences are created SIGNALED, and old fences are destroyed. The "wait all" loop tries to wait for a fence from a previous submission cycle (which wasn't signaled because the recreation happened between submit and signal).
+
 # Modify this file with things you learned or changes you think would be beneficial
 - Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.

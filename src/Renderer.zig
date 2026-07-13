@@ -11,10 +11,15 @@ vtable: *const VTable,
 userdata: *Implementation,
 last_viewport: ?@Vector(2, u32) = null,
 
+pub const DrawTarget = struct {
+    width: u32,
+    height: u32,
+};
+
 pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
     addChunk: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
-    draw: *const fn (*Implementation, io: std.Io, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
+    draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     setViewport: *const fn (*Implementation, @Vector(2, u32)) error{ViewportSetFailed}!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
     forEachChunk: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void,
@@ -34,8 +39,8 @@ pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
-pub fn draw(self: *@This(), io: std.Io, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
-    return self.vtable.draw(self.userdata, io, viewpos);
+pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+    return self.vtable.draw(self.userdata, io, target, viewpos);
 }
 
 ///sets the viewport dimensions in pixels, this function should only be called on the main thread
