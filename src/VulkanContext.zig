@@ -196,20 +196,6 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .api_version = vk.API_VERSION_1_3.toU32(),
     };
 
-    var enabled_layers: std.ArrayListUnmanaged([*:0]const u8) = .empty;
-    defer enabled_layers.deinit(allocator);
-
-    const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
-    defer allocator.free(layers);
-
-    for (layers) |layer| {
-        const name = std.mem.sliceTo(&layer.layer_name, 0);
-        if (std.mem.eql(u8, name, "VK_LAYER_KHRONOS_validation")) {
-            try enabled_layers.append(allocator, "VK_LAYER_KHRONOS_validation");
-            break;
-        }
-    }
-
     var extension_names: std.ArrayListUnmanaged([*:0]const u8) = .empty;
     defer extension_names.deinit(allocator);
 
@@ -234,8 +220,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     const instance_create_info: vk.InstanceCreateInfo = .{
         .flags = .{ .enumerate_portability_bit_khr = has_portability },
         .p_application_info = &app_info,
-        .enabled_layer_count = @intCast(enabled_layers.items.len),
-        .pp_enabled_layer_names = @ptrCast(enabled_layers.items.ptr),
+        .enabled_layer_count = 0,
+        .pp_enabled_layer_names = null,
         .enabled_extension_count = @intCast(extension_names.items.len),
         .pp_enabled_extension_names = @ptrCast(extension_names.items.ptr),
     };
