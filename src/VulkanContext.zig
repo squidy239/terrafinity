@@ -743,7 +743,7 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
     };
 
     const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
-        .{ .semaphore = self.render_complete_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.render_complete_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .bottom_of_pipe_bit = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = current_graphics_val, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
@@ -814,16 +814,20 @@ fn debugCallback(
     _ = p_user_data;
     _ = message_types;
     const cb_data = p_callback_data orelse return .false;
-    const msg = cb_data.p_message orelse return .false;
-
+    const msg = std.mem.span(cb_data.p_message orelse return .false);
+    switch (cb_data.message_id_number) {
+        //TODO add the ids of false positives
+        else => {},
+    }
+    
     if (message_severity.error_bit_ext) {
-        std.debug.panic("{s}", .{msg});
+        vklog.err("Id: {d}, {s}", .{cb_data.message_id_number, msg});
     } else if (message_severity.warning_bit_ext) {
-        vklog.warn("{s}", .{msg});
+        vklog.warn("Id: {d}, {s}", .{cb_data.message_id_number, msg});
     } else if (message_severity.info_bit_ext) {
-        vklog.info("{s}", .{msg});
+        vklog.info("Id: {d}, {s}", .{cb_data.message_id_number, msg});
     } else if (message_severity.verbose_bit_ext) {
-        vklog.debug("{s}", .{msg});
+        vklog.debug("Id: {d}, {s}", .{cb_data.message_id_number, msg});
     }
     return .false;
 }

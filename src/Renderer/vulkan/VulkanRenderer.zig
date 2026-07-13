@@ -1824,7 +1824,7 @@ fn recordCompositionPass(
     self.dev.cmdEndRendering(cmd_buffer);
 
     const post_comp_barriers: [1]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_read_bit = true }, color_aspect),
+        makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},

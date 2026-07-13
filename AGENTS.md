@@ -360,3 +360,9 @@ This is especially important after swapchain recreation: the new fences are crea
 
 # Modify this file with things you learned or changes you think would be beneficial
 - Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.
+
+## MangoHud and Vulkan Synchronization Validation
+When using `mangohud` combined with Vulkan Synchronization Validation (`VK_VALIDATION_VALIDATE_SYNC=1`), you may encounter `SYNC-HAZARD-READ-AFTER-WRITE` validation errors. This is due to a known issue where MangoHud's injected `vkCmdBeginRenderPass` issues a `VK_ATTACHMENT_LOAD_OP_LOAD` without a proper execution dependency on the application's prior layout transitions to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`. These errors are technically MangoHud bugs rather than application bugs. You can safely ignore validation messages containing `0xe4d96472` and `vkCmdBeginRenderPass`.
+
+## `deviceWaitIdle` and Timeline Semaphore Synchronization False Positives
+Mixing `vkDeviceWaitIdle` with timeline semaphore synchronization (e.g. during buffer capacity reallocations) can confuse the synchronization validation layer, resulting in false positive `SYNC-HAZARD-WRITE-RACING-WRITE` errors on `vkQueueSubmit2`. The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait stage and the device idle state. You can safely ignore validation messages containing `0x743c6069` when a timeline semaphore and `deviceWaitIdle` are involved.
