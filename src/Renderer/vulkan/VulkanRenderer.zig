@@ -522,6 +522,10 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
     const present_mode = self.render_options.present_mode;
     self.render_options_lock.unlockShared(io);
     self.vk_ctx.present_mode = present_mode;
+
+    try self.dev.deviceWaitIdle();
+    try self.dev.resetCommandPool(self.vk_ctx.command_pool, .{});
+
     try self.vk_ctx.createSwapchainLocked(gamma_correction);
 
     self.destroyRendererSwapchainResources();
@@ -663,6 +667,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     errdefer self.index_pool.deinit(allocator);
     self.max_allocated_index = .init(0);
 
+    self.pending_uploads_queue_buffer = try allocator.alloc(PendingChunkUpload, pending_queue_size);
+    errdefer allocator.free(self.pending_uploads_queue_buffer);
+    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(self.pending_uploads_queue_buffer);
+    self.peeked_upload = null;
+
     try self.recreateSwapchainResourcesLocked(io);
 
     try self.createOpaqueDescriptorSetLayout();
@@ -679,11 +688,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
 
     try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512, allocator);
     errdefer self.pool_reservoir.deinit(self.dev, allocator);
-
-    self.pending_uploads_queue_buffer = try allocator.alloc(PendingChunkUpload, pending_queue_size);
-    errdefer allocator.free(self.pending_uploads_queue_buffer);
-    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(self.pending_uploads_queue_buffer);
-    self.peeked_upload = null;
 
     self.interface = .{
         .userdata = @ptrCast(self),
@@ -853,19 +857,14 @@ pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_m
     }
 }
 
-fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatchLocked" });
+fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatchAlreadyLocked" });
     defer zone.end();
 
     const count = self.submission_batch.count;
     if (count == 0) return;
 
     const next_val = blk: {
-        const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock_queue" });
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        zone_queue.end();
-        defer self.vk_ctx.queue_mutex.unlock(io);
-
         // Load current value and compute next WITHOUT pre-incrementing.
         const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
 
@@ -938,6 +937,16 @@ fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     self.submission_batch.count = 0;
+}
+
+fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
+    const count = self.submission_batch.count;
+    if (count == 0) return;
+    const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock_queue" });
+    self.vk_ctx.queue_mutex.lockUncancelable(io);
+    zone_queue.end();
+    defer self.vk_ctx.queue_mutex.unlock(io);
+    try self.submitBatchAlreadyLocked(io);
 }
 
 fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) !void {
@@ -1537,6 +1546,7 @@ fn recordOpaquePass(
     frustum: Frustum,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
+    // Frame-start synchronization to prevent cross-frame race conditions on the shared render targets.
     // Frame-start synchronization to prevent cross-frame race conditions on the shared render targets.
     const pre_dispatch_mem_barrier: vk.MemoryBarrier2 = .{
         .src_stage_mask = .{ .all_commands_bit = true },
@@ -2141,23 +2151,6 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     const color = try self.createImageWithMemory(extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .transfer_src_bit = true, .sampled_bit = true }, .{ .color_bit = true });
     self.render_color = color;
 
-    {
-        const cmd = try self.beginSingleTimeCommands();
-        cmdImageBarrier2(
-            cmd,
-            self.dev,
-            self.render_color.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .top_of_pipe_bit = true },
-            .{},
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            .{ .color_bit = true },
-        );
-        try self.endSingleTimeCommandsLocked(cmd);
-    }
-
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
     var depth_format: vk.Format = .undefined;
     for (depth_formats) |fmt| {
@@ -2174,58 +2167,12 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     self.render_depth = depth;
     self.render_depth_sampled_view = try self.dev.createImageView(&imageViewCreateInfo(depth.image, depth_format, .{ .depth_bit = true }), null);
 
-    {
-        const cmd = try self.beginSingleTimeCommands();
-        cmdImageBarrier2(
-            cmd,
-            self.dev,
-            self.render_depth.image,
-            .undefined,
-            .depth_stencil_attachment_optimal,
-            .{ .top_of_pipe_bit = true },
-            .{},
-            .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-            .{ .depth_stencil_attachment_write_bit = true },
-            depth_aspect_mask,
-        );
-        try self.endSingleTimeCommandsLocked(cmd);
-    }
-
     const oit_usage: vk.ImageUsageFlags = .{ .color_attachment_bit = true, .sampled_bit = true };
     const oit_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const accum = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
     self.oit.accum = accum;
     const reveal = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
     self.oit.reveal = reveal;
-
-    {
-        const cmd = try self.beginSingleTimeCommands();
-        cmdImageBarrier2(
-            cmd,
-            self.dev,
-            self.oit.accum.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .top_of_pipe_bit = true },
-            .{},
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            oit_aspect,
-        );
-        cmdImageBarrier2(
-            cmd,
-            self.dev,
-            self.oit.reveal.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .top_of_pipe_bit = true },
-            .{},
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            oit_aspect,
-        );
-        try self.endSingleTimeCommandsLocked(cmd);
-    }
 
     if (self.oit.descriptor_sets_per_frame.len > 0) {
         self.updateOitDescriptorSets();

@@ -222,9 +222,9 @@ pub fn main(init: std.process.Init) !void {
                     _ = try ui_window.end(.{});
                 }
 
-                try vk_ctx.submitFrame(io, frame_ctx.frame_index, frame_ctx.cmd_buffer);
+                try vk_ctx.submitFrame(io, frame_ctx);
 
-                vk_ctx.present(io, frame_ctx.frame_index, frame_ctx.image_index) catch |err| {
+                vk_ctx.present(io, frame_ctx) catch |err| {
                     if (err == error.OutOfDate) {
                         vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
                     } else {
@@ -365,9 +365,9 @@ pub fn main(init: std.process.Init) !void {
 
             try game.frame(io, gpa, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
 
-            try vk_ctx.submitFrame(io, frame_ctx.frame_index, frame_ctx.cmd_buffer);
+            try vk_ctx.submitFrame(io, frame_ctx);
 
-            vk_ctx.present(io, frame_ctx.frame_index, frame_ctx.image_index) catch |err| {
+            vk_ctx.present(io, frame_ctx) catch |err| {
                 if (err == error.OutOfDate) {
                     vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
                     continue;

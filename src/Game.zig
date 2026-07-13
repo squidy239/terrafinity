@@ -411,10 +411,20 @@ pub fn init(
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
-    if (self.mesh_unload_future) |*future| future.cancel(io) catch {};
-    if (self.save_future) |*future| future.cancel(io) catch {};
-    if (self.load_future) |*future| future.cancel(io) catch {};
+    if (self.mesh_unload_future) |*future| {
+        future.cancel(io) catch {};
+        _ = future.await(io) catch {};
+    }
+    if (self.save_future) |*future| {
+        future.cancel(io) catch {};
+        _ = future.await(io) catch {};
+    }
+    if (self.load_future) |*future| {
+        future.cancel(io) catch {};
+        _ = future.await(io) catch {};
+    }
     self.group.cancel(io);
+    self.group.await(io) catch {};
 
     self.vulkan_renderer.deinit(io);
     self.entity_registry.deinit(io, self.allocator, &self.world);
