@@ -202,6 +202,11 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     const firstconfig = self.config.*;
     dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 
+    // Remove config strings from struct_ui's string_map to prevent double-free.
+    // struct_ui.deinit (called by Window.deinit) would otherwise free these strings,
+    // and then Config.deinit would free them again via allocator.free.
+    _ = dvui.struct_ui.string_map.remove(&self.config.game_config.render_options.selected_pack);
+
     const config_changed = !std.meta.eql(firstconfig, self.config.*);
     self.config_lock.unlock(io);
 

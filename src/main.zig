@@ -421,7 +421,7 @@ pub const Config = struct {
     }
 
     pub fn deinit(self: *const Config, allocator: std.mem.Allocator) void {
-        std.zon.parse.free(allocator, self.*);
+        allocator.free(self.game_config.render_options.selected_pack);
     }
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);

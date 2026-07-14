@@ -78,24 +78,24 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
 
-     const visible_count = comptime blk: {
+    const visible_count = comptime blk: {
         var count: usize = 0;
-        for(std.meta.fields(Block)) |field| {
-            if(!@field(Block, field.name).isVisible()) continue;
+        for (std.meta.fields(Block)) |field| {
+            if (!@field(Block, field.name).isVisible()) continue;
             count += 1;
         }
         break :blk count;
     };
-    
+
     var buffer: [visible_count][:0]const u8 = undefined;
     var default_textures: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).initBuffer(&buffer);
-    inline for(std.meta.fields(Block)) |field| {
-        if(!@field(Block, field.name).isVisible()) continue;
+    inline for (std.meta.fields(Block)) |field| {
+        if (!@field(Block, field.name).isVisible()) continue;
         default_textures.appendAssumeCapacity(@embedFile("packs/default/blocks/" ++ field.name ++ ".png"));
     }
 
     var textures_options: *std.Build.Step.Options = .create(b);
-    textures_options.addOption([]const [:0]const u8, "default",default_textures.items);
+    textures_options.addOption([]const [:0]const u8, "default", default_textures.items);
     exe.root_module.addOptions("textures", textures_options);
 
     var options: *std.Build.Step.Options = .create(b);

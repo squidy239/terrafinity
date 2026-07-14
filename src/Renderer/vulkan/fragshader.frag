@@ -47,5 +47,4 @@ void main()
 
     frag_color = texture(textures[nonuniformEXT(block_array_layer)], (texcoords + 1.0) / 2.0);
     frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
-    if (frag_color.a < 0.01) discard;
 }
