@@ -1,4 +1,5 @@
 #version 460 core
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(early_fragment_tests) in;
 
@@ -9,7 +10,7 @@ layout(location = 2) in vec3 fragpos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
-layout(binding = 0) uniform sampler2DArray texture_array;
+layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 struct PushConstants {
     mat4 projview;
@@ -44,7 +45,7 @@ void main()
     vec3 normal = face_normals[side];
     vec2 texcoords = vec2(in_coords[texcoord_axes[side][0]], in_coords[texcoord_axes[side][1]]) * 2.0;
 
-    frag_color = texture(texture_array, vec3((texcoords + 1.0) / 2.0, float(block_array_layer)));
+    frag_color = texture(textures[nonuniformEXT(block_array_layer)], (texcoords + 1.0) / 2.0);
     frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
     if (frag_color.a < 0.01) discard;
 }
