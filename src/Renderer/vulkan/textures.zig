@@ -203,13 +203,13 @@ pub const TextureManager = struct {
         errdefer if (cmd != .null_handle)
             self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
-        const staging = try self.uploadSingleTexture(cmd, &self.default_texture, 1, 1, &default_pixels, format);
-        errdefer self.renderer.cpu_to_gpu_gpa.allocator().free(staging);
+        {
+            const staging = try self.uploadSingleTexture(cmd, &self.default_texture, 1, 1, &default_pixels, format);
+            defer self.renderer.cpu_to_gpu_gpa.allocator().free(staging);
 
-        try self.renderer.endSingleTimeCommands(io, cmd);
-        cmd = .null_handle;
-
-        self.renderer.cpu_to_gpu_gpa.allocator().free(staging);
+            try self.renderer.endSingleTimeCommands(io, cmd);
+            cmd = .null_handle;
+        }
 
         self.default_texture.view = try self.renderer.dev.createImageView(&.{
             .flags = .{},

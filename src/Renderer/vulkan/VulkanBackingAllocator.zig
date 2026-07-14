@@ -6,12 +6,14 @@ const tracy = @import("tracy");
 const log = std.log.scoped(.vulkan_backing_allocator);
 
 /// Represents a single VkBuffer allocation and its associated resources.
+/// raw_alloc is the full underlying allocation (CPU-side), used for range
+/// checks and cleanup. The VkBuffer has the same size and layout.
 pub const GpuBlock = struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
-    cpu_ptr: []u8,
     gpu_address: vk.DeviceAddress,
     pool: MemoryPool,
+    raw_alloc: []u8 = &.{},
 };
 
 pub const MemoryPool = enum {
@@ -61,19 +63,28 @@ pub const VulkanBackingAllocator = struct {
     }
 
     pub fn getDeviceAddress(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) vk.DeviceAddress {
-        return self.getBlock(pool, ptr).gpu_address;
+        const block = self.getBlock(pool, ptr);
+        const offset = @intFromPtr(ptr) - @intFromPtr(block.raw_alloc.ptr);
+        return block.gpu_address + offset;
     }
 
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
-        return .{ .buffer = self.getBlock(pool, ptr).buffer, .offset = 0 };
+        const block = self.getBlock(pool, ptr);
+        const offset = @intFromPtr(ptr) - @intFromPtr(block.raw_alloc.ptr);
+        return .{ .buffer = block.buffer, .offset = @intCast(offset) };
     }
 
     fn getBlock(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) GpuBlock {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        return self.blocks[@intFromEnum(pool)].get(@intFromPtr(ptr)) orelse
-            std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{@intFromPtr(ptr)});
+        const addr = @intFromPtr(ptr);
+        var it = self.blocks[@intFromEnum(pool)].valueIterator();
+        while (it.next()) |block| {
+            const start = @intFromPtr(block.raw_alloc.ptr);
+            if (addr >= start and addr < start + block.raw_alloc.len) return block.*;
+        }
+        std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{addr});
     }
 
     fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
@@ -94,38 +105,45 @@ pub const VulkanBackingAllocator = struct {
         if (block.pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
         self.dev.freeMemory(block.memory, null);
 
-        if (block.pool == .gpu_only) self.meta_allocator.free(block.cpu_ptr);
+        if (block.pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 
-    fn allocBlock(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize) ![]u8 {
+    fn allocBlock(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ![]u8 {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "VulkanBackingAllocator.allocBlock" });
         defer zone.end();
 
-        const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, len);
+        const alignment_bytes = alignment.toByteUnits();
+        const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len;
+
+        const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, alloc_len);
         errdefer self.dev.freeMemory(memory, null);
         errdefer self.dev.destroyBuffer(buffer, null);
 
-        const cpu_ptr: []u8 = if (pool == .cpu_to_gpu) blk: {
+        const raw_cpu: []u8 = if (pool == .cpu_to_gpu) blk: {
             const mapped: [*]u8 = @ptrCast(try self.dev.mapMemory(memory, 0, mem_size, .{}));
             break :blk mapped[0..mem_size];
         } else try self.meta_allocator.alloc(u8, mem_size);
         errdefer {
-            if (pool == .cpu_to_gpu) self.dev.unmapMemory(memory) else self.meta_allocator.free(cpu_ptr);
+            if (pool == .cpu_to_gpu) self.dev.unmapMemory(memory) else self.meta_allocator.free(raw_cpu);
         }
+
+        const raw_addr = @intFromPtr(raw_cpu.ptr);
+        const aligned_addr = alignment.forward(raw_addr);
+        const result: []u8 = (@as([*]u8, @ptrFromInt(aligned_addr)))[0..len];
 
         const block: GpuBlock = .{
             .memory = memory,
             .buffer = buffer,
-            .cpu_ptr = cpu_ptr,
             .gpu_address = self.dev.getBufferDeviceAddress(&.{ .buffer = buffer }),
             .pool = pool,
+            .raw_alloc = raw_cpu,
         };
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        try self.blocks[@intFromEnum(pool)].put(self.meta_allocator, @intFromPtr(block.cpu_ptr.ptr), block);
+        try self.blocks[@intFromEnum(pool)].put(self.meta_allocator, @intFromPtr(result.ptr), block);
 
-        return cpu_ptr;
+        return result;
     }
 
     fn createBufferAndMemory(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize) !struct { vk.Buffer, vk.DeviceMemory, usize } {
@@ -181,18 +199,18 @@ pub const VulkanBackingAllocator = struct {
     }
 };
 
-fn allocGpuOnly(ctx: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+fn allocGpuOnly(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
     const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    const slice = self.allocBlock(.gpu_only, len) catch |err| {
+    const slice = self.allocBlock(.gpu_only, len, alignment) catch |err| {
         log.err("VulkanBackingAllocator: allocGpuOnly of size {d} failed: {any}", .{ len, err });
         return null;
     };
     return slice.ptr;
 }
 
-fn allocCpuToGpu(ctx: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+fn allocCpuToGpu(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
     const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    const slice = self.allocBlock(.cpu_to_gpu, len) catch |err| {
+    const slice = self.allocBlock(.cpu_to_gpu, len, alignment) catch |err| {
         log.err("VulkanBackingAllocator: allocCpuToGpu of size {d} failed: {any}", .{ len, err });
         return null;
     };
