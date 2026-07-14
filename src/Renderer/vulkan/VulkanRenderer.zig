@@ -170,6 +170,16 @@ const ChunkMeshBuffer = struct {
 pub const batch_size = 512;
 pub const pending_queue_size = 512;
 
+const SubmissionBatch = struct {
+    cmds: [batch_size]vk.CommandBuffer = undefined,
+    pools: [batch_size]vk.CommandPool = undefined,
+    opaque_meshes: [batch_size]?UploadResult = undefined,
+    transparent_meshes: [batch_size]?UploadResult = undefined,
+    chunk_positions: [batch_size]ChunkPos = undefined,
+    count: usize = 0,
+    mutex: std.Io.Mutex = .init,
+};
+
 const PendingChunkUpload = struct {
     chunk_pos: ChunkPos,
     timeline_value: u64,
@@ -200,17 +210,18 @@ const CommandPoolReservoir = struct {
 
     pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
         self.pools = try allocator.alloc(vk.CommandPool, count);
-        errdefer allocator.free(self.pools);
         self.cmds = try allocator.alloc(vk.CommandBuffer, count);
-        errdefer allocator.free(self.cmds);
         self.used = try allocator.alloc(std.atomic.Value(bool), count);
-        errdefer allocator.free(self.used);
+        errdefer {
+            for (self.pools) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, null);
+            allocator.free(self.pools);
+            allocator.free(self.cmds);
+            allocator.free(self.used);
+        }
+        @memset(self.pools, .null_handle);
         for (self.used) |*u| u.* = .init(false);
-        var i: usize = 0;
-        errdefer for (0..i) |j| dev.destroyCommandPool(self.pools[j], null);
         for (self.pools, 0..) |*pool, idx| {
             pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = queue_family }, null);
-            i += 1;
             try dev.allocateCommandBuffers(&.{ .command_pool = pool.*, .level = .primary, .command_buffer_count = 1 }, (&self.cmds[idx])[0..1]);
         }
     }
@@ -232,7 +243,9 @@ const CommandPoolReservoir = struct {
     }
 
     pub fn returnPool(self: *CommandPoolReservoir, dev: DeviceProxy, pool: vk.CommandPool) void {
-        dev.resetCommandPool(pool, .{}) catch |err| @panic(@errorName(err));
+        dev.resetCommandPool(pool, .{}) catch |err| {
+            std.log.err("CommandPoolReservoir.returnPool: resetCommandPool failed: {any}", .{err});
+        };
         for (self.pools, 0..) |p, i| {
             if (p == pool) {
                 self.used[i].store(false, .release);
@@ -276,9 +289,11 @@ comptime {
 }
 
 fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
-    for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
-        if ((type_filter & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
-            return @intCast(i);
+    const count = @min(mem_props.memory_type_count, 32);
+    for (mem_props.memory_types[0..count], 0..) |mem_type, i| {
+        const bit = @as(u5, @intCast(i));
+        if ((type_filter & (@as(u32, 1) << bit)) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
+            return @as(u32, bit);
         }
     }
     return error.MemoryTypeNotFound;
@@ -368,39 +383,33 @@ const CullState = struct {
     descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
 };
 
+const PerFrameData = struct {
+    indirect_draw: vk.Buffer = .null_handle,
+    indirect_draw_mapped: ?[*]vk.DrawIndirectCommand = null,
+    indirect_draw_offset: vk.DeviceSize = 0,
+    chunk_data: vk.Buffer = .null_handle,
+    chunk_data_mapped: ?[*]ChunkData = null,
+    chunk_data_offset: vk.DeviceSize = 0,
+    count: vk.Buffer = .null_handle,
+    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
+    count_offset: vk.DeviceSize = 0,
+    stats: vk.Buffer = .null_handle,
+    stats_mapped: ?[*]align(cull_buffer_alignment.toByteUnits()) CullCount = null,
+    stats_offset: vk.DeviceSize = 0,
+    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
+};
+
 const PerFrameBuffers = struct {
-    indirect_draw: []vk.Buffer = &.{},
-    indirect_draw_mapped: []?[*]vk.DrawIndirectCommand = &.{},
-    indirect_draw_offsets: []vk.DeviceSize = &.{},
-    chunk_data: []vk.Buffer = &.{},
-    chunk_data_mapped: []?[*]ChunkData = &.{},
-    chunk_data_offsets: []vk.DeviceSize = &.{},
-    count: []vk.Buffer = &.{},
-    count_slices: [][]align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
-    count_offsets: []vk.DeviceSize = &.{},
-    stats: []vk.Buffer = &.{},
-    stats_mapped: []?[*]align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
-    stats_offsets: []vk.DeviceSize = &.{},
-    stats_slices: [][]align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
+    items: []PerFrameData = &.{},
 
     fn deinit(self: *PerFrameBuffers, allocator: std.mem.Allocator, cpu_to_gpu_gpa: std.mem.Allocator, gpu_only_gpa: std.mem.Allocator, draw_capacity: u32) void {
-        for (self.indirect_draw_mapped) |ptr| if (ptr) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
-        for (self.chunk_data_mapped) |ptr| if (ptr) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
-        for (self.count_slices) |slice| gpu_only_gpa.free(slice);
-        for (self.stats_slices) |slice| cpu_to_gpu_gpa.free(slice);
-        allocator.free(self.indirect_draw);
-        allocator.free(self.indirect_draw_mapped);
-        allocator.free(self.indirect_draw_offsets);
-        allocator.free(self.chunk_data);
-        allocator.free(self.chunk_data_mapped);
-        allocator.free(self.chunk_data_offsets);
-        allocator.free(self.count);
-        allocator.free(self.count_slices);
-        allocator.free(self.count_offsets);
-        allocator.free(self.stats);
-        allocator.free(self.stats_mapped);
-        allocator.free(self.stats_offsets);
-        allocator.free(self.stats_slices);
+        for (self.items) |*item| {
+            if (item.indirect_draw_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
+            if (item.chunk_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
+            if (item.count_slice.len > 0) gpu_only_gpa.free(item.count_slice);
+            if (item.stats_slice.len > 0) cpu_to_gpu_gpa.free(item.stats_slice);
+        }
+        allocator.free(self.items);
         self.* = .{};
     }
 };
@@ -444,15 +453,7 @@ pool_reservoir: CommandPoolReservoir = .{},
 pending_uploads_queue: std.Io.Queue(PendingChunkUpload) = undefined,
 pending_uploads_queue_buffer: []PendingChunkUpload = &.{},
 peeked_upload: ?PendingChunkUpload = null,
-submission_batch: struct {
-    cmds: [batch_size]vk.CommandBuffer = undefined,
-    pools: [batch_size]vk.CommandPool = undefined,
-    opaque_meshes: [batch_size]?UploadResult = undefined,
-    transparent_meshes: [batch_size]?UploadResult = undefined,
-    chunk_positions: [batch_size]ChunkPos = undefined,
-    count: usize = 0,
-    mutex: std.Io.Mutex = .init,
-} = .{},
+submission_batch: SubmissionBatch = .{},
 camera_front_x: std.atomic.Value(f32) = .init(0),
 camera_front_y: std.atomic.Value(f32) = .init(0),
 camera_front_z: std.atomic.Value(f32) = .init(1),
@@ -473,23 +474,9 @@ pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.Comman
     self.output_color_view = output_view;
 }
 
-fn loadDefaultTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
+fn loadTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     self.texture_manager = textures.TextureManager.init(self, self.render_options.gamma_correction);
-    const dir = try std.Io.Dir.cwd().createDirPathOpen(io, "packs/default/Blocks/", .{ .open_options = .{ .iterate = true } });
-    defer dir.close(io);
-    const textures_to_write = [_]struct { []const u8, []const u8 }{
-        .{ "grass.png", @embedFile("../opengl/Blocks/grass.png") },
-        .{ "dirt.png", @embedFile("../opengl/Blocks/dirt.png") },
-        .{ "snow.png", @embedFile("../opengl/Blocks/snow.png") },
-        .{ "stone.png", @embedFile("../opengl/Blocks/stone.png") },
-        .{ "water.png", @embedFile("../opengl/Blocks/water.png") },
-        .{ "wood.png", @embedFile("../opengl/Blocks/wood.png") },
-        .{ "leaves.png", @embedFile("../opengl/Blocks/leaves.png") },
-    };
-    inline for (textures_to_write) |t| {
-        try dir.writeFile(io, .{ .data = t[1], .sub_path = t[0] });
-    }
-    try self.texture_manager.loadTextureDirectory(io, dir, allocator, ".png");
+    try self.texture_manager.loadTextures(io, allocator, self.render_options.selected_pack);
 }
 
 fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
@@ -499,29 +486,28 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
     const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, chunk_data_slice.ptr);
     const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
 
-    self.frame_buffers.chunk_data[i] = chunk_data_info.buffer;
-    self.frame_buffers.chunk_data_mapped[i] = chunk_data_slice.ptr;
-    self.frame_buffers.chunk_data_offsets[i] = chunk_data_info.offset;
-
-    self.frame_buffers.indirect_draw[i] = indirect_draw_info.buffer;
-    self.frame_buffers.indirect_draw_mapped[i] = indirect_draw_slice.ptr;
-    self.frame_buffers.indirect_draw_offsets[i] = indirect_draw_info.offset;
-
-    // Allocate count buffers (GPU-only)
     const count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
     const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, count_slice.ptr);
-    self.frame_buffers.count[i] = count_info.buffer;
-    self.frame_buffers.count_slices[i] = count_slice;
-    self.frame_buffers.count_offsets[i] = count_info.offset;
 
-    // Allocate stats buffers (CPU-to-GPU, mapped)
     const stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
     stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
     const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
-    self.frame_buffers.stats[i] = stats_info.buffer;
-    self.frame_buffers.stats_mapped[i] = stats_slice.ptr;
-    self.frame_buffers.stats_offsets[i] = stats_info.offset;
-    self.frame_buffers.stats_slices[i] = stats_slice;
+
+    self.frame_buffers.items[i] = .{
+        .chunk_data = chunk_data_info.buffer,
+        .chunk_data_mapped = chunk_data_slice.ptr,
+        .chunk_data_offset = chunk_data_info.offset,
+        .indirect_draw = indirect_draw_info.buffer,
+        .indirect_draw_mapped = indirect_draw_slice.ptr,
+        .indirect_draw_offset = indirect_draw_info.offset,
+        .count = count_info.buffer,
+        .count_slice = count_slice,
+        .count_offset = count_info.offset,
+        .stats = stats_info.buffer,
+        .stats_mapped = stats_slice.ptr,
+        .stats_slice = stats_slice,
+        .stats_offset = stats_info.offset,
+    };
 }
 
 pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
@@ -545,25 +531,8 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
 
     const num_swapchain_images = self.vk_ctx.swapchain_images.len;
     self.num_in_flight = @intCast(num_swapchain_images);
-    self.frame_buffers.indirect_draw = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.frame_buffers.indirect_draw_mapped = try self.allocator.alloc(?[*]vk.DrawIndirectCommand, num_swapchain_images);
-    self.frame_buffers.indirect_draw_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-    self.frame_buffers.chunk_data = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.frame_buffers.chunk_data_mapped = try self.allocator.alloc(?[*]ChunkData, num_swapchain_images);
-    self.frame_buffers.chunk_data_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-
-    self.frame_buffers.count = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.frame_buffers.count_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_swapchain_images);
-    self.frame_buffers.count_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-
-    self.frame_buffers.stats = try self.allocator.alloc(vk.Buffer, num_swapchain_images);
-    self.frame_buffers.stats_mapped = try self.allocator.alloc(?[*]align(cull_buffer_alignment.toByteUnits()) CullCount, num_swapchain_images);
-    self.frame_buffers.stats_offsets = try self.allocator.alloc(vk.DeviceSize, num_swapchain_images);
-    self.frame_buffers.stats_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_swapchain_images);
-
-    @memset(self.frame_buffers.indirect_draw_mapped, null);
-    @memset(self.frame_buffers.chunk_data_mapped, null);
-    @memset(self.frame_buffers.stats_mapped, null);
+    self.frame_buffers.items = try self.allocator.alloc(PerFrameData, num_swapchain_images);
+    @memset(self.frame_buffers.items, .{});
 
     for (0..num_swapchain_images) |i| {
         try self.allocateIndirectBuffers(i);
@@ -664,7 +633,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     });
     const cand_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, persistent_candidates_slice.ptr);
     self.persistent.buffer = cand_info.buffer;
-    self.persistent.mapped = @ptrCast(persistent_candidates_slice.ptr);
+    self.persistent.mapped = persistent_candidates_slice.ptr;
     self.persistent.offset = cand_info.offset;
     self.persistent.slice = persistent_candidates_slice;
     self.retired_candidate_slices = .empty;
@@ -678,12 +647,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(self.pending_uploads_queue_buffer);
     self.peeked_upload = null;
 
-    try self.recreateSwapchainResourcesLocked(io);
+    try self.loadTextures(io, allocator);
 
     try self.createTransparentDepthDescriptorSetLayout();
-    try self.createCullDescriptorSetLayoutAndPool();
+    try self.recreateSwapchainResourcesLocked(io);
 
-    try self.loadDefaultTextures(io, allocator);
+    try self.createCullDescriptorSetLayoutAndPool();
 
     try self.createGraphicsPipelines();
     try self.createCullPipeline();
@@ -868,49 +837,44 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
     const count = self.submission_batch.count;
     if (count == 0) return;
 
-    const next_val = blk: {
-        // Load current value and compute next WITHOUT pre-incrementing.
-        const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
+    // Load and increment the transfer semaphore value.
+    const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
+    self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
-        // Increment and store the counter before submitting so graphics queue knows to wait on this value.
-        self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
-
-        var cb_submit_infos: [batch_size]vk.CommandBufferSubmitInfo = undefined;
-        for (cb_submit_infos[0..count], self.submission_batch.cmds[0..count]) |*info, cmd| {
-            info.* = .{
-                .command_buffer = cmd,
-                .device_mask = 0,
-            };
-        }
-
-        const current_graphics_val = self.vk_ctx.frame_number.load(.monotonic);
-        const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
-            .semaphore = self.transfer.graphics_timeline_semaphore,
-            .value = current_graphics_val,
-            .stage_mask = .{ .all_transfer_bit = true },
-            .device_index = 0,
+    var cb_submit_infos: [batch_size]vk.CommandBufferSubmitInfo = undefined;
+    for (cb_submit_infos[0..count], self.submission_batch.cmds[0..count]) |*info, cmd| {
+        info.* = .{
+            .command_buffer = cmd,
+            .device_mask = 0,
         };
+    }
 
-        const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
-            .semaphore = self.transfer.semaphore,
-            .value = next_val,
-            .stage_mask = .{ .all_transfer_bit = true },
-            .device_index = 0,
-        };
-
-        const submit_info: vk.SubmitInfo2 = .{
-            .flags = .{},
-            .wait_semaphore_info_count = if (current_graphics_val > 0) 1 else 0,
-            .p_wait_semaphore_infos = (&wait_semaphore_info)[0..1],
-            .command_buffer_info_count = @intCast(count),
-            .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
-            .signal_semaphore_info_count = 1,
-            .p_signal_semaphore_infos = (&semaphore_submit_info)[0..1],
-        };
-
-        try self.dev.queueSubmit2(self.transfer.queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
-        break :blk next_val;
+    const current_graphics_val = self.vk_ctx.frame_number.load(.monotonic);
+    const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
+        .semaphore = self.transfer.graphics_timeline_semaphore,
+        .value = current_graphics_val,
+        .stage_mask = .{ .all_transfer_bit = true },
+        .device_index = 0,
     };
+
+    const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
+        .semaphore = self.transfer.semaphore,
+        .value = next_val,
+        .stage_mask = .{ .all_transfer_bit = true },
+        .device_index = 0,
+    };
+
+    const submit_info: vk.SubmitInfo2 = .{
+        .flags = .{},
+        .wait_semaphore_info_count = if (current_graphics_val > 0) 1 else 0,
+        .p_wait_semaphore_infos = (&wait_semaphore_info)[0..1],
+        .command_buffer_info_count = @intCast(count),
+        .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
+        .signal_semaphore_info_count = 1,
+        .p_signal_semaphore_infos = (&semaphore_submit_info)[0..1],
+    };
+
+    try self.dev.queueSubmit2(self.transfer.queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
 
     var i: usize = 0;
     errdefer {
@@ -1002,8 +966,7 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer, gpu_index: u
     });
 }
 
-fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?ChunkMeshBuffer, tag: RenderBufferKey, chunk_pos: ChunkPos) !void {
-    const key = tag;
+fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?ChunkMeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
     if (mesh) |m| {
         var new_mesh = m;
         var gpu_idx_opt = self.index_pool.allocIndex(io);
@@ -1443,11 +1406,11 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
 }
 
 fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32, frustum: Frustum, total_candidates: u32, view_pos: @Vector(3, f64)) void {
-    self.dev.cmdFillBuffer(cmd_buffer, self.frame_buffers.count[current_frame], self.frame_buffers.count_offsets[current_frame], @sizeOf(CullCount), 0);
+    self.dev.cmdFillBuffer(cmd_buffer, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].count_offset, @sizeOf(CullCount), 0);
 
     const fill_barrier = makeBufferBarrier2(
-        self.frame_buffers.count[current_frame],
-        self.frame_buffers.count_offsets[current_frame],
+        self.frame_buffers.items[current_frame].count,
+        self.frame_buffers.items[current_frame].count_offset,
         @sizeOf(CullCount),
         .{ .all_transfer_bit = true },
         .{ .transfer_write_bit = true },
@@ -1486,9 +1449,9 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     self.dev.cmdDispatch(cmd_buffer, group_count, 1, 1);
 
     const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
-        makeBufferBarrier2(self.frame_buffers.indirect_draw[current_frame], self.frame_buffers.indirect_draw_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
-        makeBufferBarrier2(self.frame_buffers.chunk_data[current_frame], self.frame_buffers.chunk_data_offsets[current_frame], self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_input_bit = true }, .{ .vertex_attribute_read_bit = true }),
-        makeBufferBarrier2(self.frame_buffers.count[current_frame], self.frame_buffers.count_offsets[current_frame], @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.items[current_frame].indirect_draw, self.frame_buffers.items[current_frame].indirect_draw_offset, self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.items[current_frame].chunk_data, self.frame_buffers.items[current_frame].chunk_data_offset, self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_input_bit = true }, .{ .vertex_attribute_read_bit = true }),
+        makeBufferBarrier2(self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].count_offset, @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1501,15 +1464,15 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     });
 
     const region: vk.BufferCopy = .{
-        .src_offset = self.frame_buffers.count_offsets[current_frame],
-        .dst_offset = self.frame_buffers.stats_offsets[current_frame],
+        .src_offset = self.frame_buffers.items[current_frame].count_offset,
+        .dst_offset = self.frame_buffers.items[current_frame].stats_offset,
         .size = @sizeOf(CullCount),
     };
-    self.dev.cmdCopyBuffer(cmd_buffer, self.frame_buffers.count[current_frame], self.frame_buffers.stats[current_frame], (&region)[0..1]);
+    self.dev.cmdCopyBuffer(cmd_buffer, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].stats, (&region)[0..1]);
 
     const host_barrier = makeBufferBarrier2(
-        self.frame_buffers.stats[current_frame],
-        self.frame_buffers.stats_offsets[current_frame],
+        self.frame_buffers.items[current_frame].stats,
+        self.frame_buffers.items[current_frame].stats_offset,
         @sizeOf(CullCount),
         .{ .all_transfer_bit = true },
         .{ .transfer_write_bit = true },
@@ -1586,18 +1549,18 @@ fn recordOpaquePass(
     self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.opaque_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
 
     if (total_candidates > 0) {
-        const opaque_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame];
-        const opaque_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame];
+        const opaque_byte_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].indirect_draw_offset;
+        const opaque_count_byte_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].count_offset;
 
-        const chunk_data_buffer = self.frame_buffers.chunk_data[current_frame];
-        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.chunk_data_offsets[current_frame];
+        const chunk_data_buffer = self.frame_buffers.items[current_frame].chunk_data;
+        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].chunk_data_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&chunk_data_buffer)[0..1], (&chunk_data_offset)[0..1]);
 
         self.dev.cmdDrawIndirectCount(
             cmd_buffer,
-            self.frame_buffers.indirect_draw[current_frame],
+            self.frame_buffers.items[current_frame].indirect_draw,
             opaque_byte_offset,
-            self.frame_buffers.count[current_frame],
+            self.frame_buffers.items[current_frame].count,
             opaque_count_byte_offset,
             self.draw_capacity,
             @sizeOf(vk.DrawIndirectCommand),
@@ -1678,18 +1641,18 @@ fn recordTransparentPass(
     self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.transparent_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushConstants), &pc);
 
     if (total_candidates > 0) {
-        const transparent_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame] + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
-        const transparent_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame] + @as(vk.DeviceSize, @offsetOf(CullCount, "transparent_count"));
+        const transparent_byte_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].indirect_draw_offset + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
+        const transparent_count_byte_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].count_offset + @as(vk.DeviceSize, @offsetOf(CullCount, "transparent_count"));
 
-        const chunk_data_buffer = self.frame_buffers.chunk_data[current_frame];
-        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.chunk_data_offsets[current_frame];
+        const chunk_data_buffer = self.frame_buffers.items[current_frame].chunk_data;
+        const chunk_data_offset: vk.DeviceSize = self.frame_buffers.items[current_frame].chunk_data_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&chunk_data_buffer)[0..1], (&chunk_data_offset)[0..1]);
 
         self.dev.cmdDrawIndirectCount(
             cmd_buffer,
-            self.frame_buffers.indirect_draw[current_frame],
+            self.frame_buffers.items[current_frame].indirect_draw,
             transparent_byte_offset,
-            self.frame_buffers.count[current_frame],
+            self.frame_buffers.items[current_frame].count,
             transparent_count_byte_offset,
             self.draw_capacity,
             @sizeOf(vk.DrawIndirectCommand),
@@ -1763,7 +1726,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
     const cmd_buffer = self.output_cmd_buffer;
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
-    if (self.frame_buffers.stats_mapped[current_frame]) |counts_ptr| {
+    if (self.frame_buffers.items[current_frame].stats_mapped) |counts_ptr| {
         const opaque_count = counts_ptr[0].opaque_count;
         const transparent_count = counts_ptr[0].transparent_count;
         const total_candidates = self.max_allocated_index.load(.monotonic);
@@ -1877,7 +1840,7 @@ fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacit
             .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
             .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
         };
-        @memset(new_frame.stats_slice, .{ .opaque_count = 0, .transparent_count = 0 });
+        new_frame.stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
 
         if (old_draw_capacity > 0) {
             @memcpy(new_frame.chunk_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
@@ -1893,22 +1856,21 @@ fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames
         const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, new_frame.count_slice.ptr);
         const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.stats_slice.ptr);
 
-        self.frame_buffers.chunk_data[i] = chunk_data_info.buffer;
-        self.frame_buffers.chunk_data_mapped[i] = new_frame.chunk_data_slice.ptr;
-        self.frame_buffers.chunk_data_offsets[i] = chunk_data_info.offset;
-
-        self.frame_buffers.indirect_draw[i] = indirect_draw_info.buffer;
-        self.frame_buffers.indirect_draw_mapped[i] = new_frame.indirect_draw_slice.ptr;
-        self.frame_buffers.indirect_draw_offsets[i] = indirect_draw_info.offset;
-
-        self.frame_buffers.count[i] = count_info.buffer;
-        self.frame_buffers.count_slices[i] = new_frame.count_slice;
-        self.frame_buffers.count_offsets[i] = count_info.offset;
-
-        self.frame_buffers.stats[i] = stats_info.buffer;
-        self.frame_buffers.stats_slices[i] = new_frame.stats_slice;
-        self.frame_buffers.stats_offsets[i] = stats_info.offset;
-        self.frame_buffers.stats_mapped[i] = new_frame.stats_slice.ptr;
+        self.frame_buffers.items[i] = .{
+            .chunk_data = chunk_data_info.buffer,
+            .chunk_data_mapped = new_frame.chunk_data_slice.ptr,
+            .chunk_data_offset = chunk_data_info.offset,
+            .indirect_draw = indirect_draw_info.buffer,
+            .indirect_draw_mapped = new_frame.indirect_draw_slice.ptr,
+            .indirect_draw_offset = indirect_draw_info.offset,
+            .count = count_info.buffer,
+            .count_slice = new_frame.count_slice,
+            .count_offset = count_info.offset,
+            .stats = stats_info.buffer,
+            .stats_slice = new_frame.stats_slice,
+            .stats_offset = stats_info.offset,
+            .stats_mapped = new_frame.stats_slice.ptr,
+        };
 
         self.cpu_to_gpu_gpa.allocator().free(old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
         self.cpu_to_gpu_gpa.allocator().free(old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
@@ -1916,8 +1878,7 @@ fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames
         self.cpu_to_gpu_gpa.allocator().free(old_frames[i].stats_slice);
     }
 
-    const num_frames = old_frames.len;
-    for (0..num_frames) |i| {
+    for (old_frames, 0..) |_, i| {
         self.updateCullDescriptorSet(@intCast(i));
     }
 }
@@ -1942,27 +1903,29 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     std.log.info("VulkanRenderer: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
     self.vk_ctx.queue_mutex.lockUncancelable(io);
-    try self.dev.deviceWaitIdle();
     defer self.vk_ctx.queue_mutex.unlock(io);
+    try self.dev.deviceWaitIdle();
 
     const old_draw_capacity = self.draw_capacity;
-    const num_frames = self.frame_buffers.indirect_draw_mapped.len;
+    const num_frames = self.frame_buffers.items.len;
 
-    var old_frames: [32]GrowFrameBackup = undefined;
-    for (0..num_frames) |i| {
-        old_frames[i] = .{
-            .chunk_data_ptr = self.frame_buffers.chunk_data_mapped[i].?,
-            .indirect_ptr = self.frame_buffers.indirect_draw_mapped[i].?,
-            .count_slice = self.frame_buffers.count_slices[i],
-            .stats_slice = self.frame_buffers.stats_slices[i],
+    const old_frames = try self.allocator.alloc(GrowFrameBackup, num_frames);
+    defer self.allocator.free(old_frames);
+    for (old_frames, 0..) |*frame, i| {
+        frame.* = .{
+            .chunk_data_ptr = self.frame_buffers.items[i].chunk_data_mapped.?,
+            .indirect_ptr = self.frame_buffers.items[i].indirect_draw_mapped.?,
+            .count_slice = self.frame_buffers.items[i].count_slice,
+            .stats_slice = self.frame_buffers.items[i].stats_slice,
         };
     }
 
-    var new_frames: [32]GrowFrameAllocation = undefined;
-    try self.allocateGrowFrames(new_capacity, old_draw_capacity, old_frames[0..num_frames], new_frames[0..num_frames]);
+    const new_frames = try self.allocator.alloc(GrowFrameAllocation, num_frames);
+    defer self.allocator.free(new_frames);
+    try self.allocateGrowFrames(new_capacity, old_draw_capacity, old_frames, new_frames);
 
     self.draw_capacity = new_capacity;
-    self.swapToNewGrowFrames(old_draw_capacity, old_frames[0..num_frames], new_frames[0..num_frames]);
+    self.swapToNewGrowFrames(old_draw_capacity, old_frames, new_frames);
 }
 
 fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
@@ -1974,8 +1937,8 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     std.log.info("VulkanRenderer: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
 
     self.vk_ctx.queue_mutex.lockUncancelable(io);
-    try self.dev.deviceWaitIdle();
     defer self.vk_ctx.queue_mutex.unlock(io);
+    try self.dev.deviceWaitIdle();
 
     const new_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, new_capacity);
     @memset(new_slice, .{
@@ -1992,7 +1955,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     const old_slice = self.persistent.slice;
 
     self.persistent.buffer = info.buffer;
-    self.persistent.mapped = @ptrCast(new_slice.ptr);
+    self.persistent.mapped = new_slice.ptr;
     self.persistent.offset = info.offset;
     self.persistent.slice = new_slice;
 
@@ -2145,9 +2108,9 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const infos: [4]vk.DescriptorBufferInfo = .{
         .{ .buffer = self.persistent.buffer, .offset = self.persistent.offset, .range = self.persistent.slice.len * @sizeOf(InputChunk) },
-        .{ .buffer = self.frame_buffers.indirect_draw[frame_idx], .offset = self.frame_buffers.indirect_draw_offsets[frame_idx], .range = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand) },
-        .{ .buffer = self.frame_buffers.chunk_data[frame_idx], .offset = self.frame_buffers.chunk_data_offsets[frame_idx], .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData) },
-        .{ .buffer = self.frame_buffers.count[frame_idx], .offset = self.frame_buffers.count_offsets[frame_idx], .range = @sizeOf(CullCount) },
+        .{ .buffer = self.frame_buffers.items[frame_idx].indirect_draw, .offset = self.frame_buffers.items[frame_idx].indirect_draw_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand) },
+        .{ .buffer = self.frame_buffers.items[frame_idx].chunk_data, .offset = self.frame_buffers.items[frame_idx].chunk_data_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData) },
+        .{ .buffer = self.frame_buffers.items[frame_idx].count, .offset = self.frame_buffers.items[frame_idx].count_offset, .range = @sizeOf(CullCount) },
     };
     var writes: [4]vk.WriteDescriptorSet = undefined;
     inline for (infos, 0..) |info, i| {
@@ -2619,14 +2582,14 @@ pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer)
     const submit_info: vk.SubmitInfo2 = .{
         .flags = .{},
         .wait_semaphore_info_count = 0,
-        .p_wait_semaphore_infos = undefined,
+        .p_wait_semaphore_infos = null,
         .command_buffer_info_count = 1,
         .p_command_buffer_infos = (&vk.CommandBufferSubmitInfo{
             .command_buffer = cmd,
             .device_mask = 0,
         })[0..1],
         .signal_semaphore_info_count = 0,
-        .p_signal_semaphore_infos = undefined,
+        .p_signal_semaphore_infos = null,
     };
 
     try self.dev.queueSubmit2(self.graphics_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
@@ -2707,5 +2670,5 @@ test "findMemoryType" {
 
 test "ChunkData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf(ChunkData));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
 }

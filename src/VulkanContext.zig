@@ -34,6 +34,7 @@ debug_callback: vk.DebugUtilsMessengerEXT,
 pdev: vk.PhysicalDevice,
 props: vk.PhysicalDeviceProperties,
 mem_props: vk.PhysicalDeviceMemoryProperties,
+sampler_anisotropy: bool = false,
 
 dev_handle: vk.Device,
 dev_wrapper: ?*DeviceWrapper,
@@ -84,16 +85,29 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
 
     for (pdevs) |pdev| {
         var robustness2_features: vk.PhysicalDeviceRobustness2FeaturesEXT = .{ .p_next = null };
-        var features13: vk.PhysicalDeviceVulkan13Features = .{ .p_next = @ptrCast(&robustness2_features) };
-        var features12: vk.PhysicalDeviceVulkan12Features = .{ .p_next = @ptrCast(&features13) };
-        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{}, .p_next = @ptrCast(&features12) };
+        var dynamic_rendering_features: vk.PhysicalDeviceDynamicRenderingFeatures = .{ .dynamic_rendering = .false, .p_next = @ptrCast(&robustness2_features) };
+        var sync2_features: vk.PhysicalDeviceSynchronization2Features = .{ .synchronization_2 = .false, .p_next = @ptrCast(&dynamic_rendering_features) };
+        var features13: vk.PhysicalDeviceVulkan13Features = .{ .p_next = @ptrCast(&sync2_features) };
+        var features12: vk.PhysicalDeviceVulkan12Features = .{
+            .draw_indirect_count = .false,
+            .descriptor_indexing = .false,
+            .runtime_descriptor_array = .false,
+            .descriptor_binding_partially_bound = .false,
+            .buffer_device_address = .false,
+            .buffer_device_address_capture_replay = .false,
+            .timeline_semaphore = .false,
+            .p_next = @ptrCast(&features13),
+        };
+        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false }, .p_next = @ptrCast(&features12) };
         self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
 
+        const anisotropy_supported = features2.features.sampler_anisotropy == .true;
         const required = features2.features.multi_draw_indirect == .true and
             features2.features.shader_int_64 == .true and features2.features.independent_blend == .true and
             features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
             features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
-            features12.buffer_device_address == .true and features12.timeline_semaphore == .true and
+            features12.buffer_device_address == .true and
+            features12.timeline_semaphore == .true and
             features13.synchronization_2 == .true and features13.dynamic_rendering == .true and
             robustness2_features.null_descriptor == .true;
         if (!required) continue;
@@ -124,6 +138,7 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         if (score > best_score) {
             best_score = score;
             selected_pdev = pdev;
+            self.sampler_anisotropy = anisotropy_supported;
         }
     }
     if (selected_pdev == .null_handle) return error.NoSuitablePhysicalDevice;
@@ -338,6 +353,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .descriptor_indexing = .true,
         .runtime_descriptor_array = .true,
         .descriptor_binding_partially_bound = .true,
+        .buffer_device_address_capture_replay = .false,
         .buffer_device_address = .true,
         .timeline_semaphore = .true,
         .p_next = @ptrCast(&features13),
@@ -351,6 +367,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
             .multi_draw_indirect = .true,
             .shader_int_64 = .true,
             .independent_blend = .true,
+            .sampler_anisotropy = if (self.sampler_anisotropy) .true else .false,
         },
         .p_next = @ptrCast(&features11),
     };

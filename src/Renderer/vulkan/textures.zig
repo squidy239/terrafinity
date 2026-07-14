@@ -6,7 +6,24 @@ const zigimg = @import("zigimg");
 const VulkanRenderer = @import("VulkanRenderer.zig");
 const Block = @import("../../world/Block.zig").Block;
 
-pub const max_textures: u32 = std.meta.fields(Block).len;
+const visible_block_count = blk: {
+    var count: usize = 0;
+    for (std.meta.fields(Block)) |field| {
+        if (@field(Block, field.name).isVisible()) count += 1;
+    }
+    break :blk count;
+};
+
+const visible_block_names: [visible_block_count][]const u8 = blk: {
+    var names: [visible_block_count][]const u8 = undefined;
+    var i: usize = 0;
+    for (std.meta.fields(Block)) |field| {
+        if (!@field(Block, field.name).isVisible()) continue;
+        names[i] = field.name;
+        i += 1;
+    }
+    break :blk names;
+};
 
 const Texture = struct {
     image: vk.Image = .null_handle,
@@ -21,7 +38,7 @@ pub const TextureManager = struct {
     renderer: *VulkanRenderer,
     gamma_correction: bool,
     sampler: vk.Sampler = .null_handle,
-    textures: [max_textures]Texture = [_]Texture{.{}} ** max_textures,
+    textures: std.enums.EnumArray(Block, Texture) = .initFill(.{}),
     default_texture: Texture = .{},
     descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     descriptor_pool: vk.DescriptorPool = .null_handle,
@@ -29,6 +46,38 @@ pub const TextureManager = struct {
 
     pub fn init(renderer: *VulkanRenderer, gamma_correction: bool) TextureManager {
         return .{ .renderer = renderer, .gamma_correction = gamma_correction };
+    }
+
+    pub fn loadTextures(self: *TextureManager, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
+        const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{selected_pack});
+        defer allocator.free(pack_path);
+
+        const is_default = std.mem.eql(u8, selected_pack, "default");
+
+        var pack_dir = if (is_default)
+            try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
+        else
+            try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
+        defer pack_dir.close(io);
+
+        if (is_default) {
+            const default_textures = @import("textures").default;
+            for (visible_block_names, default_textures) |name, data| {
+                const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
+                defer allocator.free(filename);
+
+                if (pack_dir.openFile(io, filename, .{})) |f| {
+                    f.close(io);
+                } else |err| {
+                    switch (err) {
+                        error.FileNotFound => try pack_dir.writeFile(io, .{ .data = data, .sub_path = filename }),
+                        else => |e| return e,
+                    }
+                }
+            }
+        }
+
+        try self.loadTextureDirectory(io, pack_dir, allocator, ".png");
     }
 
     pub fn loadTextureDirectory(
@@ -45,9 +94,12 @@ pub const TextureManager = struct {
         };
 
         try self.createDefaultTexture(io);
-        errdefer self.destroyTexture(&self.default_texture);
 
-        const indexer = std.enums.EnumIndexer(Block);
+        errdefer {
+            for (self.textures.values[0..]) |*tex| self.destroyTexture(tex);
+            self.destroyTexture(&self.default_texture);
+        }
+
         var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
 
         var entry_names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -55,8 +107,8 @@ pub const TextureManager = struct {
             for (entry_names.items) |n| allocator.free(n);
             entry_names.deinit(allocator);
         }
-        var entry_layers: std.ArrayListUnmanaged(u32) = .empty;
-        defer entry_layers.deinit(allocator);
+        var entry_blocks: std.ArrayListUnmanaged(Block) = .empty;
+        defer entry_blocks.deinit(allocator);
 
         {
             var dir_it = std.Io.Dir.iterate(dir);
@@ -66,11 +118,8 @@ pub const TextureManager = struct {
                 const block_type = std.meta.stringToEnum(Block, entry.name[0..dot]) orelse continue;
                 if (!block_type.isVisible()) continue;
 
-                const layer: u32 = @intCast(indexer.indexOf(block_type));
-                if (layer >= max_textures) return error.TooManyTextures;
-
                 try entry_names.append(allocator, try allocator.dupe(u8, entry.name));
-                try entry_layers.append(allocator, layer);
+                try entry_blocks.append(allocator, block_type);
             }
         }
 
@@ -83,12 +132,13 @@ pub const TextureManager = struct {
             self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
         var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
+        try staging_slices.ensureTotalCapacity(allocator, entry_names.items.len);
         defer {
             for (staging_slices.items) |s| self.renderer.cpu_to_gpu_gpa.allocator().free(s);
             staging_slices.deinit(allocator);
         }
 
-        for (entry_names.items, entry_layers.items) |name, layer| {
+        for (entry_names.items, entry_blocks.items) |name, block_type| {
             const texture_file = try dir.openFile(io, name, .{});
             defer texture_file.close(io);
 
@@ -98,17 +148,17 @@ pub const TextureManager = struct {
 
             const w: u32 = @intCast(loaded_img.width);
             const h: u32 = @intCast(loaded_img.height);
-            if (w != h) return error.TexturesNotSquare;
 
-            const staging = try self.uploadSingleTexture(cmd, &self.textures[layer], w, h, loaded_img.rawBytes(), format);
-            try staging_slices.append(allocator, staging);
+            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(block_type), w, h, loaded_img.rawBytes(), format);
+            staging_slices.appendAssumeCapacity(staging);
         }
 
-        try self.renderer.endSingleTimeCommands(io, cmd);
+        const end_err = self.renderer.endSingleTimeCommands(io, cmd);
         cmd = .null_handle;
+        try end_err;
 
-        for (entry_layers.items) |layer| {
-            const tex = &self.textures[layer];
+        for (entry_blocks.items) |block_type| {
+            const tex = self.textures.getPtr(block_type);
             tex.view = try self.renderer.dev.createImageView(&.{
                 .flags = .{},
                 .image = tex.image,
@@ -124,6 +174,7 @@ pub const TextureManager = struct {
     }
 
     fn createSampler(self: *TextureManager) void {
+        const anisotropy = self.renderer.vk_ctx.sampler_anisotropy;
         self.sampler = self.renderer.dev.createSampler(&.{
             .flags = .{},
             .mag_filter = .nearest,
@@ -133,8 +184,8 @@ pub const TextureManager = struct {
             .address_mode_v = .repeat,
             .address_mode_w = .repeat,
             .mip_lod_bias = 0.0,
-            .anisotropy_enable = .false,
-            .max_anisotropy = 1.0,
+            .anisotropy_enable = if (anisotropy) .true else .false,
+            .max_anisotropy = 16.0,
             .compare_enable = .false,
             .compare_op = .always,
             .min_lod = 0.0,
@@ -153,6 +204,7 @@ pub const TextureManager = struct {
             self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
 
         const staging = try self.uploadSingleTexture(cmd, &self.default_texture, 1, 1, &default_pixels, format);
+        errdefer self.renderer.cpu_to_gpu_gpa.allocator().free(staging);
 
         try self.renderer.endSingleTimeCommands(io, cmd);
         cmd = .null_handle;
@@ -167,9 +219,11 @@ pub const TextureManager = struct {
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
         }, null);
+        errdefer self.destroyTexture(&self.default_texture);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
+        const num_textures = std.enums.EnumIndexer(Block).count;
         const binding_flags: [1]vk.DescriptorBindingFlags = .{
             .{ .update_after_bind_bit = true, .partially_bound_bit = true },
         };
@@ -181,7 +235,7 @@ pub const TextureManager = struct {
             .p_bindings = &.{.{
                 .binding = 0,
                 .descriptor_type = .combined_image_sampler,
-                .descriptor_count = max_textures,
+                .descriptor_count = @intCast(num_textures),
                 .stage_flags = .{ .fragment_bit = true },
                 .p_immutable_samplers = null,
             }},
@@ -195,7 +249,7 @@ pub const TextureManager = struct {
             .flags = .{ .update_after_bind_bit = true },
             .max_sets = 1,
             .pool_size_count = 1,
-            .p_pool_sizes = &.{.{ .type = .combined_image_sampler, .descriptor_count = max_textures }},
+            .p_pool_sizes = &.{.{ .type = .combined_image_sampler, .descriptor_count = @intCast(num_textures) }},
         }, null);
         errdefer {
             self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, null);
@@ -208,21 +262,26 @@ pub const TextureManager = struct {
             .p_set_layouts = (&self.descriptor_set_layout)[0..1],
         }, (&self.descriptor_set)[0..1]);
 
-        var image_infos: [max_textures]vk.DescriptorImageInfo = undefined;
+        const indexer = std.enums.EnumIndexer(Block);
+        var image_infos: [num_textures]vk.DescriptorImageInfo = undefined;
         for (&image_infos, 0..) |*info, i| {
-            const tex = if (self.textures[i].view != .null_handle) &self.textures[i] else &self.default_texture;
+            const block = indexer.keyForIndex(i);
+            const tex_ptr = self.textures.getPtr(block);
+            const tex = if (tex_ptr.view != .null_handle) tex_ptr else &self.default_texture;
             info.* = .{ .sampler = self.sampler, .image_view = tex.view, .image_layout = .shader_read_only_optimal };
         }
 
+        const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+        const dummy_texel_buffer_view: vk.BufferView = .null_handle;
         self.renderer.dev.updateDescriptorSets(&.{vk.WriteDescriptorSet{
             .dst_set = self.descriptor_set,
             .dst_binding = 0,
             .dst_array_element = 0,
-            .descriptor_count = max_textures,
+            .descriptor_count = @intCast(num_textures),
             .descriptor_type = .combined_image_sampler,
             .p_image_info = &image_infos,
-            .p_buffer_info = (&[1]vk.DescriptorBufferInfo{.{ .buffer = .null_handle, .offset = 0, .range = 0 }})[0..1],
-            .p_texel_buffer_view = (&[1]vk.BufferView{.null_handle})[0..1],
+            .p_buffer_info = (&dummy_buffer_info)[0..1],
+            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
         }}, null);
     }
 
@@ -252,9 +311,7 @@ pub const TextureManager = struct {
     ) ![]u8 {
         const image_size: vk.DeviceSize = @intCast(width * height * 4);
         const num_mip_levels: u16 = @intCast(std.math.log2(@max(width, height)) + 1);
-
-        var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
-        self.renderer.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &.{
+        const image_info = vk.ImageCreateInfo{
             .flags = .{},
             .image_type = .@"2d",
             .extent = .{ .width = width, .height = height, .depth = 1 },
@@ -268,7 +325,10 @@ pub const TextureManager = struct {
             .samples = .{ .@"1_bit" = true },
             .queue_family_index_count = 0,
             .p_queue_family_indices = undefined,
-        }, .plane_aspect = .{} }, &mem_reqs2);
+        };
+
+        var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
+        self.renderer.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
 
         const memory = try self.renderer.dev.allocateMemory(&.{
             .allocation_size = mem_reqs2.memory_requirements.size,
@@ -276,21 +336,7 @@ pub const TextureManager = struct {
         }, null);
         errdefer self.renderer.dev.freeMemory(memory, null);
 
-        const image = try self.renderer.dev.createImage(&.{
-            .flags = .{},
-            .image_type = .@"2d",
-            .extent = .{ .width = width, .height = height, .depth = 1 },
-            .mip_levels = num_mip_levels,
-            .array_layers = 1,
-            .format = format,
-            .tiling = .optimal,
-            .initial_layout = .undefined,
-            .usage = .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
-            .sharing_mode = .exclusive,
-            .samples = .{ .@"1_bit" = true },
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
-        }, null);
+        const image = try self.renderer.dev.createImage(&image_info, null);
         errdefer self.renderer.dev.destroyImage(image, null);
 
         try self.renderer.dev.bindImageMemory(image, memory, 0);
@@ -316,26 +362,24 @@ pub const TextureManager = struct {
 
             var mip: u32 = 1;
             while (mip < num_mip_levels) : (mip += 1) {
-                const prev = mip - 1;
-                const sw = @max(1, width >> @intCast(prev));
-                const sh = @max(1, height >> @intCast(prev));
                 const dw = @max(1, width >> @intCast(mip));
                 const dh = @max(1, height >> @intCast(mip));
 
                 self.imageBarrier(cmd, image, .undefined, .transfer_dst_optimal, mip, 1);
 
-                self.renderer.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{vk.ImageBlit{
-                    .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = prev, .base_array_layer = 0, .layer_count = 1 },
-                    .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(sw), .y = @intCast(sh), .z = 1 } },
-                    .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
-                    .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(dw), .y = @intCast(dh), .z = 1 } },
-                }}, .linear);
+                self.renderer.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
+                    vk.ImageBlit{
+                        .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+                        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(width), .y = @intCast(height), .z = 1 } },
+                        .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
+                        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(dw), .y = @intCast(dh), .z = 1 } },
+                    },
+                }, .linear);
 
-                self.imageBarrier(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, prev, 1);
-                self.imageBarrier(cmd, image, .transfer_dst_optimal, .transfer_src_optimal, mip, 1);
+                self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, mip, 1);
             }
 
-            self.imageBarrier(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, num_mip_levels - 1, 1);
+            self.imageBarrier(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1);
         } else {
             self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, 0, 1);
         }
@@ -417,7 +461,7 @@ pub const TextureManager = struct {
             self.renderer.dev.destroySampler(self.sampler, null);
             self.sampler = .null_handle;
         }
-        for (&self.textures) |*tex| self.destroyTexture(tex);
+        for (self.textures.values[0..]) |*tex| self.destroyTexture(tex);
     }
 };
 

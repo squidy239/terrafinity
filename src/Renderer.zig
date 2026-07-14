@@ -64,4 +64,5 @@ pub const RenderOptions = struct {
     day_length_sec: f32 = 60 * 5,
     gamma_correction: bool = false,
     present_mode: VulkanContext.PresentMode = .mailbox,
+    selected_pack: []const u8 = "default",
 };
