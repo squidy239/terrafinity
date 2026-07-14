@@ -344,7 +344,11 @@ pub const TextureArrayManager = struct {
         base_array_layer: u32,
         array_layer_count: u32,
     ) !void {
-        var barrier = vk.ImageMemoryBarrier{
+        var barrier = vk.ImageMemoryBarrier2{
+            .src_stage_mask = .{},
+            .src_access_mask = .{},
+            .dst_stage_mask = .{},
+            .dst_access_mask = .{},
             .old_layout = old_layout,
             .new_layout = new_layout,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -357,53 +361,52 @@ pub const TextureArrayManager = struct {
                 .base_array_layer = base_array_layer,
                 .layer_count = array_layer_count,
             },
-            .src_access_mask = .{},
-            .dst_access_mask = .{},
         };
 
-        var source_stage: vk.PipelineStageFlags = .{};
-        var dest_stage: vk.PipelineStageFlags = .{};
-
         if (old_layout == .undefined and new_layout == .transfer_dst_optimal) {
-            barrier.src_access_mask = .{};
             barrier.dst_access_mask = .{ .transfer_write_bit = true };
-            source_stage = .{ .top_of_pipe_bit = true };
-            dest_stage = .{ .transfer_bit = true };
+            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
         } else if (old_layout == .transfer_dst_optimal and new_layout == .transfer_src_optimal) {
             barrier.src_access_mask = .{ .transfer_write_bit = true };
             barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            source_stage = .{ .transfer_bit = true };
-            dest_stage = .{ .transfer_bit = true };
+            barrier.src_stage_mask = .{ .all_transfer_bit = true };
+            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
         } else if (old_layout == .transfer_src_optimal and new_layout == .shader_read_only_optimal) {
             barrier.src_access_mask = .{ .transfer_read_bit = true, .transfer_write_bit = true };
             barrier.dst_access_mask = .{ .shader_read_bit = true };
-            source_stage = .{ .transfer_bit = true };
-            dest_stage = .{ .fragment_shader_bit = true };
+            barrier.src_stage_mask = .{ .all_transfer_bit = true };
+            barrier.dst_stage_mask = .{ .fragment_shader_bit = true };
         } else if (old_layout == .undefined and new_layout == .transfer_src_optimal) {
-            barrier.src_access_mask = .{};
             barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            source_stage = .{ .top_of_pipe_bit = true };
-            dest_stage = .{ .transfer_bit = true };
+            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
         } else if (old_layout == .shader_read_only_optimal and new_layout == .transfer_src_optimal) {
             barrier.src_access_mask = .{ .shader_read_bit = true };
             barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            source_stage = .{ .fragment_shader_bit = true };
-            dest_stage = .{ .transfer_bit = true };
+            barrier.src_stage_mask = .{ .fragment_shader_bit = true };
+            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
         } else if (old_layout == .transfer_dst_optimal and new_layout == .shader_read_only_optimal) {
             barrier.src_access_mask = .{ .transfer_write_bit = true };
             barrier.dst_access_mask = .{ .shader_read_bit = true };
-            source_stage = .{ .transfer_bit = true };
-            dest_stage = .{ .fragment_shader_bit = true };
+            barrier.src_stage_mask = .{ .all_transfer_bit = true };
+            barrier.dst_stage_mask = .{ .fragment_shader_bit = true };
         } else if (old_layout == .transfer_src_optimal and new_layout == .transfer_dst_optimal) {
             barrier.src_access_mask = .{ .transfer_read_bit = true };
             barrier.dst_access_mask = .{ .transfer_write_bit = true };
-            source_stage = .{ .transfer_bit = true };
-            dest_stage = .{ .transfer_bit = true };
+            barrier.src_stage_mask = .{ .all_transfer_bit = true };
+            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
         } else {
             @panic("Unsupported layout transition");
         }
 
-        self.renderer.dev.cmdPipelineBarrier(cmd, source_stage, dest_stage, .{}, null, null, &.{barrier});
+        self.renderer.dev.cmdPipelineBarrier2(cmd, &.{
+            .dependency_flags = .{},
+            .memory_barrier_count = 0,
+            .p_memory_barriers = null,
+            .buffer_memory_barrier_count = 0,
+            .p_buffer_memory_barriers = null,
+            .image_memory_barrier_count = 1,
+            .p_image_memory_barriers = (&barrier)[0..1],
+        });
     }
 
     pub fn destroyTextureArray(self: *TextureArrayManager) void {

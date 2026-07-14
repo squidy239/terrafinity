@@ -4,18 +4,17 @@
 layout(local_size_x = 64) in;
 
 struct InputChunk {
-    uint64_t address;
     vec4 absolute_position;
-    vec4 relative_position; // Ignored/unused now, computed dynamically
+    uint64_t address;
     float scale;
     uint face_count;
     uint is_transparent;
 };
 
 struct ChunkData {
-    uint64_t address;
     vec4 absolute_position;
     vec4 relative_position;
+    uint64_t address;
     float scale;
 };
 
@@ -53,14 +52,7 @@ layout(push_constant) uniform PushConsts {
 bool boxInFrustum(vec3 bmin, vec3 bmax) {
     for (int i = 0; i < 6; i++) {
         vec4 plane = pc.planes[i];
-        vec3 p = vec3(
-            (plane.x > 0.0) ? bmax.x : bmin.x,
-            (plane.y > 0.0) ? bmax.y : bmin.y,
-            (plane.z > 0.0) ? bmax.z : bmin.z
-        );
-        if (dot(plane.xyz, p) + plane.w < 0.0) {
-            return false;
-        }
+        if (dot(plane.xyz, mix(bmin, bmax, greaterThan(plane.xyz, vec3(0.0)))) + plane.w < 0.0) return false;
     }
     return true;
 }
@@ -70,53 +62,31 @@ void main() {
     if (g_idx >= pc.total_candidates) return;
 
     InputChunk chunk = candidate_chunks[g_idx];
-
-    // If face_count is 0, the chunk slot is inactive/freed
     if (chunk.face_count == 0u) return;
 
-    // Compute relative position dynamically inside the shader
-    vec3 relative_position = chunk.absolute_position.xyz - pc.player_pos.xyz;
+    vec3 relative_pos = chunk.absolute_position.xyz - pc.player_pos.xyz;
+    float size = chunk.scale * 32.0;
+    if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
 
-    // Compute bounding box
-    float scale = chunk.scale;
-    float chunk_size_blocks = scale * 32.0;
-    vec3 bmin = relative_position;
-    vec3 bmax = relative_position + vec3(chunk_size_blocks);
-
-    if (boxInFrustum(bmin, bmax)) {
-        if (chunk.is_transparent == 0u) {
-            uint idx = atomicAdd(opaque_count, 1u);
-            if (idx < pc.draw_capacity) {
-                out_indirect[idx] = DrawIndirectCommand(
-                    chunk.face_count * 6u,
-                    1u,
-                    0u,
-                    idx
-                );
-                out_chunks[idx] = ChunkData(
-                    chunk.address,
-                    chunk.absolute_position,
-                    vec4(relative_position, 1.0),
-                    chunk.scale
-                );
-            }
-        } else {
-            uint idx = atomicAdd(transparent_count, 1u);
-            if (idx < pc.draw_capacity) {
-                uint out_idx = pc.draw_capacity + idx;
-                out_indirect[out_idx] = DrawIndirectCommand(
-                    chunk.face_count * 6u,
-                    1u,
-                    0u,
-                    out_idx
-                );
-                out_chunks[out_idx] = ChunkData(
-                    chunk.address,
-                    chunk.absolute_position,
-                    vec4(relative_position, 1.0),
-                    chunk.scale
-                );
-            }
-        }
+    uint idx;
+    if (chunk.is_transparent == 0u) {
+        idx = atomicAdd(opaque_count, 1u);
+    } else {
+        idx = atomicAdd(transparent_count, 1u);
     }
+    if (idx >= pc.draw_capacity) return;
+
+    uint out_idx = idx + (chunk.is_transparent * pc.draw_capacity);
+    out_indirect[out_idx] = DrawIndirectCommand(
+        chunk.face_count * 6u,
+        1u,
+        0u,
+        out_idx
+    );
+    out_chunks[out_idx] = ChunkData(
+        chunk.absolute_position,
+        vec4(relative_pos, 1.0),
+        chunk.address,
+        chunk.scale
+    );
 }

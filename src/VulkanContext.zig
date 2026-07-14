@@ -663,7 +663,6 @@ pub fn beginFrame(self: *VulkanContext) !FrameContext {
         const frame_number = self.frame_number.load(.acquire);
         if (frame_number >= max_frames_in_flight) {
             const wait_value: u64 = frame_number - max_frames_in_flight + 1;
-            std.log.info("beginFrame: frame_number = {d}, wait_value = {d}", .{ frame_number, wait_value });
             const wait_info: vk.SemaphoreWaitInfo = .{
                 .semaphore_count = 1,
                 .p_semaphores = (&self.graphics_timeline_semaphore)[0..1],
@@ -672,10 +671,8 @@ pub fn beginFrame(self: *VulkanContext) !FrameContext {
             const wait_result = self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch return error.DrawFailed;
             if (wait_result != .success) return error.DrawFailed;
         }
-        std.log.info("beginFrame: acquired semaphores...", .{});
     }
     const image_index = try self.acquireSwapchainImage(current_frame);
-    std.log.info("beginFrame: acquireSwapchainImage done, frame_index = {d}", .{current_frame});
     return .{
         .frame_index = current_frame,
         .image_index = image_index,
@@ -719,8 +716,6 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
     const current_transfer_val = self.transfer_semaphore_value.load(.monotonic);
     const current_graphics_val = self.frame_number.fetchAdd(1, .release) + 1;
     const prev_graphics_val = current_graphics_val - 1;
-
-    std.log.info("submitFrame: current_graphics_val = {d}, prev_graphics_val = {d}", .{ current_graphics_val, prev_graphics_val });
 
     const wait_semaphore_infos: [3]vk.SemaphoreSubmitInfo = .{
         .{ .semaphore = self.image_acquired_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },

@@ -3,7 +3,6 @@ const std = @import("std");
 const options = @import("options");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-const BaseWrapper = vk.BaseWrapper;
 const InstanceWrapper = vk.InstanceWrapper;
 const DeviceWrapper = vk.DeviceWrapper;
 const InstanceProxy = vk.InstanceProxy;
@@ -32,16 +31,15 @@ const composite_frag_spv: []const u8 = @embedFile("comp_frag_spv");
 const cull_shader_spv: []const u8 = @embedFile("cull_spv");
 
 const InputChunk = extern struct {
-    address: u64 align(8),
-    absolute_position: [4]f32 align(16),
-    relative_position: [4]f32 align(16),
+    absolute_position: [4]f32 align(@sizeOf([4]f32)),
+    address: u64 align(@sizeOf(u64)),
     scale: f32,
     face_count: u32,
     is_transparent: u32,
 };
 
 comptime {
-    if (@sizeOf(InputChunk) != 64) @compileError("InputChunk size mismatch with GLSL layout (expected 64, got " ++ @typeName(@TypeOf(@sizeOf(InputChunk))) ++ ")");
+    if (@sizeOf(InputChunk) != 48) @compileError("InputChunk size mismatch with GLSL layout (expected 48, got " ++ @typeName(@TypeOf(@sizeOf(InputChunk))) ++ ")");
 }
 
 const CullCount = extern struct {
@@ -198,7 +196,7 @@ const CommandPoolReservoir = struct {
     cmds: []vk.CommandBuffer = &.{},
     used: []std.atomic.Value(bool) = &.{},
 
-    pub const Borrowed = struct { pool: vk.CommandPool, cmd: vk.CommandBuffer };
+    pub const Borrowed = struct { pool: vk.CommandPool, cmd: vk.CommandBuffer, pool_index: usize };
 
     pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
         self.pools = try allocator.alloc(vk.CommandPool, count);
@@ -227,7 +225,7 @@ const CommandPoolReservoir = struct {
     pub fn tryBorrowPool(self: *CommandPoolReservoir) ?Borrowed {
         for (self.pools, 0..) |pool, i| {
             if (self.used[i].cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
-                return .{ .pool = pool, .cmd = self.cmds[i] };
+                return .{ .pool = pool, .cmd = self.cmds[i], .pool_index = i };
             }
         }
         return null;
@@ -245,14 +243,14 @@ const CommandPoolReservoir = struct {
 };
 
 const ChunkData = extern struct {
-    address: u64 align(8),
-    absolute_position: [4]f32 align(16),
-    relative_position: [4]f32 align(16),
+    absolute_position: [4]f32 align(@sizeOf([4]f32)),
+    relative_position: [4]f32 align(@sizeOf([4]f32)),
+    address: u64 align(@sizeOf(u64)),
     scale: f32,
 };
 
 comptime {
-    if (@sizeOf(ChunkData) != 64) @compileError("ChunkData size mismatch with GLSL layout (expected 64)");
+    if (@sizeOf(ChunkData) != 48) @compileError("ChunkData size mismatch with GLSL layout (expected 48)");
 }
 
 comptime {
@@ -265,6 +263,17 @@ const PushConstants = extern struct {
     sun_dir: [3]f32,
     time: f32,
 };
+
+const CullPushConstants = extern struct {
+    planes: [6][4]f32,
+    player_pos: [4]f32 align(16),
+    total_candidates: u32,
+    draw_capacity: u32,
+};
+
+comptime {
+    if (@sizeOf(CullPushConstants) != 128) @compileError("CullPushConstants size mismatch with GLSL layout");
+}
 
 fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
@@ -650,7 +659,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     errdefer self.cpu_to_gpu_gpa.allocator().free(persistent_candidates_slice);
     @memset(persistent_candidates_slice, .{
         .absolute_position = .{ 0, 0, 0, 0 },
-        .relative_position = .{ 0, 0, 0, 0 },
         .scale = 0,
         .face_count = 0,
         .is_transparent = 0,
@@ -998,6 +1006,54 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, mesh: ChunkMeshBuffer, gpu_index: u
     });
 }
 
+fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?ChunkMeshBuffer, tag: RenderBufferKey, chunk_pos: ChunkPos) !void {
+    const key = tag;
+    if (mesh) |m| {
+        var new_mesh = m;
+        var gpu_idx_opt = self.index_pool.allocIndex(io);
+        if (gpu_idx_opt == null) {
+            try self.growPersistentCandidates(io);
+            gpu_idx_opt = self.index_pool.allocIndex(io);
+        }
+        const gpu_idx = gpu_idx_opt.?;
+        new_mesh.gpu_index = gpu_idx;
+
+        const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
+        const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
+        const abs_vec: [4]f32 = .{ @floatCast(chunk_blockpos[0]), @floatCast(chunk_blockpos[1]), @floatCast(chunk_blockpos[2]), 1.0 };
+
+        const is_transparent = key == .transparent;
+        self.persistent.mapped[gpu_idx] = .{
+            .absolute_position = abs_vec,
+            .scale = ChunkPos.toScale(chunk_pos.level),
+            .face_count = new_mesh.face_count,
+            .is_transparent = if (is_transparent) 1 else 0,
+            .address = new_mesh.device_address,
+        };
+
+        var current_max = self.max_allocated_index.load(.monotonic);
+        while (gpu_idx >= current_max) {
+            if (self.max_allocated_index.cmpxchgStrong(current_max, gpu_idx + 1, .release, .monotonic)) |actual_val| {
+                current_max = actual_val;
+                continue;
+            }
+            break;
+        }
+
+        const existing = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
+        if (existing) |old_mesh| {
+            self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
+            try self.enqueueRetiredMesh(old_mesh, old_mesh.gpu_index);
+        }
+    } else {
+        const existing = self.meshes.fetchRemove(io, key);
+        if (existing) |old_mesh| {
+            self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
+            try self.enqueueRetiredMesh(old_mesh, old_mesh.gpu_index);
+        }
+    }
+}
+
 fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "retireCompletedUploads" });
     defer zone.end();
@@ -1009,69 +1065,15 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
         const pending = if (self.peeked_upload) |p| p else blk: {
             var buf: PendingChunkUpload = undefined;
             const got = try self.pending_uploads_queue.get(io, (&buf)[0..1], 0);
-            if (got == 0) return; // Queue is empty, nothing to retire
+            if (got == 0) return;
             break :blk buf;
         };
 
-        // Fresh read each iteration — batches submitted between iterations
-        // (e.g. from addChunk flushes) may have completed by now.
         const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
 
         if (current_transfer_val >= pending.timeline_value) {
-            inline for (.{
-                .{ .mesh = pending.opaque_mesh, .tag = .@"opaque" },
-                .{ .mesh = pending.transparent_mesh, .tag = .transparent },
-            }) |item| {
-                const key = @unionInit(RenderBufferKey, @tagName(item.tag), pending.chunk_pos);
-                if (item.mesh) |m| {
-                    var new_mesh = m;
-                    var gpu_idx_opt = self.index_pool.allocIndex(io);
-                    if (gpu_idx_opt == null) {
-                        try self.growPersistentCandidates(io);
-                        gpu_idx_opt = self.index_pool.allocIndex(io);
-                    }
-                    const gpu_idx = gpu_idx_opt.?;
-                    new_mesh.gpu_index = gpu_idx;
-
-                    const ratio = ChunkPos.levelToBlockRatioFloat(pending.chunk_pos.level);
-                    const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(pending.chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
-                    const abs_vec: [4]f32 = .{ @floatCast(chunk_blockpos[0]), @floatCast(chunk_blockpos[1]), @floatCast(chunk_blockpos[2]), 1.0 };
-
-                    self.persistent.mapped[gpu_idx] = .{
-                        .absolute_position = abs_vec,
-                        .relative_position = .{ 0, 0, 0, 0 },
-                        .scale = ChunkPos.toScale(pending.chunk_pos.level),
-                        .face_count = new_mesh.face_count,
-                        .is_transparent = if (item.tag == .transparent) 1 else 0,
-                        .address = new_mesh.device_address,
-                    };
-
-                    var current_max = self.max_allocated_index.load(.monotonic);
-                    while (gpu_idx >= current_max) {
-                        if (self.max_allocated_index.cmpxchgStrong(current_max, gpu_idx + 1, .release, .monotonic)) |actual_val| {
-                            current_max = actual_val;
-                            continue;
-                        }
-                        break;
-                    }
-
-                    const existing = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
-                    if (existing) |old_mesh| {
-                        self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
-                        // Defer index free: store gpu_index in the retired entry so it's only
-                        // returned to the pool after the GPU has finished referencing it.
-                        const old_index = old_mesh.gpu_index;
-                        try self.enqueueRetiredMesh(old_mesh, old_index);
-                    }
-                } else {
-                    const existing = self.meshes.fetchRemove(io, key);
-                    if (existing) |old_mesh| {
-                        self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
-                        const old_index = old_mesh.gpu_index;
-                        try self.enqueueRetiredMesh(old_mesh, old_index);
-                    }
-                }
-            }
+            try self.retireOnePendingItem(io, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
+            try self.retireOnePendingItem(io, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
 
             self.freePendingUploadStaging(pending);
             self.peeked_upload = null;
@@ -1469,12 +1471,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
     self.dev.cmdBindDescriptorSets(cmd_buffer, .compute, self.cull.pipeline_layout, 0, (&self.cull.descriptor_sets_per_frame[current_frame])[0..1], null);
 
-    var push_consts: extern struct {
-        planes: [6][4]f32,
-        player_pos: [4]f32 align(16),
-        total_candidates: u32,
-        draw_capacity: u32,
-    } = undefined;
+    var push_consts: CullPushConstants = undefined;
     for (frustum.planes, 0..) |plane, idx| {
         push_consts.planes[idx] = plane;
     }
@@ -1534,6 +1531,29 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     });
 }
 
+inline fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, depth_aspect_mask: vk.ImageAspectFlags) void {
+    const pre_dispatch_mem_barrier: vk.MemoryBarrier2 = .{
+        .src_stage_mask = .{ .all_commands_bit = true },
+        .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+        .dst_stage_mask = .{ .all_commands_bit = true },
+        .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+    };
+    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const pre_dispatch_img_barriers: [2]vk.ImageMemoryBarrier2 = .{
+        makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
+    };
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 1,
+        .p_memory_barriers = (&pre_dispatch_mem_barrier)[0..1],
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = pre_dispatch_img_barriers.len,
+        .p_image_memory_barriers = &pre_dispatch_img_barriers,
+    });
+}
+
 fn recordOpaquePass(
     self: *VulkanRenderer,
     cmd_buffer: vk.CommandBuffer,
@@ -1546,66 +1566,7 @@ fn recordOpaquePass(
     frustum: Frustum,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
-    // Frame-start synchronization to prevent cross-frame race conditions on the shared render targets.
-    // Frame-start synchronization to prevent cross-frame race conditions on the shared render targets.
-    const pre_dispatch_mem_barrier: vk.MemoryBarrier2 = .{
-        .src_stage_mask = .{ .all_commands_bit = true },
-        .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-        .dst_stage_mask = .{ .all_commands_bit = true },
-        .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-    };
-    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const pre_dispatch_img_barriers: [4]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(
-            self.render_color.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .all_commands_bit = true },
-            .{ .memory_read_bit = true, .memory_write_bit = true },
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            color_aspect,
-        ),
-        makeImageBarrier2(
-            self.oit.accum.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .all_commands_bit = true },
-            .{ .memory_read_bit = true, .memory_write_bit = true },
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            color_aspect,
-        ),
-        makeImageBarrier2(
-            self.oit.reveal.image,
-            .undefined,
-            .color_attachment_optimal,
-            .{ .all_commands_bit = true },
-            .{ .memory_read_bit = true, .memory_write_bit = true },
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            color_aspect,
-        ),
-        makeImageBarrier2(
-            self.render_depth.image,
-            .undefined,
-            .depth_stencil_attachment_optimal,
-            .{ .all_commands_bit = true },
-            .{ .memory_read_bit = true, .memory_write_bit = true },
-            .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-            .{ .depth_stencil_attachment_write_bit = true },
-            depth_aspect_mask,
-        ),
-    };
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 1,
-        .p_memory_barriers = (&pre_dispatch_mem_barrier)[0..1],
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = pre_dispatch_img_barriers.len,
-        .p_image_memory_barriers = &pre_dispatch_img_barriers,
-    });
+    self.emitFrameStartBarriers(cmd_buffer, depth_aspect_mask);
 
     if (total_candidates > 0) {
         self.dispatchCulling(cmd_buffer, current_frame, frustum, total_candidates, view_pos);
@@ -1689,6 +1650,20 @@ fn recordTransparentPass(
     total_candidates: u32,
     pc: PushConstants,
 ) void {
+    const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const oit_pre_barriers: [2]vk.ImageMemoryBarrier2 = .{
+        makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+    };
+    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 0,
+        .p_buffer_memory_barriers = null,
+        .image_memory_barrier_count = 2,
+        .p_image_memory_barriers = &oit_pre_barriers,
+    });
     const oit_accum_attachment = renderingAttachmentColor(self.oit.accum.view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
     const oit_reveal_attachment = renderingAttachmentColor(self.oit.reveal.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
     const oit_depth_attachment = renderingAttachmentDepth(self.render_depth.view, .depth_stencil_read_only_optimal, .load);
@@ -1740,7 +1715,7 @@ fn recordTransparentPass(
 
     if (total_candidates > 0) {
         const transparent_byte_offset: vk.DeviceSize = self.frame_buffers.indirect_draw_offsets[current_frame] + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
-        const transparent_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame] + @as(vk.DeviceSize, 4);
+        const transparent_count_byte_offset: vk.DeviceSize = self.frame_buffers.count_offsets[current_frame] + @as(vk.DeviceSize, @offsetOf(CullCount, "transparent_count"));
 
         const chunk_data_buffer = self.frame_buffers.chunk_data[current_frame];
         const chunk_data_offset: vk.DeviceSize = self.frame_buffers.chunk_data_offsets[current_frame];
@@ -1827,13 +1802,13 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
     if (self.frame_buffers.stats_mapped[current_frame]) |counts_ptr| {
         const opaque_count = counts_ptr[0].opaque_count;
         const transparent_count = counts_ptr[0].transparent_count;
-        const total_count = @as(u32, @intCast(self.meshes.count(io)));
+        const total_candidates = self.max_allocated_index.load(.monotonic);
         self.frame_stats.opaque_drawn = opaque_count;
         self.frame_stats.transparent_drawn = transparent_count;
-        self.frame_stats.opaque_candidates = total_count;
-        self.frame_stats.transparent_candidates = total_count;
-        self.frame_stats.opaque_culled = total_count -| opaque_count;
-        self.frame_stats.transparent_culled = total_count -| transparent_count;
+        self.frame_stats.opaque_candidates = total_candidates;
+        self.frame_stats.transparent_candidates = total_candidates;
+        self.frame_stats.opaque_culled = total_candidates -| opaque_count;
+        self.frame_stats.transparent_culled = total_candidates -| transparent_count;
     }
 
     const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
@@ -1916,6 +1891,73 @@ fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Ren
     };
 }
 
+const GrowFrameBackup = struct {
+    chunk_data_ptr: [*]ChunkData,
+    indirect_ptr: [*]vk.DrawIndirectCommand,
+    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+};
+
+const GrowFrameAllocation = struct {
+    chunk_data_slice: []ChunkData,
+    indirect_draw_slice: []vk.DrawIndirectCommand,
+    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+};
+
+fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []GrowFrameAllocation) !void {
+    for (new_frames, 0..) |*new_frame, i| {
+        new_frame.* = .{
+            .chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, new_capacity * draw_type_count),
+            .indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count),
+            .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
+            .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
+        };
+        @memset(new_frame.stats_slice, .{ .opaque_count = 0, .transparent_count = 0 });
+
+        if (old_draw_capacity > 0) {
+            @memcpy(new_frame.chunk_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
+            @memcpy(new_frame.indirect_draw_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
+        }
+    }
+}
+
+fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []const GrowFrameAllocation) void {
+    for (new_frames, 0..) |new_frame, i| {
+        const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.chunk_data_slice.ptr);
+        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.indirect_draw_slice.ptr);
+        const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, new_frame.count_slice.ptr);
+        const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.stats_slice.ptr);
+
+        self.frame_buffers.chunk_data[i] = chunk_data_info.buffer;
+        self.frame_buffers.chunk_data_mapped[i] = new_frame.chunk_data_slice.ptr;
+        self.frame_buffers.chunk_data_offsets[i] = chunk_data_info.offset;
+
+        self.frame_buffers.indirect_draw[i] = indirect_draw_info.buffer;
+        self.frame_buffers.indirect_draw_mapped[i] = new_frame.indirect_draw_slice.ptr;
+        self.frame_buffers.indirect_draw_offsets[i] = indirect_draw_info.offset;
+
+        self.frame_buffers.count[i] = count_info.buffer;
+        self.frame_buffers.count_slices[i] = new_frame.count_slice;
+        self.frame_buffers.count_offsets[i] = count_info.offset;
+
+        self.frame_buffers.stats[i] = stats_info.buffer;
+        self.frame_buffers.stats_slices[i] = new_frame.stats_slice;
+        self.frame_buffers.stats_offsets[i] = stats_info.offset;
+        self.frame_buffers.stats_mapped[i] = new_frame.stats_slice.ptr;
+
+        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
+        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
+        self.gpu_only_gpa.allocator().free(old_frames[i].count_slice);
+        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].stats_slice);
+    }
+
+    const num_frames = old_frames.len;
+    for (0..num_frames) |i| {
+        self.updateCullDescriptorSet(@intCast(i));
+    }
+}
+
 fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
     defer zone.end();
@@ -1926,7 +1968,7 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     while (new_capacity < min_capacity) {
         new_capacity *= 2;
     }
-    // Clamp to device limit: maxDrawCount in vkCmdDrawIndirectCount must be ≤ maxDrawIndirectCount.
+
     const clamped_capacity = @min(new_capacity, self.max_draw_indirect_count);
     if (clamped_capacity < new_capacity) {
         std.log.warn("VulkanRenderer: draw capacity clamped to device limit {d} (requested {d}). Some chunks may not render!", .{ self.max_draw_indirect_count, new_capacity });
@@ -1942,23 +1984,7 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     const old_draw_capacity = self.draw_capacity;
     const num_frames = self.frame_buffers.indirect_draw_mapped.len;
 
-    // Save old pointers before any modifications (Stage 1 — record)
-    const OldFrame = struct {
-        chunk_data_ptr: [*]ChunkData,
-        indirect_ptr: [*]vk.DrawIndirectCommand,
-        count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-        stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    };
-    const NewFrame = struct {
-        chunk_data_slice: []ChunkData,
-        indirect_draw_slice: []vk.DrawIndirectCommand,
-        count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-        stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    };
-
-    var old_frames: [32]OldFrame = undefined;
-    var new_frames: [32]NewFrame = undefined;
-
+    var old_frames: [32]GrowFrameBackup = undefined;
     for (0..num_frames) |i| {
         old_frames[i] = .{
             .chunk_data_ptr = self.frame_buffers.chunk_data_mapped[i].?,
@@ -1968,77 +1994,11 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
         };
     }
 
-    // Allocate all new buffers (can fail — clean up on error)
-    var frames_allocated: u32 = 0;
-    errdefer {
-        for (0..frames_allocated) |j| {
-            self.cpu_to_gpu_gpa.allocator().free(new_frames[j].chunk_data_slice);
-            self.cpu_to_gpu_gpa.allocator().free(new_frames[j].indirect_draw_slice);
-            self.gpu_only_gpa.allocator().free(new_frames[j].count_slice);
-            self.cpu_to_gpu_gpa.allocator().free(new_frames[j].stats_slice);
-        }
-    }
+    var new_frames: [32]GrowFrameAllocation = undefined;
+    try self.allocateGrowFrames(new_capacity, old_draw_capacity, old_frames[0..num_frames], new_frames[0..num_frames]);
 
-    for (0..num_frames) |i| {
-        new_frames[i] = .{
-            .chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, new_capacity * draw_type_count),
-            .indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count),
-            .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
-            .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
-        };
-        @memset(new_frames[i].stats_slice, .{ .opaque_count = 0, .transparent_count = 0 });
-
-        if (old_draw_capacity > 0) {
-            @memcpy(
-                new_frames[i].chunk_data_slice[0 .. old_draw_capacity * draw_type_count],
-                old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count],
-            );
-            @memcpy(
-                new_frames[i].indirect_draw_slice[0 .. old_draw_capacity * draw_type_count],
-                old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count],
-            );
-        }
-        frames_allocated += 1;
-    }
-
-    // Stage 2 — update state and free old (infallible — all new buffers already allocated)
-    for (0..num_frames) |i| {
-        const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frames[i].chunk_data_slice.ptr);
-        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frames[i].indirect_draw_slice.ptr);
-        const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, new_frames[i].count_slice.ptr);
-        const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frames[i].stats_slice.ptr);
-
-        self.frame_buffers.chunk_data[i] = chunk_data_info.buffer;
-        self.frame_buffers.chunk_data_mapped[i] = new_frames[i].chunk_data_slice.ptr;
-        self.frame_buffers.chunk_data_offsets[i] = chunk_data_info.offset;
-
-        self.frame_buffers.indirect_draw[i] = indirect_draw_info.buffer;
-        self.frame_buffers.indirect_draw_mapped[i] = new_frames[i].indirect_draw_slice.ptr;
-        self.frame_buffers.indirect_draw_offsets[i] = indirect_draw_info.offset;
-
-        self.frame_buffers.count[i] = count_info.buffer;
-        self.frame_buffers.count_slices[i] = new_frames[i].count_slice;
-        self.frame_buffers.count_offsets[i] = count_info.offset;
-
-        self.frame_buffers.stats[i] = stats_info.buffer;
-        self.frame_buffers.stats_slices[i] = new_frames[i].stats_slice;
-        self.frame_buffers.stats_offsets[i] = stats_info.offset;
-        self.frame_buffers.stats_mapped[i] = new_frames[i].stats_slice.ptr;
-
-        // Free old buffers now that new ones are in place
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
-        self.gpu_only_gpa.allocator().free(old_frames[i].count_slice);
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].stats_slice);
-    }
-
-    // Stage 3 — update draw_capacity only after ALL frames are successfully migrated
     self.draw_capacity = new_capacity;
-
-    // Stage 4 — update descriptors with the correct (new) draw_capacity
-    for (0..num_frames) |i| {
-        self.updateCullDescriptorSet(@intCast(i));
-    }
+    self.swapToNewGrowFrames(old_draw_capacity, old_frames[0..num_frames], new_frames[0..num_frames]);
 }
 
 fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
@@ -2056,7 +2016,6 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     const new_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, new_capacity);
     @memset(new_slice, .{
         .absolute_position = .{ 0, 0, 0, 0 },
-        .relative_position = .{ 0, 0, 0, 0 },
         .scale = 0,
         .face_count = 0,
         .is_transparent = 0,
@@ -2344,10 +2303,10 @@ fn buildGraphicsPipeline(
         .input_rate = .instance,
     };
     const instance_attributes: [4]vk.VertexInputAttributeDescription = .{
-        .{ .location = 0, .binding = 0, .format = .r32g32_uint, .offset = 0 },
-        .{ .location = 1, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = 16 },
-        .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = 32 },
-        .{ .location = 3, .binding = 0, .format = .r32_sfloat, .offset = 48 },
+        .{ .location = 0, .binding = 0, .format = .r32g32_uint, .offset = @offsetOf(ChunkData, "address") },
+        .{ .location = 1, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(ChunkData, "absolute_position") },
+        .{ .location = 2, .binding = 0, .format = .r32g32b32a32_sfloat, .offset = @offsetOf(ChunkData, "relative_position") },
+        .{ .location = 3, .binding = 0, .format = .r32_sfloat, .offset = @offsetOf(ChunkData, "scale") },
     };
     const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
@@ -2502,12 +2461,7 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .compute_bit = true },
         .offset = 0,
-        .size = @sizeOf(extern struct {
-            planes: [6][4]f32,
-            player_pos: [4]f32 align(16),
-            total_candidates: u32,
-            draw_capacity: u32,
-        }),
+        .size = @sizeOf(CullPushConstants),
     };
     const layout_info: vk.PipelineLayoutCreateInfo = .{
         .flags = .{},
@@ -2705,17 +2659,20 @@ pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer)
 
     try self.dev.endCommandBuffer(cmd);
 
-    const submit_info: vk.SubmitInfo = .{
-        .command_buffer_count = 1,
-        .p_command_buffers = (&cmd)[0..1],
-        .wait_semaphore_count = 0,
-        .p_wait_semaphores = null,
-        .p_wait_dst_stage_mask = null,
-        .signal_semaphore_count = 0,
-        .p_signal_semaphores = null,
+    const submit_info: vk.SubmitInfo2 = .{
+        .flags = .{},
+        .wait_semaphore_info_count = 0,
+        .p_wait_semaphore_infos = undefined,
+        .command_buffer_info_count = 1,
+        .p_command_buffer_infos = (&vk.CommandBufferSubmitInfo{
+            .command_buffer = cmd,
+            .device_mask = 0,
+        })[0..1],
+        .signal_semaphore_info_count = 0,
+        .p_signal_semaphore_infos = undefined,
     };
 
-    try self.dev.queueSubmit(self.graphics_queue, &.{submit_info}, .null_handle);
+    try self.dev.queueSubmit2(self.graphics_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
 
     {
         const zone_wait = tracy.Zone.begin(.{ .src = @src(), .name = "endSingleTimeCommands_queueWaitIdle" });
@@ -2743,6 +2700,7 @@ fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vect
         self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
     }
 }
+
 fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     var front: @Vector(3, f32) = undefined;
