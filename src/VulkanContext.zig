@@ -93,6 +93,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             .descriptor_indexing = .false,
             .runtime_descriptor_array = .false,
             .descriptor_binding_partially_bound = .false,
+            .descriptor_binding_sampled_image_update_after_bind = .false,
+            .shader_sampled_image_array_non_uniform_indexing = .false,
             .buffer_device_address = .false,
             .buffer_device_address_capture_replay = .false,
             .timeline_semaphore = .false,
@@ -106,6 +108,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             features2.features.shader_int_64 == .true and features2.features.independent_blend == .true and
             features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
             features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
+            features12.descriptor_binding_sampled_image_update_after_bind == .true and
+            features12.shader_sampled_image_array_non_uniform_indexing == .true and
             features12.buffer_device_address == .true and
             features12.timeline_semaphore == .true and
             features13.synchronization_2 == .true and features13.dynamic_rendering == .true and
@@ -353,6 +357,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .descriptor_indexing = .true,
         .runtime_descriptor_array = .true,
         .descriptor_binding_partially_bound = .true,
+        .descriptor_binding_sampled_image_update_after_bind = .true,
+        .shader_sampled_image_array_non_uniform_indexing = .true,
         .buffer_device_address_capture_replay = .false,
         .buffer_device_address = .true,
         .timeline_semaphore = .true,

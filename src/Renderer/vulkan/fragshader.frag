@@ -10,6 +10,7 @@ layout(location = 2) in vec3 fragpos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
+layout(location = 7) in float _unused_view_space_depth;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 struct PushConstants {

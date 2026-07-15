@@ -5,7 +5,7 @@ layout(local_size_x = 64) in;
 
 struct InputChunk {
     vec4 absolute_position;
-    uint64_t address;
+    uint face_offset;
     float scale;
     uint face_count;
     uint is_transparent;
@@ -14,7 +14,6 @@ struct InputChunk {
 struct ChunkData {
     vec4 absolute_position;
     vec4 relative_position;
-    uint64_t address;
     float scale;
 };
 
@@ -78,15 +77,14 @@ void main() {
 
     uint out_idx = idx + (chunk.is_transparent * pc.draw_capacity);
     out_indirect[out_idx] = DrawIndirectCommand(
-        chunk.face_count * 6u,
-        1u,
+        6u,
+        chunk.face_count,
         0u,
-        out_idx
+        chunk.face_offset
     );
     out_chunks[out_idx] = ChunkData(
         chunk.absolute_position,
         vec4(relative_pos, 1.0),
-        chunk.address,
         chunk.scale
     );
 }

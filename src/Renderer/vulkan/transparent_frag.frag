@@ -13,7 +13,7 @@ layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
 layout(location = 7) in float view_space_depth;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
-layout(set = 1, binding = 0) uniform sampler2D opaque_depth_texture;
+layout(set = 2, binding = 0) uniform sampler2D opaque_depth_texture;
 
 struct PushConstants {
     mat4 projview;
