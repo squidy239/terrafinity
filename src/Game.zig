@@ -2,7 +2,6 @@ const std = @import("std");
 const Io = std.Io;
 
 const dvui = @import("dvui");
-const gl = @import("gl");
 const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
@@ -634,7 +633,7 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const camera_front = moveCameraFront(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
     const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
-    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
+    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
 
     {
@@ -657,7 +656,7 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const camera_front = moveCameraFront(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
-    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
+    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
