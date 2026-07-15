@@ -1,4 +1,5 @@
 const std = @import("std");
+const dvui = @import("dvui");
 const Block = @import("src/world/Block.zig").Block;
 
 const ThreadSanitizeMode = enum {
@@ -20,7 +21,7 @@ pub fn build(b: *std.Build) void {
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
-        if (optimize == .Debug or optimize == .ReleaseSafe) "-g" else "-Werror", //This compile errors if I leave the else blank, so I repeat the flag
+        if (optimize == .Debug or optimize == .ReleaseSafe) "-g" else "-Werror",
         "-Werror",
         "-o",
     };
@@ -170,29 +171,65 @@ fn setupDependencies(
     const wio = b.dependency("wio", .{
         .target = target,
         .optimize = optimize,
-        .enable_opengl = true,
+        .enable_opengl = false,
         .enable_vulkan = true,
         .win32_manifest = false,
     });
     root_module.addImport("wio", wio.module("wio"));
 
+    // dvui
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
+        .libc = true,
+        .@"stb-image" = true,
         .freetype = false,
         .@"tree-sitter" = false,
         .tvg = false,
-        .backend = .wio,
+        .backend = .custom,
     });
-    root_module.addImport("dvui", dvui_dep.module("dvui_wio"));
-    root_module.addImport("wio-backend", dvui_dep.module("wio"));
+    const dvui_mod = dvui_dep.module("dvui");
+    dvui_mod.link_libc = true;
 
-    const gl_bindings = @import("zigglgen").generateBindingsModule(b, .{
-        .api = .gl,
-        .version = .@"4.5",
-        .profile = .core,
+    // dvui_vk renderer (for Vulkan UI drawing)
+    const dvui_vk_dep = b.dependency("dvui_vk", .{
+        .target = target,
+        .optimize = optimize,
     });
-    root_module.addImport("gl", gl_bindings);
+    const dvui_vk_renderer_mod = b.addModule("dvui_vk_renderer", .{
+        .root_source_file = dvui_vk_dep.path("src/dvui_vk_renderer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Vulkan bindings
+    const vulkan_headers = b.dependency("vulkan_headers", .{});
+    const registry = vulkan_headers.path("registry/vk.xml");
+    const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
+    const vk_generate_cmd = b.addRunArtifact(vk_gen);
+    vk_generate_cmd.addFileArg(registry);
+    const vulkan_zig_mod = b.addModule("vk", .{
+        .root_source_file = vk_generate_cmd.addOutputFileArg("vk.zig"),
+    });
+    dvui_vk_renderer_mod.addImport("vk", vulkan_zig_mod);
+    dvui_vk_renderer_mod.addImport("dvui", dvui_mod);
+
+    // Our custom dvui backend (windowing via wio + rendering via dvui_vk_renderer)
+    const our_backend_mod = b.addModule("dvui_backend", .{
+        .root_source_file = b.path("src/dvui_backend_vk.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    our_backend_mod.addImport("wio", wio.module("wio"));
+    our_backend_mod.addImport("dvui", dvui_mod);
+    our_backend_mod.addImport("vk", vulkan_zig_mod);
+    our_backend_mod.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
+
+    // Link custom backend with dvui
+    dvui.linkBackend(dvui_mod, our_backend_mod);
+    root_module.addImport("dvui", dvui_mod);
+
+    root_module.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
 
     const zigimg_dependency = b.dependency("zigimg", .{
         .target = target,
@@ -206,14 +243,6 @@ fn setupDependencies(
     });
     root_module.addImport("zm", zm.module("zm"));
 
-    // Vulkan bindings generation
-    const vulkan_headers = b.dependency("vulkan_headers", .{});
-    const registry = vulkan_headers.path("registry/vk.xml");
-    const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
-    const vk_generate_cmd = b.addRunArtifact(vk_gen);
-    vk_generate_cmd.addFileArg(registry);
-    const vulkan_zig = b.addModule("vulkan", .{
-        .root_source_file = vk_generate_cmd.addOutputFileArg("vk.zig"),
-    });
-    root_module.addImport("vulkan", vulkan_zig);
+    // Vulkan bindings (for our game renderer - imported as "vulkan")
+    root_module.addImport("vulkan", vulkan_zig_mod);
 }

@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const dvui = @import("dvui");
-const gl = @import("gl");
 const wio = @import("wio");
 const zigimg = @import("zigimg");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
@@ -17,11 +16,8 @@ const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 const Ui = @This();
 
-proc_table: *const gl.ProcTable,
 window: *wio.Window,
 vk_ctx: *VulkanContext,
-ui_context: *wio.GlContext,
-gl_options: wio.GlOptions,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -110,7 +106,6 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
         self.game.deinit(io);
-        self.window.glMakeContextCurrent(self.ui_context.*);
         return true;
     }
 
@@ -381,6 +376,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    self.vk_ctx.swapchain_gamma.store(self.config.game_config.render_options.gamma_correction, .monotonic);
     try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx);
     std.log.info("opening game\n", .{});
 }
