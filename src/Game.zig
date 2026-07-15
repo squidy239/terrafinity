@@ -436,6 +436,8 @@ pub fn deinit(self: *@This(), io: std.Io) void {
 }
 
 pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, viewport: @Vector(2, u32)) !void {
+    const frame_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "frame" });
+    defer frame_zone.end();
     const now: std.Io.Timestamp = .now(io, .awake);
     const frame_time = self.last_frametime.durationTo(now);
     self.last_frametime = now;
@@ -461,6 +463,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, viewport:
 }
 
 fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
+    defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
     const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
@@ -522,6 +526,8 @@ pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) voi
 }
 
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleMouseMotion" });
+    defer z.end();
     const sensitivity = self.getMouseSensitivity(io);
 
     var view_dir_diff: @Vector(2, f32) = @splat(0);
@@ -541,6 +547,8 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativeP
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleScroll" });
+    defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     const scroll_sensitivity = self.options.scroll_sensitivity;
     self.options_lock.unlockShared(io);
@@ -555,12 +563,12 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     }
 }
 
-pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, delta_time: std.Io.Duration) !void {
-    const delta_time_seconds = @as(f32, @floatFromInt(delta_time.toNanoseconds())) / std.time.ns_per_s;
-
+pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
+    defer z.end();
     switch (self.player.game_mode.load(.unordered)) {
-        .Creative, .Spectator => try self.flyMove(io, actions, delta_time_seconds),
-        .Survival => try self.walkMove(io, actions, delta_time_seconds),
+        .Creative, .Spectator => try self.flyMove(io, actions),
+        .Survival => try self.walkMove(io, actions),
     }
     self.setSelectedSlot(actions);
     groupAsync(self, io, itemAction, .{ self, io, actions.* });
@@ -582,6 +590,8 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
 }
 
 fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "itemAction" });
+    defer z.end();
     self.player.physics.mutex.lockUncancelable(io);
     const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
@@ -617,11 +627,13 @@ fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {
         @cos(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(0)),
     };
 }
-fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
+fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "flyMove" });
+    defer z.end();
     self.player.view_direction_mutex.lockUncancelable(io);
     const camera_front = moveCameraFront(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
-    const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered) * delta_time_seconds);
+    const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.OpenGl.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
 
@@ -638,7 +650,9 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time
     try self.player.physics.update(&self.world, io, self.allocator);
 }
 
-fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_time_seconds: f32) !void {
+fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "walkMove" });
+    defer z.end();
     self.player.view_direction_mutex.lockUncancelable(io);
     const camera_front = moveCameraFront(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
@@ -669,8 +683,8 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet, delta_tim
             self.player.physics.velocity[0] = vel_diff[0];
             self.player.physics.velocity[2] = vel_diff[2];
         } else {
-            self.player.physics.velocity[0] += vel_diff[0] * delta_time_seconds;
-            self.player.physics.velocity[2] += vel_diff[2] * delta_time_seconds;
+            self.player.physics.velocity[0] += vel_diff[0];
+            self.player.physics.velocity[2] += vel_diff[2];
         }
     }
     try self.player.physics.update(&self.world, io, self.allocator);
@@ -760,6 +774,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
         state.is_active = true;
         state.is_queued = false;
+        if (generate_structures) state.structures_generated = true;
 
         is_covering = state.allCoveredChildren() or state.is_active;
         try bucket.hash_map.put(allocator, chunk_pos, state);
@@ -846,6 +861,8 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 
 ///loads chunks from top to bottom and in a spiral on a y level
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, level: i32, error_int: *std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)))) Io.Cancelable!void {
+    const spiral_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "loadChunksSpiral" });
+    defer spiral_zone.end();
     try game.player.physics.mutex.lock(io);
     var player_pos = game.player.physics.pos;
     game.player.physics.mutex.unlock(io);
@@ -967,6 +984,8 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
 }
 
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
+    defer z.end();
     const player_entity = try game.entity_registry.spawn(io, allocator, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{

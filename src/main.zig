@@ -427,7 +427,7 @@ fn handleEvents(
     events: *wio.EventQueue,
     ui_window: *dvui.Window,
     ui: *Ui,
-    dt: std.Io.Duration,
+    _: std.Io.Duration,
 ) !void {
     backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.is_playing_game()) {
@@ -468,6 +468,6 @@ fn handleEvents(
 
     if (ui.menu_state.ingame) {
         try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
-        try ui.game.handleButtonActions(io, action_set, dt);
+        try ui.game.handleButtonActions(io, action_set);
     }
 }
