@@ -16,6 +16,12 @@ pub const GrowInfo = struct {
 };
 
 pub const FaceDataAllocator = struct {
+    pub const AllocResult = struct {
+        offset: vk.DeviceSize,
+        buffer: vk.Buffer,
+        buffer_offset: vk.DeviceSize,
+    };
+
     buffer_slice: []u8,
     buffer: vk.Buffer,
     buffer_offset: vk.DeviceSize,
@@ -54,17 +60,20 @@ pub const FaceDataAllocator = struct {
         self.buffer_offset = buffer_offset;
     }
 
-    pub fn allocRegion(self: *FaceDataAllocator, io: std.Io, length: vk.DeviceSize) ?vk.DeviceSize {
+    pub fn allocRegion(self: *FaceDataAllocator, io: std.Io, length: vk.DeviceSize) ?AllocResult {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.used + length <= self.capacity)
-            return self.tryAllocRegion(length);
+        const offset = if (self.used + length <= self.capacity)
+            self.tryAllocRegion(length)
+        else
+            self.tryFindFreeRegion(length);
 
-        if (self.tryFindFreeRegion(length)) |offset|
-            return offset;
-
-        return null;
+        return if (offset) |off| AllocResult{
+            .offset = off,
+            .buffer = self.buffer,
+            .buffer_offset = self.buffer_offset,
+        } else null;
     }
 
     fn tryFindFreeRegion(self: *FaceDataAllocator, length: vk.DeviceSize) ?vk.DeviceSize {

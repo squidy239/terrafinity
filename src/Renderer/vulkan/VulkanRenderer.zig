@@ -1,13 +1,8 @@
 const std = @import("std");
 
-const options = @import("options");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-const InstanceWrapper = vk.InstanceWrapper;
-const DeviceWrapper = vk.DeviceWrapper;
-const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
-const wio = @import("wio");
 const zm = @import("zm");
 
 const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
@@ -20,6 +15,7 @@ const ChunkPos = World.ChunkPos;
 const Frustum = @import("../opengl/Frustum.zig").Frustum;
 const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
 const FaceDataAllocator = @import("FaceDataAllocator.zig").FaceDataAllocator;
+const StagingRing = @import("StagingRing.zig").StagingRing;
 const textures = @import("textures.zig");
 
 const vertex_shader_spv: []const u8 = @embedFile("vert_spv");
@@ -182,8 +178,6 @@ const PendingChunkUpload = struct {
     pool: vk.CommandPool,
     opaque_mesh: ?ChunkMeshBuffer,
     transparent_mesh: ?ChunkMeshBuffer,
-    opaque_staging_slice: ?[]u8,
-    transparent_staging_slice: ?[]u8,
 };
 
 const RetiredMeshEntry = struct {
@@ -460,6 +454,7 @@ retired_face_regions: std.ArrayList(RetiredFaceRegion) = undefined,
 retired_face_buffers: std.ArrayList(RetiredFaceBuffer) = undefined,
 backing_allocator: VulkanBackingAllocator = undefined,
 face_allocator: FaceDataAllocator = undefined,
+staging_ring: StagingRing = undefined,
 gpu_only_gpa: std.heap.DebugAllocator(.{}) = .init,
 cpu_to_gpu_gpa: std.heap.DebugAllocator(.{}) = .init,
 pool_reservoir: CommandPoolReservoir = .{},
@@ -647,6 +642,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     const face_buf_info = self.backing_allocator.getBufferAndOffset(.gpu_only, self.face_allocator.buffer_slice.ptr);
     self.face_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
 
+    const max_face_bytes = @as(vk.DeviceSize, World.ChunkSize) * World.ChunkSize * World.ChunkSize * 6 * @sizeOf(Mesher.Face);
+    self.staging_ring = try StagingRing.init(allocator, self.cpu_to_gpu_gpa.allocator(), max_face_bytes);
+    errdefer self.staging_ring.deinit(self.cpu_to_gpu_gpa.allocator());
+    const staging_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.staging_ring.mapping.ptr);
+    self.staging_ring.resolve(staging_info.buffer, staging_info.offset);
+
     // Initialize persistent candidate buffer on the GPU
     const initial_capacity = 4096;
     const persistent_candidates_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, initial_capacity);
@@ -783,6 +784,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.retired_candidate_slices.deinit(self.allocator);
     self.index_pool.deinit(self.allocator);
     self.cpu_to_gpu_gpa.allocator().free(self.persistent.slice);
+    self.staging_ring.deinit(self.cpu_to_gpu_gpa.allocator());
 
     self.face_allocator.deinit(self.gpu_only_gpa.allocator());
 
@@ -830,14 +832,8 @@ pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_m
     var opaque_res: ?UploadResult = null;
     var transparent_res: ?UploadResult = null;
     errdefer {
-        if (opaque_res) |r| {
-            self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
-            self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(r.mesh.face_offset)) * @sizeOf(Mesher.Face), r.mesh.face_byte_count);
-        }
-        if (transparent_res) |r| {
-            self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
-            self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(r.mesh.face_offset)) * @sizeOf(Mesher.Face), r.mesh.face_byte_count);
-        }
+        if (opaque_res) |r| self.cancelUpload(io, r);
+        if (transparent_res) |r| self.cancelUpload(io, r);
     }
 
     if (opaque_mesh.len > 0) {
@@ -876,7 +872,6 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
     const count = self.submission_batch.count;
     if (count == 0) return;
 
-    // Load and increment the transfer semaphore value.
     const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
     self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
@@ -913,35 +908,23 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
         .p_signal_semaphore_infos = (&semaphore_submit_info)[0..1],
     };
 
-    try self.dev.queueSubmit2(self.transfer.queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
-
-    var i: usize = 0;
-    errdefer {
-        for (i..count) |j| {
-            self.pool_reservoir.returnPool(self.dev, self.submission_batch.pools[j]);
-            if (self.submission_batch.opaque_meshes[j]) |r| {
-                self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
-                self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(r.mesh.face_offset)) * @sizeOf(Mesher.Face), r.mesh.face_byte_count);
-            }
-            if (self.submission_batch.transparent_meshes[j]) |r| {
-                self.cpu_to_gpu_gpa.allocator().free(r.staging_slice);
-                self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(r.mesh.face_offset)) * @sizeOf(Mesher.Face), r.mesh.face_byte_count);
-            }
-        }
-        self.submission_batch.count = 0;
-    }
     for (0..count) |j| {
+        if (self.submission_batch.opaque_meshes[j]) |r| {
+            self.staging_ring.bind(io, r.staging_slice, next_val);
+        }
+        if (self.submission_batch.transparent_meshes[j]) |r| {
+            self.staging_ring.bind(io, r.staging_slice, next_val);
+        }
         try self.pushPendingUpload(io, .{
             .chunk_pos = self.submission_batch.chunk_positions[j],
             .timeline_value = next_val,
             .pool = self.submission_batch.pools[j],
             .opaque_mesh = if (self.submission_batch.opaque_meshes[j]) |r| r.mesh else null,
             .transparent_mesh = if (self.submission_batch.transparent_meshes[j]) |r| r.mesh else null,
-            .opaque_staging_slice = if (self.submission_batch.opaque_meshes[j]) |r| r.staging_slice else null,
-            .transparent_staging_slice = if (self.submission_batch.transparent_meshes[j]) |r| r.staging_slice else null,
         });
-        i = j + 1;
     }
+
+    try self.dev.queueSubmit2(self.transfer.queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
 
     self.submission_batch.count = 0;
 }
@@ -979,15 +962,14 @@ fn destroyChunkMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) vo
     self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(mesh.face_offset)) * @sizeOf(Mesher.Face), mesh.face_byte_count);
 }
 
+fn cancelUpload(self: *VulkanRenderer, io: std.Io, result: UploadResult) void {
+    self.staging_ring.cancel(io, result.staging_slice);
+    self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(result.mesh.face_offset)) * @sizeOf(Mesher.Face), result.mesh.face_byte_count);
+}
+
 fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) void {
     if (pending.opaque_mesh) |opaque_m| self.destroyChunkMesh(io, opaque_m);
     if (pending.transparent_mesh) |transparent| self.destroyChunkMesh(io, transparent);
-    self.freePendingUploadStaging(pending);
-}
-
-fn freePendingUploadStaging(self: *VulkanRenderer, pending: PendingChunkUpload) void {
-    if (pending.opaque_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
-    if (pending.transparent_staging_slice) |slice| self.cpu_to_gpu_gpa.allocator().free(slice);
     if (pending.pool != .null_handle) {
         self.pool_reservoir.returnPool(self.dev, pending.pool);
     }
@@ -1060,6 +1042,9 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
     self.retire_mutex.lockUncancelable(io);
     defer self.retire_mutex.unlock(io);
 
+    const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
+    self.staging_ring.retire(io, current_transfer_val);
+
     while (true) {
         const pending = if (self.peeked_upload) |p| p else blk: {
             var buf: PendingChunkUpload = undefined;
@@ -1068,13 +1053,11 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
             break :blk buf;
         };
 
-        const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
-
         if (current_transfer_val >= pending.timeline_value) {
             try self.retireOnePendingItem(io, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
             try self.retireOnePendingItem(io, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
 
-            self.freePendingUploadStaging(pending);
+            self.pool_reservoir.returnPool(self.dev, pending.pool);
             self.peeked_upload = null;
         } else {
             self.peeked_upload = pending;
@@ -1088,14 +1071,22 @@ const UploadResult = struct {
     staging_slice: []u8,
 };
 
+fn allocStagingSlice(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize) ![]u8 {
+    while (true) {
+        if (self.staging_ring.alloc(io, buffer_size)) |slice| return slice;
+        try self.processPendingUploads(io);
+        try std.Io.sleep(io, .fromNanoseconds(0), .awake);
+    }
+}
+
 fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Face, cmd: vk.CommandBuffer) !UploadResult {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "uploadMeshBuffer" });
     defer zone.end();
 
     const buffer_size: vk.DeviceSize = @intCast(faces.len * @sizeOf(Mesher.Face));
 
-    const staging_slice = try self.cpu_to_gpu_gpa.allocator().alloc(u8, buffer_size);
-    errdefer self.cpu_to_gpu_gpa.allocator().free(staging_slice);
+    const staging_slice = try self.allocStagingSlice(io, buffer_size);
+    errdefer self.staging_ring.cancel(io, staging_slice);
 
     const dest_faces = std.mem.bytesAsSlice(Mesher.Face, staging_slice);
     const indexer = std.enums.EnumIndexer(World.Block);
@@ -1106,10 +1097,10 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
 
     const staging_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, staging_slice.ptr);
 
-    const face_byte_offset = try self.allocFaceRegion(io, buffer_size);
-
-    const face_buf = self.face_allocator.buffer;
-    const face_buf_offset = self.face_allocator.buffer_offset;
+    const face_alloc = try self.allocFaceRegion(io, buffer_size);
+    const face_byte_offset = face_alloc.offset;
+    const face_buf = face_alloc.buffer;
+    const face_buf_offset = face_alloc.buffer_offset;
 
     const pre_copy_barrier: vk.BufferMemoryBarrier2 = .{
         .src_stage_mask = .{ .all_transfer_bit = true },
@@ -1179,9 +1170,9 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     };
 }
 
-fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize) !vk.DeviceSize {
+fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize) !FaceDataAllocator.AllocResult {
     while (true) {
-        if (self.face_allocator.allocRegion(io, buffer_size)) |offset| return offset;
+        if (self.face_allocator.allocRegion(io, buffer_size)) |result| return result;
 
         {
             self.submission_batch.mutex.lockUncancelable(io);
@@ -1192,7 +1183,7 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         self.vk_ctx.queue_mutex.lockUncancelable(io);
         defer self.vk_ctx.queue_mutex.unlock(io);
 
-        if (self.face_allocator.allocRegion(io, buffer_size)) |offset| return offset;
+        if (self.face_allocator.allocRegion(io, buffer_size)) |result| return result;
 
         std.log.info("growing face data buffer...", .{});
         try self.dev.deviceWaitIdle();

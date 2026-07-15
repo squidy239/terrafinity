@@ -21,14 +21,6 @@ This document outlines potential architectural and design improvements for the V
 
 ---
 
-## Bindless Architecture & Descriptors
-
-### Fully Bindless Texture Architecture
-*   **Current State:** `textures.zig` uses traditional descriptor arrays, updating sets of structures when textures change.
-*   **Improvement:** Transition to a fully bindless design using `VK_EXT_descriptor_indexing`. Bind a single, giant global array of textures (`sampler2D textures[]`) to descriptor set 0, and pass texture indices to shaders via vertex/push constants or storage buffers.
-*   **Impact:** Eliminates descriptor set rebinding during drawing, simplifying shader logic and rendering state management.
-
----
 
 ## Memory Management & Resource Allocation
 
