@@ -549,7 +549,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         const current_gamma = self.swapchain_gamma.load(.monotonic);
         const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
             self.swapchain_extent_actual.height == self.swapchain_extent.height;
-        if (current_gamma == gamma_correction and extent_same) return;
+        if (current_gamma == gamma_correction and extent_same and !self.swapchain_needs_recreate.load(.monotonic)) return;
     }
 
     self.swapchain_extent_actual = self.swapchain_extent;
