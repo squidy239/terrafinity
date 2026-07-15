@@ -520,6 +520,8 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
 }
 
 pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recreateSwapchainResourcesLocked" });
+    defer zone.end();
     self.render_options_lock.lockSharedUncancelable(io);
     const gamma_correction = self.render_options.gamma_correction;
     const present_mode = self.render_options.present_mode;
@@ -597,6 +599,8 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "init" });
+    defer zone.end();
     std.log.info("VulkanRenderer.init: Starting renderer-specific Vulkan initialization...", .{});
 
     const self = try allocator.create(VulkanRenderer);
@@ -708,6 +712,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "deinit" });
+    defer zone.end();
     std.log.info("VulkanRenderer.deinit: Flushing pending uploads and waiting for device idle...", .{});
 
     {
@@ -1481,6 +1487,8 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
 }
 
 fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32, frustum: Frustum, total_candidates: u32, view_pos: @Vector(3, f64)) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "dispatchCulling" });
+    defer zone.end();
     self.dev.cmdFillBuffer(cmd_buffer, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].count_offset, @sizeOf(CullCount), 0);
 
     const fill_barrier = makeBufferBarrier2(
@@ -1600,6 +1608,8 @@ fn recordOpaquePass(
     frustum: Frustum,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
+    defer zone.end();
     self.emitFrameStartBarriers(cmd_buffer, depth_aspect_mask);
 
     if (total_candidates > 0) {
@@ -1670,6 +1680,8 @@ fn recordTransparentPass(
     total_candidates: u32,
     pc: PushConstants,
 ) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordTransparentPass" });
+    defer zone.end();
     const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const oit_pre_barriers: [2]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
@@ -1757,6 +1769,8 @@ fn recordCompositionPass(
     current_frame: u32,
     depth_aspect_mask: vk.ImageAspectFlags,
 ) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
+    defer zone.end();
     _ = depth_aspect_mask;
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const pre_comp_barriers: [4]vk.ImageMemoryBarrier2 = .{
@@ -1938,6 +1952,8 @@ fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacit
 }
 
 fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []const GrowFrameAllocation) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "swapToNewGrowFrames" });
+    defer zone.end();
     for (new_frames, 0..) |new_frame, i| {
         const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.chunk_data_slice.ptr);
         const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.indirect_draw_slice.ptr);
@@ -2087,6 +2103,8 @@ fn destroyOitResources(self: *VulkanRenderer) void {
 }
 
 fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
+    defer zone.end();
     destroyRenderTarget(self.dev, &self.render_color);
     destroyRenderTarget(self.dev, &self.render_depth);
     destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
@@ -2143,6 +2161,8 @@ fn createTransparentDepthDescriptorSetLayout(self: *VulkanRenderer) !void {
 }
 
 fn createChunkDataDescriptorResources(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createChunkDataDescriptorResources" });
+    defer zone.end();
     if (self.graphics_state.chunk_data_descriptor_set_layout == .null_handle) {
         const bindings: [1]vk.DescriptorSetLayoutBinding = .{
             .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
@@ -2215,6 +2235,8 @@ fn destroyChunkDataDescriptorResources(self: *VulkanRenderer) void {
 }
 
 fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createCullDescriptorSetLayoutAndPool" });
+    defer zone.end();
     if (self.cull.descriptor_set_layout == .null_handle) {
         const bindings: [4]vk.DescriptorSetLayoutBinding = .{
             .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
@@ -2331,6 +2353,8 @@ fn buildGraphicsPipeline(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "buildGraphicsPipeline" });
+    defer zone.end();
     const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = .triangle_list, .primitive_restart_enable = .false };
     const pvsci: vk.PipelineViewportStateCreateInfo = .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
@@ -2434,6 +2458,8 @@ fn buildGraphicsPipeline(
 }
 
 fn createGraphicsPipelines(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
+    defer zone.end();
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
         .offset = 0,
@@ -2544,6 +2570,8 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
 }
 
 fn createCullPipeline(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createCullPipeline" });
+    defer zone.end();
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .compute_bit = true },
         .offset = 0,
@@ -2584,6 +2612,8 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
 }
 
 fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createOitPipelinesAndDescriptors" });
+    defer zone.end();
     if (self.oit.descriptor_set_layout == .null_handle) {
         const bindings: [3]vk.DescriptorSetLayoutBinding = .{
             .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
@@ -2748,6 +2778,8 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 pub fn beginSingleTimeCommands(self: *VulkanRenderer) !vk.CommandBuffer {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "beginSingleTimeCommands" });
+    defer zone.end();
     const alloc_info: vk.CommandBufferAllocateInfo = .{
         .level = .primary,
         .command_pool = self.upload_command_pool,
