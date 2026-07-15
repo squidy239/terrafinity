@@ -55,14 +55,18 @@ current_frame_idx: std.atomic.Value(u32) = .init(0),
 
 swapchain: vk.SwapchainKHR = .null_handle,
 swapchain_format: vk.Format = .b8g8r8a8_srgb,
+swapchain_gamma: std.atomic.Value(bool) = .init(false),
+swapchain_extent_actual: vk.Extent2D = .{ .width = 0, .height = 0 },
 swapchain_images: []vk.Image = &.{},
 swapchain_views: []vk.ImageView = &.{},
+swapchain_image_layouts: []vk.ImageLayout = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 swapchain_needs_recreate: std.atomic.Value(bool) = .init(false),
 present_mode: PresentMode = .mailbox,
 
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
+ui_command_pool: vk.CommandPool = .null_handle,
 transfer_semaphore: vk.Semaphore = .null_handle,
 transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
@@ -91,6 +95,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         var features12: vk.PhysicalDeviceVulkan12Features = .{
             .draw_indirect_count = .false,
             .descriptor_indexing = .false,
+            .shader_sampled_image_array_non_uniform_indexing = .false,
+            .descriptor_binding_sampled_image_update_after_bind = .false,
             .runtime_descriptor_array = .false,
             .descriptor_binding_partially_bound = .false,
             .descriptor_binding_sampled_image_update_after_bind = .false,
@@ -107,6 +113,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         const required = features2.features.multi_draw_indirect == .true and
             features2.features.shader_int_64 == .true and features2.features.independent_blend == .true and
             features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
+            features12.shader_sampled_image_array_non_uniform_indexing == .true and
+            features12.descriptor_binding_sampled_image_update_after_bind == .true and
             features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
             features12.descriptor_binding_sampled_image_update_after_bind == .true and
             features12.shader_sampled_image_array_non_uniform_indexing == .true and
@@ -355,6 +363,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     var features12: vk.PhysicalDeviceVulkan12Features = .{
         .draw_indirect_count = .true,
         .descriptor_indexing = .true,
+        .shader_sampled_image_array_non_uniform_indexing = .true,
+        .descriptor_binding_sampled_image_update_after_bind = .true,
         .runtime_descriptor_array = .true,
         .descriptor_binding_partially_bound = .true,
         .descriptor_binding_sampled_image_update_after_bind = .true,
@@ -418,6 +428,9 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     };
     self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
     errdefer self.dev.destroyCommandPool(self.upload_command_pool, null);
+
+    self.ui_command_pool = try self.dev.createCommandPool(&pool_info, null);
+    errdefer self.dev.destroyCommandPool(self.ui_command_pool, null);
 
     var timeline_info: vk.SemaphoreTypeCreateInfo = .{
         .semaphore_type = .timeline,
@@ -495,6 +508,7 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
 
     self.dev.destroyCommandPool(self.command_pool, null);
     if (self.upload_command_pool != .null_handle) self.dev.destroyCommandPool(self.upload_command_pool, null);
+    if (self.ui_command_pool != .null_handle) self.dev.destroyCommandPool(self.ui_command_pool, null);
 
     self.dev.destroySemaphore(self.transfer_semaphore, null);
     self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
@@ -524,14 +538,26 @@ fn destroySwapchainResources(self: *VulkanContext) void {
     for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
     self.allocator.free(self.swapchain_images);
     self.allocator.free(self.swapchain_views);
+    self.allocator.free(self.swapchain_image_layouts);
     self.swapchain_images = &.{};
     self.swapchain_views = &.{};
+    self.swapchain_image_layouts = &.{};
 }
 
 pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void {
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
+
+    if (self.swapchain != .null_handle) {
+        const current_gamma = self.swapchain_gamma.load(.monotonic);
+        const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
+            self.swapchain_extent_actual.height == self.swapchain_extent.height;
+        if (current_gamma == gamma_correction and extent_same) return;
+    }
+
+    self.swapchain_extent_actual = self.swapchain_extent;
+    self.swapchain_gamma.store(gamma_correction, .monotonic);
 
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
@@ -542,6 +568,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     const old_swapchain = self.swapchain;
     const old_views = self.swapchain_views;
     const old_images = self.swapchain_images;
+    const old_image_layouts = self.swapchain_image_layouts;
 
     const actual_extent = if (caps.current_extent.width != 0xFFFFFFFF)
         caps.current_extent
@@ -660,6 +687,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     }
     self.allocator.free(old_images);
     self.allocator.free(old_views);
+    self.allocator.free(old_image_layouts);
 
     if (old_swapchain != .null_handle) {
         self.dev.destroySwapchainKHR(old_swapchain, null);
@@ -668,6 +696,8 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
+    self.swapchain_image_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
+    for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
 }
 
 pub fn currentFrame(self: *VulkanContext) u32 {
@@ -716,7 +746,7 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
             self.image_acquired_semaphores[current_frame_idx],
             .null_handle,
         ) catch |err| switch (err) {
-            error.OutOfDateKHR => return error.OutOfDate,
+            error.OutOfDateKHR, error.SurfaceLostKHR => return error.OutOfDate,
             else => return err,
         };
     };
@@ -728,6 +758,10 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
 }
 
 pub fn submitFrame(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
+    try self.submitFrameWithExtra(io, ctx, .null_handle, true);
+}
+
+pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext, extra_cmd_buffer: vk.CommandBuffer, include_game: bool) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame" });
     defer zone.end();
 
@@ -751,14 +785,23 @@ pub fn submitFrame(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         .{ .semaphore = self.graphics_timeline_semaphore, .value = current_graphics_val, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
-    const cmd_buffer_info: vk.CommandBufferSubmitInfo = .{ .command_buffer = ctx.cmd_buffer, .device_mask = 0 };
+    var cmd_buffer_infos: [2]vk.CommandBufferSubmitInfo = undefined;
+    var cmd_buffer_count: u32 = 0;
+    if (include_game) {
+        cmd_buffer_infos[0] = .{ .command_buffer = ctx.cmd_buffer, .device_mask = 0 };
+        cmd_buffer_count += 1;
+    }
+    if (extra_cmd_buffer != .null_handle) {
+        cmd_buffer_infos[cmd_buffer_count] = .{ .command_buffer = extra_cmd_buffer, .device_mask = 0 };
+        cmd_buffer_count += 1;
+    }
 
     const submit_info: vk.SubmitInfo2 = .{
         .flags = .{},
         .wait_semaphore_info_count = wait_semaphore_infos.len,
         .p_wait_semaphore_infos = wait_semaphore_infos[0..wait_semaphore_infos.len],
-        .command_buffer_info_count = 1,
-        .p_command_buffer_infos = (&cmd_buffer_info)[0..1],
+        .command_buffer_info_count = cmd_buffer_count,
+        .p_command_buffer_infos = cmd_buffer_infos[0..cmd_buffer_count].ptr,
         .signal_semaphore_info_count = signal_semaphore_infos.len,
         .p_signal_semaphore_infos = signal_semaphore_infos[0..signal_semaphore_infos.len],
     };
@@ -789,7 +832,7 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         const zone_present = tracy.Zone.begin(.{ .src = @src(), .name = "queuePresent" });
         defer zone_present.end();
         break :blk self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
-            error.OutOfDateKHR => {
+            error.OutOfDateKHR, error.SurfaceLostKHR => {
                 const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
                 self.current_frame_idx.store(next_frame, .monotonic);
                 return error.OutOfDate;
