@@ -114,8 +114,6 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             features12.shader_sampled_image_array_non_uniform_indexing == .true and
             features12.descriptor_binding_sampled_image_update_after_bind == .true and
             features12.runtime_descriptor_array == .true and features12.descriptor_binding_partially_bound == .true and
-            features12.descriptor_binding_sampled_image_update_after_bind == .true and
-            features12.shader_sampled_image_array_non_uniform_indexing == .true and
             features12.buffer_device_address == .true and
             features12.timeline_semaphore == .true and
             features13.synchronization_2 == .true and features13.dynamic_rendering == .true and
@@ -196,7 +194,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .window = window,
         .vkb = undefined,
         .instance_handle = undefined,
-        .instance_wrapper = undefined,
+        .instance_wrapper = null,
         .instance = undefined,
         .pdev = undefined,
         .props = undefined,
@@ -529,8 +527,6 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
 }
 
 fn destroySwapchainResources(self: *VulkanContext) void {
-    self.dev.deviceWaitIdle() catch |err| std.log.err("deviceWaitIdle failed: {}", .{err});
-
     for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
     self.allocator.free(self.swapchain_images);
     self.allocator.free(self.swapchain_views);
@@ -549,7 +545,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         const current_gamma = self.swapchain_gamma.load(.monotonic);
         const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
             self.swapchain_extent_actual.height == self.swapchain_extent.height;
-        if (current_gamma == gamma_correction and extent_same and !self.swapchain_needs_recreate.load(.monotonic)) return;
+        if (current_gamma == gamma_correction and extent_same) return;
     }
 
     self.swapchain_extent_actual = self.swapchain_extent;
@@ -558,8 +554,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
-
-    self.dev.deviceWaitIdle() catch |err| std.log.err("deviceWaitIdle failed: {}", .{err});
 
     const old_swapchain = self.swapchain;
     const old_views = self.swapchain_views;
@@ -692,6 +686,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
+    self.swapchain_image_layouts = &.{};
     self.swapchain_image_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
     for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
 }
@@ -747,9 +742,6 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
         };
     };
 
-    if (acquire_result.result == .suboptimal_khr) {
-        self.swapchain_needs_recreate.store(true, .monotonic);
-    }
     return acquire_result.image_index;
 }
 
@@ -836,13 +828,9 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
             else => return err,
         };
     };
-    if (present_result == .success) {
+    if (present_result == .success or present_result == .suboptimal_khr) {
         const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
         self.current_frame_idx.store(next_frame, .monotonic);
-    } else if (present_result == .suboptimal_khr) {
-        const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
-        self.current_frame_idx.store(next_frame, .monotonic);
-        self.swapchain_needs_recreate.store(true, .monotonic);
     }
 }
 

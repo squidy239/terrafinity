@@ -68,7 +68,6 @@ pub fn init(options: InitOptions) !@This() {
 pub fn deinit(back: *@This()) void {
     const gpa = back.renderer_gpa orelse return;
     const r = &(back.renderer orelse return);
-    r.dev.deviceWaitIdle() catch {};
     r.deinit(gpa);
     back.renderer = null;
 }

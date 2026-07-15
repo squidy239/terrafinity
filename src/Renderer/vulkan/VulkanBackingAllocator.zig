@@ -88,10 +88,12 @@ pub const VulkanBackingAllocator = struct {
     }
 
     fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
-        for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |memory_type, index| {
-            const is_supported = type_filter & (@as(u32, 1) << @as(u5, @truncate(index))) != 0;
-            const has_properties = memory_type.property_flags.contains(required_properties);
-            if (is_supported and has_properties) return @intCast(index);
+        const count = @min(self.mem_props.memory_type_count, 32);
+        for (self.mem_props.memory_types[0..count], 0..) |memory_type, index| {
+            const bit = @as(u5, @intCast(index));
+            if ((type_filter & (@as(u32, 1) << bit)) != 0 and (memory_type.property_flags.toInt() & required_properties.toInt()) == required_properties.toInt()) {
+                return @as(u32, bit);
+            }
         }
         return error.MemoryTypeNotFound;
     }

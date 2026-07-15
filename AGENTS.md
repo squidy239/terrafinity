@@ -8,6 +8,9 @@ Use these full commands without modification after each change and ensure the pl
 - run and open to a game: `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
 - format code: `zig fmt .`
 
+Important: 
+Do not git stash or commit, it can mess up git history.
+
 # Codebase Naming Conventions & Guidelines
 
 This document outlines the strict naming conventions and core principles for this project. To maintain a clean, predictable, and highly readable codebase, we follow a precise set of rules primarily inspired by Zig's ecosystem.

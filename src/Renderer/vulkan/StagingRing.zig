@@ -67,16 +67,20 @@ pub const StagingRing = struct {
         return self.mapping[offset..][0..@intCast(size)];
     }
 
+    fn findSlot(self: *StagingRing, slice: []const u8) ?usize {
+        const off = @intFromPtr(slice.ptr) - @intFromPtr(self.mapping.ptr);
+        for (self.entries.items, 0..) |e, i| {
+            if (e.offset == off) return i;
+        }
+        return null;
+    }
+
     pub fn bind(self: *StagingRing, io: std.Io, slice: []const u8, timeline_value: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const off = @intFromPtr(slice.ptr) - @intFromPtr(self.mapping.ptr);
-        for (self.entries.items) |*e| {
-            if (e.offset == off) {
-                e.timeline_value = timeline_value;
-                return;
-            }
+        if (self.findSlot(slice)) |i| {
+            self.entries.items[i].timeline_value = timeline_value;
         }
     }
 
@@ -98,12 +102,8 @@ pub const StagingRing = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const off = @intFromPtr(slice.ptr) - @intFromPtr(self.mapping.ptr);
-        for (self.entries.items, 0..) |*e, i| {
-            if (e.offset == off) {
-                _ = self.entries.swapRemove(i);
-                return;
-            }
+        if (self.findSlot(slice)) |i| {
+            _ = self.entries.swapRemove(i);
         }
     }
 };

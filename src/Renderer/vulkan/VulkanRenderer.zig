@@ -519,6 +519,19 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
     };
 }
 
+fn drainInFlightFrames(self: *VulkanRenderer) !void {
+    const frame_to_wait = self.vk_ctx.frame_number.load(.acquire);
+    if (frame_to_wait > 0) {
+        const wait_value: u64 = frame_to_wait;
+        const wait_info: vk.SemaphoreWaitInfo = .{
+            .semaphore_count = 1,
+            .p_semaphores = (&self.vk_ctx.graphics_timeline_semaphore)[0..1],
+            .p_values = (&wait_value)[0..1],
+        };
+        _ = try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
+    }
+}
+
 pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recreateSwapchainResourcesLocked" });
     defer zone.end();
@@ -528,10 +541,13 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
     self.render_options_lock.unlockShared(io);
     self.vk_ctx.present_mode = present_mode;
 
-    try self.dev.deviceWaitIdle();
+    try self.drainInFlightFrames();
     try self.dev.resetCommandPool(self.vk_ctx.command_pool, .{});
 
+    const old_swapchain = self.vk_ctx.swapchain;
     try self.vk_ctx.createSwapchainLocked(gamma_correction);
+
+    if (self.vk_ctx.swapchain == old_swapchain and self.frame_buffers.items.len > 0) return;
 
     self.destroyRendererSwapchainResources();
 
@@ -930,7 +946,7 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
         });
     }
 
-    try self.dev.queueSubmit2(self.transfer.queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
+    try self.dev.queueSubmit2(self.transfer.queue, (&submit_info)[0..1], .null_handle);
 
     self.submission_batch.count = 0;
 }
@@ -1108,27 +1124,7 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     const face_buf = face_alloc.buffer;
     const face_buf_offset = face_alloc.buffer_offset;
 
-    const pre_copy_barrier: vk.BufferMemoryBarrier2 = .{
-        .src_stage_mask = .{ .all_transfer_bit = true },
-        .src_access_mask = .{ .transfer_write_bit = true, .transfer_read_bit = true },
-        .dst_stage_mask = .{ .all_transfer_bit = true },
-        .dst_access_mask = .{ .transfer_write_bit = true },
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .buffer = face_buf,
-        .offset = face_buf_offset + face_byte_offset,
-        .size = buffer_size,
-    };
-    const pre_dependency_info: vk.DependencyInfo = .{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 1,
-        .p_buffer_memory_barriers = (&pre_copy_barrier)[0..1],
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    };
-    self.dev.cmdPipelineBarrier2(cmd, &pre_dependency_info);
+    cmdBufferBarrier2(cmd, self.dev, face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true, .transfer_read_bit = true }, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true });
 
     const copy_region: vk.BufferCopy2 = .{
         .src_offset = staging_info.offset,
@@ -1143,27 +1139,7 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     };
     self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
 
-    const buffer_barrier: vk.BufferMemoryBarrier2 = .{
-        .src_stage_mask = .{ .all_transfer_bit = true },
-        .src_access_mask = .{ .transfer_write_bit = true },
-        .dst_stage_mask = .{ .all_transfer_bit = true },
-        .dst_access_mask = .{ .transfer_write_bit = true, .transfer_read_bit = true },
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .buffer = face_buf,
-        .offset = face_buf_offset + face_byte_offset,
-        .size = buffer_size,
-    };
-    const dependency_info: vk.DependencyInfo = .{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 1,
-        .p_buffer_memory_barriers = (&buffer_barrier)[0..1],
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    };
-    self.dev.cmdPipelineBarrier2(cmd, &dependency_info);
+    cmdBufferBarrier2(cmd, self.dev, face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true, .transfer_read_bit = true });
 
     return UploadResult{
         .mesh = ChunkMeshBuffer{
@@ -1192,7 +1168,7 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         if (self.face_allocator.allocRegion(io, buffer_size)) |result| return result;
 
         std.log.info("growing face data buffer...", .{});
-        try self.dev.deviceWaitIdle();
+        try self.drainInFlightFrames();
 
         const grow_info = try self.face_allocator.grow(self.gpu_only_gpa.allocator());
 
@@ -1239,18 +1215,20 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 inline fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
-    self.dev.cmdSetViewport(cmd, 0, &[_]vk.Viewport{.{
+    const viewport = vk.Viewport{
         .x = 0.0,
         .y = 0.0,
         .width = @floatFromInt(extent.width),
         .height = @floatFromInt(extent.height),
         .min_depth = 0.0,
         .max_depth = 1.0,
-    }});
-    self.dev.cmdSetScissor(cmd, 0, &[_]vk.Rect2D{.{
+    };
+    self.dev.cmdSetViewport(cmd, 0, (&viewport)[0..1]);
+    const scissor = vk.Rect2D{
         .offset = .{ .x = 0, .y = 0 },
         .extent = extent,
-    }});
+    };
+    self.dev.cmdSetScissor(cmd, 0, (&scissor)[0..1]);
 }
 
 inline fn makeImageBarrier2(
@@ -1307,7 +1285,30 @@ inline fn cmdImageBarrier2(
     });
 }
 
-inline fn makeBufferBarrier2(
+inline fn cmdBufferBarrier2(
+    cmd: vk.CommandBuffer,
+    dev: DeviceProxy,
+    buffer: vk.Buffer,
+    offset: vk.DeviceSize,
+    size: vk.DeviceSize,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
+) void {
+    const barrier = makeBufferBarrier2(buffer, offset, size, src_stage, src_access, dst_stage, dst_access);
+    dev.cmdPipelineBarrier2(cmd, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = (&barrier)[0..1],
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    });
+}
+
+fn makeBufferBarrier2(
     buffer: vk.Buffer,
     offset: vk.DeviceSize,
     size: vk.DeviceSize,
@@ -1491,24 +1492,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     defer zone.end();
     self.dev.cmdFillBuffer(cmd_buffer, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].count_offset, @sizeOf(CullCount), 0);
 
-    const fill_barrier = makeBufferBarrier2(
-        self.frame_buffers.items[current_frame].count,
-        self.frame_buffers.items[current_frame].count_offset,
-        @sizeOf(CullCount),
-        .{ .all_transfer_bit = true },
-        .{ .transfer_write_bit = true },
-        .{ .compute_shader_bit = true },
-        .{ .shader_read_bit = true, .shader_write_bit = true },
-    );
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 1,
-        .p_buffer_memory_barriers = (&fill_barrier)[0..1],
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    });
+    cmdBufferBarrier2(cmd_buffer, self.dev, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].count_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true });
 
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
     self.dev.cmdBindDescriptorSets(cmd_buffer, .compute, self.cull.pipeline_layout, 0, (&self.cull.descriptor_sets_per_frame[current_frame])[0..1], null);
@@ -1553,24 +1537,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     };
     self.dev.cmdCopyBuffer(cmd_buffer, self.frame_buffers.items[current_frame].count, self.frame_buffers.items[current_frame].stats, (&region)[0..1]);
 
-    const host_barrier = makeBufferBarrier2(
-        self.frame_buffers.items[current_frame].stats,
-        self.frame_buffers.items[current_frame].stats_offset,
-        @sizeOf(CullCount),
-        .{ .all_transfer_bit = true },
-        .{ .transfer_write_bit = true },
-        .{ .host_bit = true },
-        .{ .host_read_bit = true },
-    );
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 1,
-        .p_buffer_memory_barriers = (&host_barrier)[0..1],
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    });
+    cmdBufferBarrier2(cmd_buffer, self.dev, self.frame_buffers.items[current_frame].stats, self.frame_buffers.items[current_frame].stats_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true }, .{ .host_read_bit = true });
 }
 
 inline fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, depth_aspect_mask: vk.ImageAspectFlags) void {
@@ -2009,7 +1976,7 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
 
     self.vk_ctx.queue_mutex.lockUncancelable(io);
     defer self.vk_ctx.queue_mutex.unlock(io);
-    try self.dev.deviceWaitIdle();
+    try self.drainInFlightFrames();
 
     const old_draw_capacity = self.draw_capacity;
     const num_frames = self.frame_buffers.items.len;
@@ -2043,7 +2010,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
 
     self.vk_ctx.queue_mutex.lockUncancelable(io);
     defer self.vk_ctx.queue_mutex.unlock(io);
-    try self.dev.deviceWaitIdle();
+    try self.drainInFlightFrames();
 
     const new_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, new_capacity);
     @memset(new_slice, .{
@@ -2313,33 +2280,32 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
     const num_frames = self.vk_ctx.swapchain_images.len;
-    const pool_info: vk.DescriptorPoolCreateInfo = .{
+    pool.* = try self.dev.createDescriptorPool(&.{
         .flags = .{},
         .max_sets = @intCast(num_frames),
         .pool_size_count = @intCast(pool_sizes.len),
         .p_pool_sizes = pool_sizes.ptr,
+    }, null);
+    errdefer if (pool.* != .null_handle) {
+        self.dev.destroyDescriptorPool(pool.*, null);
+        pool.* = .null_handle;
     };
-    pool.* = try self.dev.createDescriptorPool(&pool_info, null);
-    errdefer {
-        if (pool.* != .null_handle) {
-            self.dev.destroyDescriptorPool(pool.*, null);
-            pool.* = .null_handle;
-        }
-    }
+
     sets.* = try self.allocator.alloc(vk.DescriptorSet, num_frames);
-    @memset(sets.*, .null_handle);
     errdefer {
-        if (sets.*.len > 0) self.allocator.free(sets.*);
+        self.allocator.free(sets.*);
         sets.* = &.{};
     }
-    for (sets.*[0..num_frames]) |*set| {
-        const alloc_info: vk.DescriptorSetAllocateInfo = .{
-            .descriptor_pool = pool.*,
-            .descriptor_set_count = 1,
-            .p_set_layouts = (&layout)[0..1],
-        };
-        try self.dev.allocateDescriptorSets(&alloc_info, (&set.*)[0..1]);
-    }
+
+    const layouts = try self.allocator.alloc(vk.DescriptorSetLayout, num_frames);
+    defer self.allocator.free(layouts);
+    @memset(layouts, layout);
+
+    try self.dev.allocateDescriptorSets(&.{
+        .descriptor_pool = pool.*,
+        .descriptor_set_count = @intCast(num_frames),
+        .p_set_layouts = layouts.ptr,
+    }, sets.*.ptr);
 }
 
 fn buildGraphicsPipeline(
@@ -2816,7 +2782,7 @@ pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer)
         .p_signal_semaphore_infos = null,
     };
 
-    try self.dev.queueSubmit2(self.graphics_queue, &[_]vk.SubmitInfo2{submit_info}, .null_handle);
+    try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], .null_handle);
 
     {
         const zone_wait = tracy.Zone.begin(.{ .src = @src(), .name = "endSingleTimeCommands_queueWaitIdle" });
@@ -2833,16 +2799,7 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
 
 fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    if (viewport_pixels[0] != self.viewport_pixels[0] or
-        viewport_pixels[1] != self.viewport_pixels[1])
-    {
-        self.viewport_pixels = viewport_pixels;
-        self.vk_ctx.swapchain_extent = .{
-            .width = viewport_pixels[0],
-            .height = viewport_pixels[1],
-        };
-        self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
-    }
+    self.viewport_pixels = viewport_pixels;
 }
 
 fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {
@@ -2872,10 +2829,10 @@ fn vtableForEachChunk(user_data: *Renderer.Implementation, io: std.Io, callback_
 test "RenderBufferKey.toPos" {
     const pos_a: ChunkPos = .{ .level = 0, .position = .{ 1, 2, 3 } };
     const pos_b: ChunkPos = .{ .level = -3, .position = .{ -10, 20, 30 } };
-    try std.testing.expectEqual(pos_a, (RenderBufferKey{ .@"opaque" = pos_a }).toPos());
+    try std.testing.expectEqual(pos_a, (RenderBufferKey{ .opaque_part = pos_a }).toPos());
     try std.testing.expectEqual(pos_b, (RenderBufferKey{ .transparent = pos_b }).toPos());
     const pos: ChunkPos = .{ .level = 5, .position = .{ -100, 200, -300 } };
-    try std.testing.expectEqual(pos, (RenderBufferKey{ .@"opaque" = pos }).toPos());
+    try std.testing.expectEqual(pos, (RenderBufferKey{ .opaque_part = pos }).toPos());
 }
 
 test "findMemoryType" {
