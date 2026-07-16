@@ -224,13 +224,11 @@ pub const TextureManager = struct {
 
     fn createDescriptorResources(self: *TextureManager) !void {
         const num_textures = std.enums.EnumIndexer(Block).count;
-        const binding_flags: [1]vk.DescriptorBindingFlags = .{
-            .{ .update_after_bind_bit = true, .partially_bound_bit = true },
-        };
+        const binding_flags = vk.DescriptorBindingFlags{ .update_after_bind_bit = true, .partially_bound_bit = true };
 
         self.descriptor_set_layout = try self.renderer.dev.createDescriptorSetLayout(&.{
             .flags = .{ .update_after_bind_pool_bit = true },
-            .p_next = &vk.DescriptorSetLayoutBindingFlagsCreateInfo{ .binding_count = 1, .p_binding_flags = &binding_flags },
+            .p_next = &vk.DescriptorSetLayoutBindingFlagsCreateInfo{ .binding_count = 1, .p_binding_flags = (&binding_flags)[0..1] },
             .binding_count = 1,
             .p_bindings = &.{.{
                 .binding = 0,

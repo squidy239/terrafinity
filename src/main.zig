@@ -217,7 +217,7 @@ pub const Config = struct {
         };
         defer if (config_file) |file| file.close(io);
         var config: Config = undefined;
-        config = if (config_file) |file| try utils.loadZON(Config, io, file, allocator, allocator) else blk: {
+        config = if (config_file) |file| try utils.loadZon(Config, io, file, allocator, allocator) else blk: {
             var default_config: Config = .{};
             default_config.game_config.render_options.selected_pack = try allocator.dupe(u8, "default");
             break :blk default_config;

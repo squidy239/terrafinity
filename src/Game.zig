@@ -289,11 +289,11 @@ pub const WorldOptions = struct {
         const generator_config_file = try world_folder.openFile(io, "config/DefaultGenerator.zon", .{ .lock = .shared });
         defer generator_config_file.close(io);
 
-        var generator_config = try utils.loadZON(World.DefaultGenerator.Params, io, generator_config_file, allocator, allocator);
+        var generator_config = try utils.loadZon(World.DefaultGenerator.Params, io, generator_config_file, allocator, allocator);
         generator_config.setSeeds(io);
         return .{
             .generator_config = generator_config,
-            .world_config = try utils.loadZON(World.WorldConfig, io, world_config_file, allocator, allocator),
+            .world_config = try utils.loadZon(World.WorldConfig, io, world_config_file, allocator, allocator),
         };
     }
 

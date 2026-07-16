@@ -13,10 +13,10 @@ const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 const World = @import("../../world/World.zig");
 const ChunkPos = World.ChunkPos;
 const Frustum = @import("../Frustum.zig").Frustum;
-const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
 const FaceDataAllocator = @import("FaceDataAllocator.zig").FaceDataAllocator;
 const StagingRing = @import("StagingRing.zig").StagingRing;
 const textures = @import("textures.zig");
+const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
 
 const vertex_shader_spv: []const u8 = @embedFile("vert_spv");
 const fragment_shader_spv: []const u8 = @embedFile("frag_spv");
@@ -1666,19 +1666,17 @@ fn recordTransparentPass(
     };
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const depth_write: [1]vk.WriteDescriptorSet = .{
-        .{
-            .dst_set = .null_handle,
-            .dst_binding = 0,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .combined_image_sampler,
-            .p_image_info = (&depth_image_info)[0..1],
-            .p_buffer_info = (&dummy_buffer_info)[0..1],
-            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-        },
+    const depth_write: vk.WriteDescriptorSet = .{
+        .dst_set = .null_handle,
+        .dst_binding = 0,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .combined_image_sampler,
+        .p_image_info = (&depth_image_info)[0..1],
+        .p_buffer_info = (&dummy_buffer_info)[0..1],
+        .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
     };
-    self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 2, &depth_write);
+    self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 2, (&depth_write)[0..1]);
 
     const chunk_desc_set = self.graphics_state.chunk_data_descriptor_sets_per_frame[current_frame];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 1, (&chunk_desc_set)[0..1], null);
@@ -1751,17 +1749,15 @@ fn recordCompositionPass(
 
     self.dev.cmdEndRendering(cmd_buffer);
 
-    const post_comp_barriers: [1]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, color_aspect),
-    };
+    const post_comp_barrier = makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, color_aspect);
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
         .memory_barrier_count = 0,
         .p_memory_barriers = null,
         .buffer_memory_barrier_count = 0,
         .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = post_comp_barriers.len,
-        .p_image_memory_barriers = &post_comp_barriers,
+        .image_memory_barrier_count = 1,
+        .p_image_memory_barriers = (&post_comp_barrier)[0..1],
     });
 }
 
@@ -2092,10 +2088,8 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
 fn createTransparentDepthDescriptorSetLayout(self: *VulkanRenderer) !void {
     if (self.graphics_state.transparent_depth_descriptor_set_layout == .null_handle) {
-        const bindings: [1]vk.DescriptorSetLayoutBinding = .{
-            .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null };
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = (&binding)[0..1] };
         self.graphics_state.transparent_depth_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 }
@@ -2104,22 +2098,18 @@ fn createChunkDataDescriptorResources(self: *VulkanRenderer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createChunkDataDescriptorResources" });
     defer zone.end();
     if (self.graphics_state.chunk_data_descriptor_set_layout == .null_handle) {
-        const bindings: [1]vk.DescriptorSetLayoutBinding = .{
-            .{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null },
-        };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
+        const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
+        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] };
         self.graphics_state.chunk_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
     const num_frames = self.vk_ctx.swapchain_images.len;
-    const pool_sizes: [1]vk.DescriptorPoolSize = .{
-        .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) },
-    };
+    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) };
     const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
         .max_sets = @intCast(num_frames),
-        .pool_size_count = pool_sizes.len,
-        .p_pool_sizes = pool_sizes[0..].ptr,
+        .pool_size_count = 1,
+        .p_pool_sizes = (&pool_size)[0..1].ptr,
     };
     self.graphics_state.chunk_data_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
     errdefer self.dev.destroyDescriptorPool(self.graphics_state.chunk_data_descriptor_pool, null);
@@ -2194,14 +2184,12 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
     }
 
     const num_frames = self.vk_ctx.swapchain_images.len;
-    const pool_sizes: [1]vk.DescriptorPoolSize = .{
-        .{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames * 4) },
-    };
+    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames * 4) };
     const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
         .max_sets = @intCast(num_frames),
-        .pool_size_count = pool_sizes.len,
-        .p_pool_sizes = pool_sizes[0..].ptr,
+        .pool_size_count = 1,
+        .p_pool_sizes = (&pool_size)[0..1].ptr,
     };
     errdefer if (self.cull.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.cull.descriptor_pool, null);
