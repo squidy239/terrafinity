@@ -349,6 +349,7 @@ const TransferState = struct {
 const OitState = struct {
     accum: RenderTarget = .{},
     reveal: RenderTarget = .{},
+    volume_weight: RenderTarget = .{},
     sampler: vk.Sampler = .null_handle,
     composition_pipeline: vk.Pipeline = .null_handle,
     composition_layout: vk.PipelineLayout = .null_handle,
@@ -1632,9 +1633,10 @@ fn recordTransparentPass(
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordTransparentPass" });
     defer zone.end();
     const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const oit_pre_barriers: [2]vk.ImageMemoryBarrier2 = .{
+    const oit_pre_barriers: [3]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1642,13 +1644,14 @@ fn recordTransparentPass(
         .p_memory_barriers = null,
         .buffer_memory_barrier_count = 0,
         .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = 2,
+        .image_memory_barrier_count = 3,
         .p_image_memory_barriers = &oit_pre_barriers,
     });
     const oit_accum_attachment = renderingAttachmentColor(self.oit.accum.view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
     const oit_reveal_attachment = renderingAttachmentColor(self.oit.reveal.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
+    const oit_volume_attachment = renderingAttachmentColor(self.oit.volume_weight.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
     const oit_depth_attachment = renderingAttachmentDepth(self.render_depth.view, .depth_stencil_read_only_optimal, .load);
-    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{ oit_accum_attachment, oit_reveal_attachment }, &oit_depth_attachment));
+    self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{ oit_accum_attachment, oit_reveal_attachment, oit_volume_attachment }, &oit_depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);
 
@@ -1715,16 +1718,16 @@ fn recordCompositionPass(
     output_image: vk.Image,
     output_view: vk.ImageView,
     current_frame: u32,
-    depth_aspect_mask: vk.ImageAspectFlags,
+    scatter_enabled: u32,
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
     defer zone.end();
-    _ = depth_aspect_mask;
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const pre_comp_barriers: [4]vk.ImageMemoryBarrier2 = .{
+    const pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
+        makeImageBarrier2(self.oit.volume_weight.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(output_image, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
@@ -1742,6 +1745,8 @@ fn recordCompositionPass(
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.oit.composition_pipeline);
     self.setViewportAndScissor(cmd_buffer, extent);
+
+    self.dev.cmdPushConstants(cmd_buffer, self.oit.composition_layout, .{ .fragment_bit = true }, 0, @sizeOf(u32), &scatter_enabled);
 
     const oit_desc_set: vk.DescriptorSet = self.oit.descriptor_sets_per_frame[current_frame];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.oit.composition_layout, 0, (&oit_desc_set)[0..1], null);
@@ -1790,6 +1795,7 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
     defer self.render_options_lock.unlockShared(io);
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
+    const inside_transparent = self.render_options.inside_transparent;
 
     const vp = self.computeViewProjection(aspect, fov);
     const blue_sky = @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 };
@@ -1849,7 +1855,8 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
         self.frame_stats.log();
     }
 
-    self.recordCompositionPass(cmd_buffer, extent, self.output_color_image, self.output_color_view, current_frame, depth_aspect_mask);
+    const scatter_enabled: u32 = @intFromBool(!inside_transparent);
+    self.recordCompositionPass(cmd_buffer, extent, self.output_color_image, self.output_color_view, current_frame, scatter_enabled);
 
     try self.dev.endCommandBuffer(cmd_buffer);
 }
@@ -2027,6 +2034,7 @@ pub fn depthHasStencil(self: *const VulkanRenderer) bool {
 fn destroyOitResources(self: *VulkanRenderer) void {
     destroyRenderTarget(self.dev, &self.oit.accum);
     destroyRenderTarget(self.dev, &self.oit.reveal);
+    destroyRenderTarget(self.dev, &self.oit.volume_weight);
 
     if (self.oit.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.oit.descriptor_pool, null);
@@ -2078,6 +2086,9 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     self.oit.accum = accum;
     const reveal = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
     self.oit.reveal = reveal;
+
+    const volume_weight = try self.createImageWithMemory(extent, .r16_sfloat, oit_usage, oit_aspect);
+    self.oit.volume_weight = volume_weight;
 
     if (self.oit.descriptor_sets_per_frame.len > 0) {
         self.updateOitDescriptorSets();
@@ -2489,11 +2500,12 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
             .min_depth_bounds = 0.0,
             .max_depth_bounds = 1.0,
         };
-        const blend_attachments: [2]vk.PipelineColorBlendAttachmentState = .{
+        const blend_attachments: [3]vk.PipelineColorBlendAttachmentState = .{
             .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
             .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
+            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = false, .b_bit = false, .a_bit = false } },
         };
-        const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
+        const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
         self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, self.graphics_state.transparent_pipeline_layout, face_vertex_input);
     }
 }
@@ -2544,22 +2556,28 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createOitPipelinesAndDescriptors" });
     defer zone.end();
     if (self.oit.descriptor_set_layout == .null_handle) {
-        const bindings: [3]vk.DescriptorSetLayoutBinding = .{
+        const bindings: [4]vk.DescriptorSetLayoutBinding = .{
             .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 3, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
         var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
         self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
     if (self.oit.composition_layout == .null_handle) {
+        const pc_range: vk.PushConstantRange = .{
+            .stage_flags = .{ .fragment_bit = true },
+            .offset = 0,
+            .size = @sizeOf(u32),
+        };
         const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{
             .flags = .{},
             .set_layout_count = 1,
             .p_set_layouts = (&self.oit.descriptor_set_layout)[0..1],
-            .push_constant_range_count = 0,
-            .p_push_constant_ranges = null,
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = (&pc_range)[0..1],
         };
         self.oit.composition_layout = try self.dev.createPipelineLayout(&pipeline_layout_info, null);
     }
@@ -2612,7 +2630,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
     };
     self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{blend}, self.oit.composition_layout, no_vertex_input);
 
-    const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.vk_ctx.swapchain_images.len * 3) };
+    const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.vk_ctx.swapchain_images.len * 4) };
     try self.createFrameDescriptorPool(&self.oit.descriptor_pool, self.oit.descriptor_set_layout, &self.oit.descriptor_sets_per_frame, (&pool_size)[0..1]);
     self.updateOitDescriptorSets();
 }
@@ -2621,16 +2639,18 @@ fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const num_frames = self.vk_ctx.swapchain_images.len;
-    const image_infos: [3]vk.DescriptorImageInfo = .{
+    const image_infos: [4]vk.DescriptorImageInfo = .{
         .{ .sampler = self.oit.sampler, .image_view = self.render_color.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.accum.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.reveal.view, .image_layout = .shader_read_only_optimal },
+        .{ .sampler = self.oit.sampler, .image_view = self.oit.volume_weight.view, .image_layout = .shader_read_only_optimal },
     };
     for (self.oit.descriptor_sets_per_frame[0..num_frames]) |desc_set| {
-        const writes: [3]vk.WriteDescriptorSet = .{
+        const writes: [4]vk.WriteDescriptorSet = .{
             .{ .dst_set = desc_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[0..1], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
             .{ .dst_set = desc_set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[1..2], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
             .{ .dst_set = desc_set, .dst_binding = 2, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[2..3], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
+            .{ .dst_set = desc_set, .dst_binding = 3, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[3..4], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
         };
         self.dev.updateDescriptorSets(&writes, null);
     }

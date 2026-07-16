@@ -66,4 +66,5 @@ pub const RenderOptions = struct {
     gamma_correction: bool = false,
     present_mode: VulkanContext.PresentMode = .mailbox,
     selected_pack: []const u8 = "default",
+    inside_transparent: bool = false,
 };

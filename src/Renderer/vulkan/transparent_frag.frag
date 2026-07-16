@@ -5,6 +5,7 @@ layout(early_fragment_tests) in;
 
 layout(location = 0) out vec4 outAccum;
 layout(location = 1) out vec4 outReveal;
+layout(location = 2) out float outVolume;
 
 layout(location = 1) in vec3 in_coords;
 layout(location = 2) in vec3 fragpos;
@@ -61,16 +62,15 @@ void main()
     vec4 color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * unlit_color.rgb, unlit_color.a);
 
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
-    float bg_depth_linear = (bg_depth_raw >= 0.9999999 || bg_depth_raw <= 0.0000001)
-        ? 1000.0
-        : (0.01 / max(bg_depth_raw, 1e-6));
+    float bg_depth_linear = 0.01 / max(bg_depth_raw, 1e-10);
 
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
     vec4 volume_color = texelFetch(textures[nonuniformEXT(block_array_layer)], ivec2(0, 0), 0);
     vec3 absorption = max(1.0 - volume_color.rgb, vec3(0.01));
     float density = 0.1;
-    vec3 opticalDepth = volume_thickness * absorption * density;
+    float td = volume_thickness * density;
+    vec3 opticalDepth = td * absorption;
 
     float wboit_reveal = 0.0;
     vec4 wboit_color = vec4(0.0);
@@ -83,4 +83,5 @@ void main()
 
     outAccum = vec4(opticalDepth, wboit_reveal);
     outReveal = wboit_color;
+    outVolume = td;
 }
