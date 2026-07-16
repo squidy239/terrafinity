@@ -21,7 +21,7 @@
     },
     .water = .{
         .density = 0.05,
-        .volume_color = .{ 0.2, 0.6, 0.6 },
+        .volume_color = .{ 0.1, 0.3, 0.3 },
     },
     .leaves = .{
         .density = 0.08,
