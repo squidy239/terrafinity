@@ -99,6 +99,10 @@ pub fn build(b: *std.Build) void {
     textures_options.addOption([]const [:0]const u8, "default", default_textures.items);
     exe.root_module.addOptions("textures", textures_options);
 
+    var materials_options: *std.Build.Step.Options = .create(b);
+    materials_options.addOption([]const u8, "default", @embedFile("packs/default/blocks/materials.zon"));
+    exe.root_module.addOptions("materials", materials_options);
+
     var options: *std.Build.Step.Options = .create(b);
     options.addOption(?u32, "test_play", test_play);
     options.addOption(bool, "sanitize_thread", sanitize != .None);

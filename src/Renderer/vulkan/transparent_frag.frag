@@ -26,6 +26,10 @@ layout(push_constant) uniform PushConsts {
     PushConstants pc;
 } push_consts_frag;
 
+layout(set = 3, binding = 0, std430) readonly buffer Materials {
+    vec4 materials[];
+};
+
 const vec3 face_normals[6] = vec3[](
     vec3(-1.0,  0.0,  0.0),
     vec3( 1.0,  0.0,  0.0),
@@ -66,9 +70,9 @@ void main()
 
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
-    vec4 volume_color = texelFetch(textures[nonuniformEXT(block_array_layer)], ivec2(0, 0), 0);
-    vec3 absorption = max(1.0 - volume_color.rgb, vec3(0.01));
-    float density = 0.1;
+    vec4 vol_color_and_density = materials[nonuniformEXT(block_array_layer)];
+    vec3 absorption = max(1.0 - vol_color_and_density.rgb, vec3(0.01));
+    float density = vol_color_and_density.a;
     float td = volume_thickness * density;
     vec3 opticalDepth = td * absorption;
 

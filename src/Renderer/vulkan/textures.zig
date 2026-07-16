@@ -6,13 +6,7 @@ const zigimg = @import("zigimg");
 const VulkanRenderer = @import("VulkanRenderer.zig");
 const Block = @import("../../world/Block.zig").Block;
 
-const visible_block_count = blk: {
-    var count: usize = 0;
-    for (std.meta.fields(Block)) |field| {
-        if (@field(Block, field.name).isVisible()) count += 1;
-    }
-    break :blk count;
-};
+const visible_block_count = Block.visible_count;
 
 const visible_block_names: [visible_block_count][]const u8 = blk: {
     var names: [visible_block_count][]const u8 = undefined;

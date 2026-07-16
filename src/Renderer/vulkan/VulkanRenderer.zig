@@ -16,6 +16,7 @@ const Frustum = @import("../Frustum.zig").Frustum;
 const FaceDataAllocator = @import("FaceDataAllocator.zig").FaceDataAllocator;
 const StagingRing = @import("StagingRing.zig").StagingRing;
 const textures = @import("textures.zig");
+const utils = @import("../../libs/utils.zig");
 const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
 
 const vertex_shader_spv: []const u8 = @embedFile("vert_spv");
@@ -46,6 +47,33 @@ comptime {
     // Must match GLSL CountBuffer (uint + uint) in cull.comp
     if (@sizeOf(CullCount) != 8) @compileError("CullCount size mismatch");
 }
+
+const BlockMaterial = extern struct {
+    volume_color: [3]f32 align(4) = .{ 1.0, 1.0, 1.0 },
+    density: f32 = 0.0,
+};
+
+const BlockMaterialsZon = blk: {
+    const vis_count = World.Block.visible_count;
+    var names: [vis_count][]const u8 = undefined;
+    var ni: usize = 0;
+    for (std.meta.fields(World.Block)) |fld| {
+        if (!@field(World.Block, fld.name).isVisible()) continue;
+        names[ni] = fld.name;
+        ni += 1;
+    }
+    const types: [vis_count]type = .{BlockMaterial} ** vis_count;
+    const default_mat: BlockMaterial = .{};
+    var attrs: [vis_count]std.builtin.Type.StructField.Attributes = undefined;
+    for (&attrs) |*a| {
+        a.* = .{ .default_value_ptr = @as(?*const anyopaque, @ptrCast(&default_mat)) };
+    }
+    break :blk @Struct(.auto, null, &names, &types, &attrs);
+};
+
+const MaterialGpu = extern struct {
+    volume_color_and_density: @Vector(4, f32),
+};
 
 const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 const cull_workgroup_size: u32 = 64;
@@ -435,6 +463,11 @@ oit: OitState = .{},
 texture_manager: textures.TextureManager = undefined,
 
 graphics_state: GraphicsState = .{},
+
+block_materials_mapped: []MaterialGpu = &.{},
+block_materials_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
+block_materials_descriptor_pool: vk.DescriptorPool = .null_handle,
+block_materials_descriptor_set: vk.DescriptorSet = .null_handle,
 transfer: TransferState = .{},
 meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
 frame_buffers: PerFrameBuffers = .{},
@@ -482,6 +515,136 @@ pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.Comman
 fn loadTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     self.texture_manager = textures.TextureManager.init(self, self.render_options.gamma_correction);
     try self.texture_manager.loadTextures(io, allocator, self.render_options.selected_pack);
+}
+
+fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
+    const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{self.render_options.selected_pack});
+    defer allocator.free(pack_path);
+
+    const is_default = std.mem.eql(u8, self.render_options.selected_pack, "default");
+
+    var pack_dir = if (is_default)
+        try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
+    else
+        try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    if (is_default) {
+        const default_materials_zon = @import("materials").default;
+        if (pack_dir.openFile(io, "materials.zon", .{})) |f| {
+            f.close(io);
+        } else |err| switch (err) {
+            error.FileNotFound => try pack_dir.writeFile(io, .{ .data = default_materials_zon, .sub_path = "materials.zon" }),
+            else => |e| return e,
+        }
+    }
+
+    const zon_file = pack_dir.openFile(io, "materials.zon", .{}) catch {
+        std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{});
+        const indexer = std.enums.EnumIndexer(World.Block);
+        const count = indexer.count;
+        const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
+        @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 } });
+        self.block_materials_mapped = slice;
+        try self.createBlockMaterialsDescriptorResources();
+        return;
+    };
+    defer zon_file.close(io);
+
+    var temp_arena = std.heap.ArenaAllocator.init(allocator);
+    defer temp_arena.deinit();
+    const parsed = try utils.loadZon(BlockMaterialsZon, io, zon_file, temp_arena.allocator(), allocator);
+
+    const indexer = std.enums.EnumIndexer(World.Block);
+    const count = indexer.count;
+    const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
+    @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 } });
+
+    inline for (std.meta.fields(World.Block)) |fld| {
+        if (!@field(World.Block, fld.name).isVisible()) continue;
+        const mat = &@field(parsed, fld.name);
+        const idx = indexer.indexOf(@field(World.Block, fld.name));
+        slice[idx] = .{
+            .volume_color_and_density = .{
+                mat.volume_color[0],
+                mat.volume_color[1],
+                mat.volume_color[2],
+                mat.density,
+            },
+        };
+    }
+
+    self.block_materials_mapped = slice;
+    try self.createBlockMaterialsDescriptorResources();
+}
+
+fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
+    if (self.block_materials_descriptor_set_layout == .null_handle) {
+        const binding = vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_type = .storage_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .fragment_bit = true },
+            .p_immutable_samplers = null,
+        };
+        const layout_info: vk.DescriptorSetLayoutCreateInfo = .{
+            .flags = .{},
+            .binding_count = 1,
+            .p_bindings = (&binding)[0..1],
+        };
+        self.block_materials_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+    }
+    errdefer {
+        if (self.block_materials_descriptor_set_layout != .null_handle) {
+            self.dev.destroyDescriptorSetLayout(self.block_materials_descriptor_set_layout, null);
+            self.block_materials_descriptor_set_layout = .null_handle;
+        }
+    }
+
+    if (self.block_materials_descriptor_pool == .null_handle) {
+        const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 1 };
+        const pool_info: vk.DescriptorPoolCreateInfo = .{
+            .flags = .{},
+            .max_sets = 1,
+            .pool_size_count = 1,
+            .p_pool_sizes = (&pool_size)[0..1].ptr,
+        };
+        self.block_materials_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
+    }
+    errdefer {
+        if (self.block_materials_descriptor_pool != .null_handle) {
+            self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, null);
+            self.block_materials_descriptor_pool = .null_handle;
+        }
+    }
+
+    if (self.block_materials_descriptor_set == .null_handle) {
+        try self.dev.allocateDescriptorSets(&.{
+            .descriptor_pool = self.block_materials_descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = (&self.block_materials_descriptor_set_layout)[0..1],
+        }, (&self.block_materials_descriptor_set)[0..1]);
+    }
+
+    const info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.block_materials_mapped.ptr);
+    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
+    const buffer_info: vk.DescriptorBufferInfo = .{
+        .buffer = info.buffer,
+        .offset = info.offset,
+        .range = self.block_materials_mapped.len * @sizeOf(MaterialGpu),
+    };
+    const write: vk.WriteDescriptorSet = .{
+        .dst_set = self.block_materials_descriptor_set,
+        .dst_binding = 0,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .storage_buffer,
+        .p_image_info = (&dummy_image_info)[0..1],
+        .p_buffer_info = (&buffer_info)[0..1],
+        .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+    };
+    self.dev.updateDescriptorSets((&write)[0..1], null);
 }
 
 fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
@@ -686,6 +849,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
 
     try self.loadTextures(io, allocator);
 
+    try self.loadBlockMaterials(io, allocator);
+
     try self.createTransparentDepthDescriptorSetLayout();
     try self.recreateSwapchainResourcesLocked(io);
 
@@ -777,6 +942,15 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.cull.descriptor_set_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.chunk_data_descriptor_set_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.block_materials_descriptor_set_layout);
+
+    if (self.block_materials_descriptor_pool != .null_handle) {
+        self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, null);
+        self.block_materials_descriptor_pool = .null_handle;
+    }
+    if (self.block_materials_mapped.len > 0) {
+        self.cpu_to_gpu_gpa.allocator().free(self.block_materials_mapped);
+    }
 
     if (self.cull.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.cull.descriptor_pool, null);
@@ -1703,6 +1877,10 @@ fn recordTransparentPass(
     const chunk_desc_set = self.graphics_state.chunk_data_descriptor_sets_per_frame[current_frame];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 1, (&chunk_desc_set)[0..1], null);
 
+    if (self.block_materials_descriptor_set != .null_handle) {
+        self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 3, (&self.block_materials_descriptor_set)[0..1], null);
+    }
+
     var pc_transparent = pc;
     pc_transparent.chunk_base = self.draw_capacity;
     self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.transparent_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, push_constants_size, &pc_transparent);
@@ -2490,10 +2668,11 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
 
     // 2. Transparent Pipeline
     {
-        const set_layouts: [3]vk.DescriptorSetLayout = .{
+        const set_layouts: [4]vk.DescriptorSetLayout = .{
             self.texture_manager.descriptor_set_layout,
             self.graphics_state.chunk_data_descriptor_set_layout,
             self.graphics_state.transparent_depth_descriptor_set_layout,
+            self.block_materials_descriptor_set_layout,
         };
         const layout_info: vk.PipelineLayoutCreateInfo = .{
             .flags = .{},

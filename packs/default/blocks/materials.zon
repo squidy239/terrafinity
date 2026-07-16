@@ -1,0 +1,30 @@
+.{
+    .stone = .{
+        .density = 0.0,
+        .volume_color = .{ 1.0, 1.0, 1.0 },
+    },
+    .grass = .{
+        .density = 0.0,
+        .volume_color = .{ 0.3, 0.7, 0.3 },
+    },
+    .dirt = .{
+        .density = 0.0,
+        .volume_color = .{ 0.5, 0.35, 0.2 },
+    },
+    .wood = .{
+        .density = 0.0,
+        .volume_color = .{ 0.4, 0.25, 0.1 },
+    },
+    .snow = .{
+        .density = 0.0,
+        .volume_color = .{ 1.0, 1.0, 1.0 },
+    },
+    .water = .{
+        .density = 0.05,
+        .volume_color = .{ 0.2, 0.6, 0.6 },
+    },
+    .leaves = .{
+        .density = 0.08,
+        .volume_color = .{ 0.15, 0.5, 0.15 },
+    },
+}

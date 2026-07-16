@@ -51,6 +51,14 @@ pub const Block = enum(Tag) {
             else => false,
         };
     }
+
+    pub const visible_count: usize = blk: {
+        var count: usize = 0;
+        for (std.meta.fields(@This())) |field| {
+            if (@field(@This(), field.name).isVisible()) count += 1;
+        }
+        break :blk count;
+    };
 };
 
 test "Block properties" {
