@@ -185,6 +185,7 @@ const RetiredMeshEntry = struct {
     face_offset: vk.DeviceSize,
     face_length: vk.DeviceSize,
     graphics_timeline_value: u64,
+    free_index: bool,
 };
 
 const RetiredCandidateSlice = struct {
@@ -982,57 +983,75 @@ fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunk
     }
 }
 
-fn enqueueRetiredMesh(self: *VulkanRenderer, gpu_index: u32, face_offset: u32, face_byte_count: vk.DeviceSize) !void {
+fn enqueueRetiredMesh(self: *VulkanRenderer, gpu_index: u32, face_offset: u32, face_byte_count: vk.DeviceSize, free_index: bool) !void {
     const retire_frame = self.vk_ctx.frame_number.load(.acquire);
     try self.retired_meshes.append(self.allocator, .{
         .gpu_index = gpu_index,
         .face_offset = @as(vk.DeviceSize, @intCast(face_offset)) * @sizeOf(Mesher.Face),
         .face_length = face_byte_count,
         .graphics_timeline_value = retire_frame + self.num_in_flight,
+        .free_index = free_index,
     });
 }
 
 fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?ChunkMeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
     if (mesh) |m| {
         var new_mesh = m;
-        const gpu_idx = while (true) {
-            if (self.index_pool.allocIndex(io)) |idx| break idx;
-            try self.growPersistentCandidates(io);
-        };
-        new_mesh.gpu_index = gpu_idx;
 
         const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
         const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
         const abs_vec: [4]f32 = .{ @floatCast(chunk_blockpos[0]), @floatCast(chunk_blockpos[1]), @floatCast(chunk_blockpos[2]), 1.0 };
 
         const is_transparent = key == .transparent;
-        self.persistent.mapped[gpu_idx] = .{
-            .absolute_position = abs_vec,
-            .scale = ChunkPos.toScale(chunk_pos.level),
-            .face_count = new_mesh.face_count,
-            .is_transparent = if (is_transparent) 1 else 0,
-            .face_offset = new_mesh.face_offset,
-        };
 
-        var current_max = self.max_allocated_index.load(.monotonic);
-        while (gpu_idx >= current_max) {
-            if (self.max_allocated_index.cmpxchgStrong(current_max, gpu_idx + 1, .release, .monotonic)) |actual_val| {
-                current_max = actual_val;
-                continue;
-            }
-            break;
-        }
-
-        const existing = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
+        const existing = self.meshes.get(io, key);
         if (existing) |old_mesh| {
-            self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
-            try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count);
+            new_mesh.gpu_index = old_mesh.gpu_index;
+            self.persistent.mapped[old_mesh.gpu_index] = .{
+                .absolute_position = abs_vec,
+                .scale = ChunkPos.toScale(chunk_pos.level),
+                .face_count = new_mesh.face_count,
+                .is_transparent = if (is_transparent) 1 else 0,
+                .face_offset = new_mesh.face_offset,
+            };
+            const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
+            if (removed) |old| {
+                try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, false);
+            }
+        } else {
+            const gpu_idx = while (true) {
+                if (self.index_pool.allocIndex(io)) |idx| break idx;
+                try self.growPersistentCandidates(io);
+            };
+            new_mesh.gpu_index = gpu_idx;
+
+            self.persistent.mapped[gpu_idx] = .{
+                .absolute_position = abs_vec,
+                .scale = ChunkPos.toScale(chunk_pos.level),
+                .face_count = new_mesh.face_count,
+                .is_transparent = if (is_transparent) 1 else 0,
+                .face_offset = new_mesh.face_offset,
+            };
+
+            var current_max = self.max_allocated_index.load(.monotonic);
+            while (gpu_idx >= current_max) {
+                if (self.max_allocated_index.cmpxchgStrong(current_max, gpu_idx + 1, .release, .monotonic)) |actual_val| {
+                    current_max = actual_val;
+                    continue;
+                }
+                break;
+            }
+
+            const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
+            if (removed) |old| {
+                self.persistent.mapped[old.gpu_index].face_count = 0;
+                try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, true);
+            }
         }
     } else {
         const existing = self.meshes.fetchRemove(io, key);
         if (existing) |old_mesh| {
-            self.persistent.mapped[old_mesh.gpu_index].face_count = 0;
-            try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count);
+            try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count, true);
         }
     }
 }
@@ -2685,7 +2704,10 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
     while (i < self.retired_meshes.items.len) {
         const entry = self.retired_meshes.items[i];
         if (current_graphics_val >= entry.graphics_timeline_value) {
-            self.index_pool.freeIndex(io, entry.gpu_index);
+            if (entry.free_index) {
+                self.persistent.mapped[entry.gpu_index].face_count = 0;
+                self.index_pool.freeIndex(io, entry.gpu_index);
+            }
             self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
             _ = self.retired_meshes.swapRemove(i);
         } else {
