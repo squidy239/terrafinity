@@ -51,6 +51,8 @@ comptime {
 const BlockMaterial = extern struct {
     volume_color: [3]f32 align(4) = .{ 1.0, 1.0, 1.0 },
     density: f32 = 0.0,
+    fresnel_power: f32 = 5.0,
+    min_opacity: f32 = 0.15,
 };
 
 const BlockMaterialsZon = blk: {
@@ -73,6 +75,7 @@ const BlockMaterialsZon = blk: {
 
 const MaterialGpu = extern struct {
     volume_color_and_density: @Vector(4, f32),
+    fresnel_params: @Vector(4, f32),
 };
 
 const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
@@ -544,7 +547,7 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
         const indexer = std.enums.EnumIndexer(World.Block);
         const count = indexer.count;
         const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-        @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 } });
+        @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 }, .fresnel_params = .{ 5.0, 0.15, 0.0, 0.0 } });
         self.block_materials_mapped = slice;
         try self.createBlockMaterialsDescriptorResources();
         return;
@@ -558,7 +561,7 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
     const indexer = std.enums.EnumIndexer(World.Block);
     const count = indexer.count;
     const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-    @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 } });
+    @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 }, .fresnel_params = .{ 5.0, 0.15, 0.0, 0.0 } });
 
     inline for (std.meta.fields(World.Block)) |fld| {
         if (!@field(World.Block, fld.name).isVisible()) continue;
@@ -571,6 +574,7 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
                 mat.volume_color[2],
                 mat.density,
             },
+            .fresnel_params = .{ mat.fresnel_power, mat.min_opacity, 0.0, 0.0 },
         };
     }
 

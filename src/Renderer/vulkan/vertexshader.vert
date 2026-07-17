@@ -94,18 +94,20 @@ void main() {
     vec3 coords = CUBE_FACES[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
-    fragpos = vec3(local_pos) * scale + coords + absolute_position;
+    vec3 local_fragcoords = vec3(local_pos) * scale + coords;
+    fragpos = local_fragcoords + relative_position;
+    vec3 absolute_fragpos = local_fragcoords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
     // TODO: Replace hardcoded surface animation with a data-driven block material system
     if ((local_pos + absolute_position).y == 0.0 && side == 2 && block_type_local == 3u) {
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
-        float safe_y = max(abs(fragpos.y), 1e-10);
-        float safe_z = max(abs(fragpos.z), 1e-10);
+        float safe_y = max(abs(absolute_fragpos.y), 1e-10);
+        float safe_z = max(abs(absolute_fragpos.z), 1e-10);
         float p     = 1.0 + bouncingMod(
-            fragpos.x * fragpos.y * fragpos.z * (fragpos.x / (safe_y * safe_z)) *
-            (sin(fragpos.x) * sin(fragpos.y) * sin(fragpos.z)),
+            absolute_fragpos.x * absolute_fragpos.y * absolute_fragpos.z * (absolute_fragpos.x / (safe_y * safe_z)) *
+            (sin(absolute_fragpos.x) * sin(absolute_fragpos.y) * sin(absolute_fragpos.z)),
             400.0) / 400.0;
         coords.y -= bouncingMod(p * t * speed, 0.4);
         coords.y = max(coords.y, -0.5);

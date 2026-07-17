@@ -6,7 +6,6 @@ layout(early_fragment_tests) in;
 layout(location = 0) out vec4 frag_color;
 
 layout(location = 1) in vec3 in_coords;
-layout(location = 2) in vec3 fragpos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;

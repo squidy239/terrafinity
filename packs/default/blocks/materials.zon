@@ -22,9 +22,13 @@
     .water = .{
         .density = 0.05,
         .volume_color = .{ 0.1, 0.3, 0.3 },
+        .fresnel_power = 5.0,
+        .min_opacity = 0.1,
     },
     .leaves = .{
         .density = 0.08,
         .volume_color = .{ 0.15, 0.5, 0.15 },
+        .fresnel_power = 3.0,
+        .min_opacity = 1.0,
     },
 }

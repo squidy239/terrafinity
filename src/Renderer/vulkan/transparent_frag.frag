@@ -70,7 +70,12 @@ void main()
 
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
-    vec4 vol_color_and_density = materials[nonuniformEXT(block_array_layer)];
+    uint mat_idx = block_array_layer * 2u;
+    vec4 vol_color_and_density = materials[nonuniformEXT(mat_idx)];
+    vec4 fresnel_data = materials[nonuniformEXT(mat_idx + 1u)];
+    float fresnel_power = fresnel_data.x;
+    float min_opacity = fresnel_data.y;
+
     vec3 absorption = max(1.0 - vol_color_and_density.rgb, vec3(0.01));
     float density = vol_color_and_density.a;
     float td = volume_thickness * density;
@@ -80,9 +85,14 @@ void main()
     vec4 wboit_color = vec4(0.0);
 
     if (gl_FrontFacing && draw_surface) {
-        float weight = calculate_weight(view_space_depth, color.a);
-        wboit_color = vec4(color.rgb * color.a, color.a) * weight;
-        wboit_reveal = color.a;
+        vec3 view_dir = normalize(-fragpos);
+        float NdotV = abs(dot(normal, view_dir));
+        float fresnel = pow(1.0 - NdotV, fresnel_power);
+        float view_alpha = mix(color.a * min_opacity, color.a, fresnel);
+
+        float weight = calculate_weight(view_space_depth, view_alpha);
+        wboit_color = vec4(color.rgb * view_alpha, view_alpha) * weight;
+        wboit_reveal = view_alpha;
     }
 
     outAccum = vec4(opticalDepth, wboit_reveal);
