@@ -719,12 +719,11 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
 
     try self.createRenderTargets(actual_extent);
 
-    const num_swapchain_images = self.vk_ctx.swapchain_images.len;
-    self.num_in_flight = @intCast(num_swapchain_images);
-    self.frame_buffers.items = try self.allocator.alloc(PerFrameData, num_swapchain_images);
+    self.num_in_flight = @intCast(VulkanContext.max_frames_in_flight);
+    self.frame_buffers.items = try self.allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
     @memset(self.frame_buffers.items, .{});
 
-    for (0..num_swapchain_images) |i| {
+    for (0..VulkanContext.max_frames_in_flight) |i| {
         try self.allocateIndirectBuffers(i);
     }
 
@@ -752,7 +751,7 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
     // These were just recreated by allocateIndirectBuffers above, so the descriptor sets
     // must be updated to point to the new buffers.
     if (self.cull.descriptor_set_layout != .null_handle) {
-        for (0..num_swapchain_images) |i| {
+        for (self.cull.descriptor_sets_per_frame, 0..) |_, i| {
             self.updateCullDescriptorSet(@intCast(i));
         }
     }
@@ -2218,8 +2217,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
 
     try self.index_pool.grow(io, self.allocator, @intCast(new_capacity));
 
-    const num_frames = self.vk_ctx.swapchain_images.len;
-    for (0..num_frames) |i| {
+    for (self.cull.descriptor_sets_per_frame, 0..) |_, i| {
         self.updateCullDescriptorSet(@intCast(i));
     }
 }
@@ -2315,7 +2313,7 @@ fn createChunkDataDescriptorResources(self: *VulkanRenderer) !void {
         self.graphics_state.chunk_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
-    const num_frames = self.vk_ctx.swapchain_images.len;
+    const num_frames = VulkanContext.max_frames_in_flight;
     const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) };
     const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
@@ -2395,7 +2393,7 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
         self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
-    const num_frames = self.vk_ctx.swapchain_images.len;
+    const num_frames = VulkanContext.max_frames_in_flight;
     const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames * 4) };
     const pool_info: vk.DescriptorPoolCreateInfo = .{
         .flags = .{},
@@ -2453,7 +2451,7 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
 }
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
-    const num_frames = self.vk_ctx.swapchain_images.len;
+    const num_frames = VulkanContext.max_frames_in_flight;
     pool.* = try self.dev.createDescriptorPool(&.{
         .flags = .{},
         .max_sets = @intCast(num_frames),
@@ -2832,7 +2830,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
     };
     self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{blend}, self.oit.composition_layout, no_vertex_input);
 
-    const pool_size = vk.DescriptorPoolSize{ .type = .combined_image_sampler, .descriptor_count = @intCast(self.vk_ctx.swapchain_images.len * 4) };
+    const pool_size: vk.DescriptorPoolSize = .{ .type = .combined_image_sampler, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
     try self.createFrameDescriptorPool(&self.oit.descriptor_pool, self.oit.descriptor_set_layout, &self.oit.descriptor_sets_per_frame, (&pool_size)[0..1]);
     self.updateOitDescriptorSets();
 }
@@ -2840,14 +2838,13 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
 fn updateOitDescriptorSets(self: *VulkanRenderer) void {
     const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const num_frames = self.vk_ctx.swapchain_images.len;
     const image_infos: [4]vk.DescriptorImageInfo = .{
         .{ .sampler = self.oit.sampler, .image_view = self.render_color.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.accum.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.reveal.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.volume_weight.view, .image_layout = .shader_read_only_optimal },
     };
-    for (self.oit.descriptor_sets_per_frame[0..num_frames]) |desc_set| {
+    for (self.oit.descriptor_sets_per_frame) |desc_set| {
         const writes: [4]vk.WriteDescriptorSet = .{
             .{ .dst_set = desc_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[0..1], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
             .{ .dst_set = desc_set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[1..2], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },

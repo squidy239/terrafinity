@@ -205,7 +205,13 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     _ = dvui.struct_ui.string_map.remove(&self.config.game_config.render_options.selected_pack);
 
     const config_changed = !std.meta.eql(firstconfig, self.config.*);
+    const gamma_changed = firstconfig.game_config.render_options.gamma_correction != self.config.game_config.render_options.gamma_correction;
+    const present_mode_changed = firstconfig.game_config.render_options.present_mode != self.config.game_config.render_options.present_mode;
     self.config_lock.unlock(io);
+
+    if (gamma_changed or present_mode_changed) {
+        self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+    }
 
     if (config_changed) try self.config.save(io, self.config_path, self.config_lock);
     return menuchanged;

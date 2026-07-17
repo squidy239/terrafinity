@@ -25,6 +25,7 @@ pub const Action = enum {
     use_item_secondary,
     use_item_tertiary,
     use_item_quaternary,
+    fullscreen,
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);

@@ -93,7 +93,9 @@ pub fn main(init: std.process.Init) !void {
     var single_press = Key.Singlepress.empty;
     try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
+    try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
     single_press.insert(.escape_menu);
+    single_press.insert(.fullscreen);
 
     inline for (.{ .{ .key = .w, .action = .forward }, .{ .key = .s, .action = .backward }, .{ .key = .a, .action = .left }, .{ .key = .d, .action = .right }, .{ .key = .space, .action = .up }, .{ .key = .left_shift, .action = .down }, .{ .key = .mouse_left, .action = .use_item_primary }, .{ .key = .mouse_right, .action = .use_item_secondary }, .{ .key = .f, .action = .use_item_tertiary } }) |bind| {
         try keymap.setActionKey(io, .{ .key = bind.key }, bind.action);
@@ -125,6 +127,8 @@ pub fn main(init: std.process.Init) !void {
     var frame_time: std.Io.Timestamp = start_time;
     var action_set = Key.ActionSet.empty;
     var prev_window_size = window_size;
+    var current_window_mode: wio.WindowMode = .maximized;
+    var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
 
     var ui_cmd_buffers: [VulkanContext.max_frames_in_flight]vk.CommandBuffer = undefined;
     const ui_cmd_bufs_slice: []vk.CommandBuffer = &ui_cmd_buffers;
@@ -138,6 +142,16 @@ pub fn main(init: std.process.Init) !void {
         wio.update();
         try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
+        if (action_set.contains(.fullscreen)) {
+            if (current_window_mode == .fullscreen) {
+                window.setMode(pre_fullscreen_window_mode);
+                current_window_mode = pre_fullscreen_window_mode;
+            } else {
+                pre_fullscreen_window_mode = current_window_mode;
+                current_window_mode = .fullscreen;
+                window.setMode(current_window_mode);
+            }
+        }
         frame_time = .now(io, .awake);
 
         if (prev_window_size.width != window_size.width or prev_window_size.height != window_size.height) {

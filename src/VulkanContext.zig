@@ -63,6 +63,8 @@ swapchain_image_layouts: []vk.ImageLayout = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 swapchain_needs_recreate: std.atomic.Value(bool) = .init(false),
 present_mode: PresentMode = .mailbox,
+last_present_mode_requested: PresentMode = .mailbox,
+swapchain_present_mode: vk.PresentModeKHR = .fifo_khr,
 
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
@@ -545,7 +547,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         const current_gamma = self.swapchain_gamma.load(.monotonic);
         const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
             self.swapchain_extent_actual.height == self.swapchain_extent.height;
-        if (current_gamma == gamma_correction and extent_same) return;
+        if (current_gamma == gamma_correction and extent_same and self.present_mode == self.last_present_mode_requested) return;
     }
 
     self.swapchain_extent_actual = self.swapchain_extent;
@@ -686,6 +688,8 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
+    self.swapchain_present_mode = present_mode;
+    self.last_present_mode_requested = self.present_mode;
     self.swapchain_image_layouts = &.{};
     self.swapchain_image_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
     for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
