@@ -19,24 +19,17 @@ pub const DrawTarget = struct {
 
 pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
-    addChunk: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
+    addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     setViewport: *const fn (*Implementation, @Vector(2, u32)) error{ViewportSetFailed}!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
-    forEachChunk: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void,
+    forEachMesh: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void,
 };
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
 ///After this call opaque mesh and transparent mesh are in an undefined state and may not be read
 pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
-    return self.vtable.addChunk(self.userdata, io, chunk_pos, opaque_mesh, transparent_mesh);
-}
-
-///removes a chunk mesh from the renderer and frees all associated resources, this function may be called on any thread
-pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) void {
-    const cancel_protection = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(cancel_protection);
-    return addChunk(self, io, chunk_pos, &.{}, &.{}) catch @panic("addChunk may not return an error here since its under cancel protection");
+    return self.vtable.addMesh(self.userdata, io, chunk_pos, opaque_mesh, transparent_mesh);
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
@@ -56,8 +49,8 @@ pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
     return self.vtable.updateCameraDirection(self.userdata, viewDir);
 }
 
-pub fn forEachChunk(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) !void {
-    return self.vtable.forEachChunk(self.userdata, io, userdata, callback);
+pub fn forEachMesh(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {
+    return self.vtable.forEachMesh(self.userdata, io, userdata, callback);
 }
 
 pub const RenderOptions = struct {

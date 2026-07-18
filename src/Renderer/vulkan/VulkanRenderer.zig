@@ -873,11 +873,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     self.interface = .{
         .userdata = @ptrCast(self),
         .vtable = &.{
-            .addChunk = vtableAddChunk,
+            .addMesh = vtableAddMesh,
             .draw = vtableDrawChunks,
             .setViewport = vtableSetViewport,
             .updateCameraDirection = vtableUpdateCameraDirection,
-            .forEachChunk = vtableForEachChunk,
+            .forEachMesh = vtableForEachMesh,
         },
     };
 
@@ -984,7 +984,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.allocator.destroy(self);
 }
 
-pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
+pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
     defer zone.end();
 
@@ -1134,9 +1134,9 @@ fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpl
     }
 }
 
-fn vtableAddChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
+fn vtableAddMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.addChunk(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
+    self.addMesh(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.AddChunkFailed,
     };
@@ -2892,34 +2892,43 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
 
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.transfer.graphics_timeline_semaphore);
 
-    for (0..self.retired_meshes.items.len) |i| {
-        const idx = self.retired_meshes.items.len - 1 - i;
-        const entry = self.retired_meshes.items[idx];
-        if (current_graphics_val >= entry.graphics_timeline_value) {
-            if (entry.free_index) {
-                self.persistent.mapped[entry.gpu_index].face_count = 0;
-                self.index_pool.freeIndex(io, entry.gpu_index);
+    {
+        const len = self.retired_meshes.items.len;
+        for (0..len) |i| {
+            const idx = len - 1 - i;
+            const entry = self.retired_meshes.items[idx];
+            if (current_graphics_val >= entry.graphics_timeline_value) {
+                if (entry.free_index) {
+                    self.persistent.mapped[entry.gpu_index].face_count = 0;
+                    self.index_pool.freeIndex(io, entry.gpu_index);
+                }
+                self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
+                _ = self.retired_meshes.swapRemove(idx);
             }
-            self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
-            _ = self.retired_meshes.swapRemove(idx);
         }
     }
 
-    for (0..self.retired_candidate_slices.items.len) |i| {
-        const idx = self.retired_candidate_slices.items.len - 1 - i;
-        const entry = self.retired_candidate_slices.items[idx];
-        if (current_graphics_val >= entry.graphics_timeline_value) {
-            self.cpu_to_gpu_gpa.allocator().free(entry.slice);
-            _ = self.retired_candidate_slices.swapRemove(idx);
+    {
+        const len = self.retired_candidate_slices.items.len;
+        for (0..len) |i| {
+            const idx = len - 1 - i;
+            const entry = self.retired_candidate_slices.items[idx];
+            if (current_graphics_val >= entry.graphics_timeline_value) {
+                self.cpu_to_gpu_gpa.allocator().free(entry.slice);
+                _ = self.retired_candidate_slices.swapRemove(idx);
+            }
         }
     }
 
-    for (0..self.retired_face_buffers.items.len) |i| {
-        const idx = self.retired_face_buffers.items.len - 1 - i;
-        const entry = self.retired_face_buffers.items[idx];
-        if (current_graphics_val >= entry.graphics_timeline_value) {
-            self.gpu_only_gpa.allocator().free(entry.slice);
-            _ = self.retired_face_buffers.swapRemove(idx);
+    {
+        const len = self.retired_face_buffers.items.len;
+        for (0..len) |i| {
+            const idx = len - 1 - i;
+            const entry = self.retired_face_buffers.items[idx];
+            if (current_graphics_val >= entry.graphics_timeline_value) {
+                self.gpu_only_gpa.allocator().free(entry.slice);
+                _ = self.retired_face_buffers.swapRemove(idx);
+            }
         }
     }
 }
@@ -2995,14 +3004,14 @@ fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @V
     self.camera_front_z.store(norm[2], .monotonic);
 }
 
-fn vtableForEachChunk(user_data: *Renderer.Implementation, io: std.Io, callback_user_data: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) void) std.Io.Cancelable!void {
+fn vtableForEachMesh(user_data: *Renderer.Implementation, io: std.Io, callback_user_data: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     var it = self.meshes.iterator();
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         const chunk_pos = entry.key_ptr.*.toPos();
         it.pause(io);
-        callback(callback_user_data, chunk_pos);
+        try callback(callback_user_data, chunk_pos);
         try it.unpause(io);
     }
 }

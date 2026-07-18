@@ -720,7 +720,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos) and self.canUnloadMesh(io, chunk_pos)) {
-        self.renderer.removeChunk(io, chunk_pos);
+        try self.renderer.addChunk(io, chunk_pos, &.{}, &.{});
         try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
     }
@@ -755,7 +755,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
             try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
         } else {
-            self.renderer.removeChunk(io, chunk_pos);
+            try self.renderer.addChunk(io, chunk_pos, &.{}, &.{});
         }
     }
     const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
@@ -929,7 +929,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
     }
 }
 
-fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
+fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
     defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
@@ -939,22 +939,23 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         io: std.Io,
         chunks: u64 = 0,
         unloaded: u64 = 0,
+        err: ?anyerror = null,
 
-        pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) void {
+        pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) error{Failed}!void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
             ctx.chunks += 1;
             if (ctx.game.keepChunkLoaded(ctx.io, chunk_pos)) return;
             if (!ctx.game.canUnloadMesh(ctx.io, chunk_pos)) return; // children not ready
-            const prev = ctx.io.swapCancelProtection(.blocked);
 
-            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| switch (err) {
-                error.Canceled => unreachable,
-                else => @panic("TODO handle error"),
+            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| {
+                ctx.err = err;
+                return error.Failed;
             };
 
-            _ = ctx.io.swapCancelProtection(prev);
-
-            ctx.game.renderer.removeChunk(ctx.io, chunk_pos);
+            ctx.game.renderer.addChunk(ctx.io, chunk_pos, &.{}, &.{}) catch |err| {
+                ctx.err = err;
+                return error.Failed;
+            };
             ctx.unloaded += 1;
         }
     };
@@ -963,7 +964,10 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         .io = io,
     };
 
-    try self.renderer.forEachChunk(io, &ctx, ChunkCollector.callback);
+    self.renderer.forEachMesh(io, &ctx, ChunkCollector.callback) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Failed => if (ctx.err) |e| return e,
+    };
     self.debug_menu.meshes.store(ctx.chunks, .unordered);
 
     var it = self.loaded_or_meshed.iterator();
@@ -974,10 +978,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) std.Io.Cancelable!void {
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
-        self.tryRemoveChunkFromLoaded(io, self.allocator, key) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => @panic("TODO handle error"),
-        };
+        try self.tryRemoveChunkFromLoaded(io, self.allocator, key);
         try it.unpause(io);
     }
 }
