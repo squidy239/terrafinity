@@ -22,12 +22,19 @@ struct PushConstants {
     float time;
 };
 
+struct MaterialGpu {
+    float density;
+    float fresnel_power;
+    float min_opacity;
+    vec3 volume_color;
+};
+
 layout(push_constant) uniform PushConsts {
     PushConstants pc;
 } push_consts_frag;
 
 layout(set = 3, binding = 0, std430) readonly buffer Materials {
-    vec4 materials[];
+    MaterialGpu materials[];
 };
 
 const vec3 face_normals[6] = vec3[](
@@ -70,15 +77,10 @@ void main()
 
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
-    uint mat_idx = block_array_layer * 2u;
-    vec4 vol_color_and_density = materials[nonuniformEXT(mat_idx)];
-    vec4 fresnel_data = materials[nonuniformEXT(mat_idx + 1u)];
-    float fresnel_power = fresnel_data.x;
-    float min_opacity = fresnel_data.y;
-
-    vec3 absorption = max(1.0 - vol_color_and_density.rgb, vec3(0.01));
-    float density = vol_color_and_density.a;
-    float td = volume_thickness * density;
+    uint mat_idx = block_array_layer;
+    MaterialGpu mat = materials[nonuniformEXT(mat_idx)];
+    vec3 absorption = max(1.0 - mat.volume_color, vec3(0.01));
+    float td = volume_thickness * mat.density;
     vec3 opticalDepth = td * absorption;
 
     float wboit_reveal = 0.0;
@@ -87,8 +89,8 @@ void main()
     if (gl_FrontFacing && draw_surface) {
         vec3 view_dir = normalize(-fragpos);
         float NdotV = abs(dot(normal, view_dir));
-        float fresnel = pow(1.0 - NdotV, fresnel_power);
-        float view_alpha = mix(color.a * min_opacity, color.a, fresnel);
+        float fresnel = pow(1.0 - NdotV, mat.fresnel_power);
+        float view_alpha = mix(color.a * mat.min_opacity, color.a, fresnel);
 
         float weight = calculate_weight(view_space_depth, view_alpha);
         wboit_color = vec4(color.rgb * view_alpha, view_alpha) * weight;

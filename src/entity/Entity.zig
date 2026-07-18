@@ -3,7 +3,6 @@ const std = @import("std");
 const EntityTypes = @import("EntityTypes");
 const tracy = @import("tracy");
 
-const Renderer = @import("../Game.zig").Renderer;
 const World = @import("../world/World.zig");
 
 const Entity = @This();
@@ -22,7 +21,6 @@ pub const Interface = struct {
     /// The entity ptr is not valid after this.
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
     getPos: ?*const fn (self: *Implementation, io: std.Io) @Vector(3, f64) = null,
-    draw: ?*const fn (self: *Implementation, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
 };
 
 /// Removes a ref from entity when it returns.
@@ -33,12 +31,6 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
         const unloaded = try updateFn(self, io, world, uuid, allocator);
         if (!unloaded) _ = self.ref_count.fetchSub(1, .seq_cst);
     } else _ = self.ref_count.fetchSub(1, .seq_cst);
-}
-
-pub fn draw(self: *@This(), playerPos: @Vector(3, f64), uuid: u128, world: *World, r: *Renderer) !void {
-    if (self.vtable.draw) |drawFn| {
-        return try drawFn(self.ptr, world, uuid, world.allocator, playerPos, r);
-    }
 }
 
 pub fn getPos(self: *@This()) ?@Vector(3, f64) {

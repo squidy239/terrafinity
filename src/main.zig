@@ -151,6 +151,7 @@ pub fn main(init: std.process.Init) !void {
                 current_window_mode = .fullscreen;
                 window.setMode(current_window_mode);
             }
+            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
         }
         frame_time = .now(io, .awake);
 
@@ -191,9 +192,9 @@ pub fn main(init: std.process.Init) !void {
                 frame_ctx.cmd_buffer,
                 vk_ctx.swapchain_images[frame_ctx.image_index],
                 vk_ctx.swapchain_views[frame_ctx.image_index],
+                &vk_ctx.swapchain_image_layouts[frame_ctx.image_index],
             );
             try game.frame(io, gpa, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
-            vk_ctx.swapchain_image_layouts[frame_ctx.image_index] = .present_src_khr;
         }
 
         try recordUiPass(io, gpa, vk_ctx, &backend, &ui_window, &ui, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
@@ -356,14 +357,16 @@ fn recordUiPass(
 
 fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
     const src_stage: vk.PipelineStageFlags2 = switch (old_layout) {
-        .present_src_khr => .{ .all_commands_bit = true },
+        .undefined => .{ .top_of_pipe_bit = true },
+        .present_src_khr => .{ .bottom_of_pipe_bit = true },
         .color_attachment_optimal => .{ .color_attachment_output_bit = true },
         else => .{ .all_commands_bit = true },
     };
     const src_access: vk.AccessFlags2 = switch (old_layout) {
-        .present_src_khr => .{ .memory_write_bit = true },
+        .undefined => .{},
+        .present_src_khr => .{},
         .color_attachment_optimal => .{ .color_attachment_write_bit = true },
-        else => .{},
+        else => .{ .memory_read_bit = true, .memory_write_bit = true },
     };
     const barrier = vk.ImageMemoryBarrier2{
         .src_stage_mask = src_stage,

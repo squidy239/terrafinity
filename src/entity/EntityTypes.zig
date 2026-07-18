@@ -202,17 +202,6 @@ pub const Explosive = struct {
             .getPos = getPos,
             .unload = unload,
             .update = update,
-            .draw = null,
         };
     }
 };
-
-fn texture(u: f64, v: f64, args: anytype) f64 {
-    const noise = World.DefaultGenerator.Noise.Noise(f32){
-        .noise_type = .simplex,
-        .frequency = 0.5,
-    };
-    _ = args;
-    const sampled = noise.genNoise2DRange(@floatCast(u), @floatCast(v), f32, 0, 1);
-    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0), @as(f32, 0.75)));
-}

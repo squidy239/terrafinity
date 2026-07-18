@@ -6,6 +6,7 @@ const DeviceProxy = vk.DeviceProxy;
 const zm = @import("zm");
 
 const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
+const utils = @import("../../libs/utils.zig");
 const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
 pub const RenderOptions = Renderer.RenderOptions;
@@ -16,15 +17,14 @@ const Frustum = @import("../Frustum.zig").Frustum;
 const FaceDataAllocator = @import("FaceDataAllocator.zig").FaceDataAllocator;
 const StagingRing = @import("StagingRing.zig").StagingRing;
 const textures = @import("textures.zig");
-const utils = @import("../../libs/utils.zig");
 const VulkanBackingAllocator = @import("VulkanBackingAllocator.zig").VulkanBackingAllocator;
 
-const vertex_shader_spv: []const u8 = @embedFile("vert_spv");
-const fragment_shader_spv: []const u8 = @embedFile("frag_spv");
-const transparent_frag_spv: []const u8 = @embedFile("trans_frag_spv");
-const composite_vert_spv: []const u8 = @embedFile("comp_vert_spv");
-const composite_frag_spv: []const u8 = @embedFile("comp_frag_spv");
-const cull_shader_spv: []const u8 = @embedFile("cull_spv");
+const vertex_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("vert_spv")));
+const fragment_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("frag_spv")));
+const transparent_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("trans_frag_spv")));
+const composite_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("comp_vert_spv")));
+const composite_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("comp_frag_spv")));
+const cull_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("cull_spv")));
 
 const InputChunk = extern struct {
     absolute_position: [4]f32 align(@sizeOf([4]f32)),
@@ -74,8 +74,10 @@ const BlockMaterialsZon = blk: {
 };
 
 const MaterialGpu = extern struct {
-    volume_color_and_density: @Vector(4, f32),
-    fresnel_params: @Vector(4, f32),
+    density: f32,
+    fresnel_power: f32,
+    min_opacity: f32,
+    volume_color: @Vector(3, f32),
 };
 
 const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
@@ -508,11 +510,16 @@ init_time_ns: u64 = 0,
 last_stat_log_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
-pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.CommandBuffer, output_image: vk.Image, output_view: vk.ImageView) void {
+swapchain_image_old_layout: vk.ImageLayout = .undefined,
+swapchain_image_layout_ptr: ?*vk.ImageLayout = null,
+
+pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.CommandBuffer, output_image: vk.Image, output_view: vk.ImageView, swapchain_image_layout: *vk.ImageLayout) void {
     self.current_frame = frame_index;
     self.output_cmd_buffer = cmd_buffer;
     self.output_color_image = output_image;
     self.output_color_view = output_view;
+    self.swapchain_image_old_layout = swapchain_image_layout.*;
+    self.swapchain_image_layout_ptr = swapchain_image_layout;
 }
 
 fn loadTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
@@ -547,7 +554,7 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
         const indexer = std.enums.EnumIndexer(World.Block);
         const count = indexer.count;
         const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-        @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 }, .fresnel_params = .{ 5.0, 0.15, 0.0, 0.0 } });
+        @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
         self.block_materials_mapped = slice;
         try self.createBlockMaterialsDescriptorResources();
         return;
@@ -561,20 +568,17 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
     const indexer = std.enums.EnumIndexer(World.Block);
     const count = indexer.count;
     const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-    @memset(slice, .{ .volume_color_and_density = .{ 1.0, 1.0, 1.0, 0.0 }, .fresnel_params = .{ 5.0, 0.15, 0.0, 0.0 } });
+    @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
 
     inline for (std.meta.fields(World.Block)) |fld| {
         if (!@field(World.Block, fld.name).isVisible()) continue;
         const mat = &@field(parsed, fld.name);
         const idx = indexer.indexOf(@field(World.Block, fld.name));
         slice[idx] = .{
-            .volume_color_and_density = .{
-                mat.volume_color[0],
-                mat.volume_color[1],
-                mat.volume_color[2],
-                mat.density,
-            },
-            .fresnel_params = .{ mat.fresnel_power, mat.min_opacity, 0.0, 0.0 },
+            .density = mat.density,
+            .fresnel_power = mat.fresnel_power,
+            .min_opacity = mat.min_opacity,
+            .volume_color = mat.volume_color,
         };
     }
 
@@ -980,6 +984,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     self.texture_manager.deinit();
 
+    self.swapchain_image_layout_ptr = null;
     self.allocator.destroy(self);
 }
 
@@ -1719,21 +1724,15 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
 }
 
 fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, depth_aspect_mask: vk.ImageAspectFlags) void {
-    const pre_dispatch_mem_barrier: vk.MemoryBarrier2 = .{
-        .src_stage_mask = .{ .all_commands_bit = true },
-        .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-        .dst_stage_mask = .{ .all_commands_bit = true },
-        .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-    };
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const pre_dispatch_img_barriers: [2]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
+        makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{}, .{}, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
-        .memory_barrier_count = 1,
-        .p_memory_barriers = (&pre_dispatch_mem_barrier)[0..1],
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
         .buffer_memory_barrier_count = 0,
         .p_buffer_memory_barriers = null,
         .image_memory_barrier_count = pre_dispatch_img_barriers.len,
@@ -1830,9 +1829,9 @@ fn recordTransparentPass(
     defer zone.end();
     const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const oit_pre_barriers: [3]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
-        makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
-        makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{ .all_commands_bit = true }, .{ .memory_read_bit = true, .memory_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1923,12 +1922,35 @@ fn recordCompositionPass(
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
     defer zone.end();
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const output_barrier = blk: {
+        const old = self.swapchain_image_old_layout;
+        const src_stage: vk.PipelineStageFlags2 = switch (old) {
+            .undefined => .{},
+            .present_src_khr => .{ .bottom_of_pipe_bit = true },
+            else => .{ .all_commands_bit = true },
+        };
+        const src_access: vk.AccessFlags2 = switch (old) {
+            .undefined => .{},
+            .present_src_khr => .{},
+            else => .{ .memory_write_bit = true },
+        };
+        break :blk makeImageBarrier2(
+            output_image,
+            old,
+            .color_attachment_optimal,
+            src_stage,
+            src_access,
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            color_aspect,
+        );
+    };
     const pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.volume_weight.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
-        makeImageBarrier2(output_image, .undefined, .color_attachment_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        output_barrier,
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1964,6 +1986,10 @@ fn recordCompositionPass(
         .image_memory_barrier_count = 1,
         .p_image_memory_barriers = (&post_comp_barrier)[0..1],
     });
+
+    if (self.swapchain_image_layout_ptr) |ptr| {
+        ptr.* = .present_src_khr;
+    }
 }
 
 pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view_pos: @Vector(3, f64)) !void {
@@ -2622,7 +2648,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
         })[0..1],
     };
 
-    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len, .p_code = @ptrCast(@alignCast(vertex_shader_spv.ptr)) }, null);
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len * @sizeOf(u32), .p_code = vertex_shader_spv.ptr }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
 
     // 1. Opaque Pipeline
@@ -2640,7 +2666,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
         };
         self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
 
-        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len, .p_code = @ptrCast(@alignCast(fragment_shader_spv.ptr)) }, null);
+        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len * @sizeOf(u32), .p_code = fragment_shader_spv.ptr }, null);
         defer self.dev.destroyShaderModule(frag_module, null);
 
         const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
@@ -2685,7 +2711,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
         };
         self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
 
-        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len, .p_code = @ptrCast(@alignCast(transparent_frag_spv.ptr)) }, null);
+        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len * @sizeOf(u32), .p_code = transparent_frag_spv.ptr }, null);
         defer self.dev.destroyShaderModule(frag_module, null);
 
         const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
@@ -2731,7 +2757,7 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
         self.cull.pipeline_layout = .null_handle;
     }
 
-    const comp_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = cull_shader_spv.len, .p_code = @ptrCast(@alignCast(cull_shader_spv.ptr)) }, null);
+    const comp_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = cull_shader_spv.len * @sizeOf(u32), .p_code = cull_shader_spv.ptr }, null);
     defer self.dev.destroyShaderModule(comp_module, null);
 
     const cpci: vk.ComputePipelineCreateInfo = .{
@@ -2806,9 +2832,9 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         self.oit.sampler = .null_handle;
     }
 
-    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_vert_spv.len, .p_code = @ptrCast(@alignCast(composite_vert_spv.ptr)) }, null);
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_vert_spv.len * @sizeOf(u32), .p_code = composite_vert_spv.ptr }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_frag_spv.len, .p_code = @ptrCast(@alignCast(composite_frag_spv.ptr)) }, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_frag_spv.len * @sizeOf(u32), .p_code = composite_frag_spv.ptr }, null);
     defer self.dev.destroyShaderModule(frag_module, null);
 
     const blend: vk.PipelineColorBlendAttachmentState = .{

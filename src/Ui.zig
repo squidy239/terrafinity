@@ -24,7 +24,6 @@ game: *Game,
 config_path: []const u8,
 worlds_path: []const u8,
 menu_background: dvui.Texture,
-game_initialized: bool = false,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
 
@@ -107,7 +106,6 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
         self.game.deinit(io);
-        self.game_initialized = false;
         return true;
     }
 
@@ -386,7 +384,6 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
     self.vk_ctx.swapchain_gamma.store(self.config.game_config.render_options.gamma_correction, .monotonic);
     try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx);
-    self.game_initialized = true;
     std.log.info("opening game\n", .{});
 }
 
