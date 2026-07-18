@@ -12,15 +12,8 @@ layout(location = 2) in vec3 fragpos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
-layout(location = 7) in float view_space_depth;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 2, binding = 0) uniform sampler2D opaque_depth_texture;
-
-struct PushConstants {
-    mat4 projview;
-    vec3 sun_dir;
-    float time;
-};
 
 struct MaterialGpu {
     float density;
@@ -28,10 +21,6 @@ struct MaterialGpu {
     float min_opacity;
     vec3 volume_color;
 };
-
-layout(push_constant) uniform PushConsts {
-    PushConstants pc;
-} push_consts_frag;
 
 layout(set = 3, binding = 0, std430) readonly buffer Materials {
     MaterialGpu materials[];
@@ -75,10 +64,10 @@ void main()
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
     float bg_depth_linear = 0.01 / max(bg_depth_raw, 1e-10);
 
+    float view_space_depth = 1.0 / gl_FragCoord.w;
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
-    uint mat_idx = block_array_layer;
-    MaterialGpu mat = materials[nonuniformEXT(mat_idx)];
+    MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
     vec3 absorption = max(1.0 - mat.volume_color, vec3(0.01));
     float td = volume_thickness * mat.density;
     vec3 opticalDepth = td * absorption;

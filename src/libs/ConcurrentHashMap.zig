@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const Chunk = @import("Chunk").Chunk;
-
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
     return struct {
         const Map = @This();

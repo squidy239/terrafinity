@@ -27,21 +27,10 @@ pub const tracy_options: tracy.Options = .{
     .verbose = false,
 };
 
-fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(60), .awake) catch unreachable;
-    running.store(false, .unordered);
-}
-
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
     const gpa = init.gpa;
     const io = init.io;
-
-    var exit: ?std.Io.Future(void) = null;
-    if (options.test_play != null) {
-        exit = try io.concurrent(exiter, .{ io, &running });
-    }
-    defer if (exit) |*e| e.await(io);
 
     const config_path: []const u8 = "Config.zon";
     const worlds_path: []const u8 = "worlds";

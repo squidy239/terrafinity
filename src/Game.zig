@@ -18,18 +18,15 @@ pub const Renderer = @import("Renderer.zig");
 const BFA = @import("world/BufferFirstAllocator.zig");
 const Chunk = @import("world/Chunk.zig");
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
+const Cone = @import("world/structures/Cone.zig").Cone;
+const Sphere = @import("world/structures/Sphere.zig").Sphere;
 const World = @import("world/World.zig");
-
-const geometry = struct {
-    pub const Cone = @import("world/structures/Cone.zig").Cone;
-    pub const Sphere = @import("world/structures/Sphere.zig").Sphere;
-};
 const Game = @This();
 
 allocator: std.mem.Allocator,
 world: World,
 player: *EntityTypes.Player,
-vulkan_renderer: *Renderer.Vulkan,
+vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
@@ -359,7 +356,7 @@ pub fn init(
         .entity_registry = .init(),
     };
 
-    game.vulkan_renderer = try Renderer.Vulkan.init(io, allocator, vk_ctx, &game.options.render_options, game.options_lock);
+    try Renderer.Vulkan.init(&game.vulkan_renderer, io, allocator, vk_ctx, &game.options.render_options, game.options_lock);
     errdefer game.vulkan_renderer.deinit(io);
 
     game.renderer = game.vulkan_renderer.interface;
@@ -606,15 +603,15 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
     if (actions.contains(.use_item_primary)) {
-        const cone: geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
+        const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.air, cone, 0);
     }
     if (actions.contains(.use_item_secondary)) {
-        const cone: geometry.Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
+        const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
         try editor.placeSamplerShape(.stone, cone, 0);
     }
     if (actions.contains(.use_item_tertiary)) {
-        try editor.placeSamplerShape(sphere_block, geometry.Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
+        try editor.placeSamplerShape(sphere_block, Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
     }
     try editor.flush(io, self.allocator);
 }

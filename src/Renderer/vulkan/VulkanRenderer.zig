@@ -84,7 +84,6 @@ const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 const cull_workgroup_size: u32 = 64;
 const draw_type_count = 2;
 
-const camera_up = @Vector(3, f32){ 0, 1, 0 };
 const sky_height: f32 = 4096.0;
 const near_plane: f32 = 0.01;
 const degrees_per_circle: f32 = 360.0;
@@ -92,11 +91,7 @@ const degrees_per_circle: f32 = 360.0;
 const FrameDebugStats = struct {
     frame_number: u64 = 0,
     total_meshes: u32 = 0,
-    opaque_candidates: u32 = 0,
-    opaque_culled: u32 = 0,
     opaque_drawn: u32 = 0,
-    transparent_candidates: u32 = 0,
-    transparent_culled: u32 = 0,
     transparent_drawn: u32 = 0,
     player_pos: @Vector(3, f64) = .{ 0, 0, 0 },
     camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
@@ -231,40 +226,30 @@ const RetiredFaceBuffer = struct {
     graphics_timeline_value: u64,
 };
 
+const reservoir_size = 512;
+
 const CommandPoolReservoir = struct {
-    pools: []vk.CommandPool = &.{},
-    cmds: []vk.CommandBuffer = &.{},
-    used: []std.atomic.Value(bool) = &.{},
+    pools: [reservoir_size]vk.CommandPool = @splat(@as(vk.CommandPool, .null_handle)),
+    cmds: [reservoir_size]vk.CommandBuffer = @splat(@as(vk.CommandBuffer, .null_handle)),
+    used: [reservoir_size]std.atomic.Value(bool) = @splat(std.atomic.Value(bool).init(false)),
+    count: usize = 0,
 
     pub const Borrowed = struct { pool: vk.CommandPool, cmd: vk.CommandBuffer };
 
-    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, count: usize, allocator: std.mem.Allocator) !void {
-        self.pools = try allocator.alloc(vk.CommandPool, count);
-        self.cmds = try allocator.alloc(vk.CommandBuffer, count);
-        self.used = try allocator.alloc(std.atomic.Value(bool), count);
-        errdefer {
-            for (self.pools) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, null);
-            allocator.free(self.pools);
-            allocator.free(self.cmds);
-            allocator.free(self.used);
-        }
-        @memset(self.pools, .null_handle);
-        for (self.used) |*u| u.* = .init(false);
-        for (self.pools, self.cmds) |*pool, *cmd| {
+    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, init_count: usize) !void {
+        self.count = init_count;
+        for (self.pools[0..init_count], self.cmds[0..init_count]) |*pool, *cmd| {
             pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = queue_family }, null);
             try dev.allocateCommandBuffers(&.{ .command_pool = pool.*, .level = .primary, .command_buffer_count = 1 }, (&cmd.*)[0..1]);
         }
     }
 
-    pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, allocator: std.mem.Allocator) void {
-        for (self.pools) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, null);
-        allocator.free(self.pools);
-        allocator.free(self.cmds);
-        allocator.free(self.used);
+    pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy) void {
+        for (self.pools[0..self.count]) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, null);
     }
 
     pub fn tryBorrowPool(self: *CommandPoolReservoir) ?Borrowed {
-        for (self.pools, self.cmds, 0..) |pool, cmd, i| {
+        for (self.pools[0..self.count], self.cmds[0..self.count], 0..) |pool, cmd, i| {
             if (self.used[i].cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
                 return .{ .pool = pool, .cmd = cmd };
             }
@@ -276,7 +261,7 @@ const CommandPoolReservoir = struct {
         dev.resetCommandPool(pool, .{}) catch {
             @panic("CommandPoolReservoir.returnPool: resetCommandPool failed - command pool is now unusable");
         };
-        for (self.pools, 0..) |p, i| {
+        for (self.pools[0..self.count], 0..) |p, i| {
             if (p == pool) {
                 self.used[i].store(false, .release);
                 break;
@@ -331,7 +316,7 @@ fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: 
 }
 
 fn computeViewProjection(self: *const VulkanRenderer, aspect: f32, fov_radians: f32) struct { projview: @Vector(16, f32), frustum: Frustum } {
-    const up_vec: zm.vec.Vec3f = .{ .data = [3]f32{ camera_up[0], camera_up[1], camera_up[2] } };
+    const up_vec: zm.vec.Vec3f = .{ .data = .{ 0, 1, 0 } };
     const camera_front_val = @Vector(3, f32){
         self.camera_front_x.load(.monotonic),
         self.camera_front_y.load(.monotonic),
@@ -489,7 +474,7 @@ gpu_only_gpa: std.heap.DebugAllocator(.{}) = .init,
 cpu_to_gpu_gpa: std.heap.DebugAllocator(.{}) = .init,
 pool_reservoir: CommandPoolReservoir = .{},
 pending_uploads_queue: std.Io.Queue(PendingChunkUpload) = undefined,
-pending_uploads_queue_buffer: []PendingChunkUpload = &.{},
+pending_uploads_queue_buffer: [pending_queue_size]PendingChunkUpload = undefined,
 peeked_upload: ?PendingChunkUpload = null,
 submission_batch: SubmissionBatch = .{},
 camera_front_x: std.atomic.Value(f32) = .init(0),
@@ -767,13 +752,10 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     self.destroyOitResources();
 }
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const Renderer.RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
+pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const Renderer.RenderOptions, render_options_lock: *std.Io.RwLock) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "init" });
     defer zone.end();
     std.log.info("VulkanRenderer.init: Starting renderer-specific Vulkan initialization...", .{});
-
-    const self = try allocator.create(VulkanRenderer);
-    errdefer allocator.destroy(self);
 
     self.* = .{
         .vk_ctx = vk_ctx,
@@ -798,6 +780,13 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     self.transfer.semaphore = vk_ctx.transfer_semaphore;
     self.transfer.graphics_timeline_semaphore = vk_ctx.graphics_timeline_semaphore;
 
+    try self.initMemoryManagement(io, allocator);
+    try self.initGpuDataStructures(allocator);
+    try self.initResources(io, allocator);
+    try self.initFinalize();
+}
+
+fn initMemoryManagement(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     self.backing_allocator = VulkanBackingAllocator.init(self.dev, self.vk_ctx.mem_props, io, allocator);
     errdefer self.backing_allocator.deinit();
 
@@ -819,9 +808,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     errdefer self.staging_ring.deinit(self.cpu_to_gpu_gpa.allocator());
     const staging_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.staging_ring.mapping.ptr);
     self.staging_ring.resolve(staging_info.buffer, staging_info.offset);
+}
 
-    // Initialize persistent candidate buffer on the GPU
+fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !void {
     const initial_capacity = 4096;
+
     const persistent_candidates_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, initial_capacity);
     errdefer self.cpu_to_gpu_gpa.allocator().free(persistent_candidates_slice);
     @memset(persistent_candidates_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
@@ -836,30 +827,26 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
     errdefer self.index_pool.deinit(allocator);
     self.max_allocated_index = .init(0);
 
-    self.pending_uploads_queue_buffer = try allocator.alloc(PendingChunkUpload, pending_queue_size);
-    errdefer allocator.free(self.pending_uploads_queue_buffer);
-    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(self.pending_uploads_queue_buffer);
+    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(&self.pending_uploads_queue_buffer);
     self.peeked_upload = null;
+}
 
+fn initResources(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     try self.loadTextures(io, allocator);
-
     try self.loadBlockMaterials(io, allocator);
-
     try self.createTransparentDepthDescriptorSetLayout();
     try self.recreateSwapchainResourcesLocked(io);
-
     try self.createCullDescriptorSetLayoutAndPool();
-
     try self.createChunkDataDescriptorResources();
-
     try self.createGraphicsPipelines();
     try self.createCullPipeline();
     try self.createOitPipelinesAndDescriptors();
+}
 
+fn initFinalize(self: *VulkanRenderer) !void {
     self.meshes = .init;
 
-    try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512, allocator);
-    errdefer self.pool_reservoir.deinit(self.dev, allocator);
+    try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512);
 
     self.interface = .{
         .userdata = @ptrCast(self),
@@ -871,8 +858,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
             .forEachMesh = vtableForEachMesh,
         },
     };
-
-    return self;
 }
 
 pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
@@ -904,8 +889,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         if (got == 0) break;
         self.destroyPendingUpload(io, buf);
     }
-    self.allocator.free(self.pending_uploads_queue_buffer);
-
     for (self.retired_meshes.items) |entry| {
         self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
     }
@@ -953,7 +936,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.allocator.free(self.cull.descriptor_sets_per_frame);
     self.cull.descriptor_sets_per_frame = &.{};
 
-    self.pool_reservoir.deinit(self.dev, self.allocator);
+    self.pool_reservoir.deinit(self.dev);
 
     for (self.retired_candidate_slices.items) |entry| {
         self.cpu_to_gpu_gpa.allocator().free(entry.slice);
@@ -972,7 +955,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.texture_manager.deinit();
 
     self.swapchain_image_layout_ptr = null;
-    self.allocator.destroy(self);
 }
 
 pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
@@ -1276,9 +1258,8 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     const staging_slice = try self.allocStagingSlice(io, buffer_size);
     errdefer self.staging_ring.cancel(io, staging_slice);
 
-    const dest_faces = std.mem.bytesAsSlice(Mesher.Face, staging_slice);
     const indexer = std.enums.EnumIndexer(World.Block);
-    for (faces, dest_faces[0..faces.len]) |face, *dest| {
+    for (faces, std.mem.bytesAsSlice(Mesher.Face, staging_slice)[0..faces.len]) |face, *dest| {
         dest.* = face;
         dest.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
     }
@@ -1994,13 +1975,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     if (self.frame_buffers.items[current_frame].stats_mapped) |counts_ptr| {
         const opaque_count = counts_ptr[0].opaque_count;
         const transparent_count = counts_ptr[0].transparent_count;
-        const total_candidates = self.max_allocated_index.load(.monotonic);
         self.frame_stats.opaque_drawn = opaque_count;
         self.frame_stats.transparent_drawn = transparent_count;
-        self.frame_stats.opaque_candidates = total_candidates;
-        self.frame_stats.transparent_candidates = total_candidates;
-        self.frame_stats.opaque_culled = total_candidates -| opaque_count;
-        self.frame_stats.transparent_culled = total_candidates -| transparent_count;
     }
 
     const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));

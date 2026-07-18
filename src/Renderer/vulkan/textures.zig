@@ -23,8 +23,6 @@ const Texture = struct {
     image: vk.Image = .null_handle,
     memory: vk.DeviceMemory = .null_handle,
     view: vk.ImageView = .null_handle,
-    width: u32 = 0,
-    height: u32 = 0,
     num_mip_levels: u16 = 0,
 };
 
@@ -378,8 +376,6 @@ pub const TextureManager = struct {
 
         tex.image = image;
         tex.memory = memory;
-        tex.width = width;
-        tex.height = height;
         tex.num_mip_levels = num_mip_levels;
 
         return staging;

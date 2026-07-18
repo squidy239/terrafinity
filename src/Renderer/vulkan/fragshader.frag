@@ -9,18 +9,7 @@ layout(location = 1) in vec3 in_coords;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
-layout(location = 7) in float _unused_view_space_depth;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
-
-struct PushConstants {
-    mat4 projview;
-    vec3 sun_dir;
-    float time;
-};
-
-layout(push_constant) uniform PushConsts {
-    PushConstants pc;
-} push_consts_frag;
 
 const vec3 face_normals[6] = vec3[](
     vec3(-1.0,  0.0,  0.0),

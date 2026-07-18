@@ -19,7 +19,6 @@ layout(location = 2) out vec3 fragpos;
 layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
-layout(location = 7) out float view_space_depth;
 
 struct ChunkData {
     vec4 absolute_position;
@@ -32,7 +31,6 @@ layout(std430, set = 1, binding = 0) readonly buffer ChunkDataBuffer {
 };
 
 const uint CHUNK_SIZE = 32u;
-const uint COORD_BITS = 5u;
 const uint COORD_MASK = CHUNK_SIZE - 1u;
 
 uint decodeBlockType(uint64_t val) {
@@ -116,5 +114,4 @@ void main() {
     out_coords = coords;
     vec3 view_pos = coords + vec3(local_pos) * scale + relative_position;
     gl_Position = push_consts.pc.projview * vec4(view_pos, 1.0);
-    view_space_depth = gl_Position.w;
 }

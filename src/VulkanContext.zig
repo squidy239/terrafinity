@@ -141,6 +141,9 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
 
         const props = self.instance.getPhysicalDeviceProperties(pdev);
         var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
+        // NVIDIA's Vulkan driver produces false-positive thread sanitizer errors,
+        // making TSAN builds unusable with NVIDIA hardware. Demote to lowest priority
+        // so the integrated GPU (or another vendor's discrete GPU) is preferred instead.
         if (options.sanitize_thread) {
             const device_name = std.mem.sliceTo(&props.device_name, 0);
             if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) score = 1;
@@ -480,6 +483,10 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
 
 pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.queue_mutex.lockUncancelable(io);
+
+    self.dev.deviceWaitIdle() catch |err| {
+        std.log.err("deviceWaitIdle failed during VulkanContext.deinit: {}", .{err});
+    };
 
     self.destroySwapchainResources();
 

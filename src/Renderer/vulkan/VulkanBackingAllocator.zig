@@ -11,7 +11,6 @@ const log = std.log.scoped(.vulkan_backing_allocator);
 pub const GpuBlock = struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
-    gpu_address: vk.DeviceAddress,
     pool: MemoryPool,
     raw_alloc: []u8 = &.{},
 };
@@ -60,12 +59,6 @@ pub const VulkanBackingAllocator = struct {
                 .cpu_to_gpu => &cpu_to_gpu_vtable,
             },
         };
-    }
-
-    pub fn getDeviceAddress(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) vk.DeviceAddress {
-        const block = self.getBlock(pool, ptr);
-        const offset = @intFromPtr(ptr) - @intFromPtr(block.raw_alloc.ptr);
-        return block.gpu_address + offset;
     }
 
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
@@ -136,7 +129,6 @@ pub const VulkanBackingAllocator = struct {
         const block: GpuBlock = .{
             .memory = memory,
             .buffer = buffer,
-            .gpu_address = self.dev.getBufferDeviceAddress(&.{ .buffer = buffer }),
             .pool = pool,
             .raw_alloc = raw_cpu,
         };
