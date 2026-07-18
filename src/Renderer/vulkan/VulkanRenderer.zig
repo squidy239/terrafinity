@@ -273,8 +273,8 @@ const CommandPoolReservoir = struct {
     }
 
     pub fn returnPool(self: *CommandPoolReservoir, dev: DeviceProxy, pool: vk.CommandPool) void {
-        dev.resetCommandPool(pool, .{}) catch |err| {
-            std.log.err("CommandPoolReservoir.returnPool: resetCommandPool failed: {any}", .{err});
+        dev.resetCommandPool(pool, .{}) catch {
+            @panic("CommandPoolReservoir.returnPool: resetCommandPool failed - command pool is now unusable");
         };
         for (self.pools, 0..) |p, i| {
             if (p == pool) {
@@ -549,12 +549,13 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
         }
     }
 
+    const indexer = std.enums.EnumIndexer(World.Block);
+    const count = indexer.count;
+    const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
+    @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
+
     const zon_file = pack_dir.openFile(io, "materials.zon", .{}) catch {
         std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{});
-        const indexer = std.enums.EnumIndexer(World.Block);
-        const count = indexer.count;
-        const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-        @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
         self.block_materials_mapped = slice;
         try self.createBlockMaterialsDescriptorResources();
         return;
@@ -564,11 +565,6 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
     const parsed = try utils.loadZon(BlockMaterialsZon, io, zon_file, temp_arena.allocator(), allocator);
-
-    const indexer = std.enums.EnumIndexer(World.Block);
-    const count = indexer.count;
-    const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
-    @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
 
     inline for (std.meta.fields(World.Block)) |fld| {
         if (!@field(World.Block, fld.name).isVisible()) continue;
@@ -655,7 +651,7 @@ fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
     self.dev.updateDescriptorSets((&write)[0..1], null);
 }
 
-fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
+fn allocateIndirectBuffers(self: *VulkanRenderer, frame: *PerFrameData) !void {
     const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, self.draw_capacity * draw_type_count);
     const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, self.draw_capacity * draw_type_count);
 
@@ -669,7 +665,7 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, i: usize) !void {
     stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
     const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
 
-    self.frame_buffers.items[i] = .{
+    frame.* = .{
         .chunk_data = chunk_data_info.buffer,
         .chunk_data_mapped = chunk_data_slice.ptr,
         .chunk_data_offset = chunk_data_info.offset,
@@ -727,8 +723,8 @@ pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void
     self.frame_buffers.items = try self.allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
     @memset(self.frame_buffers.items, .{});
 
-    for (0..VulkanContext.max_frames_in_flight) |i| {
-        try self.allocateIndirectBuffers(i);
+    for (self.frame_buffers.items) |*frame| {
+        try self.allocateIndirectBuffers(frame);
     }
 
     if (self.graphics_state.opaque_pipeline_layout != .null_handle) {
@@ -896,15 +892,15 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     {
         self.submission_batch.mutex.lockUncancelable(io);
         defer self.submission_batch.mutex.unlock(io);
-        self.submitBatchLocked(io) catch |err| {
-            std.log.err("VulkanRenderer.deinit: failed to flush submission batch: {any}", .{err});
+        self.submitBatchLocked(io) catch {
+            @panic("VulkanRenderer.deinit: failed to flush submission batch - GPU state may be inconsistent");
         };
     }
     {
         self.vk_ctx.queue_mutex.lockUncancelable(io);
         defer self.vk_ctx.queue_mutex.unlock(io);
-        self.dev.deviceWaitIdle() catch |err| {
-            std.log.err("VulkanRenderer.deinit: deviceWaitIdle failed: {any}", .{err});
+        self.dev.deviceWaitIdle() catch {
+            @panic("VulkanRenderer.deinit: deviceWaitIdle failed - cannot safely release GPU resources");
         };
     }
 
@@ -913,7 +909,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
     while (true) {
         var buf: PendingChunkUpload = undefined;
-        const got = self.pending_uploads_queue.getUncancelable(io, (&buf)[0..1], 0) catch 0;
+        const got = self.pending_uploads_queue.getUncancelable(io, (&buf)[0..1], 0) catch unreachable;
         if (got == 0) break;
         self.destroyPendingUpload(io, buf);
     }
@@ -931,7 +927,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     var it = self.meshes.iterator();
     defer it.deinit(io);
-    while (it.next(io) catch null) |entry| {
+    while (it.next(io) catch unreachable) |entry| {
         self.destroyChunkMesh(io, entry.value_ptr.*);
     }
     self.meshes.deinit(io, self.allocator);
@@ -1100,22 +1096,20 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     self.submission_batch.count = 0;
 
-    for (0..count) |j| {
-        if (self.submission_batch.opaque_meshes[j]) |r| {
+    for (self.submission_batch.opaque_meshes[0..count], self.submission_batch.transparent_meshes[0..count], self.submission_batch.chunk_positions[0..count], self.submission_batch.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
+        if (opaque_mesh) |r| {
             self.staging_ring.bind(io, r.staging_slice, next_val);
         }
-        if (self.submission_batch.transparent_meshes[j]) |r| {
+        if (transparent_mesh) |r| {
             self.staging_ring.bind(io, r.staging_slice, next_val);
         }
-        self.pushPendingUpload(io, .{
-            .chunk_pos = self.submission_batch.chunk_positions[j],
+        try self.pushPendingUpload(io, .{
+            .chunk_pos = chunk_pos,
             .timeline_value = next_val,
-            .pool = self.submission_batch.pools[j],
-            .opaque_mesh = if (self.submission_batch.opaque_meshes[j]) |r| r.mesh else null,
-            .transparent_mesh = if (self.submission_batch.transparent_meshes[j]) |r| r.mesh else null,
-        }) catch |err| {
-            std.log.err("submitBatchAlreadyLocked: pushPendingUpload failed: {any}", .{err});
-        };
+            .pool = pool,
+            .opaque_mesh = if (opaque_mesh) |r| r.mesh else null,
+            .transparent_mesh = if (transparent_mesh) |r| r.mesh else null,
+        });
     }
 }
 
@@ -1356,8 +1350,8 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         self.face_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
 
         const cmd = try self.beginSingleTimeCommands();
-        defer self.endSingleTimeCommandsLocked(cmd) catch |err| {
-            std.log.err("allocFaceRegion: endSingleTimeCommandsLocked failed: {any}", .{err});
+        defer self.endSingleTimeCommandsLocked(cmd) catch {
+            @panic("allocFaceRegion: GPU command submission or wait failed - cannot safely continue");
         };
 
         const copy_region: vk.BufferCopy2 = .{
@@ -1513,10 +1507,9 @@ fn makeBufferBarrier2(
 }
 
 fn destroyIfValidImageView(dev: DeviceProxy, view: *vk.ImageView) void {
-    if (view.* != .null_handle) {
-        dev.destroyImageView(view.*, null);
-        view.* = .null_handle;
-    }
+    if (view.* == .null_handle) return;
+    dev.destroyImageView(view.*, null);
+    view.* = .null_handle;
 }
 
 fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory) void {
@@ -1531,24 +1524,21 @@ fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMem
 }
 
 fn destroyIfValidPipeline(dev: DeviceProxy, pipeline: *vk.Pipeline) void {
-    if (pipeline.* != .null_handle) {
-        dev.destroyPipeline(pipeline.*, null);
-        pipeline.* = .null_handle;
-    }
+    if (pipeline.* == .null_handle) return;
+    dev.destroyPipeline(pipeline.*, null);
+    pipeline.* = .null_handle;
 }
 
 fn destroyIfValidPipelineLayout(dev: DeviceProxy, layout: *vk.PipelineLayout) void {
-    if (layout.* != .null_handle) {
-        dev.destroyPipelineLayout(layout.*, null);
-        layout.* = .null_handle;
-    }
+    if (layout.* == .null_handle) return;
+    dev.destroyPipelineLayout(layout.*, null);
+    layout.* = .null_handle;
 }
 
 fn destroyIfValidDescriptorSetLayout(dev: DeviceProxy, layout: *vk.DescriptorSetLayout) void {
-    if (layout.* != .null_handle) {
-        dev.destroyDescriptorSetLayout(layout.*, null);
-        layout.* = .null_handle;
-    }
+    if (layout.* == .null_handle) return;
+    dev.destroyDescriptorSetLayout(layout.*, null);
+    layout.* = .null_handle;
 }
 
 fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget) void {
@@ -2895,51 +2885,41 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processRetiredMeshes" });
     defer zone.end();
 
-    {
-        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "processRetiredMeshes_lock" });
-        self.retire_mutex.lockUncancelable(io);
-        zone_lock.end();
-    }
+    self.retire_mutex.lockUncancelable(io);
     defer self.retire_mutex.unlock(io);
 
     if (self.retired_meshes.items.len == 0 and self.retired_candidate_slices.items.len == 0 and self.retired_face_buffers.items.len == 0) return;
 
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.transfer.graphics_timeline_semaphore);
 
-    var i: usize = 0;
-    while (i < self.retired_meshes.items.len) {
-        const entry = self.retired_meshes.items[i];
+    for (0..self.retired_meshes.items.len) |i| {
+        const idx = self.retired_meshes.items.len - 1 - i;
+        const entry = self.retired_meshes.items[idx];
         if (current_graphics_val >= entry.graphics_timeline_value) {
             if (entry.free_index) {
                 self.persistent.mapped[entry.gpu_index].face_count = 0;
                 self.index_pool.freeIndex(io, entry.gpu_index);
             }
             self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
-            _ = self.retired_meshes.swapRemove(i);
-        } else {
-            i += 1;
+            _ = self.retired_meshes.swapRemove(idx);
         }
     }
 
-    var j: usize = 0;
-    while (j < self.retired_candidate_slices.items.len) {
-        const entry = self.retired_candidate_slices.items[j];
+    for (0..self.retired_candidate_slices.items.len) |i| {
+        const idx = self.retired_candidate_slices.items.len - 1 - i;
+        const entry = self.retired_candidate_slices.items[idx];
         if (current_graphics_val >= entry.graphics_timeline_value) {
             self.cpu_to_gpu_gpa.allocator().free(entry.slice);
-            _ = self.retired_candidate_slices.swapRemove(j);
-        } else {
-            j += 1;
+            _ = self.retired_candidate_slices.swapRemove(idx);
         }
     }
 
-    var m: usize = 0;
-    while (m < self.retired_face_buffers.items.len) {
-        const entry = self.retired_face_buffers.items[m];
+    for (0..self.retired_face_buffers.items.len) |i| {
+        const idx = self.retired_face_buffers.items.len - 1 - i;
+        const entry = self.retired_face_buffers.items[idx];
         if (current_graphics_val >= entry.graphics_timeline_value) {
             self.gpu_only_gpa.allocator().free(entry.slice);
-            _ = self.retired_face_buffers.swapRemove(m);
-        } else {
-            m += 1;
+            _ = self.retired_face_buffers.swapRemove(idx);
         }
     }
 }

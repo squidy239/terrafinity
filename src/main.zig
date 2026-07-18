@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui);
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
@@ -444,7 +444,6 @@ fn handleEvents(
     events: *wio.EventQueue,
     ui_window: *dvui.Window,
     ui: *Ui,
-    _: std.Io.Duration,
 ) !void {
     backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.is_playing_game()) {

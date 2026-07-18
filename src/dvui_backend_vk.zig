@@ -29,7 +29,7 @@ pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, pdev: vk.PhysicalDevice, 
         .render_pass = .{ .dynamic = .{
             .color_attachment_count = 1,
             .view_mask = 0,
-            .p_color_attachment_formats = &[_]vk.Format{swapchain_format},
+            .p_color_attachment_formats = (&swapchain_format)[0..1].ptr,
             .depth_attachment_format = .undefined,
             .stencil_attachment_format = .undefined,
         } },

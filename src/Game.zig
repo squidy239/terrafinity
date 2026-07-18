@@ -378,7 +378,7 @@ pub fn init(
     game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
     errdefer World.DefaultGenerator.deinit(game.generator.getSource(), io, allocator, undefined);
 
-    const storage_path = try std.fs.path.joinZ(game.allocator, &[_][]const u8{ folder, "storage" });
+    const storage_path = try std.fs.path.joinZ(game.allocator, &.{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
         game.world_storage = try .init(storage_path, game.allocator);

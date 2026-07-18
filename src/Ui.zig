@@ -246,7 +246,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             defer worlds_dir.close(io);
             var worldfolder = try worlds_dir.createDirPathOpen(io, world_name, .{});
             defer worldfolder.close(io);
-            const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
+            const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(io, game_path);
             try self.openGame(io, allocator, game_path);
@@ -366,7 +366,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         text.deinit();
         if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
             std.log.info("Joining game: {s}", .{item.name});
-            const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, item.name });
+            const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
             try self.openGame(io, allocator, jpath);
             self.menu_state.ingame = true;
