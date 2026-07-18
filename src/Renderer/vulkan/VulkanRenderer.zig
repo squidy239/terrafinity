@@ -9,7 +9,7 @@ const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").Concurrent
 const utils = @import("../../libs/utils.zig");
 const Mesher = @import("../../Mesher.zig");
 const Renderer = @import("../../Renderer.zig");
-pub const RenderOptions = Renderer.RenderOptions;
+const FrameDrawContext = Renderer.FrameDrawContext;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 const World = @import("../../world/World.zig");
 const ChunkPos = World.ChunkPos;
@@ -84,12 +84,12 @@ const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 const cull_workgroup_size: u32 = 64;
 const draw_type_count = 2;
 
-pub const camera_up = @Vector(3, f32){ 0, 1, 0 };
+const camera_up = @Vector(3, f32){ 0, 1, 0 };
 const sky_height: f32 = 4096.0;
 const near_plane: f32 = 0.01;
 const degrees_per_circle: f32 = 360.0;
 
-pub const FrameDebugStats = struct {
+const FrameDebugStats = struct {
     frame_number: u64 = 0,
     total_meshes: u32 = 0,
     opaque_candidates: u32 = 0,
@@ -192,8 +192,8 @@ const ChunkMeshBuffer = struct {
     gpu_index: u32,
 };
 
-pub const batch_size = 512;
-pub const pending_queue_size = 512;
+const batch_size = 512;
+const pending_queue_size = 512;
 
 const SubmissionBatch = struct {
     cmds: [batch_size]vk.CommandBuffer = undefined,
@@ -456,10 +456,6 @@ dev: DeviceProxy,
 graphics_queue: vk.Queue,
 upload_command_pool: vk.CommandPool = .null_handle,
 
-current_frame: u32 = 0,
-output_cmd_buffer: vk.CommandBuffer = .null_handle,
-output_color_image: vk.Image = .null_handle,
-output_color_view: vk.ImageView = .null_handle,
 render_color: RenderTarget = .{},
 render_depth: RenderTarget = .{},
 render_depth_sampled_view: vk.ImageView = .null_handle,
@@ -500,7 +496,7 @@ camera_front_x: std.atomic.Value(f32) = .init(0),
 camera_front_y: std.atomic.Value(f32) = .init(0),
 camera_front_z: std.atomic.Value(f32) = .init(1),
 viewport_pixels: @Vector(2, u32) = .{ 800, 600 },
-render_options: *const RenderOptions,
+render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
 interface: Renderer,
 
@@ -510,17 +506,12 @@ init_time_ns: u64 = 0,
 last_stat_log_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
+current_frame: u32 = 0,
+output_cmd_buffer: vk.CommandBuffer = .null_handle,
+output_color_image: vk.Image = .null_handle,
+output_color_view: vk.ImageView = .null_handle,
 swapchain_image_old_layout: vk.ImageLayout = .undefined,
 swapchain_image_layout_ptr: ?*vk.ImageLayout = null,
-
-pub fn setupFrame(self: *VulkanRenderer, frame_index: u32, cmd_buffer: vk.CommandBuffer, output_image: vk.Image, output_view: vk.ImageView, swapchain_image_layout: *vk.ImageLayout) void {
-    self.current_frame = frame_index;
-    self.output_cmd_buffer = cmd_buffer;
-    self.output_color_image = output_image;
-    self.output_color_view = output_view;
-    self.swapchain_image_old_layout = swapchain_image_layout.*;
-    self.swapchain_image_layout_ptr = swapchain_image_layout;
-}
 
 fn loadTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     self.texture_manager = textures.TextureManager.init(self, self.render_options.gamma_correction);
@@ -695,7 +686,7 @@ fn drainInFlightFrames(self: *VulkanRenderer) !void {
     }
 }
 
-pub fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
+fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recreateSwapchainResourcesLocked" });
     defer zone.end();
     self.render_options_lock.lockSharedUncancelable(io);
@@ -776,7 +767,7 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     self.destroyOitResources();
 }
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const Renderer.RenderOptions, render_options_lock: *std.Io.RwLock) !*VulkanRenderer {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "init" });
     defer zone.end();
     std.log.info("VulkanRenderer.init: Starting renderer-specific Vulkan initialization...", .{});
@@ -875,7 +866,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, re
         .vtable = &.{
             .addMesh = vtableAddMesh,
             .draw = vtableDrawChunks,
-            .setViewport = vtableSetViewport,
+            .recreateSwapchain = vtableRecreateSwapchain,
             .updateCameraDirection = vtableUpdateCameraDirection,
             .forEachMesh = vtableForEachMesh,
         },
@@ -1982,9 +1973,16 @@ fn recordCompositionPass(
     }
 }
 
-pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view_pos: @Vector(3, f64)) !void {
+fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
+
+    self.current_frame = frame_ctx.frame_index;
+    self.output_cmd_buffer = frame_ctx.cmd_buffer;
+    self.output_color_image = frame_ctx.output_image;
+    self.output_color_view = frame_ctx.output_view;
+    self.swapchain_image_old_layout = frame_ctx.swapchain_image_layout.*;
+    self.swapchain_image_layout_ptr = frame_ctx.swapchain_image_layout;
 
     try self.processPendingUploads(io);
     try self.processRetiredMeshes(io);
@@ -2077,9 +2075,9 @@ pub fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, view
     try self.dev.endCommandBuffer(cmd_buffer);
 }
 
-fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.draw(io, target, view_pos) catch |err| switch (err) {
+    self.draw(io, target, frame_ctx, view_pos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.DrawFailed,
     };
@@ -2242,7 +2240,7 @@ pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties:
     return findMemoryTypeRaw(self.vk_ctx.mem_props, type_filter, properties);
 }
 
-pub fn depthHasStencil(self: *const VulkanRenderer) bool {
+fn depthHasStencil(self: *const VulkanRenderer) bool {
     return self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
 }
 
@@ -2954,7 +2952,7 @@ pub fn beginSingleTimeCommands(self: *VulkanRenderer) !vk.CommandBuffer {
     return cmd;
 }
 
-pub fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !void {
+fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !void {
     defer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
 
     try self.dev.endCommandBuffer(cmd);
@@ -2987,9 +2985,11 @@ pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandB
     try self.endSingleTimeCommandsLocked(cmd);
 }
 
-fn vtableSetViewport(user_data: *Renderer.Implementation, viewport_pixels: @Vector(2, u32)) error{ViewportSetFailed}!void {
+fn vtableRecreateSwapchain(user_data: *Renderer.Implementation, io: std.Io) void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.viewport_pixels = viewport_pixels;
+    self.recreateSwapchainResourcesLocked(io) catch |err| {
+        std.log.err("recreateSwapchainResourcesLocked failed: {}", .{err});
+    };
 }
 
 fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {

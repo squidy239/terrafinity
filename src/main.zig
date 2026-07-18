@@ -5,6 +5,7 @@ pub const tracy = @import("tracy");
 pub const tracy_impl = @import("tracy_impl");
 const wio = @import("wio");
 const vk = @import("vulkan");
+const Renderer = @import("Renderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const dvui_vk_renderer = @import("dvui_vk_renderer");
 
@@ -187,14 +188,14 @@ pub fn main(init: std.process.Init) !void {
         };
 
         if (ui.menu_state.ingame) {
-            game.vulkan_renderer.setupFrame(
-                frame_ctx.frame_index,
-                frame_ctx.cmd_buffer,
-                vk_ctx.swapchain_images[frame_ctx.image_index],
-                vk_ctx.swapchain_views[frame_ctx.image_index],
-                &vk_ctx.swapchain_image_layouts[frame_ctx.image_index],
-            );
-            try game.frame(io, gpa, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
+            const draw_ctx: Renderer.FrameDrawContext = .{
+                .frame_index = frame_ctx.frame_index,
+                .cmd_buffer = frame_ctx.cmd_buffer,
+                .output_image = vk_ctx.swapchain_images[frame_ctx.image_index],
+                .output_view = vk_ctx.swapchain_views[frame_ctx.image_index],
+                .swapchain_image_layout = &vk_ctx.swapchain_image_layouts[frame_ctx.image_index],
+            };
+            try game.frame(io, gpa, draw_ctx, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
         }
 
         try recordUiPass(io, gpa, vk_ctx, &backend, &ui_window, &ui, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
@@ -293,10 +294,7 @@ fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, g
 
     vk_ctx.present_mode = present_mode;
     if (ui.menu_state.ingame) {
-        game.vulkan_renderer.recreateSwapchainResourcesLocked(io) catch |err| {
-            std.log.err("recreateSwapchainResourcesLocked failed: {}", .{err});
-            return;
-        };
+        game.renderer.recreateSwapchain(io);
     } else {
         vk_ctx.createSwapchainLocked(false) catch |err| {
             std.log.err("createSwapchainLocked failed: {}", .{err});
@@ -483,7 +481,6 @@ fn handleEvents(
     }
 
     if (ui.menu_state.ingame) {
-        try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
         try ui.game.handleButtonActions(io, action_set);
     }
 }

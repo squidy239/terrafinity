@@ -1,4 +1,5 @@
 const std = @import("std");
+const vk = @import("vulkan");
 
 const Mesher = @import("Mesher.zig");
 pub const Vulkan = @import("Renderer/vulkan/VulkanRenderer.zig");
@@ -10,18 +11,25 @@ pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 pub const Implementation = opaque {};
 vtable: *const VTable,
 userdata: *Implementation,
-last_viewport: ?@Vector(2, u32) = null,
 
 pub const DrawTarget = struct {
     width: u32,
     height: u32,
 };
 
+pub const FrameDrawContext = struct {
+    frame_index: u32,
+    cmd_buffer: vk.CommandBuffer,
+    output_image: vk.Image,
+    output_view: vk.ImageView,
+    swapchain_image_layout: *vk.ImageLayout,
+};
+
 pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
     addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
-    draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
-    setViewport: *const fn (*Implementation, @Vector(2, u32)) error{ViewportSetFailed}!void,
+    draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
+    recreateSwapchain: *const fn (*Implementation, io: std.Io) void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
     forEachMesh: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void,
 };
@@ -33,16 +41,13 @@ pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
-pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
-    return self.vtable.draw(self.userdata, io, target, viewpos);
+pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+    return self.vtable.draw(self.userdata, io, target, frame_ctx, viewpos);
 }
 
-///sets the viewport dimensions in pixels, this function should only be called on the main thread
-pub fn setViewport(self: *@This(), viewport_pixels: @Vector(2, u32)) !void {
-    if (!std.meta.eql(self.last_viewport, viewport_pixels)) {
-        try self.vtable.setViewport(self.userdata, viewport_pixels);
-        self.last_viewport = viewport_pixels;
-    }
+/// Notifies the renderer that the swapchain has been resized/changed and resources must be recreated.
+pub fn recreateSwapchain(self: *@This(), io: std.Io) void {
+    self.vtable.recreateSwapchain(self.userdata, io);
 }
 
 pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {

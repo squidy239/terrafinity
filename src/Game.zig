@@ -434,7 +434,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.* = undefined;
 }
 
-pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, viewport: @Vector(2, u32)) !void {
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx: Renderer.FrameDrawContext, viewport: @Vector(2, u32)) !void {
     const frame_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "frame" });
     defer frame_zone.end();
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -456,7 +456,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, viewport:
     const player_pos_updated = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
 
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, player_pos_updated);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos_updated);
     try self.handleErrors();
     try entities_future.await(io);
 }

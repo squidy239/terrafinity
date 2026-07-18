@@ -855,7 +855,7 @@ fn debugCallback(
     }
 
     if (message_severity.error_bit_ext) {
-        vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
+        std.debug.panic("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.warning_bit_ext) {
         vklog.warn("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.info_bit_ext) {
