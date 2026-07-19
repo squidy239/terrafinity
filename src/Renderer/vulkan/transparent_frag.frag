@@ -63,9 +63,13 @@ void main()
 
     float view_space_depth = 1.0 / gl_FragCoord.w;
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
-    float bg_depth_linear = 0.01 / max(bg_depth_raw, 1e-10);
-    bg_depth_linear = min(bg_depth_linear, view_space_depth + 100.0);
-    float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
+    float bg_depth_linear;
+    if (bg_depth_raw < 1e-7) {
+        bg_depth_linear = view_space_depth;
+    } else {
+        bg_depth_linear = 0.01 / bg_depth_raw;
+    }
+    float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : max(view_space_depth - bg_depth_linear, 0.0);
 
     MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
     vec3 absorption = max(1.0 - mat.volume_color, vec3(0.01));
