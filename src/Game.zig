@@ -5,7 +5,6 @@ const dvui = @import("dvui");
 const tracy = @import("tracy");
 const wio = @import("wio");
 const zm = @import("zm");
-const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Entity = @import("entity/Entity.zig");
 const EntityRegistry = @import("entity/EntityRegistry.zig");
@@ -15,12 +14,14 @@ const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMa
 const utils = @import("libs/utils.zig");
 const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const BFA = @import("world/BufferFirstAllocator.zig");
 const Chunk = @import("world/Chunk.zig");
-const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const Cone = @import("world/structures/Cone.zig").Cone;
 const Sphere = @import("world/structures/Sphere.zig").Sphere;
+const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const World = @import("world/World.zig");
+
 const Game = @This();
 
 allocator: std.mem.Allocator,
@@ -446,16 +447,12 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     var entities_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
     defer entities_future.cancel(io) catch {};
     try restartFutures(self, io, allocator);
-    asyncs.end();
-    try self.player.physics.update(&self.world, io, allocator);
-
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos_updated = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
-
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos_updated);
-    try self.handleErrors();
     try entities_future.await(io);
+    asyncs.end();
+    const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
+
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
+    try self.handleErrors();
 }
 
 fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
@@ -618,9 +615,9 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 
 fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {
     return @Vector(3, f32){
-        @sin(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(0)),
-        @sin(std.math.degreesToRadians(0)),
-        @cos(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(0)),
+        @sin(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(dir[0])),
+        @sin(std.math.degreesToRadians(dir[0])),
+        @cos(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(dir[0])),
     };
 }
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
@@ -643,12 +640,14 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
         if (actions.contains(.right) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * cross_norm.?.data));
         if (actions.contains(.left) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * cross_norm.?.data));
     }
-    try self.player.physics.update(&self.world, io, self.allocator);
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "walkMove" });
     defer z.end();
+    const now = std.Io.Timestamp.now(io, .awake);
+    const dt_ns = now.nanoseconds -| self.last_frametime.nanoseconds;
+    const delta_time_seconds = @as(f32, @floatFromInt(dt_ns)) / std.time.ns_per_s;
     self.player.view_direction_mutex.lockUncancelable(io);
     const camera_front = moveCameraFront(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
@@ -679,11 +678,10 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
             self.player.physics.velocity[0] = vel_diff[0];
             self.player.physics.velocity[2] = vel_diff[2];
         } else {
-            self.player.physics.velocity[0] += vel_diff[0];
-            self.player.physics.velocity[2] += vel_diff[2];
+            self.player.physics.velocity[0] += vel_diff[0] * @as(f64, @floatCast(delta_time_seconds));
+            self.player.physics.velocity[2] += vel_diff[2] * @as(f64, @floatCast(delta_time_seconds));
         }
     }
-    try self.player.physics.update(&self.world, io, self.allocator);
 }
 
 pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
@@ -717,7 +715,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos) and self.canUnloadMesh(io, chunk_pos)) {
-        try self.renderer.addChunk(io, chunk_pos, &.{}, &.{});
+        try self.renderer.addMesh(io, chunk_pos, &.{}, &.{});
         try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
     }
@@ -750,9 +748,9 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
         defer chunk_add.end();
         if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
-            try self.renderer.addChunk(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+            try self.renderer.addMesh(io, chunk_pos, opaque_faces.items, transparent_faces.items);
         } else {
-            try self.renderer.addChunk(io, chunk_pos, &.{}, &.{});
+            try self.renderer.addMesh(io, chunk_pos, &.{}, &.{});
         }
     }
     const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
@@ -949,7 +947,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
                 return error.Failed;
             };
 
-            ctx.game.renderer.addChunk(ctx.io, chunk_pos, &.{}, &.{}) catch |err| {
+            ctx.game.renderer.addMesh(ctx.io, chunk_pos, &.{}, &.{}) catch |err| {
                 ctx.err = err;
                 return error.Failed;
             };

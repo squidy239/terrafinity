@@ -27,7 +27,7 @@ pub const FrameDrawContext = struct {
 
 pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
-    addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
+    addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void,
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     recreateSwapchain: *const fn (*Implementation, io: std.Io) void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
@@ -36,7 +36,7 @@ pub const VTable = struct {
 
 ///adds a chunk mesh to the renderer, this function may be called on any thread
 ///After this call opaque mesh and transparent mesh are in an undefined state and may not be read
-pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
+pub fn addMesh(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void {
     return self.vtable.addMesh(self.userdata, io, chunk_pos, opaque_mesh, transparent_mesh);
 }
 

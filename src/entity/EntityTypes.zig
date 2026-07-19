@@ -14,7 +14,7 @@ pub const Player = struct {
     pub const Type = Entity.Type.Player;
     player_name: Name,
     game_mode: std.atomic.Value(GameMode),
-    fly_speed: std.atomic.Value(f32) = .init(100),
+    fly_speed: std.atomic.Value(f32) = .init(1024),
     walk_speed: std.atomic.Value(f32) = .init(8),
     jump_strength: std.atomic.Value(f32) = .init(8),
     fly_speed_linear: std.atomic.Value(f32) = .init(10),

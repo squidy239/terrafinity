@@ -3,7 +3,7 @@
 
 layout(local_size_x = 64) in;
 
-struct InputChunk {
+struct MeshCandidate {
     vec4 absolute_position;
     uint face_offset;
     float scale;
@@ -11,7 +11,7 @@ struct InputChunk {
     uint is_transparent;
 };
 
-struct ChunkData {
+struct MeshData {
     vec4 absolute_position;
     vec4 relative_position;
     float scale;
@@ -25,15 +25,15 @@ struct DrawIndirectCommand {
 };
 
 layout(std430, binding = 0) readonly buffer InputBuffer {
-    InputChunk candidate_chunks[];
+    MeshCandidate candidate_meshes[];
 };
 
 layout(std430, binding = 1) writeonly buffer OutputIndirectBuffer {
     DrawIndirectCommand out_indirect[];
 };
 
-layout(std430, binding = 2) writeonly buffer OutputChunkBuffer {
-    ChunkData out_chunks[];
+layout(std430, binding = 2) writeonly buffer OutputMeshDataBuffer {
+    MeshData out_meshes[];
 };
 
 layout(std430, binding = 3) buffer CountBuffer {
@@ -60,31 +60,31 @@ void main() {
     uint g_idx = gl_GlobalInvocationID.x;
     if (g_idx >= pc.total_candidates) return;
 
-    InputChunk chunk = candidate_chunks[g_idx];
-    if (chunk.face_count == 0u) return;
+    MeshCandidate candidate = candidate_meshes[g_idx];
+    if (candidate.face_count == 0u) return;
 
-    vec3 relative_pos = chunk.absolute_position.xyz - pc.player_pos.xyz;
-    float size = chunk.scale * 32.0;
+    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
+    float size = candidate.scale * 32.0;
     if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
 
     uint idx;
-    if (chunk.is_transparent == 0u) {
+    if (candidate.is_transparent == 0u) {
         idx = atomicAdd(opaque_count, 1u);
     } else {
         idx = atomicAdd(transparent_count, 1u);
     }
     if (idx >= pc.draw_capacity) return;
 
-    uint out_idx = idx + (chunk.is_transparent * pc.draw_capacity);
+    uint out_idx = idx + (candidate.is_transparent * pc.draw_capacity);
     out_indirect[out_idx] = DrawIndirectCommand(
         6u,
-        chunk.face_count,
+        candidate.face_count,
         0u,
-        chunk.face_offset
+        candidate.face_offset
     );
-    out_chunks[out_idx] = ChunkData(
-        chunk.absolute_position,
+    out_meshes[out_idx] = MeshData(
+        candidate.absolute_position,
         vec4(relative_pos, 1.0),
-        chunk.scale
+        candidate.scale
     );
 }

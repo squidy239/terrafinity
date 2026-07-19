@@ -5,7 +5,7 @@ struct PushConstants {
     mat4 projview;
     vec3 sun_dir;
     float time;
-    uint chunk_base;
+    uint mesh_base;
 };
 
 layout(push_constant) uniform PushConsts {
@@ -20,14 +20,14 @@ layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
 
-struct ChunkData {
+struct MeshData {
     vec4 absolute_position;
     vec4 relative_position;
     float scale;
 };
 
-layout(std430, set = 1, binding = 0) readonly buffer ChunkDataBuffer {
-    ChunkData chunks[];
+layout(std430, set = 1, binding = 0) readonly buffer MeshDataBuffer {
+    MeshData meshes[];
 };
 
 const uint CHUNK_SIZE = 32u;
@@ -75,13 +75,13 @@ float bouncingMod(float x, float n) {
 
 void main() {
     uint64_t val = packUint2x32(in_face_data);
-    ChunkData chunk = chunks[gl_DrawID + push_consts.pc.chunk_base];
+    MeshData mesh = meshes[gl_DrawID + push_consts.pc.mesh_base];
 
-    vec3 relative_position = chunk.relative_position.xyz;
-    float scale = chunk.scale;
+    vec3 relative_position = mesh.relative_position.xyz;
+    float scale = mesh.scale;
     const uint quad_indices[6] = uint[6](0u, 1u, 2u, 0u, 2u, 3u);
     uint local_vertex = quad_indices[gl_VertexIndex];
-    vec3 absolute_position = chunk.absolute_position.xyz;
+    vec3 absolute_position = mesh.absolute_position.xyz;
 
     uvec3 local_pos = decodePosition(val);
     uvec3 lengths   = decodeLengths(val);

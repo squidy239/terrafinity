@@ -26,7 +26,7 @@ const composite_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @em
 const composite_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("comp_frag_spv")));
 const cull_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("cull_spv")));
 
-const InputChunk = extern struct {
+const MeshCandidate = extern struct {
     absolute_position: [4]f32 align(@sizeOf([4]f32)),
     face_offset: u32,
     scale: f32,
@@ -35,7 +35,7 @@ const InputChunk = extern struct {
 };
 
 comptime {
-    if (@sizeOf(InputChunk) != 32) @compileError("InputChunk size mismatch with GLSL layout (expected 32, got " ++ @typeName(@TypeOf(@sizeOf(InputChunk))) ++ ")");
+    if (@sizeOf(MeshCandidate) != 32) @compileError("MeshCandidate size mismatch with GLSL layout (expected 32, got " ++ @typeName(@TypeOf(@sizeOf(MeshCandidate))) ++ ")");
 }
 
 const CullCount = extern struct {
@@ -180,7 +180,7 @@ const IndexPool = struct {
     }
 };
 
-const ChunkMeshBuffer = struct {
+const MeshBuffer = struct {
     face_offset: u32,
     face_byte_count: vk.DeviceSize,
     face_count: u32,
@@ -200,12 +200,12 @@ const SubmissionBatch = struct {
     mutex: std.Io.Mutex = .init,
 };
 
-const PendingChunkUpload = struct {
+const PendingMeshUpload = struct {
     chunk_pos: ChunkPos,
     timeline_value: u64,
     pool: vk.CommandPool,
-    opaque_mesh: ?ChunkMeshBuffer,
-    transparent_mesh: ?ChunkMeshBuffer,
+    opaque_mesh: ?MeshBuffer,
+    transparent_mesh: ?MeshBuffer,
 };
 
 const RetiredMeshEntry = struct {
@@ -217,7 +217,7 @@ const RetiredMeshEntry = struct {
 };
 
 const RetiredCandidateSlice = struct {
-    slice: []InputChunk,
+    slice: []MeshCandidate,
     graphics_timeline_value: u64,
 };
 
@@ -270,14 +270,14 @@ const CommandPoolReservoir = struct {
     }
 };
 
-const ChunkData = extern struct {
+const MeshData = extern struct {
     absolute_position: [4]f32 align(@sizeOf([4]f32)),
     relative_position: [4]f32 align(@sizeOf([4]f32)),
     scale: f32,
 };
 
 comptime {
-    if (@sizeOf(ChunkData) != 48) @compileError("ChunkData size mismatch with GLSL layout (expected 48)");
+    if (@sizeOf(MeshData) != 48) @compileError("MeshData size mismatch with GLSL layout (expected 48)");
 }
 
 comptime {
@@ -288,10 +288,10 @@ const PushConstants = extern struct {
     projview: [16]f32,
     sun_dir: [3]f32,
     time: f32,
-    chunk_base: u32,
+    mesh_base: u32,
 };
 
-const push_constants_size = @offsetOf(PushConstants, "chunk_base") + @sizeOf(u32);
+const push_constants_size = @offsetOf(PushConstants, "mesh_base") + @sizeOf(u32);
 
 const CullPushConstants = extern struct {
     planes: [6][4]f32,
@@ -379,9 +379,9 @@ const OitState = struct {
 
 const PersistentCandidates = struct {
     buffer: vk.Buffer = .null_handle,
-    mapped: [*]InputChunk = undefined,
+    mapped: [*]MeshCandidate = undefined,
     offset: vk.DeviceSize = 0,
-    slice: []InputChunk = &.{},
+    slice: []MeshCandidate = &.{},
 };
 
 const GraphicsState = struct {
@@ -390,9 +390,9 @@ const GraphicsState = struct {
     pipeline: vk.Pipeline = .null_handle,
     transparent_pipeline: vk.Pipeline = .null_handle,
     transparent_depth_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
-    chunk_data_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
-    chunk_data_descriptor_pool: vk.DescriptorPool = .null_handle,
-    chunk_data_descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
+    mesh_data_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
+    mesh_data_descriptor_pool: vk.DescriptorPool = .null_handle,
+    mesh_data_descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
 };
 
 const CullState = struct {
@@ -407,9 +407,9 @@ const PerFrameData = struct {
     indirect_draw: vk.Buffer = .null_handle,
     indirect_draw_mapped: ?[*]vk.DrawIndirectCommand = null,
     indirect_draw_offset: vk.DeviceSize = 0,
-    chunk_data: vk.Buffer = .null_handle,
-    chunk_data_mapped: ?[*]ChunkData = null,
-    chunk_data_offset: vk.DeviceSize = 0,
+    mesh_data: vk.Buffer = .null_handle,
+    mesh_data_mapped: ?[*]MeshData = null,
+    mesh_data_offset: vk.DeviceSize = 0,
     count: vk.Buffer = .null_handle,
     count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
     count_offset: vk.DeviceSize = 0,
@@ -425,7 +425,7 @@ const PerFrameBuffers = struct {
     fn deinit(self: *PerFrameBuffers, allocator: std.mem.Allocator, cpu_to_gpu_gpa: std.mem.Allocator, gpu_only_gpa: std.mem.Allocator, draw_capacity: u32) void {
         for (self.items) |*item| {
             if (item.indirect_draw_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
-            if (item.chunk_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
+            if (item.mesh_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
             if (item.count_slice.len > 0) gpu_only_gpa.free(item.count_slice);
             if (item.stats_slice.len > 0) cpu_to_gpu_gpa.free(item.stats_slice);
         }
@@ -455,7 +455,7 @@ block_materials_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 block_materials_descriptor_pool: vk.DescriptorPool = .null_handle,
 block_materials_descriptor_set: vk.DescriptorSet = .null_handle,
 transfer: TransferState = .{},
-meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
+meshes: ConcurrentHashMap(RenderBufferKey, MeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
 frame_buffers: PerFrameBuffers = .{},
 cull: CullState = .{},
 persistent: PersistentCandidates = .{},
@@ -473,9 +473,9 @@ staging_ring: StagingRing = undefined,
 gpu_only_gpa: std.heap.DebugAllocator(.{}) = .init,
 cpu_to_gpu_gpa: std.heap.DebugAllocator(.{}) = .init,
 pool_reservoir: CommandPoolReservoir = .{},
-pending_uploads_queue: std.Io.Queue(PendingChunkUpload) = undefined,
-pending_uploads_queue_buffer: [pending_queue_size]PendingChunkUpload = undefined,
-peeked_upload: ?PendingChunkUpload = null,
+pending_uploads_queue: std.Io.Queue(PendingMeshUpload) = undefined,
+pending_uploads_queue_buffer: [pending_queue_size]PendingMeshUpload = undefined,
+peeked_upload: ?PendingMeshUpload = null,
 submission_batch: SubmissionBatch = .{},
 camera_front_x: std.atomic.Value(f32) = .init(0),
 camera_front_y: std.atomic.Value(f32) = .init(0),
@@ -628,10 +628,10 @@ fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
 }
 
 fn allocateIndirectBuffers(self: *VulkanRenderer, frame: *PerFrameData) !void {
-    const chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, self.draw_capacity * draw_type_count);
+    const mesh_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshData, self.draw_capacity * draw_type_count);
     const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, self.draw_capacity * draw_type_count);
 
-    const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, chunk_data_slice.ptr);
+    const mesh_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
     const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
 
     const count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
@@ -642,9 +642,9 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, frame: *PerFrameData) !void {
     const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
 
     frame.* = .{
-        .chunk_data = chunk_data_info.buffer,
-        .chunk_data_mapped = chunk_data_slice.ptr,
-        .chunk_data_offset = chunk_data_info.offset,
+        .mesh_data = mesh_data_info.buffer,
+        .mesh_data_mapped = mesh_data_slice.ptr,
+        .mesh_data_offset = mesh_data_info.offset,
         .indirect_draw = indirect_draw_info.buffer,
         .indirect_draw_mapped = indirect_draw_slice.ptr,
         .indirect_draw_offset = indirect_draw_info.offset,
@@ -723,7 +723,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
         try self.createTransparentDepthDescriptorSetLayout();
     }
 
-    // The cull descriptor sets also reference the indirect, chunk_data, count, and stats buffers.
+    // The cull descriptor sets also reference the indirect, mesh_data, count, and stats buffers.
     // These were just recreated by allocateIndirectBuffers above, so the descriptor sets
     // must be updated to point to the new buffers.
     if (self.cull.descriptor_set_layout != .null_handle) {
@@ -737,9 +737,9 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
         try self.createOitPipelinesAndDescriptors();
     }
 
-    if (self.graphics_state.chunk_data_descriptor_set_layout != .null_handle) {
-        self.destroyChunkDataDescriptorResources();
-        try self.createChunkDataDescriptorResources();
+    if (self.graphics_state.mesh_data_descriptor_set_layout != .null_handle) {
+        self.destroyMeshDataDescriptorResources();
+        try self.createMeshDataDescriptorResources();
     }
 }
 
@@ -748,7 +748,7 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     destroyRenderTarget(self.dev, &self.render_depth);
     destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
     self.frame_buffers.deinit(self.allocator, self.cpu_to_gpu_gpa.allocator(), self.gpu_only_gpa.allocator(), self.draw_capacity);
-    self.destroyChunkDataDescriptorResources();
+    self.destroyMeshDataDescriptorResources();
     self.destroyOitResources();
 }
 
@@ -813,7 +813,7 @@ fn initMemoryManagement(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Al
 fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !void {
     const initial_capacity = 4096;
 
-    const persistent_candidates_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, initial_capacity);
+    const persistent_candidates_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshCandidate, initial_capacity);
     errdefer self.cpu_to_gpu_gpa.allocator().free(persistent_candidates_slice);
     @memset(persistent_candidates_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
     const cand_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, persistent_candidates_slice.ptr);
@@ -827,7 +827,7 @@ fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !v
     errdefer self.index_pool.deinit(allocator);
     self.max_allocated_index = .init(0);
 
-    self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(&self.pending_uploads_queue_buffer);
+    self.pending_uploads_queue = std.Io.Queue(PendingMeshUpload).init(&self.pending_uploads_queue_buffer);
     self.peeked_upload = null;
 }
 
@@ -837,7 +837,7 @@ fn initResources(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator
     try self.createTransparentDepthDescriptorSetLayout();
     try self.recreateSwapchainResourcesLocked(io);
     try self.createCullDescriptorSetLayoutAndPool();
-    try self.createChunkDataDescriptorResources();
+    try self.createMeshDataDescriptorResources();
     try self.createGraphicsPipelines();
     try self.createCullPipeline();
     try self.createOitPipelinesAndDescriptors();
@@ -852,7 +852,7 @@ fn initFinalize(self: *VulkanRenderer) !void {
         .userdata = @ptrCast(self),
         .vtable = &.{
             .addMesh = vtableAddMesh,
-            .draw = vtableDrawChunks,
+            .draw = vtableDraw,
             .recreateSwapchain = vtableRecreateSwapchain,
             .updateCameraDirection = vtableUpdateCameraDirection,
             .forEachMesh = vtableForEachMesh,
@@ -884,7 +884,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.destroyPendingUpload(io, pending);
     }
     while (true) {
-        var buf: PendingChunkUpload = undefined;
+        var buf: PendingMeshUpload = undefined;
         const got = self.pending_uploads_queue.getUncancelable(io, (&buf)[0..1], 0) catch unreachable;
         if (got == 0) break;
         self.destroyPendingUpload(io, buf);
@@ -902,7 +902,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     var it = self.meshes.iterator();
     defer it.deinit(io);
     while (it.next(io) catch unreachable) |entry| {
-        self.destroyChunkMesh(io, entry.value_ptr.*);
+        self.destroyMeshBuffer(io, entry.value_ptr.*);
     }
     self.meshes.deinit(io, self.allocator);
 
@@ -918,7 +918,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     destroyIfValidPipelineLayout(self.dev, &self.cull.pipeline_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.cull.descriptor_set_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.chunk_data_descriptor_set_layout);
+    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.mesh_data_descriptor_set_layout);
     destroyIfValidDescriptorSetLayout(self.dev, &self.block_materials_descriptor_set_layout);
 
     if (self.block_materials_descriptor_pool != .null_handle) {
@@ -958,7 +958,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 }
 
 pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh" });
     defer zone.end();
 
     const borrowed = while (true) {
@@ -1002,7 +1002,7 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
     try self.dev.endCommandBuffer(cmd);
 
     {
-        const zone_batch = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk_lock_batch" });
+        const zone_batch = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh_lock_batch" });
         self.submission_batch.mutex.lockUncancelable(io);
         zone_batch.end();
         defer self.submission_batch.mutex.unlock(io);
@@ -1096,7 +1096,7 @@ fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
     try self.submitBatchAlreadyLocked(io);
 }
 
-fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) !void {
+fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingMeshUpload) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "pushPendingUpload" });
     defer zone.end();
 
@@ -1107,15 +1107,15 @@ fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpl
     }
 }
 
-fn vtableAddMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
+fn vtableAddMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     self.addMesh(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        else => return error.AddChunkFailed,
+        else => return error.AddMeshFailed,
     };
 }
 
-fn destroyChunkMesh(self: *VulkanRenderer, io: std.Io, mesh: ChunkMeshBuffer) void {
+fn destroyMeshBuffer(self: *VulkanRenderer, io: std.Io, mesh: MeshBuffer) void {
     self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(mesh.face_offset)) * @sizeOf(Mesher.Face), mesh.face_byte_count);
 }
 
@@ -1124,9 +1124,9 @@ fn cancelUpload(self: *VulkanRenderer, io: std.Io, result: UploadResult) void {
     self.face_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(result.mesh.face_offset)) * @sizeOf(Mesher.Face), result.mesh.face_byte_count);
 }
 
-fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingChunkUpload) void {
-    if (pending.opaque_mesh) |opaque_m| self.destroyChunkMesh(io, opaque_m);
-    if (pending.transparent_mesh) |transparent| self.destroyChunkMesh(io, transparent);
+fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingMeshUpload) void {
+    if (pending.opaque_mesh) |opaque_m| self.destroyMeshBuffer(io, opaque_m);
+    if (pending.transparent_mesh) |transparent| self.destroyMeshBuffer(io, transparent);
     if (pending.pool != .null_handle) {
         self.pool_reservoir.returnPool(self.dev, pending.pool);
     }
@@ -1143,13 +1143,13 @@ fn enqueueRetiredMesh(self: *VulkanRenderer, gpu_index: u32, face_offset: u32, f
     });
 }
 
-fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?ChunkMeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
+fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
     if (mesh) |m| {
         var new_mesh = m;
 
         const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
-        const chunk_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
-        const abs_vec: [4]f32 = .{ @floatCast(chunk_blockpos[0]), @floatCast(chunk_blockpos[1]), @floatCast(chunk_blockpos[2]), 1.0 };
+        const mesh_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
+        const abs_vec: [4]f32 = .{ @floatCast(mesh_blockpos[0]), @floatCast(mesh_blockpos[1]), @floatCast(mesh_blockpos[2]), 1.0 };
 
         const is_transparent = key == .transparent;
 
@@ -1217,7 +1217,7 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
 
     while (true) {
         const pending = if (self.peeked_upload) |p| p else blk: {
-            var buf: PendingChunkUpload = undefined;
+            var buf: PendingMeshUpload = undefined;
             const got = try self.pending_uploads_queue.get(io, (&buf)[0..1], 0);
             if (got == 0) return;
             break :blk buf;
@@ -1237,7 +1237,7 @@ fn retireCompletedUploads(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 const UploadResult = struct {
-    mesh: ChunkMeshBuffer,
+    mesh: MeshBuffer,
     staging_slice: []u8,
 };
 
@@ -1288,7 +1288,7 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
 
     return UploadResult{
-        .mesh = ChunkMeshBuffer{
+        .mesh = MeshBuffer{
             .face_offset = @intCast(face_byte_offset / @sizeOf(Mesher.Face)),
             .face_byte_count = buffer_size,
             .face_count = @intCast(faces.len),
@@ -1662,7 +1662,7 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
 
     const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
         makeBufferBarrier2(frame.indirect_draw, frame.indirect_draw_offset, self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
-        makeBufferBarrier2(frame.chunk_data, frame.chunk_data_offset, self.draw_capacity * draw_type_count * @sizeOf(ChunkData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
+        makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, self.draw_capacity * draw_type_count * @sizeOf(MeshData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
         makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
@@ -1737,11 +1737,11 @@ fn recordOpaquePass(
 
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.opaque_pipeline_layout, 0, (&self.texture_manager.descriptor_set)[0..1], null);
 
-    const chunk_desc_set = self.graphics_state.chunk_data_descriptor_sets_per_frame[current_frame];
-    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.opaque_pipeline_layout, 1, (&chunk_desc_set)[0..1], null);
+    const mesh_desc_set = self.graphics_state.mesh_data_descriptor_sets_per_frame[current_frame];
+    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.opaque_pipeline_layout, 1, (&mesh_desc_set)[0..1], null);
 
     var pc_opaque = pc;
-    pc_opaque.chunk_base = 0;
+    pc_opaque.mesh_base = 0;
     self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.opaque_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, push_constants_size, &pc_opaque);
 
     if (total_candidates > 0) {
@@ -1838,15 +1838,15 @@ fn recordTransparentPass(
     };
     self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 2, (&depth_write)[0..1]);
 
-    const chunk_desc_set = self.graphics_state.chunk_data_descriptor_sets_per_frame[current_frame];
-    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 1, (&chunk_desc_set)[0..1], null);
+    const mesh_desc_set = self.graphics_state.mesh_data_descriptor_sets_per_frame[current_frame];
+    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 1, (&mesh_desc_set)[0..1], null);
 
     if (self.block_materials_descriptor_set != .null_handle) {
         self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 3, (&self.block_materials_descriptor_set)[0..1], null);
     }
 
     var pc_transparent = pc;
-    pc_transparent.chunk_base = self.draw_capacity;
+    pc_transparent.mesh_base = self.draw_capacity;
     self.dev.cmdPushConstants(cmd_buffer, self.graphics_state.transparent_pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, push_constants_size, &pc_transparent);
 
     if (total_candidates > 0) {
@@ -2004,7 +2004,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .projview = @splat(0),
         .sun_dir = sun_dir,
         .time = elapsed_sec,
-        .chunk_base = 0,
+        .mesh_base = 0,
     };
     inline for (0..4) |row| {
         inline for (0..4) |col| {
@@ -2051,7 +2051,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     try self.dev.endCommandBuffer(cmd_buffer);
 }
 
-fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     self.draw(io, target, frame_ctx, view_pos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -2060,14 +2060,14 @@ fn vtableDrawChunks(user_data: *Renderer.Implementation, io: std.Io, target: Ren
 }
 
 const GrowFrameBackup = struct {
-    chunk_data_ptr: [*]ChunkData,
+    mesh_data_ptr: [*]MeshData,
     indirect_ptr: [*]vk.DrawIndirectCommand,
     count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
 };
 
 const GrowFrameAllocation = struct {
-    chunk_data_slice: []ChunkData,
+    mesh_data_slice: []MeshData,
     indirect_draw_slice: []vk.DrawIndirectCommand,
     count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
@@ -2076,7 +2076,7 @@ const GrowFrameAllocation = struct {
 fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []GrowFrameAllocation) !void {
     for (new_frames, 0..) |*new_frame, i| {
         new_frame.* = .{
-            .chunk_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(ChunkData, new_capacity * draw_type_count),
+            .mesh_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshData, new_capacity * draw_type_count),
             .indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count),
             .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
             .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
@@ -2084,7 +2084,7 @@ fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacit
         new_frame.stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
 
         if (old_draw_capacity > 0) {
-            @memcpy(new_frame.chunk_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
+            @memcpy(new_frame.mesh_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].mesh_data_ptr[0 .. old_draw_capacity * draw_type_count]);
             @memcpy(new_frame.indirect_draw_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
         }
     }
@@ -2094,15 +2094,15 @@ fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "swapToNewGrowFrames" });
     defer zone.end();
     for (new_frames, 0..) |new_frame, i| {
-        const chunk_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.chunk_data_slice.ptr);
+        const mesh_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.mesh_data_slice.ptr);
         const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.indirect_draw_slice.ptr);
         const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, new_frame.count_slice.ptr);
         const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.stats_slice.ptr);
 
         self.frame_buffers.items[i] = .{
-            .chunk_data = chunk_data_info.buffer,
-            .chunk_data_mapped = new_frame.chunk_data_slice.ptr,
-            .chunk_data_offset = chunk_data_info.offset,
+            .mesh_data = mesh_data_info.buffer,
+            .mesh_data_mapped = new_frame.mesh_data_slice.ptr,
+            .mesh_data_offset = mesh_data_info.offset,
             .indirect_draw = indirect_draw_info.buffer,
             .indirect_draw_mapped = new_frame.indirect_draw_slice.ptr,
             .indirect_draw_offset = indirect_draw_info.offset,
@@ -2115,7 +2115,7 @@ fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames
             .stats_mapped = new_frame.stats_slice.ptr,
         };
 
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].chunk_data_ptr[0 .. old_draw_capacity * draw_type_count]);
+        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].mesh_data_ptr[0 .. old_draw_capacity * draw_type_count]);
         self.cpu_to_gpu_gpa.allocator().free(old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
         self.gpu_only_gpa.allocator().free(old_frames[i].count_slice);
         self.cpu_to_gpu_gpa.allocator().free(old_frames[i].stats_slice);
@@ -2123,7 +2123,7 @@ fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames
 
     for (old_frames, 0..) |_, i| {
         self.updateCullDescriptorSet(@intCast(i));
-        self.updateChunkDataDescriptorSet(@intCast(i));
+        self.updateMeshDataDescriptorSet(@intCast(i));
     }
 }
 
@@ -2157,7 +2157,7 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     defer self.allocator.free(old_frames);
     for (old_frames, 0..) |*frame, i| {
         frame.* = .{
-            .chunk_data_ptr = self.frame_buffers.items[i].chunk_data_mapped.?,
+            .mesh_data_ptr = self.frame_buffers.items[i].mesh_data_mapped.?,
             .indirect_ptr = self.frame_buffers.items[i].indirect_draw_mapped.?,
             .count_slice = self.frame_buffers.items[i].count_slice,
             .stats_slice = self.frame_buffers.items[i].stats_slice,
@@ -2184,7 +2184,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     defer self.vk_ctx.queue_mutex.unlock(io);
     try self.drainInFlightFrames();
 
-    const new_slice = try self.cpu_to_gpu_gpa.allocator().alloc(InputChunk, new_capacity);
+    const new_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshCandidate, new_capacity);
     @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
 
     @memcpy(new_slice[0..old_capacity], self.persistent.slice[0..old_capacity]);
@@ -2294,13 +2294,13 @@ fn createTransparentDepthDescriptorSetLayout(self: *VulkanRenderer) !void {
     }
 }
 
-fn createChunkDataDescriptorResources(self: *VulkanRenderer) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createChunkDataDescriptorResources" });
+fn createMeshDataDescriptorResources(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createMeshDataDescriptorResources" });
     defer zone.end();
-    if (self.graphics_state.chunk_data_descriptor_set_layout == .null_handle) {
+    if (self.graphics_state.mesh_data_descriptor_set_layout == .null_handle) {
         const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
         var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] };
-        self.graphics_state.chunk_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        self.graphics_state.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
     }
 
     const num_frames = VulkanContext.max_frames_in_flight;
@@ -2311,42 +2311,42 @@ fn createChunkDataDescriptorResources(self: *VulkanRenderer) !void {
         .pool_size_count = 1,
         .p_pool_sizes = (&pool_size)[0..1].ptr,
     };
-    self.graphics_state.chunk_data_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
-    errdefer self.dev.destroyDescriptorPool(self.graphics_state.chunk_data_descriptor_pool, null);
+    self.graphics_state.mesh_data_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
+    errdefer self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
 
-    self.graphics_state.chunk_data_descriptor_sets_per_frame = try self.allocator.alloc(vk.DescriptorSet, num_frames);
-    errdefer if (self.graphics_state.chunk_data_descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.graphics_state.chunk_data_descriptor_pool, null);
-        self.graphics_state.chunk_data_descriptor_pool = .null_handle;
+    self.graphics_state.mesh_data_descriptor_sets_per_frame = try self.allocator.alloc(vk.DescriptorSet, num_frames);
+    errdefer if (self.graphics_state.mesh_data_descriptor_pool != .null_handle) {
+        self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
+        self.graphics_state.mesh_data_descriptor_pool = .null_handle;
     };
-    @memset(self.graphics_state.chunk_data_descriptor_sets_per_frame, .null_handle);
+    @memset(self.graphics_state.mesh_data_descriptor_sets_per_frame, .null_handle);
 
     const layouts = try self.allocator.alloc(vk.DescriptorSetLayout, num_frames);
     defer self.allocator.free(layouts);
-    @memset(layouts, self.graphics_state.chunk_data_descriptor_set_layout);
+    @memset(layouts, self.graphics_state.mesh_data_descriptor_set_layout);
 
     const alloc_info: vk.DescriptorSetAllocateInfo = .{
-        .descriptor_pool = self.graphics_state.chunk_data_descriptor_pool,
+        .descriptor_pool = self.graphics_state.mesh_data_descriptor_pool,
         .descriptor_set_count = @intCast(num_frames),
         .p_set_layouts = layouts.ptr,
     };
-    try self.dev.allocateDescriptorSets(&alloc_info, self.graphics_state.chunk_data_descriptor_sets_per_frame.ptr);
+    try self.dev.allocateDescriptorSets(&alloc_info, self.graphics_state.mesh_data_descriptor_sets_per_frame.ptr);
 
     for (0..num_frames) |i| {
-        self.updateChunkDataDescriptorSet(@intCast(i));
+        self.updateMeshDataDescriptorSet(@intCast(i));
     }
 }
 
-fn updateChunkDataDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
+fn updateMeshDataDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
     const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const info: vk.DescriptorBufferInfo = .{
-        .buffer = self.frame_buffers.items[frame_idx].chunk_data,
-        .offset = self.frame_buffers.items[frame_idx].chunk_data_offset,
-        .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData),
+        .buffer = self.frame_buffers.items[frame_idx].mesh_data,
+        .offset = self.frame_buffers.items[frame_idx].mesh_data_offset,
+        .range = self.draw_capacity * draw_type_count * @sizeOf(MeshData),
     };
     const write: vk.WriteDescriptorSet = .{
-        .dst_set = self.graphics_state.chunk_data_descriptor_sets_per_frame[frame_idx],
+        .dst_set = self.graphics_state.mesh_data_descriptor_sets_per_frame[frame_idx],
         .dst_binding = 0,
         .dst_array_element = 0,
         .descriptor_count = 1,
@@ -2358,14 +2358,14 @@ fn updateChunkDataDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
     self.dev.updateDescriptorSets((&write)[0..1], null);
 }
 
-fn destroyChunkDataDescriptorResources(self: *VulkanRenderer) void {
-    if (self.graphics_state.chunk_data_descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.graphics_state.chunk_data_descriptor_pool, null);
-        self.graphics_state.chunk_data_descriptor_pool = .null_handle;
+fn destroyMeshDataDescriptorResources(self: *VulkanRenderer) void {
+    if (self.graphics_state.mesh_data_descriptor_pool != .null_handle) {
+        self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
+        self.graphics_state.mesh_data_descriptor_pool = .null_handle;
     }
-    if (self.graphics_state.chunk_data_descriptor_sets_per_frame.len > 0) {
-        self.allocator.free(self.graphics_state.chunk_data_descriptor_sets_per_frame);
-        self.graphics_state.chunk_data_descriptor_sets_per_frame = &.{};
+    if (self.graphics_state.mesh_data_descriptor_sets_per_frame.len > 0) {
+        self.allocator.free(self.graphics_state.mesh_data_descriptor_sets_per_frame);
+        self.graphics_state.mesh_data_descriptor_sets_per_frame = &.{};
     }
 }
 
@@ -2419,9 +2419,9 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
     const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
     const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const infos: [4]vk.DescriptorBufferInfo = .{
-        .{ .buffer = self.persistent.buffer, .offset = self.persistent.offset, .range = self.persistent.slice.len * @sizeOf(InputChunk) },
+        .{ .buffer = self.persistent.buffer, .offset = self.persistent.offset, .range = self.persistent.slice.len * @sizeOf(MeshCandidate) },
         .{ .buffer = self.frame_buffers.items[frame_idx].indirect_draw, .offset = self.frame_buffers.items[frame_idx].indirect_draw_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand) },
-        .{ .buffer = self.frame_buffers.items[frame_idx].chunk_data, .offset = self.frame_buffers.items[frame_idx].chunk_data_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(ChunkData) },
+        .{ .buffer = self.frame_buffers.items[frame_idx].mesh_data, .offset = self.frame_buffers.items[frame_idx].mesh_data_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(MeshData) },
         .{ .buffer = self.frame_buffers.items[frame_idx].count, .offset = self.frame_buffers.items[frame_idx].count_offset, .range = @sizeOf(CullCount) },
     };
     var writes: [4]vk.WriteDescriptorSet = undefined;
@@ -2619,7 +2619,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
     {
         const set_layouts: [2]vk.DescriptorSetLayout = .{
             self.texture_manager.descriptor_set_layout,
-            self.graphics_state.chunk_data_descriptor_set_layout,
+            self.graphics_state.mesh_data_descriptor_set_layout,
         };
         const layout_info: vk.PipelineLayoutCreateInfo = .{
             .flags = .{},
@@ -2662,7 +2662,7 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
     {
         const set_layouts: [4]vk.DescriptorSetLayout = .{
             self.texture_manager.descriptor_set_layout,
-            self.graphics_state.chunk_data_descriptor_set_layout,
+            self.graphics_state.mesh_data_descriptor_set_layout,
             self.graphics_state.transparent_depth_descriptor_set_layout,
             self.block_materials_descriptor_set_layout,
         };
@@ -3015,7 +3015,7 @@ test "findMemoryType" {
     try std.testing.expectEqual(@as(u32, 1), try findMemoryTypeRaw(mem_props, 0b11, .{ .device_local_bit = true }));
 }
 
-test "ChunkData size" {
-    try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
+test "MeshData size" {
+    try std.testing.expectEqual(@as(usize, 16), @alignOf(MeshData));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(MeshData));
 }

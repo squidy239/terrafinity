@@ -61,10 +61,10 @@ void main()
 
     vec4 color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * unlit_color.rgb, unlit_color.a);
 
+    float view_space_depth = 1.0 / gl_FragCoord.w;
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
     float bg_depth_linear = 0.01 / max(bg_depth_raw, 1e-10);
-
-    float view_space_depth = 1.0 / gl_FragCoord.w;
+    bg_depth_linear = min(bg_depth_linear, view_space_depth + 100.0);
     float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : (view_space_depth - bg_depth_linear);
 
     MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
