@@ -98,7 +98,7 @@ void main() {
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
     // TODO: Replace hardcoded surface animation with a data-driven block material system
-    if ((local_pos + absolute_position).y == 0.0 && side == 2 && block_type_local == 3u) {
+    if ((local_pos + absolute_position).y == 0.0 && block_type_local == 3u) {
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
         float safe_y = max(abs(absolute_fragpos.y), 1e-10);

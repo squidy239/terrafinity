@@ -33,7 +33,7 @@ void main() {
 
     if (wboit_reveal < 1.0) {
         vec4 wboit_accum = texelFetch(s_reveal, texel_coord, 0);
-        vec3 surface_color = wboit_accum.rgb / max(wboit_accum.a, 1e-5);
+        vec3 surface_color = (wboit_accum.rgb / max(wboit_accum.a, 1e-5));
         outColor = vec4(surface_color * (1.0 - wboit_reveal) + background * wboit_reveal, 1.0);
     } else {
         outColor = vec4(background, 1.0);

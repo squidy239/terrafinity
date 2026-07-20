@@ -1,8 +1,6 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
 
-layout(early_fragment_tests) in;
-
 layout(location = 0) out vec4 outAccum;
 layout(location = 1) out vec4 outReveal;
 layout(location = 2) out float outVolume;
@@ -45,9 +43,13 @@ const uvec2 texcoord_axes[6] = uvec2[](
 );
 
 float calculate_weight(float linear_depth, float alpha) {
+    // This curve prevents distance scaling from dropping to 0 as violently
     float z = linear_depth;
-    float tmp = 0.03 / (0.00001 + pow(z / 200.0, 4.0));
-    return alpha * clamp(tmp, 0.01, 3000.0);
+    float depth_weight = clamp(0.03 / (1e-5 + pow(z / 200.0, 4.0)), 1e-2, 3e3);
+    
+    // Mix alpha into the weight curve so highly transparent things at a distance 
+    // don't overwhelm opaque things
+    return pow(alpha, 1.2) * depth_weight + clamp(0.3 - alpha, 0.0, 1.0);
 }
 
 layout(constant_id = 0) const bool draw_surface = true;
@@ -63,23 +65,33 @@ void main()
 
     float view_space_depth = 1.0 / gl_FragCoord.w;
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
+    // 1. Get the linear background depth (using the 100000.0 fix for the sky)
     float bg_depth_linear;
     if (bg_depth_raw < 1e-7) {
-        bg_depth_linear = view_space_depth;
+        bg_depth_linear = 100000.0; 
     } else {
         bg_depth_linear = 0.01 / bg_depth_raw;
     }
-    float volume_thickness = gl_FrontFacing ? max(bg_depth_linear - view_space_depth, 0.0) : max(view_space_depth - bg_depth_linear, 0.0);
-
+    
+    // 2. Calculate distance from THIS fragment to the opaque background
+    float dist_to_bg = max(bg_depth_linear - view_space_depth, 0.0);
+    
+    // 3. The New Additive Sign Trick
+    // Frontfaces ADD their distance to the background.
+    // Backfaces SUBTRACT their distance to the background.
+    float sign = gl_FrontFacing ? 1.0 : -1.0;
+    
     MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
     vec3 absorption = max(1.0 - mat.volume_color, vec3(0.01));
-    float td = volume_thickness * mat.density;
+    
+    // 4. Calculate final signed optical depth
+    float td = dist_to_bg * mat.density * sign;
     vec3 opticalDepth = td * absorption;
 
     float wboit_reveal = 0.0;
     vec4 wboit_color = vec4(0.0);
 
-    if (gl_FrontFacing && draw_surface) {
+    if (bg_depth_linear >= view_space_depth && gl_FrontFacing && draw_surface) {
         vec3 view_dir = normalize(-fragpos);
         float NdotV = abs(dot(normal, view_dir));
         float fresnel = pow(1.0 - NdotV, mat.fresnel_power);
