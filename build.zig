@@ -62,7 +62,6 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = true,
     });
 
     exe.step.dependOn(&vert_cmd.step);
@@ -118,7 +117,6 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = root_module,
-        .use_llvm = true,
     });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addInstallArtifact(tests, .{}).step);
@@ -235,11 +233,11 @@ fn setupDependencies(
 
     root_module.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
 
-    const zigimg_dependency = b.dependency("zigimg", .{
+    const zignal_dependency = b.dependency("zignal", .{
         .target = target,
         .optimize = optimize,
     });
-    root_module.addImport("zigimg", zigimg_dependency.module("zigimg"));
+    root_module.addImport("zignal", zignal_dependency.module("zignal"));
 
     const zm = b.dependency("zm", .{
         .target = target,

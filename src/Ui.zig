@@ -2,7 +2,7 @@ const std = @import("std");
 
 const dvui = @import("dvui");
 const wio = @import("wio");
-const zigimg = @import("zigimg");
+const zignal = @import("zignal");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Config = @import("main.zig").Config;
@@ -48,12 +48,11 @@ menu_state: struct {
 },
 
 pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
-    var image = try zigimg.Image.fromMemory(allocator, menu_background_image);
+    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
     defer image.deinit(allocator);
-    try image.convert(allocator, .rgba32);
-    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), .{
-        .width = @intCast(image.width),
-        .height = @intCast(image.height),
+    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
+        .width = @intCast(image.cols),
+        .height = @intCast(image.rows),
         .format = .rgba_32,
         .interpolation = .linear,
     });
