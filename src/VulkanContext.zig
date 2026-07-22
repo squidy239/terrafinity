@@ -488,6 +488,9 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
         std.log.err("deviceWaitIdle failed during VulkanContext.deinit: {}", .{err});
     };
 
+    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
+    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+
     self.destroySwapchainResources();
 
     if (self.swapchain != .null_handle) {
@@ -862,7 +865,7 @@ fn debugCallback(
     }
 
     if (message_severity.error_bit_ext) {
-        std.debug.panic("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
+        vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.warning_bit_ext) {
         vklog.warn("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.info_bit_ext) {

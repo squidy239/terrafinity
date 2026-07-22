@@ -878,6 +878,11 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         self.dev.deviceWaitIdle() catch {
             @panic("VulkanRenderer.deinit: deviceWaitIdle failed - cannot safely release GPU resources");
         };
+
+        self.dev.resetCommandPool(self.upload_command_pool, .{}) catch {};
+        for (self.pool_reservoir.pools[0..self.pool_reservoir.count]) |pool| {
+            if (pool != .null_handle) self.dev.resetCommandPool(pool, .{}) catch {};
+        }
     }
 
     if (self.peeked_upload) |pending| {

@@ -176,7 +176,8 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
 
-        if (ui.menu_state.ingame) {
+        const is_ingame = ui.menu_state.ingame;
+        if (is_ingame) {
             const draw_ctx: Renderer.FrameDrawContext = .{
                 .frame_index = frame_ctx.frame_index,
                 .cmd_buffer = frame_ctx.cmd_buffer,
@@ -189,7 +190,8 @@ pub fn main(init: std.process.Init) !void {
 
         try recordUiPass(io, gpa, vk_ctx, &backend, &ui_window, &ui, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
-        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], ui.menu_state.ingame);
+        const submit_game = is_ingame and ui.menu_state.ingame;
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
             error.OutOfDate, error.SurfaceLostKHR => {
