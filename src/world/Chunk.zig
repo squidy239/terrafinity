@@ -175,12 +175,10 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub fn fuzzerMakeEncoding(grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
-        @disableInstrumentation();
-        @setRuntimeSafety(false);
         return switch (smith.value(@typeInfo(Encoding).@"union".tag_type.?)) {
             .grid => blk: {
                 grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-                break :blk Encoding{ .grid = grid };
+                break :blk .fromBlocks(grid);
             },
             .uniform => .{ .uniform = smith.value(Block) },
         };

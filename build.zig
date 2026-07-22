@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("sanitizer_stubs.c"),
         .flags = &.{"-fno-sanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc,trace-pc-guard,indirect-calls"},
     });
-    
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addInstallArtifact(tests, .{}).step);
     test_step.dependOn(&b.addRunArtifact(tests).step);

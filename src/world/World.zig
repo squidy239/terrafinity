@@ -1010,14 +1010,46 @@ test "loadChunk allocation failure" {
         .{std.Io.Threaded.global_single_threaded.io()},
     );
 }
+const FuzzGenerator = @import("generators/Fuzz.zig").FuzzGenerator;
 
 test "fuzz world" {
+    if(!builtin.fuzz) return;
     var world: World = undefined;
-    var generator: DefaultGenerator = undefined;
+    var generator: FuzzGenerator = undefined;
     var dba: std.heap.DebugAllocator(.{}) = .init;
     defer dba.deinitWithoutLeakChecks();
+    const allocator = dba.allocator();
+    
     var threaded: std.Io.Threaded = .init(dba.allocator(), .{});
-    try makeTestingWorld(&world, &generator, dba.allocator(), 1000, 1000);
+    const chunk_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
+    const grid_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
+
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, chunkPosHash, .{}, 1).init(
+        allocator,
+        chunk_count,
+        .{ .name = "test chunk cache" },
+    );
+    errdefer {
+        var c = chunk_cache;
+        c.deinit(allocator);
+    }
+
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, 1).init(
+        allocator,
+        grid_count,
+        .{ .name = "test grid cache" },
+    );
+    errdefer {
+        var g = grid_cache;
+        g.deinit(allocator);
+    }
+
+    world = .{
+        .chunks = chunk_cache,
+        .grids = grid_cache,
+        .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
+        .chunk_sources = .{ generator.getSource(), null, null, null },
+    };
     defer world.deinit(threaded.io(), dba.allocator());
     try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = dba.allocator(), .world = &world }, fuzzChunkLoad, .{});
 }
@@ -1033,8 +1065,8 @@ fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
         context.io,
         context.allocator,
         .{
-            .level = smith.valueRangeAtMost(i32, -2, 12),
-            .position = @mod(smith.value(@Vector(3, i32)), @Vector(3, i32){ 1000, 1000, 1000 }),
+            .level = smith.value(i32),
+            .position = smith.value(@Vector(3, i32)),
         },
         smith.value(bool),
     );
