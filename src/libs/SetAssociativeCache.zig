@@ -472,7 +472,7 @@ pub fn SetAssociativeCacheType(
 
             fn inspect(set: Set, sac: SetAssociativeCache) void {
                 const clock_index = @divExact(set.offset, layout.ways);
-                std.debug.print(
+                std.log.debug(
                     \\{{
                     \\  tag={}
                     \\  offset={}
@@ -483,19 +483,19 @@ pub fn SetAssociativeCacheType(
                     sac.clocks.get(clock_index),
                 });
 
-                std.debug.print("\n  tags={}", .{set.tags[0]});
-                for (set.tags[1..]) |tag| std.debug.print(", {}", .{tag});
+                std.log.debug("\n  tags={}", .{set.tags[0]});
+                for (set.tags[1..]) |tag| std.log.debug(", {}", .{tag});
 
-                std.debug.print("\n  values={}", .{set.values[0]});
-                for (set.values[1..]) |value| std.debug.print(", {}", .{value});
+                std.log.debug("\n  values={}", .{set.values[0]});
+                for (set.values[1..]) |value| std.log.debug(", {}", .{value});
 
-                std.debug.print("\n  counts={}", .{sac.counts.get(set.offset)});
+                std.log.debug("\n  counts={}", .{sac.counts.get(set.offset)});
                 var i: usize = 1;
                 while (i < layout.ways) : (i += 1) {
-                    std.debug.print(", {}", .{sac.counts.get(set.offset + i)});
+                    std.log.debug(", {}", .{sac.counts.get(set.offset + i)});
                 }
 
-                std.debug.print("\n}}\n", .{});
+                std.log.debug("\n}}\n", .{});
             }
         };
 
@@ -515,7 +515,7 @@ pub fn SetAssociativeCacheType(
         }
 
         pub fn inspect() void {
-            std.debug.print("\nKey={} Value={} ways={} tag_bits={} clock_bits={} " ++
+            std.log.debug("\nKey={} Value={} ways={} tag_bits={} clock_bits={} " ++
                 "clock_hand_bits={} tags_per_line={} clocks_per_line={} " ++
                 "clock_hands_per_line={}\n", .{
                 @bitSizeOf(Key),

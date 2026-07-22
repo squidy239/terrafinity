@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     defer config.deinit(gpa);
     try config.save(io, config_path, &config_lock);
 
-    try wio.init(gpa, io, wio.EventQueue.eventFn, .{});
+    try wio.init(.{ .allocator = gpa, .io = io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
     var events: wio.EventQueue = .empty;

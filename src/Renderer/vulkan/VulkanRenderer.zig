@@ -112,9 +112,6 @@ const FrameDebugStats = struct {
         std.log.info("Total: culled={d:>6}  drawn={d:>6} ({d:.1}% visible)", .{ total_culled, total_drawn, visible_pct });
         std.log.info("Time: {d:.2} ms", .{ms});
         std.log.info("========================", .{});
-        if (total_drawn == 0) {
-            std.log.warn("FRAME {d}: NO CHUNKS DRAWN! total_meshes={d}", .{ self.frame_number, self.total_meshes });
-        }
     }
 };
 

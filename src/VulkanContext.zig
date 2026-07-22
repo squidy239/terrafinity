@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const builtin = @import("builtin");
+
 const options = @import("options");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
@@ -245,11 +247,27 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         }
     }
 
+    var layer_names: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    defer layer_names.deinit(allocator);
+
+    if (builtin.mode == .Debug) {
+        const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
+        defer allocator.free(layers);
+        for (layers) |layer| {
+            const name = std.mem.sliceTo(&layer.layer_name, 0);
+            if (std.mem.eql(u8, name, "VK_LAYER_KHRONOS_validation")) {
+                try layer_names.append(allocator, "VK_LAYER_KHRONOS_validation");
+                std.log.info("Enabling Vulkan validation layer", .{});
+                break;
+            }
+        }
+    }
+
     const instance_create_info: vk.InstanceCreateInfo = .{
         .flags = .{ .enumerate_portability_bit_khr = has_portability },
         .p_application_info = &app_info,
-        .enabled_layer_count = 0,
-        .pp_enabled_layer_names = null,
+        .enabled_layer_count = @intCast(layer_names.items.len),
+        .pp_enabled_layer_names = @ptrCast(layer_names.items.ptr),
         .enabled_extension_count = @intCast(extension_names.items.len),
         .pp_enabled_extension_names = @ptrCast(extension_names.items.ptr),
     };
@@ -874,4 +892,61 @@ fn debugCallback(
         vklog.debug("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     }
     return .false;
+}
+
+test "VulkanContext init and deinit" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    try std.testing.expect(ctx.instance_handle != .null_handle);
+    try std.testing.expect(ctx.dev_handle != .null_handle);
+    try std.testing.expect(ctx.graphics_queue != .null_handle);
+    try std.testing.expect(ctx.present_queue != .null_handle);
+    try std.testing.expect(ctx.command_pool != .null_handle);
+    try std.testing.expect(ctx.upload_command_pool != .null_handle);
+    try std.testing.expect(ctx.ui_command_pool != .null_handle);
+    try std.testing.expect(ctx.transfer_semaphore != .null_handle);
+    try std.testing.expect(ctx.graphics_timeline_semaphore != .null_handle);
+    try std.testing.expect(ctx.surface != .null_handle);
+    try std.testing.expect(ctx.cmd_buffers.len > 0);
+    try std.testing.expect(ctx.image_acquired_semaphores.len > 0);
+    try std.testing.expect(ctx.render_complete_semaphores.len > 0);
+}
+
+test "VulkanRenderer init and deinit" {
+    const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
+    const Renderer = @import("Renderer.zig");
+
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    ctx.swapchain_extent = .{ .width = 640, .height = 480 };
+    ctx.queue_mutex.lockUncancelable(std.testing.io);
+    try ctx.createSwapchainLocked(false);
+    ctx.queue_mutex.unlock(std.testing.io);
+
+    var render_opts: Renderer.RenderOptions = .{};
+    var render_opts_lock: std.Io.RwLock = .init;
+
+    var renderer: VulkanRenderer = undefined;
+    try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
+    defer renderer.deinit(std.testing.io);
 }

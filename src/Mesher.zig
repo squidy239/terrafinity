@@ -482,9 +482,8 @@ test "MeshBehavior - Exact Rotation Generation" {
     }
 
     // Ensure every single rotation enum was generated exactly once
-    for (seen_rotations, 0..) |seen, i| {
+    for (seen_rotations) |seen| {
         if (!seen) {
-            std.debug.print("Failed to generate face rotation: {s}\n", .{@tagName(@as(FaceRotation, @enumFromInt(i)))});
             return error.MissingFaceRotation;
         }
     }
@@ -530,7 +529,7 @@ test "MeshBenchmark" {
         const et = std.Io.Timestamp.now(std.testing.io, .awake);
         const dt = st.durationTo(et);
         const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
-        std.log.warn("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (i == 0) "uniform" else if (i == 1) "grid" else if (i == 2) "grid air" else "random", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
+        std.log.info("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (i == 0) "uniform" else if (i == 1) "grid" else if (i == 2) "grid air" else "random", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
     }
 }
 
