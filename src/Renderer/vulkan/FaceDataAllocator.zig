@@ -3,13 +3,15 @@ const vk = @import("vulkan");
 
 const log = std.log.scoped(.face_data_allocator);
 
+const buf_align: std.mem.Alignment = .fromByteUnits(256);
+
 const Region = struct {
     offset: vk.DeviceSize,
     length: vk.DeviceSize,
 };
 
 pub const GrowInfo = struct {
-    old_slice: []u8,
+    old_slice: []align(buf_align.toByteUnits()) u8,
     old_buffer: vk.Buffer,
     old_buffer_offset: vk.DeviceSize,
     old_used: vk.DeviceSize,
@@ -22,7 +24,7 @@ pub const FaceDataAllocator = struct {
         buffer_offset: vk.DeviceSize,
     };
 
-    buffer_slice: []u8,
+    buffer_slice: []align(buf_align.toByteUnits()) u8,
     buffer: vk.Buffer,
     buffer_offset: vk.DeviceSize,
     capacity: vk.DeviceSize,
@@ -32,7 +34,7 @@ pub const FaceDataAllocator = struct {
     meta_allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
 
-    const init_align: std.mem.Alignment = .fromByteUnits(256);
+    const init_align = buf_align;
 
     pub fn init(meta_allocator: std.mem.Allocator, gpu_allocator: std.mem.Allocator) !FaceDataAllocator {
         const initial_capacity: vk.DeviceSize = 64 * 1024 * 1024;

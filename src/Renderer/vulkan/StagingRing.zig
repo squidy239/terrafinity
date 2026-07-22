@@ -9,7 +9,7 @@ const Slot = struct {
 pub const StagingRing = struct {
     allocator: std.mem.Allocator,
 
-    mapping: []u8,
+    mapping: []align(256) u8,
     buffer: vk.Buffer,
     buffer_offset: vk.DeviceSize,
     capacity: vk.DeviceSize,

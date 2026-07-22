@@ -12,6 +12,15 @@ const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 
+const VulkanBackingAllocator = @import("Renderer/vulkan/VulkanBackingAllocator.zig").VulkanBackingAllocator;
+const StagingRing = @import("Renderer/vulkan/StagingRing.zig").StagingRing;
+const FaceDataAllocator = @import("Renderer/vulkan/FaceDataAllocator.zig").FaceDataAllocator;
+const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
+const Renderer = @import("Renderer.zig");
+const Mesher = @import("Mesher.zig");
+const World = @import("world/World.zig");
+const Block = @import("world/Block.zig").Block;
+
 pub const PresentMode = enum {
     vsync,
     mailbox,
@@ -923,9 +932,6 @@ test "VulkanContext init and deinit" {
 }
 
 test "VulkanRenderer init and deinit" {
-    const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
-    const Renderer = @import("Renderer.zig");
-
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
@@ -949,4 +955,180 @@ test "VulkanRenderer init and deinit" {
     var renderer: VulkanRenderer = undefined;
     try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
     defer renderer.deinit(std.testing.io);
+}
+
+test "VulkanRenderer mesh upload" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    ctx.swapchain_extent = .{ .width = 640, .height = 480 };
+    ctx.queue_mutex.lockUncancelable(std.testing.io);
+    try ctx.createSwapchainLocked(false);
+    ctx.queue_mutex.unlock(std.testing.io);
+
+    var render_opts: Renderer.RenderOptions = .{};
+    var render_opts_lock: std.Io.RwLock = .init;
+
+    var renderer: VulkanRenderer = undefined;
+    try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
+    defer renderer.deinit(std.testing.io);
+
+    var iface = renderer.interface;
+
+    var opaque_faces: [6]Mesher.Face = undefined;
+    for (&opaque_faces) |*f| {
+        f.* = .{ .block_type = @intFromEnum(Block.stone), .x = 0, .y = 0, .z = 0, .x_length = 0, .y_length = 0, .z_length = 0, .rotation = .xplus };
+    }
+
+    const chunk_pos: World.ChunkPos = .{ .level = 0, .position = .{ 0, 0, 0 } };
+    try iface.addChunk(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
+}
+
+test "VulkanBackingAllocator alloc and free both pools" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+    const cpu_alloc = backing.allocator(.cpu_to_gpu);
+
+    const gpu_slice = try gpu_alloc.alloc(u8, 1024);
+    defer gpu_alloc.free(gpu_slice);
+    const gpu_info = backing.getBufferAndOffset(.gpu_only, gpu_slice.ptr);
+    try std.testing.expect(gpu_info.buffer != .null_handle);
+    try std.testing.expect(gpu_info.offset < 1024);
+
+    const cpu_slice = try cpu_alloc.alloc(u64, 256);
+    defer cpu_alloc.free(cpu_slice);
+    const cpu_info = backing.getBufferAndOffset(.cpu_to_gpu, cpu_slice.ptr);
+    try std.testing.expect(cpu_info.buffer != .null_handle);
+    try std.testing.expect(cpu_info.offset < 256 * @sizeOf(u64));
+    cpu_slice[0] = 42;
+}
+
+test "StagingRing alloc wrap-around" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const cpu_alloc = backing.allocator(.cpu_to_gpu);
+
+    const max_face_bytes: vk.DeviceSize = 16;
+    var ring = try StagingRing.init(std.testing.allocator, cpu_alloc, max_face_bytes);
+    defer ring.deinit(cpu_alloc);
+
+    const s1 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s1 != null);
+    @memset(s1.?, 0xab);
+
+    const s2 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s2 != null);
+    @memset(s2.?, 0xcd);
+
+    try std.testing.expect(s1.?[0] == 0xab);
+    try std.testing.expect(s2.?[0] == 0xcd);
+
+    const s3 = ring.alloc(std.testing.io, ring.capacity);
+    try std.testing.expect(s3 == null);
+
+    ring.retire(std.testing.io, 1);
+
+    const s4 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s4 != null);
+}
+
+fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
+    var ring = try StagingRing.init(alloc, alloc, 16);
+    ring.deinit(alloc);
+}
+
+test "StagingRing checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
+}
+
+test "FaceDataAllocator init and deinit" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc);
+    defer alloc.deinit(gpu_alloc);
+
+    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
+}
+
+test "FaceDataAllocator grow and retire old buffer" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc);
+
+    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
+
+    const grow_info = try alloc.grow(gpu_alloc);
+    gpu_alloc.free(grow_info.old_slice);
+    const grow_info2 = try alloc.grow(gpu_alloc);
+    gpu_alloc.free(grow_info2.old_slice);
+
+    alloc.deinit(gpu_alloc);
 }

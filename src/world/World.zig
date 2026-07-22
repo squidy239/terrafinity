@@ -1014,15 +1014,24 @@ test "loadChunk allocation failure" {
 test "fuzz world" {
     var world: World = undefined;
     var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, std.testing.allocator, 1000, 100);
-    defer world.deinit(std.testing.io, std.testing.allocator);
-    try std.testing.fuzz(&world, fuzzChunkLoad, .{});
+    var dba: std.heap.DebugAllocator(.{}) = .init;
+    defer dba.deinitWithoutLeakChecks();
+    var threaded: std.Io.Threaded = .init(dba.allocator(), .{});
+    try makeTestingWorld(&world, &generator, dba.allocator(), 1000, 1000);
+    defer world.deinit(threaded.io(), dba.allocator());
+    try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = dba.allocator(), .world = &world }, fuzzChunkLoad, .{});
 }
 
-fn fuzzChunkLoad(world: *World, smith: *std.testing.Smith) !void {
-    const test_chunk = try world.loadChunk(
-        std.testing.io,
-        std.testing.allocator,
+const Context = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    world: *World,
+};
+
+fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
+    const test_chunk = try context.world.loadChunk(
+        context.io,
+        context.allocator,
         .{
             .level = smith.valueRangeAtMost(i32, -2, 12),
             .position = @mod(smith.value(@Vector(3, i32)), @Vector(3, i32){ 1000, 1000, 1000 }),

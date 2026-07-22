@@ -219,7 +219,7 @@ const RetiredCandidateSlice = struct {
 };
 
 const RetiredFaceBuffer = struct {
-    slice: []u8,
+    slice: []align(256) u8,
     graphics_timeline_value: u64,
 };
 
