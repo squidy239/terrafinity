@@ -437,6 +437,7 @@ allocator: std.mem.Allocator,
 dev: DeviceProxy,
 graphics_queue: vk.Queue,
 upload_command_pool: vk.CommandPool = .null_handle,
+single_time_fence: vk.Fence = .null_handle,
 
 render_color: RenderTarget = .{},
 render_depth: RenderTarget = .{},
@@ -483,7 +484,7 @@ render_options_lock: *std.Io.RwLock,
 interface: Renderer,
 
 retire_mutex: std.Io.Mutex = .init,
-num_in_flight: u32 = 0,
+num_in_flight: u32 = VulkanContext.max_frames_in_flight,
 init_time_ns: u64 = 0,
 last_stat_log_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
@@ -692,7 +693,6 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     try self.createRenderTargets(actual_extent);
 
-    self.num_in_flight = @intCast(VulkanContext.max_frames_in_flight);
     self.frame_buffers.items = try self.allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
     @memset(self.frame_buffers.items, .{});
 
@@ -760,6 +760,7 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
         .dev = vk_ctx.dev,
         .graphics_queue = vk_ctx.graphics_queue,
         .upload_command_pool = vk_ctx.upload_command_pool,
+        .single_time_fence = .null_handle,
         .render_options = render_options,
         .render_options_lock = render_options_lock,
         .meshes = undefined,
@@ -877,6 +878,11 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         };
 
         self.dev.resetCommandPool(self.upload_command_pool, .{}) catch {};
+        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch {};
+        if (self.single_time_fence != .null_handle) {
+            self.dev.destroyFence(self.single_time_fence, null);
+            self.single_time_fence = .null_handle;
+        }
         for (self.pool_reservoir.pools[0..self.pool_reservoir.count]) |pool| {
             if (pool != .null_handle) self.dev.resetCommandPool(pool, .{}) catch {};
         }
@@ -1041,7 +1047,7 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
         };
     }
 
-    const current_graphics_val = self.vk_ctx.frame_number.load(.monotonic);
+    const current_graphics_val = self.vk_ctx.frame_number.load(.acquire);
     const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
         .semaphore = self.transfer.graphics_timeline_semaphore,
         .value = current_graphics_val,
@@ -1056,11 +1062,12 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
         .device_index = 0,
     };
 
-    const has_wait = current_graphics_val > 0;
+    // Wait value 0 is immediately satisfied (semaphore initializes to 0);
+    // including the wait unconditionally lets validation trace the chain.
     const submit_info: vk.SubmitInfo2 = .{
         .flags = .{},
-        .wait_semaphore_info_count = @intFromBool(has_wait),
-        .p_wait_semaphore_infos = if (has_wait) (&wait_semaphore_info)[0..1] else null,
+        .wait_semaphore_info_count = 1,
+        .p_wait_semaphore_infos = (&wait_semaphore_info)[0..1],
         .command_buffer_info_count = @intCast(count),
         .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
         .signal_semaphore_info_count = 1,
@@ -1273,9 +1280,6 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     const face_buf = face_alloc.buffer;
     const face_buf_offset = face_alloc.buffer_offset;
 
-    // Face buffer region is freshly allocated and not in GPU use - no barrier needed before copy.
-    // The timeline semaphore will make the copied data visible to the graphics queue.
-
     const copy_region: vk.BufferCopy2 = .{
         .src_offset = staging_info.offset,
         .dst_offset = face_buf_offset + face_byte_offset,
@@ -1288,6 +1292,26 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
         .p_regions = (&copy_region)[0..1],
     };
     self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
+
+    // dst_access is empty — a cross-queue release makes data available;
+    // the graphics queue performs its own acquire barrier.
+    self.dev.cmdPipelineBarrier2(cmd, &.{
+        .dependency_flags = .{},
+        .memory_barrier_count = 0,
+        .p_memory_barriers = null,
+        .buffer_memory_barrier_count = 1,
+        .p_buffer_memory_barriers = (&makeBufferBarrier2(
+            face_buf,
+            face_buf_offset + face_byte_offset,
+            buffer_size,
+            .{ .all_transfer_bit = true },
+            .{ .transfer_write_bit = true },
+            .{ .all_transfer_bit = true },
+            .{},
+        ))[0..1],
+        .image_memory_barrier_count = 0,
+        .p_image_memory_barriers = null,
+    });
 
     return UploadResult{
         .mesh = ChunkMeshBuffer{
@@ -1317,6 +1341,18 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
 
         std.log.info("growing face data buffer...", .{});
         try self.drainInFlightFrames();
+
+        // The transfer batch submitted above writes to the old face buffer.
+        // Wait for it to complete before copying old→new on the graphics queue.
+        const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
+        if (transfer_done_val > 0) {
+            const wait_info: vk.SemaphoreWaitInfo = .{
+                .semaphore_count = 1,
+                .p_semaphores = (&self.transfer.semaphore)[0..1],
+                .p_values = (&transfer_done_val)[0..1],
+            };
+            _ = try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
+        }
 
         const grow_info = try self.face_allocator.grow(self.gpu_only_gpa.allocator());
 
@@ -1458,6 +1494,21 @@ fn cmdBufferBarrier2(
     });
 }
 
+fn cmdAcquireFaceBuffer(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer) void {
+    if (self.face_allocator.used == 0) return;
+    cmdBufferBarrier2(
+        cmd_buffer,
+        self.dev,
+        self.face_allocator.buffer,
+        self.face_allocator.buffer_offset,
+        self.face_allocator.used,
+        .{ .vertex_attribute_input_bit = true },
+        .{},
+        .{ .vertex_attribute_input_bit = true },
+        .{ .vertex_attribute_read_bit = true },
+    );
+}
+
 fn makeBufferBarrier2(
     buffer: vk.Buffer,
     offset: vk.DeviceSize,
@@ -1472,6 +1523,9 @@ fn makeBufferBarrier2(
         .src_access_mask = src_access,
         .dst_stage_mask = dst_stage,
         .dst_access_mask = dst_access,
+        // Assumes transfer and graphics queues share a family (true on
+        // desktop GPUs). On split-family GPUs these must be the actual
+        // family indices for proper queue family ownership transfer.
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .buffer = buffer,
@@ -1689,9 +1743,10 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
 
 fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, depth_aspect_mask: vk.ImageAspectFlags) void {
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+
     const pre_dispatch_img_barriers: [2]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{}, .{}, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
+        makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
+        makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1719,6 +1774,8 @@ fn recordOpaquePass(
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
     defer zone.end();
     self.emitFrameStartBarriers(cmd_buffer, depth_aspect_mask);
+
+    self.cmdAcquireFaceBuffer(cmd_buffer);
 
     if (total_candidates > 0) {
         self.dispatchCulling(cmd_buffer, current_frame, frustum, total_candidates, view_pos);
@@ -1793,9 +1850,9 @@ fn recordTransparentPass(
     defer zone.end();
     const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const oit_pre_barriers: [3]vk.ImageMemoryBarrier2 = .{
-        makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
-        makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
-        makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{}, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.accum.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
+        makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
     };
     self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
         .dependency_flags = .{},
@@ -1806,6 +1863,9 @@ fn recordTransparentPass(
         .image_memory_barrier_count = 3,
         .p_image_memory_barriers = &oit_pre_barriers,
     });
+
+    self.cmdAcquireFaceBuffer(cmd_buffer);
+
     const oit_accum_attachment = renderingAttachmentColor(self.oit.accum.view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
     const oit_reveal_attachment = renderingAttachmentColor(self.oit.reveal.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
     const oit_volume_attachment = renderingAttachmentColor(self.oit.volume_weight.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
@@ -1889,7 +1949,7 @@ fn recordCompositionPass(
     const output_barrier = blk: {
         const old = self.swapchain_image_old_layout;
         const src_stage: vk.PipelineStageFlags2 = switch (old) {
-            .undefined => .{},
+            .undefined => .{ .top_of_pipe_bit = true },
             .present_src_khr => .{ .bottom_of_pipe_bit = true },
             else => .{ .all_commands_bit = true },
         };
@@ -2031,7 +2091,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
 
-    const frame_num = self.vk_ctx.frame_number.load(.monotonic) + 1;
+    const frame_num = self.vk_ctx.frame_number.load(.acquire) + 1;
     self.frame_stats.frame_number = frame_num;
     self.frame_stats.total_meshes = @intCast(self.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
@@ -2199,7 +2259,7 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     self.persistent.offset = info.offset;
     self.persistent.slice = new_slice;
 
-    const current_frame_num = self.vk_ctx.frame_number.load(.monotonic);
+    const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
     {
         try self.retired_candidate_slices.append(self.allocator, .{
             .slice = old_slice,
@@ -2948,13 +3008,17 @@ fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !vo
         .p_signal_semaphore_infos = null,
     };
 
-    try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], .null_handle);
+    const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "endSingleTimeCommands_lock" });
+    defer zone_submit.end();
 
-    {
-        const zone_wait = tracy.Zone.begin(.{ .src = @src(), .name = "endSingleTimeCommands_queueWaitIdle" });
-        defer zone_wait.end();
-        try self.dev.queueWaitIdle(self.graphics_queue);
+    if (self.single_time_fence == .null_handle) {
+        self.single_time_fence = try self.dev.createFence(&.{}, null);
+    } else {
+        try self.dev.resetFences((&self.single_time_fence)[0..1]);
     }
+
+    try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], self.single_time_fence);
+    _ = try self.dev.waitForFences((&self.single_time_fence)[0..1], .true, std.math.maxInt(u64));
 }
 
 pub fn endSingleTimeCommands(self: *VulkanRenderer, io: std.Io, cmd: vk.CommandBuffer) !void {

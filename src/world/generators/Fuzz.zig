@@ -8,7 +8,7 @@ const ChunkPos = World.ChunkPos;
 
 pub const FuzzGenerator = struct {
     smith: *std.testing.Smith,
-    
+
     pub fn init(smith: *std.testing.Smith) !FuzzGenerator {
         return FuzzGenerator{ .smith = smith };
     }
@@ -29,7 +29,7 @@ pub const FuzzGenerator = struct {
         _ = allocator;
         _ = world;
         _ = chunk_pos;
-        
+
         const self: *FuzzGenerator = @ptrCast(@alignCast(source.data));
         blocks.* = .fuzzerMakeEncoding(grid_buffer, self.smith);
         return self.smith.value(World.ChunkSource.GetBlocksMetadata);

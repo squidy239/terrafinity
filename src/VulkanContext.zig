@@ -805,7 +805,7 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
 
     const wait_semaphore_infos: [3]vk.SemaphoreSubmitInfo = .{
         .{ .semaphore = self.image_acquired_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
-        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .top_of_pipe_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .vertex_attribute_input_bit = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = prev_graphics_val, .stage_mask = .{ .top_of_pipe_bit = true }, .device_index = 0 },
     };
 

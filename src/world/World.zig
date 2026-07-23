@@ -1017,7 +1017,7 @@ test "fuzz world" {
     var dba: std.heap.DebugAllocator(.{}) = .init;
     defer dba.deinitWithoutLeakChecks();
     const allocator = dba.allocator();
-    
+
     var threaded: std.Io.Threaded = .init(dba.allocator(), .{});
     const chunk_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
     const grid_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
