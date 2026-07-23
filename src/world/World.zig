@@ -1013,9 +1013,7 @@ test "loadChunk allocation failure" {
 const FuzzGenerator = @import("generators/Fuzz.zig").FuzzGenerator;
 
 test "fuzz world" {
-    if(!builtin.fuzz) return;
     var world: World = undefined;
-    var generator: FuzzGenerator = undefined;
     var dba: std.heap.DebugAllocator(.{}) = .init;
     defer dba.deinitWithoutLeakChecks();
     const allocator = dba.allocator();
@@ -1048,7 +1046,7 @@ test "fuzz world" {
         .chunks = chunk_cache,
         .grids = grid_cache,
         .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
-        .chunk_sources = .{ generator.getSource(), null, null, null },
+        .chunk_sources = undefined,
     };
     defer world.deinit(threaded.io(), dba.allocator());
     try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = dba.allocator(), .world = &world }, fuzzChunkLoad, .{});
@@ -1061,6 +1059,9 @@ const Context = struct {
 };
 
 fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
+    var generator: FuzzGenerator = try .init(smith);
+    context.world.chunk_sources = .{ generator.getSource(), null, null, null };
+
     const test_chunk = try context.world.loadChunk(
         context.io,
         context.allocator,
