@@ -20,10 +20,6 @@
             .url = "git+https://github.com/chip2n/zig-obj#6070356009e761a4aef82256f1f431037ae97426",
             .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
-        .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg#0dd86499cccdbf798330e184d02d5efac7e5b50b",
-            .hash = "zigimg-0.1.0-8_eo2uelFwC9-IbogKwVT_ze4KqosOEqa5O03ZXIa2UZ",
-        },
         .rocksdb = .{
             .url = "git+https://github.com/squidy239/rocksdb-zig#e150efe80e0f3a389dace66e00a65ad9e019c39b",
             .hash = "rocksdb-11.1.1-z_CUTiF7AQBNJ8dXAFmcfp90gyu29NRJDmP5xcp-9dPm",
@@ -33,8 +29,7 @@
             .hash = "dvui-0.5.0-dev-AQFJmYXU9gD-ISak0ThV_OscVn4tn7gz95iBolDEqQQD",
         },
         .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#21ad79ec140e4dd4a310ed9543620c4a083521c3",
-            .hash = "wio-0.0.0-8xHrr3xPBwA-nbDM-P-i24xqQdpYDU4OA_YCHlSj8GXA",
+            .path = "../wio",
         },
         .tracy = .{
             .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
@@ -51,6 +46,10 @@
         .dvui_vk = .{
             .url = "git+https://github.com/Deins/dvui_vk#b5dfd5f9a4430390853e4552d1c677aa40a7370d",
             .hash = "dvui_vk-0.0.0-HWdnmTwbAwB70kbQ-0yWZoxIGhDwiN91Z3bl8WQSeVlQ",
+        },
+        .zignal = .{
+            .url = "git+https://github.com/arrufat/zignal#9c824ba7a600e611fb6e3a708fc243be9f5b7693",
+            .hash = "zignal-0.11.0-dev-OrZ3s58cKADge6xp3X_XwEFOC07xk_WyoxaMf3Su5a5w",
         },
     },
 

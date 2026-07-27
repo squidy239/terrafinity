@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     defer config.deinit(gpa);
     try config.save(io, config_path, &config_lock);
 
-    try wio.init(gpa, io, wio.EventQueue.eventFn, .{});
+    try wio.init(.{ .allocator = gpa, .io = io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
     var events: wio.EventQueue = .empty;
@@ -54,7 +54,11 @@ pub fn main(init: std.process.Init) !void {
     var vk_ctx = try VulkanContext.init(gpa, &window);
     defer vk_ctx.deinit(io);
 
-    try createSwapchainForUi(io, vk_ctx, config.game_config.render_options.present_mode);
+    vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
+    vk_ctx.present_mode = config.game_config.render_options.present_mode;
+    vk_ctx.queue_mutex.lockUncancelable(io);
+    try vk_ctx.createSwapchainLocked(false);
+    vk_ctx.queue_mutex.unlock(io);
 
     var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
     defer backend.deinit();
@@ -176,7 +180,8 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
 
-        if (ui.menu_state.ingame) {
+        const is_ingame = ui.menu_state.ingame;
+        if (is_ingame) {
             const draw_ctx: Renderer.FrameDrawContext = .{
                 .frame_index = frame_ctx.frame_index,
                 .cmd_buffer = frame_ctx.cmd_buffer,
@@ -187,9 +192,10 @@ pub fn main(init: std.process.Init) !void {
             try game.frame(io, gpa, draw_ctx, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
         }
 
-        try recordUiPass(io, gpa, vk_ctx, &backend, &ui_window, &ui, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
+        try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
-        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], ui.menu_state.ingame);
+        const submit_game = is_ingame and ui.menu_state.ingame;
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
             error.OutOfDate, error.SurfaceLostKHR => {
@@ -266,14 +272,6 @@ fn pollInitialSize(io: std.Io, events: *wio.EventQueue, size: *wio.Size) void {
     }
 }
 
-fn createSwapchainForUi(io: std.Io, vk_ctx: *VulkanContext, present_mode: VulkanContext.PresentMode) !void {
-    vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
-    vk_ctx.present_mode = present_mode;
-    vk_ctx.queue_mutex.lockUncancelable(io);
-    try vk_ctx.createSwapchainLocked(false);
-    vk_ctx.queue_mutex.unlock(io);
-}
-
 fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode) void {
     vk_ctx.queue_mutex.lockUncancelable(io);
     defer vk_ctx.queue_mutex.unlock(io);
@@ -291,133 +289,6 @@ fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, g
         };
     }
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
-}
-
-fn recordUiPass(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    vk_ctx: *VulkanContext,
-    backend: *dvui.backend,
-    ui_window: *dvui.Window,
-    ui: *Ui,
-    cmd: vk.CommandBuffer,
-    frame_ctx: VulkanContext.FrameContext,
-    frame_time: std.Io.Timestamp,
-) !void {
-    const extent = vk_ctx.swapchain_extent;
-    const image_index = frame_ctx.image_index;
-    const image = vk_ctx.swapchain_images[image_index];
-    const view = vk_ctx.swapchain_views[image_index];
-    const initial_layout = vk_ctx.swapchain_image_layouts[image_index];
-    try vk_ctx.dev.resetCommandBuffer(cmd, .{});
-    try vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
-
-    transitionImageLayout(vk_ctx.dev, cmd, image, initial_layout, .color_attachment_optimal);
-    vk_ctx.swapchain_image_layouts[image_index] = .color_attachment_optimal;
-
-    const color_attachment = vk.RenderingAttachmentInfo{
-        .image_view = view,
-        .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{},
-        .resolve_image_layout = .undefined,
-        .load_op = .load,
-        .store_op = .store,
-        .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
-    };
-    vk_ctx.dev.cmdBeginRendering(cmd, &vk.RenderingInfo{
-        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
-        .layer_count = 1,
-        .view_mask = 0,
-        .color_attachment_count = 1,
-        .p_color_attachments = (&color_attachment)[0..1],
-    });
-
-    backend.setCommandBuffer(cmd, extent);
-    backend.beginFrame();
-    try drawUi(io, gpa, ui_window, ui, frame_time);
-    vk_ctx.dev.cmdEndRendering(cmd);
-
-    transitionImageLayout(vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
-    vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
-    try vk_ctx.dev.endCommandBuffer(cmd);
-}
-
-fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
-    const src_stage: vk.PipelineStageFlags2 = switch (old_layout) {
-        .undefined => .{ .top_of_pipe_bit = true },
-        .present_src_khr => .{ .bottom_of_pipe_bit = true },
-        .color_attachment_optimal => .{ .color_attachment_output_bit = true },
-        else => .{ .all_commands_bit = true },
-    };
-    const src_access: vk.AccessFlags2 = switch (old_layout) {
-        .undefined => .{},
-        .present_src_khr => .{},
-        .color_attachment_optimal => .{ .color_attachment_write_bit = true },
-        else => .{ .memory_read_bit = true, .memory_write_bit = true },
-    };
-    const barrier = vk.ImageMemoryBarrier2{
-        .src_stage_mask = src_stage,
-        .src_access_mask = src_access,
-        .dst_stage_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_output_bit = true } else .{ .bottom_of_pipe_bit = true },
-        .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true } else .{},
-        .old_layout = old_layout,
-        .new_layout = new_layout,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    dev.cmdPipelineBarrier2(cmd, &.{
-        .image_memory_barrier_count = 1,
-        .p_image_memory_barriers = (&barrier)[0..1],
-    });
-}
-
-fn drawUi(io: std.Io, gpa: std.mem.Allocator, ui_window: *dvui.Window, ui: *Ui, frame_time: std.Io.Timestamp) !void {
-    const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
-    defer dw.end();
-
-    try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-    var menu_changed: bool = false;
-    {
-        const ov = dvui.overlay(@src(), .{ .expand = .both });
-        defer ov.deinit();
-
-        if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) ui.debugInfo(io) catch |err| {
-            std.log.err("debugInfo failed: {}", .{err});
-        };
-        if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
-        if (ui.menu_state.esc and !menu_changed) menu_changed = ui.escMenu(io) catch false;
-        if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| blk: {
-            showWorldError(frame_time, err);
-            break :blk false;
-        };
-        if (ui.menu_state.settings and !menu_changed) menu_changed = ui.settingsMenu(io) catch false;
-        if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| blk: {
-            showWorldError(frame_time, err);
-            break :blk false;
-        };
-    }
-    _ = try ui_window.end(.{});
-}
-
-fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
-    var error_buffer: [65536]u8 = undefined;
-    var error_writer: std.Io.Writer = .fixed(&error_buffer);
-    switch (err) {
-        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
-        else => error_writer.print("{any}", .{err}) catch unreachable,
-    }
-    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
 }
 
 fn handleEvents(

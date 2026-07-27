@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const vk = @import("vulkan");
-const zigimg = @import("zigimg");
+const zignal = @import("zignal");
 
 const VulkanRenderer = @import("VulkanRenderer.zig");
 const Block = @import("../../world/Block.zig").Block;
@@ -92,8 +92,6 @@ pub const TextureManager = struct {
             self.destroyTexture(&self.default_texture);
         }
 
-        var read_buffer: [zigimg.io.DEFAULT_BUFFER_SIZE]u8 = undefined;
-
         var entry_names: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
             for (entry_names.items) |n| allocator.free(n);
@@ -134,14 +132,20 @@ pub const TextureManager = struct {
             const texture_file = try dir.openFile(io, name, .{});
             defer texture_file.close(io);
 
-            var loaded_img = try zigimg.Image.fromFile(allocator, io, texture_file, &read_buffer);
+            var read_buffer: [8192]u8 = undefined;
+            const stat = try texture_file.stat(io);
+            const content = try allocator.alloc(u8, stat.size);
+            defer allocator.free(content);
+            var reader = texture_file.reader(io, &read_buffer);
+            try reader.interface.readSliceAll(content);
+
+            var loaded_img = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, content);
             defer loaded_img.deinit(allocator);
-            try loaded_img.convert(allocator, .rgba32);
 
-            const w: u32 = @intCast(loaded_img.width);
-            const h: u32 = @intCast(loaded_img.height);
+            const w: u32 = @intCast(loaded_img.cols);
+            const h: u32 = @intCast(loaded_img.rows);
 
-            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(block_type), w, h, loaded_img.rawBytes(), format);
+            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(block_type), w, h, loaded_img.asBytes(), format);
             staging_slices.appendAssumeCapacity(staging);
         }
 

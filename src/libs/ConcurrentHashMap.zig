@@ -1,9 +1,9 @@
 const std = @import("std");
 
-pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64, comptime bucketamount: u32) type {
+pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime bucketamount: u32) type {
     return struct {
         const Map = @This();
-        pub const Bkt = Bucket(K, V, Context, maxloadpercentage);
+        pub const Bkt = Bucket(K, V, Context);
         ctx: Context,
         buckets: [bucketamount]Bkt,
 
@@ -52,12 +52,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return self.buckets[bucket_index].fetchRemove(io, key);
         }
 
-        pub fn getAndAddRefNoLock(self: *Self, key: K) ?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
-            return self.buckets[bucket_index].getAndAddRefNoLock(key);
-        }
-
         pub fn getPtr(self: *Self, io: std.Io, key: K) ?*V {
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
@@ -68,12 +62,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucketamount);
             try self.buckets[bucket_index].put(io, allocator, key, value);
-        }
-
-        pub fn increment(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, amount: i32) !void {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
-            try self.buckets[bucket_index].increment(io, allocator, key, amount);
         }
 
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
@@ -99,9 +87,9 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
         }
 
         pub const init = blk: {
-            var bkts: [bucketamount]Bucket(K, V, Context, maxloadpercentage) = undefined;
+            var bkts: [bucketamount]Bucket(K, V, Context) = undefined;
             for (0..bucketamount) |i| {
-                bkts[i] = Bucket(K, V, Context, maxloadpercentage).init();
+                bkts[i] = Bucket(K, V, Context).init();
             }
             break :blk @This(){
                 .ctx = Context{},
@@ -178,8 +166,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
     };
 }
 
-fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime maxloadpercentage: u64) type {
-    _ = maxloadpercentage;
+fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
     return struct {
         const Self = @This();
         const Map = std.HashMapUnmanaged(K, V, Context, 80);
@@ -221,12 +208,6 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             return val;
         }
 
-        pub fn getAndAddRefNoLock(self: *Self, key: K) ?V {
-            const val = self.hash_map.get(key) orelse return null;
-            _ = val.ref_count.fetchAdd(1, .seq_cst);
-            return val;
-        }
-
         pub fn getPtr(self: *Self, io: std.Io, key: K) ?*V {
             self.lock.lockSharedUncancelable(io);
             defer self.lock.unlockShared(io);
@@ -263,20 +244,9 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
             try self.hash_map.put(allocator, key, value);
         }
 
-        pub fn increment(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, amount: i32) !void {
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
-            const gop = try self.hash_map.getOrPut(allocator, key, 0);
-            gop.value_ptr.* += amount;
-        }
-
         pub fn remove(self: *Self, io: std.Io, key: K) bool {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
-            return self.hash_map.remove(key);
-        }
-
-        pub fn removeManualLock(self: *Self, key: K) bool {
             return self.hash_map.remove(key);
         }
 
@@ -291,7 +261,7 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type, comptime m
 test "ConcurrentHashMap basic" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init;
+    var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 4).init;
     defer map.deinit(io, allocator);
 
     try map.put(io, allocator, 1, 10);
@@ -309,7 +279,7 @@ test "ConcurrentHashMap allocation failure" {
     const io = std.testing.io;
     const test_fn = struct {
         fn run(allocator: std.mem.Allocator, _io: std.Io) !void {
-            var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 80, 4).init;
+            var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 4).init;
             defer map.deinit(_io, allocator);
             try map.put(_io, allocator, 1, 10);
             try map.put(_io, allocator, 2, 20);

@@ -2,7 +2,9 @@ const std = @import("std");
 
 const dvui = @import("dvui");
 const wio = @import("wio");
-const zigimg = @import("zigimg");
+const zignal = @import("zignal");
+const tracy = @import("tracy");
+const vk = @import("vulkan");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Config = @import("main.zig").Config;
@@ -48,12 +50,11 @@ menu_state: struct {
 },
 
 pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
-    var image = try zigimg.Image.fromMemory(allocator, menu_background_image);
+    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
     defer image.deinit(allocator);
-    try image.convert(allocator, .rgba32);
-    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), .{
-        .width = @intCast(image.width),
-        .height = @intCast(image.height),
+    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
+        .width = @intCast(image.cols),
+        .height = @intCast(image.rows),
         .format = .rgba_32,
         .interpolation = .linear,
     });
@@ -61,6 +62,94 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
 
 pub fn deinit(self: *@This()) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
+}
+
+fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
+    var error_buffer: [65536]u8 = undefined;
+    var error_writer: std.Io.Writer = .fixed(&error_buffer);
+    switch (err) {
+        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+        else => error_writer.print("{any}", .{err}) catch unreachable,
+    }
+    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
+}
+
+pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time: std.Io.Timestamp) !void {
+    const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+    defer dw.end();
+
+    try self.ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+    var menu_changed: bool = false;
+    {
+        const ov = dvui.overlay(@src(), .{ .expand = .both });
+        defer ov.deinit();
+
+        if (self.menu_state.debug_info and self.menu_state.ingame and !menu_changed) self.debugInfo(io) catch |err| {
+            std.log.err("debugInfo failed: {}", .{err});
+        };
+        if (self.menu_state.crosshair and self.menu_state.ingame and !menu_changed) self.crossHair();
+        if (self.menu_state.esc and !menu_changed) menu_changed = self.escMenu(io) catch false;
+        if (self.menu_state.main and !menu_changed) menu_changed = self.mainPage(io, gpa) catch |err| blk: {
+            showWorldError(frame_time, err);
+            break :blk false;
+        };
+        if (self.menu_state.settings and !menu_changed) menu_changed = self.settingsMenu(io) catch false;
+        if (self.menu_state.newgame and !menu_changed) menu_changed = self.newGameMenu(io, gpa) catch |err| blk: {
+            showWorldError(frame_time, err);
+            break :blk false;
+        };
+    }
+    _ = try self.ui_window.end(.{});
+}
+
+pub fn recordCommandBuffer(
+    self: *@This(),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    backend: *dvui.backend,
+    cmd: vk.CommandBuffer,
+    frame_ctx: VulkanContext.FrameContext,
+    frame_time: std.Io.Timestamp,
+) !void {
+    const extent = self.vk_ctx.swapchain_extent;
+    const image_index = frame_ctx.image_index;
+    const image = self.vk_ctx.swapchain_images[image_index];
+    const view = self.vk_ctx.swapchain_views[image_index];
+    const initial_layout = self.vk_ctx.swapchain_image_layouts[image_index];
+    try self.vk_ctx.dev.resetCommandBuffer(cmd, .{});
+    try self.vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
+
+    VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, initial_layout, .color_attachment_optimal);
+    self.vk_ctx.swapchain_image_layouts[image_index] = .color_attachment_optimal;
+
+    const color_attachment = vk.RenderingAttachmentInfo{
+        .image_view = view,
+        .image_layout = .color_attachment_optimal,
+        .resolve_mode = .{},
+        .resolve_image_layout = .undefined,
+        .load_op = .load,
+        .store_op = .store,
+        .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+    };
+    self.vk_ctx.dev.cmdBeginRendering(cmd, &vk.RenderingInfo{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .layer_count = 1,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachments = (&color_attachment)[0..1],
+    });
+
+    backend.setCommandBuffer(cmd, extent);
+    backend.beginFrame();
+    try self.drawFrame(io, gpa, frame_time);
+    self.vk_ctx.dev.cmdEndRendering(cmd);
+
+    VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
+    self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+    try self.vk_ctx.dev.endCommandBuffer(cmd);
 }
 
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {

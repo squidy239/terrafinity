@@ -184,8 +184,7 @@ pub fn addEvent(self: *@This(), win: *dvui.Window, event: wio.Event) !bool {
             try win.addEventWindow(.{ .action = .close });
             return false;
         },
-        .focused => {
-            const modifiers = wio.getModifiers();
+        .modifiers => |modifiers| {
             if (modifiers.shift) self.mod.combine(.lshift);
             if (modifiers.control) self.mod.combine(.lcontrol);
             if (modifiers.alt) self.mod.combine(.lalt);

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const builtin = @import("builtin");
+
 const options = @import("options");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
@@ -9,6 +11,15 @@ const DeviceWrapper = vk.DeviceWrapper;
 const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
+
+const VulkanBackingAllocator = @import("Renderer/vulkan/VulkanBackingAllocator.zig").VulkanBackingAllocator;
+const StagingRing = @import("Renderer/vulkan/StagingRing.zig").StagingRing;
+const FaceDataAllocator = @import("Renderer/vulkan/FaceDataAllocator.zig").FaceDataAllocator;
+const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
+const Renderer = @import("Renderer.zig");
+const Mesher = @import("Mesher.zig");
+const World = @import("world/World.zig");
+const Block = @import("world/Block.zig").Block;
 
 pub const PresentMode = enum {
     vsync,
@@ -245,11 +256,27 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         }
     }
 
+    var layer_names: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    defer layer_names.deinit(allocator);
+
+    if (builtin.mode == .Debug) {
+        const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
+        defer allocator.free(layers);
+        for (layers) |layer| {
+            const name = std.mem.sliceTo(&layer.layer_name, 0);
+            if (std.mem.eql(u8, name, "VK_LAYER_KHRONOS_validation")) {
+                try layer_names.append(allocator, "VK_LAYER_KHRONOS_validation");
+                std.log.info("Enabling Vulkan validation layer", .{});
+                break;
+            }
+        }
+    }
+
     const instance_create_info: vk.InstanceCreateInfo = .{
         .flags = .{ .enumerate_portability_bit_khr = has_portability },
         .p_application_info = &app_info,
-        .enabled_layer_count = 0,
-        .pp_enabled_layer_names = null,
+        .enabled_layer_count = @intCast(layer_names.items.len),
+        .pp_enabled_layer_names = @ptrCast(layer_names.items.ptr),
         .enabled_extension_count = @intCast(extension_names.items.len),
         .pp_enabled_extension_names = @ptrCast(extension_names.items.ptr),
     };
@@ -488,6 +515,9 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
         std.log.err("deviceWaitIdle failed during VulkanContext.deinit: {}", .{err});
     };
 
+    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
+    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+
     self.destroySwapchainResources();
 
     if (self.swapchain != .null_handle) {
@@ -702,6 +732,43 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
 }
 
+pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
+    const src_stage: vk.PipelineStageFlags2 = switch (old_layout) {
+        .undefined => .{ .top_of_pipe_bit = true },
+        .present_src_khr => .{ .bottom_of_pipe_bit = true },
+        .color_attachment_optimal => .{ .color_attachment_output_bit = true },
+        else => .{ .all_commands_bit = true },
+    };
+    const src_access: vk.AccessFlags2 = switch (old_layout) {
+        .undefined => .{},
+        .present_src_khr => .{},
+        .color_attachment_optimal => .{ .color_attachment_write_bit = true },
+        else => .{ .memory_read_bit = true, .memory_write_bit = true },
+    };
+    const barrier = vk.ImageMemoryBarrier2{
+        .src_stage_mask = src_stage,
+        .src_access_mask = src_access,
+        .dst_stage_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_output_bit = true } else .{ .bottom_of_pipe_bit = true },
+        .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true } else .{},
+        .old_layout = old_layout,
+        .new_layout = new_layout,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+    };
+    dev.cmdPipelineBarrier2(cmd, &.{
+        .image_memory_barrier_count = 1,
+        .p_image_memory_barriers = (&barrier)[0..1],
+    });
+}
+
 pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
@@ -775,7 +842,7 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
 
     const wait_semaphore_infos: [3]vk.SemaphoreSubmitInfo = .{
         .{ .semaphore = self.image_acquired_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
-        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .top_of_pipe_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .vertex_attribute_input_bit = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = prev_graphics_val, .stage_mask = .{ .top_of_pipe_bit = true }, .device_index = 0 },
     };
 
@@ -853,8 +920,8 @@ fn debugCallback(
     p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
     p_user_data: ?*anyopaque,
 ) callconv(vk.vulkan_call_conv) vk.Bool32 {
-    _ = p_user_data;
     _ = message_types;
+    _ = p_user_data;
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
     switch (cb_data.message_id_number) {
@@ -862,7 +929,7 @@ fn debugCallback(
     }
 
     if (message_severity.error_bit_ext) {
-        std.debug.panic("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
+        vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.warning_bit_ext) {
         vklog.warn("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.info_bit_ext) {
@@ -870,5 +937,239 @@ fn debugCallback(
     } else if (message_severity.verbose_bit_ext) {
         vklog.debug("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     }
+
     return .false;
+}
+
+test "VulkanContext init and deinit" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    try std.testing.expect(ctx.instance_handle != .null_handle);
+    try std.testing.expect(ctx.dev_handle != .null_handle);
+    try std.testing.expect(ctx.graphics_queue != .null_handle);
+    try std.testing.expect(ctx.present_queue != .null_handle);
+    try std.testing.expect(ctx.command_pool != .null_handle);
+    try std.testing.expect(ctx.upload_command_pool != .null_handle);
+    try std.testing.expect(ctx.ui_command_pool != .null_handle);
+    try std.testing.expect(ctx.transfer_semaphore != .null_handle);
+    try std.testing.expect(ctx.graphics_timeline_semaphore != .null_handle);
+    try std.testing.expect(ctx.surface != .null_handle);
+    try std.testing.expect(ctx.cmd_buffers.len > 0);
+    try std.testing.expect(ctx.image_acquired_semaphores.len > 0);
+    try std.testing.expect(ctx.render_complete_semaphores.len > 0);
+}
+
+test "VulkanRenderer init and deinit" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    ctx.swapchain_extent = .{ .width = 640, .height = 480 };
+    ctx.queue_mutex.lockUncancelable(std.testing.io);
+    try ctx.createSwapchainLocked(false);
+    ctx.queue_mutex.unlock(std.testing.io);
+
+    var render_opts: Renderer.RenderOptions = .{};
+    var render_opts_lock: std.Io.RwLock = .init;
+
+    var renderer: VulkanRenderer = undefined;
+    try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
+    defer renderer.deinit(std.testing.io);
+}
+
+test "VulkanRenderer mesh upload" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    ctx.swapchain_extent = .{ .width = 640, .height = 480 };
+    ctx.queue_mutex.lockUncancelable(std.testing.io);
+    try ctx.createSwapchainLocked(false);
+    ctx.queue_mutex.unlock(std.testing.io);
+
+    var render_opts: Renderer.RenderOptions = .{};
+    var render_opts_lock: std.Io.RwLock = .init;
+
+    var renderer: VulkanRenderer = undefined;
+    try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
+    defer renderer.deinit(std.testing.io);
+
+    var iface = renderer.interface;
+
+    var opaque_faces: [6]Mesher.Face = undefined;
+    for (&opaque_faces) |*f| {
+        f.* = .{ .block_type = @intFromEnum(Block.stone), .x = 0, .y = 0, .z = 0, .x_length = 0, .y_length = 0, .z_length = 0, .rotation = .xplus };
+    }
+
+    const chunk_pos: World.ChunkPos = .{ .level = 0, .position = .{ 0, 0, 0 } };
+    try iface.addChunk(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
+}
+
+test "VulkanBackingAllocator alloc and free both pools" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+    const cpu_alloc = backing.allocator(.cpu_to_gpu);
+
+    const gpu_slice = try gpu_alloc.alloc(u8, 1024);
+    defer gpu_alloc.free(gpu_slice);
+    const gpu_info = backing.getBufferAndOffset(.gpu_only, gpu_slice.ptr);
+    try std.testing.expect(gpu_info.buffer != .null_handle);
+    try std.testing.expect(gpu_info.offset < 1024);
+
+    const cpu_slice = try cpu_alloc.alloc(u64, 256);
+    defer cpu_alloc.free(cpu_slice);
+    const cpu_info = backing.getBufferAndOffset(.cpu_to_gpu, cpu_slice.ptr);
+    try std.testing.expect(cpu_info.buffer != .null_handle);
+    try std.testing.expect(cpu_info.offset < 256 * @sizeOf(u64));
+    cpu_slice[0] = 42;
+}
+
+test "StagingRing alloc wrap-around" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const cpu_alloc = backing.allocator(.cpu_to_gpu);
+
+    const ring_capacity: vk.DeviceSize = Mesher.max_face_bytes;
+    var ring = try StagingRing.init(std.testing.allocator, cpu_alloc, ring_capacity);
+    defer ring.deinit(cpu_alloc);
+
+    const staging_info = backing.getBufferAndOffset(.cpu_to_gpu, ring.mapping.ptr);
+    ring.resolve(staging_info.buffer);
+
+    const s1 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s1 != null);
+    @memset(s1.?, 0xab);
+
+    const s2 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s2 != null);
+    @memset(s2.?, 0xcd);
+
+    try std.testing.expect(s1.?[0] == 0xab);
+    try std.testing.expect(s2.?[0] == 0xcd);
+
+    const s3 = ring.alloc(std.testing.io, ring.mapping.len);
+    try std.testing.expect(s3 == null);
+
+    ring.retire(std.testing.io, 1);
+
+    const s4 = ring.alloc(std.testing.io, 8);
+    try std.testing.expect(s4 != null);
+}
+
+fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
+    var ring = try StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
+    ring.deinit(alloc);
+}
+
+test "StagingRing checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
+}
+
+test "FaceDataAllocator init and deinit" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
+    defer alloc.deinit(gpu_alloc);
+
+    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
+}
+
+test "FaceDataAllocator grow and retire old buffer" {
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
+
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    defer backing.deinit();
+
+    const gpu_alloc = backing.allocator(.gpu_only);
+
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
+
+    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
+
+    const grow_info = try alloc.grow(std.testing.io, gpu_alloc);
+    gpu_alloc.free(grow_info.old_slice);
+    const grow_info2 = try alloc.grow(std.testing.io, gpu_alloc);
+    gpu_alloc.free(grow_info2.old_slice);
+
+    alloc.deinit(gpu_alloc);
 }

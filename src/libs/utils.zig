@@ -1,9 +1,5 @@
 const std = @import("std");
 
-pub fn outOfSquareRange(chunk_pos: @Vector(3, i32), range: @Vector(3, i32)) bool {
-    return @reduce(.Or, @as(@Vector(3, i32), @intCast(@abs(chunk_pos))) > range);
-}
-
 pub fn loadZon(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: std.mem.Allocator, allocator: std.mem.Allocator) !T {
     var buf: [1024]u8 = undefined;
     const stat = try file.stat(io);
