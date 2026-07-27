@@ -117,6 +117,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = root_module,
+        .use_llvm = true,
     });
 
     tests.root_module.addCSourceFile(.{

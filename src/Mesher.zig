@@ -8,6 +8,8 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 
 const Mesher = @This();
 
+pub const max_face_bytes = ChunkSize * ChunkSize * ChunkSize * 6 * @sizeOf(Face);
+
 pub const Face = packed struct(u64) {
     const CoordInChunk = Chunk.Int;
     block_type: Block.Tag,

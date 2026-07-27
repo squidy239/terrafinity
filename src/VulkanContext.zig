@@ -1082,9 +1082,12 @@ test "StagingRing alloc wrap-around" {
 
     const cpu_alloc = backing.allocator(.cpu_to_gpu);
 
-    const max_face_bytes: vk.DeviceSize = 16;
-    var ring = try StagingRing.init(std.testing.allocator, cpu_alloc, max_face_bytes);
+    const ring_capacity: vk.DeviceSize = Mesher.max_face_bytes;
+    var ring = try StagingRing.init(std.testing.allocator, cpu_alloc, ring_capacity);
     defer ring.deinit(cpu_alloc);
+
+    const staging_info = backing.getBufferAndOffset(.cpu_to_gpu, ring.mapping.ptr);
+    ring.resolve(staging_info.buffer);
 
     const s1 = ring.alloc(std.testing.io, 8);
     try std.testing.expect(s1 != null);
@@ -1097,7 +1100,7 @@ test "StagingRing alloc wrap-around" {
     try std.testing.expect(s1.?[0] == 0xab);
     try std.testing.expect(s2.?[0] == 0xcd);
 
-    const s3 = ring.alloc(std.testing.io, ring.capacity);
+    const s3 = ring.alloc(std.testing.io, ring.mapping.len);
     try std.testing.expect(s3 == null);
 
     ring.retire(std.testing.io, 1);
@@ -1107,7 +1110,7 @@ test "StagingRing alloc wrap-around" {
 }
 
 fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
-    var ring = try StagingRing.init(alloc, alloc, 16);
+    var ring = try StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
     ring.deinit(alloc);
 }
 
@@ -1133,7 +1136,7 @@ test "FaceDataAllocator init and deinit" {
 
     const gpu_alloc = backing.allocator(.gpu_only);
 
-    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc);
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
     defer alloc.deinit(gpu_alloc);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
@@ -1158,14 +1161,14 @@ test "FaceDataAllocator grow and retire old buffer" {
 
     const gpu_alloc = backing.allocator(.gpu_only);
 
-    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc);
+    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
     alloc.resolve(buf_info.buffer, buf_info.offset);
 
-    const grow_info = try alloc.grow(gpu_alloc);
+    const grow_info = try alloc.grow(std.testing.io, gpu_alloc);
     gpu_alloc.free(grow_info.old_slice);
-    const grow_info2 = try alloc.grow(gpu_alloc);
+    const grow_info2 = try alloc.grow(std.testing.io, gpu_alloc);
     gpu_alloc.free(grow_info2.old_slice);
 
     alloc.deinit(gpu_alloc);

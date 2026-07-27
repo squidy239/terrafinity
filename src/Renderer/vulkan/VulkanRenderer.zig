@@ -4,7 +4,6 @@ const tracy = @import("tracy");
 const vk = @import("vulkan");
 const DeviceProxy = vk.DeviceProxy;
 const zm = @import("zm");
-
 const ConcurrentHashMap = @import("../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const utils = @import("../../libs/utils.zig");
 const Mesher = @import("../../Mesher.zig");
@@ -496,7 +495,6 @@ output_color_view: vk.ImageView = .null_handle,
 swapchain_image_old_layout: vk.ImageLayout = .undefined,
 swapchain_image_layout_ptr: ?*vk.ImageLayout = null,
 
-
 fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{self.render_options.selected_pack});
     defer allocator.free(pack_path);
@@ -792,16 +790,15 @@ fn initMemoryManagement(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Al
     self.cpu_to_gpu_gpa.backing_allocator = self.backing_allocator.allocator(.cpu_to_gpu);
     errdefer _ = self.cpu_to_gpu_gpa.deinit();
 
-    self.face_allocator = try FaceDataAllocator.init(allocator, self.gpu_only_gpa.allocator());
+    self.face_allocator = try FaceDataAllocator.init(allocator, self.gpu_only_gpa.allocator(), 64 * 1024 * 1024);
     errdefer self.face_allocator.deinit(self.gpu_only_gpa.allocator());
     const face_buf_info = self.backing_allocator.getBufferAndOffset(.gpu_only, self.face_allocator.buffer_slice.ptr);
     self.face_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
 
     const max_face_bytes = @as(vk.DeviceSize, World.ChunkSize) * World.ChunkSize * World.ChunkSize * 6 * @sizeOf(Mesher.Face);
-    self.staging_ring = try StagingRing.init(allocator, self.cpu_to_gpu_gpa.allocator(), max_face_bytes);
-    errdefer self.staging_ring.deinit(self.cpu_to_gpu_gpa.allocator());
+    self.staging_ring = try .init(allocator, self.cpu_to_gpu_gpa.allocator(), max_face_bytes * 64);
     const staging_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.staging_ring.mapping.ptr);
-    self.staging_ring.resolve(staging_info.buffer, staging_info.offset);
+    self.staging_ring.resolve(staging_info.buffer);
 }
 
 fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !void {
@@ -818,7 +815,6 @@ fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !v
     self.retired_candidate_slices = .empty;
 
     self.index_pool = try IndexPool.init(allocator, initial_capacity);
-    errdefer self.index_pool.deinit(allocator);
     self.max_allocated_index = .init(0);
 
     self.pending_uploads_queue = std.Io.Queue(PendingChunkUpload).init(&self.pending_uploads_queue_buffer);
@@ -1310,7 +1306,7 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
         .p_image_memory_barriers = null,
     });
 
-    return UploadResult{
+    return .{
         .mesh = ChunkMeshBuffer{
             .face_offset = @intCast(face_byte_offset / @sizeOf(Mesher.Face)),
             .face_byte_count = buffer_size,
@@ -1351,7 +1347,7 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
             _ = try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
         }
 
-        const grow_info = try self.face_allocator.grow(self.gpu_only_gpa.allocator());
+        const grow_info = try self.face_allocator.grow(io, self.gpu_only_gpa.allocator());
 
         const face_buf_info = self.backing_allocator.getBufferAndOffset(.gpu_only, self.face_allocator.buffer_slice.ptr);
         self.face_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
@@ -1368,7 +1364,7 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         };
         const copy_buffer_info: vk.CopyBufferInfo2 = .{
             .src_buffer = grow_info.old_buffer,
-            .dst_buffer = self.face_allocator.buffer,
+            .dst_buffer = self.face_allocator.buffer.?,
             .region_count = 1,
             .p_regions = (&copy_region)[0..1],
         };
@@ -1496,7 +1492,7 @@ fn cmdAcquireFaceBuffer(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer) voi
     cmdBufferBarrier2(
         cmd_buffer,
         self.dev,
-        self.face_allocator.buffer,
+        self.face_allocator.buffer.?,
         self.face_allocator.buffer_offset,
         self.face_allocator.used,
         .{ .vertex_attribute_input_bit = true },
@@ -1805,7 +1801,7 @@ fn recordOpaquePass(
         const opaque_byte_offset: vk.DeviceSize = frame.indirect_draw_offset;
         const opaque_count_byte_offset: vk.DeviceSize = frame.count_offset;
 
-        const face_buf = self.face_allocator.buffer;
+        const face_buf = self.face_allocator.buffer.?;
         const face_buf_off: vk.DeviceSize = self.face_allocator.buffer_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buf)[0..1], (&face_buf_off)[0..1]);
 
@@ -1911,9 +1907,9 @@ fn recordTransparentPass(
     if (total_candidates > 0) {
         const frame = &self.frame_buffers.items[current_frame];
         const transparent_byte_offset: vk.DeviceSize = frame.indirect_draw_offset + @as(vk.DeviceSize, @intCast(self.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
-        const transparent_count_byte_offset: vk.DeviceSize = frame.count_offset + @as(vk.DeviceSize, @offsetOf(CullCount, "transparent_count"));
+        const transparent_count_byte_offset: vk.DeviceSize = frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(CullCount, "transparent_count")));
 
-        const face_buf = self.face_allocator.buffer;
+        const face_buf = self.face_allocator.buffer.?;
         const face_buf_off: vk.DeviceSize = self.face_allocator.buffer_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buf)[0..1], (&face_buf_off)[0..1]);
 
@@ -3081,4 +3077,8 @@ test "findMemoryType" {
 test "ChunkData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(ChunkData));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(ChunkData));
+}
+
+test "ref decls" {
+    std.testing.refAllDecls(@This());
 }

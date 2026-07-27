@@ -2,33 +2,30 @@ const std = @import("std");
 const vk = @import("vulkan");
 
 const Slot = struct {
-    offset: vk.DeviceSize,
-    timeline_value: u64,
+    ptr: [*]const u8,
+    timeline_value: ?u64,
 };
 
 pub const StagingRing = struct {
+    const transfer_alignment: vk.DeviceSize = 256;
+
     allocator: std.mem.Allocator,
 
-    mapping: []align(256) u8,
-    buffer: vk.Buffer,
-    buffer_offset: vk.DeviceSize,
-    capacity: vk.DeviceSize,
+    mapping: []align(transfer_alignment) u8,
+    buffer: ?vk.Buffer,
 
     head: vk.DeviceSize,
     entries: std.ArrayList(Slot),
     mutex: std.Io.Mutex = .init,
 
-    pub fn init(allocator: std.mem.Allocator, cpu_to_gpu_allocator: std.mem.Allocator, max_face_bytes: vk.DeviceSize) !StagingRing {
-        const capacity = max_face_bytes * 64;
-        const mapping = try cpu_to_gpu_allocator.alignedAlloc(u8, .fromByteUnits(256), capacity);
+    pub fn init(allocator: std.mem.Allocator, cpu_to_gpu_allocator: std.mem.Allocator, capacity_bytes: vk.DeviceSize) !StagingRing {
+        const mapping = try cpu_to_gpu_allocator.alignedAlloc(u8, .fromByteUnits(transfer_alignment), capacity_bytes);
         errdefer cpu_to_gpu_allocator.free(mapping);
 
-        return StagingRing{
+        return .{
             .allocator = allocator,
             .mapping = mapping,
-            .buffer = .null_handle,
-            .buffer_offset = 0,
-            .capacity = capacity,
+            .buffer = null,
             .head = 0,
             .entries = .empty,
         };
@@ -39,49 +36,51 @@ pub const StagingRing = struct {
         self.entries.deinit(self.allocator);
     }
 
-    pub fn resolve(self: *StagingRing, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) void {
+    pub fn resolve(self: *StagingRing, buffer: vk.Buffer) void {
+        std.debug.assert(buffer != .null_handle);
         self.buffer = buffer;
-        self.buffer_offset = buffer_offset;
     }
 
     pub fn alloc(self: *StagingRing, io: std.Io, size: vk.DeviceSize) ?[]u8 {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const alignment: vk.DeviceSize = 256;
-        const aligned = (size + alignment - 1) / alignment * alignment;
-
-        if (aligned > self.capacity)
+        if (self.buffer == null)
             return null;
 
-        if (self.head + aligned > self.capacity) {
+        const aligned = std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
+
+        if (aligned > self.mapping.len)
+            return null;
+
+        if (self.head + aligned > self.mapping.len) {
             if (self.entries.items.len > 0)
                 return null;
             self.head = 0;
         }
 
-        const offset = self.head;
-        self.entries.append(self.allocator, .{ .offset = offset, .timeline_value = std.math.maxInt(u64) }) catch return null;
+        const slice = self.mapping[self.head..][0..@intCast(size)];
+        self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch return null;
         self.head += aligned;
 
-        return self.mapping[offset..][0..@intCast(size)];
-    }
-
-    fn findSlot(self: *StagingRing, slice: []const u8) ?usize {
-        const off = @intFromPtr(slice.ptr) - @intFromPtr(self.mapping.ptr);
-        for (self.entries.items, 0..) |e, i| {
-            if (e.offset == off) return i;
-        }
-        return null;
+        return slice;
     }
 
     pub fn bind(self: *StagingRing, io: std.Io, slice: []const u8, timeline_value: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.findSlot(slice)) |i| {
-            self.entries.items[i].timeline_value = timeline_value;
+        for (self.entries.items) |*e| {
+            if (e.ptr == slice.ptr) {
+                e.timeline_value = timeline_value;
+                return;
+            }
         }
+    }
+
+    fn maybeReset(self: *StagingRing) void {
+        if (self.entries.items.len == 0)
+            self.head = 0;
     }
 
     pub fn retire(self: *StagingRing, io: std.Io, current_transfer_val: u64) void {
@@ -90,20 +89,25 @@ pub const StagingRing = struct {
 
         while (self.entries.items.len > 0) {
             const e = self.entries.items[0];
-            if (e.timeline_value != 0 and current_transfer_val < e.timeline_value) break;
-            _ = self.entries.swapRemove(0);
+            const tv = e.timeline_value orelse break;
+            if (current_transfer_val < tv) break;
+            _ = self.entries.orderedRemove(0);
         }
 
-        if (self.entries.items.len == 0)
-            self.head = 0;
+        self.maybeReset();
     }
 
     pub fn cancel(self: *StagingRing, io: std.Io, slice: []const u8) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.findSlot(slice)) |i| {
-            _ = self.entries.swapRemove(i);
+        for (self.entries.items, 0..) |e, i| {
+            if (e.ptr == slice.ptr) {
+                std.debug.assert(e.timeline_value == null);
+                _ = self.entries.swapRemove(i);
+                self.maybeReset();
+                return;
+            }
         }
     }
 };

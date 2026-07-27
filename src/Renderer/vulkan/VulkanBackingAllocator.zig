@@ -11,8 +11,7 @@ const log = std.log.scoped(.vulkan_backing_allocator);
 pub const GpuBlock = struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
-    pool: MemoryPool,
-    raw_alloc: []u8 = &.{},
+    raw_alloc: []u8 = &.{}, // safety sentinel for getBlock range check
 };
 
 pub const MemoryPool = enum {
@@ -32,12 +31,12 @@ pub const VulkanBackingAllocator = struct {
     blocks: [std.meta.fields(MemoryPool).len]std.AutoHashMapUnmanaged(usize, GpuBlock) = .{ .{}, .{} },
     meta_allocator: std.mem.Allocator,
 
-    pub fn init(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, io: std.Io, meta_allocator: std.mem.Allocator) VulkanBackingAllocator {
+    pub fn init(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, io: std.Io, hashmap_allocator: std.mem.Allocator) VulkanBackingAllocator {
         return .{
             .dev = dev,
             .mem_props = mem_props,
             .io = io,
-            .meta_allocator = meta_allocator,
+            .meta_allocator = hashmap_allocator,
         };
     }
 
@@ -61,6 +60,9 @@ pub const VulkanBackingAllocator = struct {
         };
     }
 
+    /// Returns the buffer handle and byte offset for a pointer into a block.
+    /// The caller must own the pointer and may not call this concurrently with
+    /// any alloc or free in this pool.
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
         const block = self.getBlock(pool, ptr);
         const offset = @intFromPtr(ptr) - @intFromPtr(block.raw_alloc.ptr);
@@ -68,9 +70,6 @@ pub const VulkanBackingAllocator = struct {
     }
 
     fn getBlock(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) GpuBlock {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
         const addr = @intFromPtr(ptr);
         var it = self.blocks[@intFromEnum(pool)].valueIterator();
         while (it.next()) |block| {
@@ -81,7 +80,7 @@ pub const VulkanBackingAllocator = struct {
     }
 
     fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
-        const count = @min(self.mem_props.memory_type_count, 32);
+        const count = @min(self.mem_props.memory_type_count, self.mem_props.memory_types.len);
         for (self.mem_props.memory_types[0..count], 0..) |memory_type, index| {
             const bit = @as(u5, @intCast(index));
             if ((type_filter & (@as(u32, 1) << bit)) != 0 and (memory_type.property_flags.toInt() & required_properties.toInt()) == required_properties.toInt()) {
@@ -91,16 +90,16 @@ pub const VulkanBackingAllocator = struct {
         return error.MemoryTypeNotFound;
     }
 
-    fn destroyBlockResources(self: *VulkanBackingAllocator, block: GpuBlock) void {
+    fn destroyBlockResources(self: *VulkanBackingAllocator, block: GpuBlock, pool: MemoryPool) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "destroyBlockResources" });
         defer zone.end();
 
         self.dev.destroyBuffer(block.buffer, null);
 
-        if (block.pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
+        if (pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
         self.dev.freeMemory(block.memory, null);
 
-        if (block.pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
+        if (pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 
     fn allocBlock(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ![]u8 {
@@ -108,19 +107,32 @@ pub const VulkanBackingAllocator = struct {
         defer zone.end();
 
         const alignment_bytes = alignment.toByteUnits();
-        const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len;
+        const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len; // room for alignment padding
 
         const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, alloc_len);
         errdefer self.dev.freeMemory(memory, null);
         errdefer self.dev.destroyBuffer(buffer, null);
 
+        var raw_cpu_guard: ?[]u8 = null;
+        errdefer {
+            if (raw_cpu_guard) |rc| {
+                if (pool == .cpu_to_gpu) {
+                    self.dev.unmapMemory(memory);
+                } else {
+                    self.meta_allocator.free(rc);
+                }
+            }
+        }
+
         const raw_cpu: []u8 = if (pool == .cpu_to_gpu) blk: {
             const mapped: [*]u8 = @ptrCast(try self.dev.mapMemory(memory, 0, mem_size, .{}));
+            raw_cpu_guard = mapped[0..mem_size];
             break :blk mapped[0..mem_size];
-        } else try self.meta_allocator.alloc(u8, mem_size);
-        errdefer {
-            if (pool == .cpu_to_gpu) self.dev.unmapMemory(memory) else self.meta_allocator.free(raw_cpu);
-        }
+        } else blk: {
+            const alloc = try self.meta_allocator.alloc(u8, mem_size);
+            raw_cpu_guard = alloc;
+            break :blk alloc;
+        };
 
         const raw_addr = @intFromPtr(raw_cpu.ptr);
         const aligned_addr = alignment.forward(raw_addr);
@@ -129,7 +141,6 @@ pub const VulkanBackingAllocator = struct {
         const block: GpuBlock = .{
             .memory = memory,
             .buffer = buffer,
-            .pool = pool,
             .raw_alloc = raw_cpu,
         };
 
@@ -185,11 +196,13 @@ pub const VulkanBackingAllocator = struct {
         defer zone.end();
 
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        const fetch_result = self.blocks[@intFromEnum(pool)].fetchRemove(@intFromPtr(buf.ptr)) orelse
+        const fetch_result = self.blocks[@intFromEnum(pool)].fetchRemove(@intFromPtr(buf.ptr)) orelse {
+            self.mutex.unlock(self.io);
             std.debug.panic("VulkanBackingAllocator.freeBlock: Double-free or invalid pointer free detected on: {*}", .{buf.ptr});
-        self.destroyBlockResources(fetch_result.value);
+        };
+        self.mutex.unlock(self.io);
+
+        self.destroyBlockResources(fetch_result.value, pool);
     }
 };
 
