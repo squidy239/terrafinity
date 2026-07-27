@@ -265,15 +265,6 @@ pub fn SetAssociativeCacheType(
             return removed;
         }
 
-        /// Hint that the key is less likely to be accessed in the future, without actually removing
-        /// it from the cache.
-        pub fn demote(self: *SetAssociativeCache, key: Key) void {
-            const set = self.associate(key);
-            const way = self.search(set, key) orelse return;
-
-            self.counts.set(set.offset + way, 1);
-        }
-
         /// If the key is present in the set, returns the way. Otherwise returns null.
         inline fn search(self: *const SetAssociativeCache, set: Set, key: Key) ?u16 {
             const ways: u16 = search_tags(set.tags, set.tag);

@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 
 const tracy = @import("tracy");
 
-const Options = @import("../Game.zig").Options;
 const Cache = @import("../libs/Cache.zig").Cache;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");

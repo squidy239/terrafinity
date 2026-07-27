@@ -31,7 +31,7 @@ renderer: Renderer,
 generator: World.DefaultGenerator,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
-loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 80, 128),
+loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 128),
 
 entity_registry: EntityRegistry,
 
@@ -1005,7 +1005,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         .game_mode = .init(.Spectator),
         .view_direction = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
-    }, true);
+    });
     player_entity.release();
     game.player = @ptrCast(@alignCast(player_entity.ptr));
     game.player.main_inventory = .initBuffer(

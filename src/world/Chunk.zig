@@ -328,15 +328,6 @@ pub const Encoding = union(enum(u1)) {
     }
 };
 
-/// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
-pub fn from(block_encoding: Encoding, chunk: *@This()) !*@This() {
-    chunk.* = .{
-        .encoding = block_encoding,
-        .ref_count = std.atomic.Value(u32).init(1),
-    };
-    return chunk;
-}
-
 ///checks if the block array is all the same block
 pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
     const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(block_array[0][0][0]));
@@ -351,18 +342,6 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceR
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
     return self.encoding.extractFace(rotation);
-}
-
-pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, max_micro_time: ?u64) error{Canceled}!bool {
-    std.debug.assert(self.encoding == .grid or self.encoding == .uniform);
-    if (self.ref_count.load(.seq_cst) == amount) return true;
-    const st = std.Io.Timestamp.now(io, .awake);
-    while (self.ref_count.load(.seq_cst) != amount) {
-        @branchHint(.unlikely);
-        if (max_micro_time != null and st.untilNow(io, .awake).toMicroseconds() > max_micro_time.?) return false;
-        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
-    }
-    return true;
 }
 
 pub fn modify(self: *@This()) void {

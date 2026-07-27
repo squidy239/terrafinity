@@ -453,7 +453,7 @@ block_materials_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 block_materials_descriptor_pool: vk.DescriptorPool = .null_handle,
 block_materials_descriptor_set: vk.DescriptorSet = .null_handle,
 transfer: TransferState = .{},
-meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
+meshes: ConcurrentHashMap(RenderBufferKey, ChunkMeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 32),
 frame_buffers: PerFrameBuffers = .{},
 cull: CullState = .{},
 persistent: PersistentCandidates = .{},
@@ -496,10 +496,6 @@ output_color_view: vk.ImageView = .null_handle,
 swapchain_image_old_layout: vk.ImageLayout = .undefined,
 swapchain_image_layout_ptr: ?*vk.ImageLayout = null,
 
-fn loadTextures(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
-    self.texture_manager = textures.TextureManager.init(self, self.render_options.gamma_correction);
-    try self.texture_manager.loadTextures(io, allocator, self.render_options.selected_pack);
-}
 
 fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
     const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{self.render_options.selected_pack});
@@ -830,7 +826,8 @@ fn initGpuDataStructures(self: *VulkanRenderer, allocator: std.mem.Allocator) !v
 }
 
 fn initResources(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator) !void {
-    try self.loadTextures(io, allocator);
+    self.texture_manager = textures.TextureManager.init(self, self.render_options.gamma_correction);
+    try self.texture_manager.loadTextures(io, allocator, self.render_options.selected_pack);
     try self.loadBlockMaterials(io, allocator);
     try self.createTransparentDepthDescriptorSetLayout();
     try self.recreateSwapchainResourcesLocked(io);

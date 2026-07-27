@@ -732,6 +732,43 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
 }
 
+pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
+    const src_stage: vk.PipelineStageFlags2 = switch (old_layout) {
+        .undefined => .{ .top_of_pipe_bit = true },
+        .present_src_khr => .{ .bottom_of_pipe_bit = true },
+        .color_attachment_optimal => .{ .color_attachment_output_bit = true },
+        else => .{ .all_commands_bit = true },
+    };
+    const src_access: vk.AccessFlags2 = switch (old_layout) {
+        .undefined => .{},
+        .present_src_khr => .{},
+        .color_attachment_optimal => .{ .color_attachment_write_bit = true },
+        else => .{ .memory_read_bit = true, .memory_write_bit = true },
+    };
+    const barrier = vk.ImageMemoryBarrier2{
+        .src_stage_mask = src_stage,
+        .src_access_mask = src_access,
+        .dst_stage_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_output_bit = true } else .{ .bottom_of_pipe_bit = true },
+        .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true } else .{},
+        .old_layout = old_layout,
+        .new_layout = new_layout,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+    };
+    dev.cmdPipelineBarrier2(cmd, &.{
+        .image_memory_barrier_count = 1,
+        .p_image_memory_barriers = (&barrier)[0..1],
+    });
+}
+
 pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
@@ -883,8 +920,8 @@ fn debugCallback(
     p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
     p_user_data: ?*anyopaque,
 ) callconv(vk.vulkan_call_conv) vk.Bool32 {
-    _ = p_user_data;
     _ = message_types;
+    _ = p_user_data;
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
     switch (cb_data.message_id_number) {
@@ -900,6 +937,7 @@ fn debugCallback(
     } else if (message_severity.verbose_bit_ext) {
         vklog.debug("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     }
+
     return .false;
 }
 

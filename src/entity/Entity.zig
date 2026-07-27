@@ -84,13 +84,12 @@ pub fn release(self: *@This()) void {
 
 pub const Type = enum(u32) {
     Player = 0,
-    Cube = 1,
     Explosive = 2,
 };
 
 test "Entity.make allocation failure" {
     const DummyEntity = struct {
-        pub const Type = Entity.Type.Cube;
+        pub const Type = Entity.Type.Player;
         pos: @Vector(3, f64) = .{ 0, 0, 0 },
         pub fn getInterface(self: *@This()) Entity.Interface {
             _ = self;
