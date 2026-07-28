@@ -320,10 +320,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     errdefer if (has_debug_utils) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
 
     var surface: vk.SurfaceKHR = .null_handle;
-    const result: vk.Result = @enumFromInt(window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface)));
-    if (result != .success) {
-        return error.SurfaceCreationFailed;
-    }
+    try window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface));
+
     self.surface = surface;
     errdefer self.instance.destroySurfaceKHR(self.surface, null);
 

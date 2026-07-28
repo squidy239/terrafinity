@@ -452,7 +452,7 @@ block_materials_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 block_materials_descriptor_pool: vk.DescriptorPool = .null_handle,
 block_materials_descriptor_set: vk.DescriptorSet = .null_handle,
 transfer: TransferState = .{},
-meshes: ConcurrentHashMap(RenderBufferKey, MeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 80, 32),
+meshes: ConcurrentHashMap(RenderBufferKey, MeshBuffer, std.hash_map.AutoContext(RenderBufferKey), 32),
 frame_buffers: PerFrameBuffers = .{},
 cull: CullState = .{},
 persistent: PersistentCandidates = .{},
@@ -1307,7 +1307,7 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     });
 
     return .{
-        .mesh = ChunkMeshBuffer{
+        .mesh = .{
             .face_offset = @intCast(face_byte_offset / @sizeOf(Mesher.Face)),
             .face_byte_count = buffer_size,
             .face_count = @intCast(faces.len),
@@ -2873,7 +2873,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .vertex_attribute_description_count = 0,
         .p_vertex_attribute_descriptions = null,
     };
-        self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{blend}, self.oit.composition_layout, no_vertex_input);
+    self.oit.composition_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{blend}, self.oit.composition_layout, no_vertex_input);
 
     const pool_size: vk.DescriptorPoolSize = .{ .type = .combined_image_sampler, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
     try self.createFrameDescriptorPool(&self.oit.descriptor_pool, self.oit.descriptor_set_layout, &self.oit.descriptor_sets_per_frame, (&pool_size)[0..1]);
