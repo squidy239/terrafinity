@@ -16,8 +16,7 @@ void main() {
     vec4 accum = texelFetch(s_accum, texel_coord, 0);
     vec4 opaque_color = texelFetch(s_opaque_color, texel_coord, 0);
 
-    float wboit_reveal = accum.a;
-
+    float revealage = accum.a;
     vec3 transmission = exp(-max(accum.rgb, 0.0));
 
     vec3 background = opaque_color.rgb * transmission;
@@ -31,10 +30,10 @@ void main() {
         }
     }
 
-    if (wboit_reveal < 1.0) {
+    if (revealage < 1.0) {
         vec4 wboit_accum = texelFetch(s_reveal, texel_coord, 0);
-        vec3 surface_color = (wboit_accum.rgb / max(wboit_accum.a, 1e-10));
-        outColor = vec4(surface_color * (1.0 - wboit_reveal) + background * wboit_reveal, 1.0);
+        vec3 surface_color = wboit_accum.rgb / max(wboit_accum.a, 1e-10);
+        outColor = vec4(surface_color * (1.0 - revealage) + background * revealage, 1.0);
     } else {
         outColor = vec4(background, 1.0);
     }

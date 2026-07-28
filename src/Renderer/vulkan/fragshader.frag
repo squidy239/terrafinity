@@ -1,8 +1,6 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
 
-layout(early_fragment_tests) in;
-
 layout(location = 0) out vec4 frag_color;
 
 layout(location = 1) in vec3 in_coords;
@@ -35,5 +33,6 @@ void main()
     vec2 texcoords = vec2(in_coords[texcoord_axes[side][0]], in_coords[texcoord_axes[side][1]]) * 2.0;
 
     frag_color = texture(textures[nonuniformEXT(block_array_layer)], (texcoords + 1.0) / 2.0);
+    //if(frag_color.a == 0.0) discard;
     frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
 }

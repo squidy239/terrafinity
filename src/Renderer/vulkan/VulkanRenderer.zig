@@ -40,11 +40,13 @@ comptime {
 const CullCount = extern struct {
     opaque_count: u32,
     transparent_count: u32,
+    opaque_face_count: u32,
+    transparent_face_count: u32,
 };
 
 comptime {
-    // Must match GLSL CountBuffer (uint + uint) in cull.comp
-    if (@sizeOf(CullCount) != 8) @compileError("CullCount size mismatch");
+    // Must match GLSL CountBuffer (uint + uint + uint + uint) in cull.comp
+    if (@sizeOf(CullCount) != 16) @compileError("CullCount size mismatch");
 }
 
 const BlockMaterial = extern struct {
@@ -92,23 +94,23 @@ const FrameDebugStats = struct {
     total_meshes: u32 = 0,
     opaque_drawn: u32 = 0,
     transparent_drawn: u32 = 0,
+    opaque_faces: u32 = 0,
+    transparent_faces: u32 = 0,
     player_pos: @Vector(3, f64) = .{ 0, 0, 0 },
     camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
     elapsed_ns: u64 = 0,
 
     pub fn log(self: *const FrameDebugStats) void {
-        const total_drawn = self.opaque_drawn + self.transparent_drawn;
-        const total_culled = self.total_meshes -| total_drawn;
+        const total_faces = self.opaque_faces + self.transparent_faces;
         const elapsed_f: f64 = @floatFromInt(self.elapsed_ns);
         const ms = elapsed_f / 1_000_000.0;
-        const visible_pct = if (self.total_meshes > 0) @as(f64, @floatFromInt(total_drawn)) / @as(f64, @floatFromInt(self.total_meshes)) * 100.0 else 0.0;
         std.log.info("=== FRAME {d} DEBUG STATS ===", .{self.frame_number});
         std.log.info("Player pos=({d:.1}, {d:.1}, {d:.1})  Camera front=({d:.3}, {d:.3}, {d:.3})", .{
             self.player_pos[0],   self.player_pos[1],   self.player_pos[2],
             self.camera_front[0], self.camera_front[1], self.camera_front[2],
         });
-        std.log.info("Meshes in map: {d}  Opaque drawn: {d}  Transparent drawn: {d}", .{ self.total_meshes, self.opaque_drawn, self.transparent_drawn });
-        std.log.info("Total: culled={d:>6}  drawn={d:>6} ({d:.1}% visible)", .{ total_culled, total_drawn, visible_pct });
+        std.log.info("Meshes in map: {d}  drawn opaque: {d}  transparent: {d}", .{ self.total_meshes, self.opaque_drawn, self.transparent_drawn });
+        std.log.info("Faces drawn — opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
         std.log.info("Time: {d:.2} ms", .{ms});
         std.log.info("========================", .{});
     }
@@ -630,7 +632,7 @@ fn allocateIndirectBuffers(self: *VulkanRenderer, frame: *PerFrameData) !void {
     const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, count_slice.ptr);
 
     const stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
-    stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
+    stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
     const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
 
     frame.* = .{
@@ -2028,10 +2030,10 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
     if (self.frame_buffers.items[current_frame].stats_mapped) |counts_ptr| {
-        const opaque_count = counts_ptr[0].opaque_count;
-        const transparent_count = counts_ptr[0].transparent_count;
-        self.frame_stats.opaque_drawn = opaque_count;
-        self.frame_stats.transparent_drawn = transparent_count;
+        self.frame_stats.opaque_drawn = counts_ptr[0].opaque_count;
+        self.frame_stats.transparent_drawn = counts_ptr[0].transparent_count;
+        self.frame_stats.opaque_faces = counts_ptr[0].opaque_face_count;
+        self.frame_stats.transparent_faces = counts_ptr[0].transparent_face_count;
     }
 
     const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
@@ -2136,7 +2138,7 @@ fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacit
             .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
             .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
         };
-        new_frame.stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0 };
+        new_frame.stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
 
         if (old_draw_capacity > 0) {
             @memcpy(new_frame.mesh_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].mesh_data_ptr[0 .. old_draw_capacity * draw_type_count]);

@@ -20,14 +20,14 @@
         .volume_color = .{ 1.0, 1.0, 1.0 },
     },
     .water = .{
-        .density = 0.02,
+        .density = 0.05,
         .volume_color = .{ 0.1, 0.3, 0.3 },
         .fresnel_power = 5.0,
         .min_opacity = 0.1,
     },
     .leaves = .{
-        .density = 1.0,
-        .volume_color = .{ 0.15, 0.3, 0.15 },
+        .density = 0.0,
+        .volume_color = .{ 0.125, 0.25, 0.0 },
         .fresnel_power = 100.0,
         .min_opacity = 1.0,
     },

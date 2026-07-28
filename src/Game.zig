@@ -64,6 +64,8 @@ last_frametime: std.Io.Timestamp,
 debug_menu: struct {
     fps: std.atomic.Value(f32) = .init(0),
     meshes: std.atomic.Value(u64) = .init(0),
+    opaque_faces: std.atomic.Value(u64) = .init(0),
+    transparent_faces: std.atomic.Value(u64) = .init(0),
 } = .{},
 
 const NodeData = struct {
@@ -452,6 +454,10 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
 
     try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
+
+    self.debug_menu.opaque_faces.store(self.vulkan_renderer.frame_stats.opaque_faces, .unordered);
+    self.debug_menu.transparent_faces.store(self.vulkan_renderer.frame_stats.transparent_faces, .unordered);
+
     try self.handleErrors();
 }
 

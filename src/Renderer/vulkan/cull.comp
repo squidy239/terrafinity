@@ -39,6 +39,8 @@ layout(std430, binding = 2) writeonly buffer OutputMeshDataBuffer {
 layout(std430, binding = 3) buffer CountBuffer {
     uint opaque_count;
     uint transparent_count;
+    uint opaque_face_count;
+    uint transparent_face_count;
 };
 
 layout(push_constant) uniform PushConsts {
@@ -70,8 +72,10 @@ void main() {
     uint idx;
     if (candidate.is_transparent == 0u) {
         idx = atomicAdd(opaque_count, 1u);
+        atomicAdd(opaque_face_count, candidate.face_count);
     } else {
         idx = atomicAdd(transparent_count, 1u);
+        atomicAdd(transparent_face_count, candidate.face_count);
     }
     if (idx >= pc.draw_capacity) return;
 

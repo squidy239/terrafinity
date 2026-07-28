@@ -231,6 +231,8 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
+        \\opaque faces: {d}
+        \\transparent faces: {d}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\chunk hit ratio: {d:.2}
@@ -238,6 +240,8 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),
             self.game.debug_menu.meshes.load(.unordered),
+            self.game.debug_menu.opaque_faces.load(.unordered),
+            self.game.debug_menu.transparent_faces.load(.unordered),
             chunk_count,
             grid_count,
             chunk_hit_ratio,
