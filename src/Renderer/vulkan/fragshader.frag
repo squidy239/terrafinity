@@ -18,7 +18,7 @@ const vec3 face_normals[6] = vec3[](
     vec3( 0.0,  0.0,  1.0)
 );
 
-const uvec2 texcoord_axes[6] = uvec2[](
+const uvec2 tex_coord_axes[6] = uvec2[](
     uvec2(1, 2),
     uvec2(1, 2),
     uvec2(0, 2),
@@ -30,9 +30,8 @@ const uvec2 texcoord_axes[6] = uvec2[](
 void main()
 {
     vec3 normal = face_normals[side];
-    vec2 texcoords = vec2(in_coords[texcoord_axes[side][0]], in_coords[texcoord_axes[side][1]]) * 2.0;
+    vec2 tex_coords = vec2(in_coords[tex_coord_axes[side][0]], in_coords[tex_coord_axes[side][1]]) * 2.0;
 
-    frag_color = texture(textures[nonuniformEXT(block_array_layer)], (texcoords + 1.0) / 2.0);
-    //if(frag_color.a == 0.0) discard;
+    frag_color = texture(textures[nonuniformEXT(block_array_layer)], (tex_coords + 1.0) / 2.0);
     frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
 }

@@ -45,7 +45,6 @@ const CullCount = extern struct {
 };
 
 comptime {
-    // Must match GLSL CountBuffer (uint + uint + uint + uint) in cull.comp
     if (@sizeOf(CullCount) != 16) @compileError("CullCount size mismatch");
 }
 
@@ -68,9 +67,7 @@ const BlockMaterialsZon = blk: {
     const types: [vis_count]type = .{BlockMaterial} ** vis_count;
     const default_mat: BlockMaterial = .{};
     var attrs: [vis_count]std.builtin.Type.StructField.Attributes = undefined;
-    for (&attrs) |*a| {
-        a.* = .{ .default_value_ptr = @as(?*const anyopaque, @ptrCast(&default_mat)) };
-    }
+    for (&attrs) |*a| a.* = .{ .default_value_ptr = @as(?*const anyopaque, @ptrCast(&default_mat)) };
     break :blk @Struct(.auto, null, &names, &types, &attrs);
 };
 
@@ -134,13 +131,8 @@ const IndexPool = struct {
 
     pub fn init(allocator: std.mem.Allocator, capacity: u32) !IndexPool {
         const indices = try allocator.alloc(u32, capacity);
-        for (indices, 0..) |*val, i| {
-            val.* = @intCast(capacity - 1 - i);
-        }
-        return .{
-            .free_indices = indices,
-            .head = capacity,
-        };
+        for (indices, 0..) |*val, i| val.* = @intCast(capacity - 1 - i);
+        return .{ .free_indices = indices, .head = capacity };
     }
 
     pub fn deinit(self: *IndexPool, allocator: std.mem.Allocator) void {
@@ -169,9 +161,7 @@ const IndexPool = struct {
         const added = new_capacity - old_capacity;
         const new_indices = try allocator.alloc(u32, new_capacity);
         @memcpy(new_indices[0..self.head], self.free_indices[0..self.head]);
-        for (new_indices[self.head .. self.head + added], old_capacity..) |*val, i| {
-            val.* = @intCast(i);
-        }
+        for (new_indices[self.head .. self.head + added], old_capacity..) |*val, i| val.* = @intCast(i);
         allocator.free(self.free_indices);
         self.free_indices = new_indices;
         self.head += added;
@@ -305,9 +295,8 @@ comptime {
 fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     const count = @min(mem_props.memory_type_count, 32);
     for (mem_props.memory_types[0..count], 0..) |mem_type, i| {
-        const bit = @as(u5, @intCast(i));
-        if ((type_filter & (@as(u32, 1) << bit)) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
-            return @as(u32, bit);
+        if ((type_filter & (@as(u32, 1) << @truncate(i))) != 0 and (mem_type.property_flags.toInt() & properties.toInt()) == properties.toInt()) {
+            return @intCast(i);
         }
     }
     return error.MemoryTypeNotFound;
@@ -561,35 +550,12 @@ fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
             .stage_flags = .{ .fragment_bit = true },
             .p_immutable_samplers = null,
         };
-        const layout_info: vk.DescriptorSetLayoutCreateInfo = .{
-            .flags = .{},
-            .binding_count = 1,
-            .p_bindings = (&binding)[0..1],
-        };
-        self.block_materials_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
-    }
-    errdefer {
-        if (self.block_materials_descriptor_set_layout != .null_handle) {
-            self.dev.destroyDescriptorSetLayout(self.block_materials_descriptor_set_layout, null);
-            self.block_materials_descriptor_set_layout = .null_handle;
-        }
+        self.block_materials_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
     }
 
     if (self.block_materials_descriptor_pool == .null_handle) {
         const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 1 };
-        const pool_info: vk.DescriptorPoolCreateInfo = .{
-            .flags = .{},
-            .max_sets = 1,
-            .pool_size_count = 1,
-            .p_pool_sizes = (&pool_size)[0..1].ptr,
-        };
-        self.block_materials_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
-    }
-    errdefer {
-        if (self.block_materials_descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, null);
-            self.block_materials_descriptor_pool = .null_handle;
-        }
+        self.block_materials_descriptor_pool = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = 1, .pool_size_count = 1, .p_pool_sizes = (&pool_size)[0..1].ptr }, null);
     }
 
     if (self.block_materials_descriptor_set == .null_handle) {
@@ -601,24 +567,12 @@ fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
     }
 
     const info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.block_materials_mapped.ptr);
-    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
-    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
-    const buffer_info: vk.DescriptorBufferInfo = .{
+    const buf_info: vk.DescriptorBufferInfo = .{
         .buffer = info.buffer,
         .offset = info.offset,
         .range = self.block_materials_mapped.len * @sizeOf(MaterialGpu),
     };
-    const write: vk.WriteDescriptorSet = .{
-        .dst_set = self.block_materials_descriptor_set,
-        .dst_binding = 0,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .storage_buffer,
-        .p_image_info = (&dummy_image_info)[0..1],
-        .p_buffer_info = (&buffer_info)[0..1],
-        .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-    };
-    self.dev.updateDescriptorSets((&write)[0..1], null);
+    self.dev.updateDescriptorSets((&dummyWriteDescriptorSet(self.block_materials_descriptor_set, 0, .storage_buffer, &buf_info))[0..1], null);
 }
 
 fn allocateIndirectBuffers(self: *VulkanRenderer, frame: *PerFrameData) !void {
@@ -692,9 +646,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     self.frame_buffers.items = try self.allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
     @memset(self.frame_buffers.items, .{});
 
-    for (self.frame_buffers.items) |*frame| {
-        try self.allocateIndirectBuffers(frame);
-    }
+    for (self.frame_buffers.items) |*frame| try self.allocateIndirectBuffers(frame);
 
     if (self.graphics_state.opaque_pipeline_layout != .null_handle) {
         if (self.graphics_state.pipeline != .null_handle) {
@@ -716,13 +668,8 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
         try self.createTransparentDepthDescriptorSetLayout();
     }
 
-    // The cull descriptor sets also reference the indirect, mesh_data, count, and stats buffers.
-    // These were just recreated by allocateIndirectBuffers above, so the descriptor sets
-    // must be updated to point to the new buffers.
     if (self.cull.descriptor_set_layout != .null_handle) {
-        for (self.cull.descriptor_sets_per_frame, 0..) |_, i| {
-            self.updateCullDescriptorSet(@intCast(i));
-        }
+        for (self.cull.descriptor_sets_per_frame, 0..) |_, i| self.updateCullDescriptorSet(@intCast(i));
     }
 
     if (self.oit.descriptor_set_layout != .null_handle) {
@@ -739,7 +686,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     destroyRenderTarget(self.dev, &self.render_color);
     destroyRenderTarget(self.dev, &self.render_depth);
-    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+    destroyIfValid(self.dev, &self.render_depth_sampled_view);
     self.frame_buffers.deinit(self.allocator, self.cpu_to_gpu_gpa.allocator(), self.gpu_only_gpa.allocator(), self.draw_capacity);
     self.destroyMeshDataDescriptorResources();
     self.destroyOitResources();
@@ -861,7 +808,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     {
         self.submission_batch.mutex.lockUncancelable(io);
         defer self.submission_batch.mutex.unlock(io);
-        self.submitBatchLocked(io) catch {
+        self.submitBatch(io) catch {
             @panic("VulkanRenderer.deinit: failed to flush submission batch - GPU state may be inconsistent");
         };
     }
@@ -883,54 +830,43 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         }
     }
 
-    if (self.peeked_upload) |pending| {
-        self.destroyPendingUpload(io, pending);
-    }
+    if (self.peeked_upload) |pending| self.destroyPendingUpload(io, pending);
     while (true) {
         var buf: PendingMeshUpload = undefined;
         const got = self.pending_uploads_queue.getUncancelable(io, (&buf)[0..1], 0) catch unreachable;
         if (got == 0) break;
         self.destroyPendingUpload(io, buf);
     }
-    for (self.retired_meshes.items) |entry| {
-        self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
-    }
+    for (self.retired_meshes.items) |entry| self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
     self.retired_meshes.deinit(self.allocator);
 
-    for (self.retired_face_buffers.items) |entry| {
-        self.gpu_only_gpa.allocator().free(entry.slice);
-    }
+    for (self.retired_face_buffers.items) |entry| self.gpu_only_gpa.allocator().free(entry.slice);
     self.retired_face_buffers.deinit(self.allocator);
 
     var it = self.meshes.iterator();
     defer it.deinit(io);
-    while (it.next(io) catch unreachable) |entry| {
-        self.destroyMeshBuffer(io, entry.value_ptr.*);
-    }
+    while (it.next(io) catch unreachable) |entry| self.destroyMeshBuffer(io, entry.value_ptr.*);
     self.meshes.deinit(io, self.allocator);
 
     self.destroyRendererSwapchainResources();
-
     self.destroyOitPipelinesAndDescriptors();
 
-    destroyIfValidPipeline(self.dev, &self.graphics_state.pipeline);
-    destroyIfValidPipeline(self.dev, &self.graphics_state.transparent_pipeline);
-    destroyIfValidPipeline(self.dev, &self.cull.pipeline);
-    destroyIfValidPipelineLayout(self.dev, &self.graphics_state.opaque_pipeline_layout);
-    destroyIfValidPipelineLayout(self.dev, &self.graphics_state.transparent_pipeline_layout);
-    destroyIfValidPipelineLayout(self.dev, &self.cull.pipeline_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.cull.descriptor_set_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.graphics_state.mesh_data_descriptor_set_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.block_materials_descriptor_set_layout);
+    destroyIfValid(self.dev, &self.graphics_state.pipeline);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline);
+    destroyIfValid(self.dev, &self.cull.pipeline);
+    destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout);
+    destroyIfValid(self.dev, &self.cull.pipeline_layout);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout);
+    destroyIfValid(self.dev, &self.cull.descriptor_set_layout);
+    destroyIfValid(self.dev, &self.graphics_state.mesh_data_descriptor_set_layout);
+    destroyIfValid(self.dev, &self.block_materials_descriptor_set_layout);
 
     if (self.block_materials_descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, null);
         self.block_materials_descriptor_pool = .null_handle;
     }
-    if (self.block_materials_mapped.len > 0) {
-        self.cpu_to_gpu_gpa.allocator().free(self.block_materials_mapped);
-    }
+    if (self.block_materials_mapped.len > 0) self.cpu_to_gpu_gpa.allocator().free(self.block_materials_mapped);
 
     if (self.cull.descriptor_pool != .null_handle) {
         self.dev.destroyDescriptorPool(self.cull.descriptor_pool, null);
@@ -941,9 +877,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     self.pool_reservoir.deinit(self.dev);
 
-    for (self.retired_candidate_slices.items) |entry| {
-        self.cpu_to_gpu_gpa.allocator().free(entry.slice);
-    }
+    for (self.retired_candidate_slices.items) |entry| self.cpu_to_gpu_gpa.allocator().free(entry.slice);
     self.retired_candidate_slices.deinit(self.allocator);
     self.index_pool.deinit(self.allocator);
     self.cpu_to_gpu_gpa.allocator().free(self.persistent.slice);
@@ -969,9 +903,7 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
         {
             self.submission_batch.mutex.lockUncancelable(io);
             defer self.submission_batch.mutex.unlock(io);
-            if (self.submission_batch.count > 0) {
-                try self.submitBatchLocked(io);
-            }
+            if (self.submission_batch.count > 0) try self.submitBatch(io);
         }
         try self.retireCompletedUploads(io);
         try std.Io.sleep(io, .fromNanoseconds(0), .awake);
@@ -982,11 +914,7 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
 
     try self.dev.resetCommandPool(pool, .{});
 
-    const begin_info: vk.CommandBufferBeginInfo = .{
-        .flags = .{ .one_time_submit_bit = true },
-        .p_inheritance_info = null,
-    };
-    try self.dev.beginCommandBuffer(cmd, &begin_info);
+    try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
 
     var opaque_res: ?UploadResult = null;
     var transparent_res: ?UploadResult = null;
@@ -995,12 +923,8 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
         if (transparent_res) |r| self.cancelUpload(io, r);
     }
 
-    if (opaque_mesh.len > 0) {
-        opaque_res = try self.uploadMeshBuffer(io, opaque_mesh, cmd);
-    }
-    if (transparent_mesh.len > 0) {
-        transparent_res = try self.uploadMeshBuffer(io, transparent_mesh, cmd);
-    }
+    if (opaque_mesh.len > 0) opaque_res = try self.uploadMeshBuffer(io, opaque_mesh, cmd);
+    if (transparent_mesh.len > 0) transparent_res = try self.uploadMeshBuffer(io, transparent_mesh, cmd);
 
     try self.dev.endCommandBuffer(cmd);
 
@@ -1010,9 +934,7 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
         zone_batch.end();
         defer self.submission_batch.mutex.unlock(io);
 
-        if (self.submission_batch.count == batch_size) {
-            try self.submitBatchLocked(io);
-        }
+        if (self.submission_batch.count == batch_size) try self.submitBatch(io);
 
         const count = self.submission_batch.count;
         self.submission_batch.cmds[count] = cmd;
@@ -1024,49 +946,43 @@ pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_me
     }
 }
 
-fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatchAlreadyLocked" });
-    defer zone.end();
-
+fn submitBatch(self: *VulkanRenderer, io: std.Io) !void {
     const count = self.submission_batch.count;
     if (count == 0) return;
+    const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock_queue" });
+    self.vk_ctx.queue_mutex.lockUncancelable(io);
+    zone_queue.end();
+    defer self.vk_ctx.queue_mutex.unlock(io);
+
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch" });
+    defer zone.end();
 
     const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
     self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
     var cb_submit_infos: [batch_size]vk.CommandBufferSubmitInfo = undefined;
-    for (cb_submit_infos[0..count], self.submission_batch.cmds[0..count]) |*info, cmd| {
-        info.* = .{
-            .command_buffer = cmd,
-            .device_mask = 0,
-        };
-    }
+    for (cb_submit_infos[0..count], self.submission_batch.cmds[0..count]) |*info, cmd| info.* = .{ .command_buffer = cmd, .device_mask = 0 };
 
     const current_graphics_val = self.vk_ctx.frame_number.load(.acquire);
-    const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
-        .semaphore = self.transfer.graphics_timeline_semaphore,
-        .value = current_graphics_val,
-        .stage_mask = .{ .all_transfer_bit = true },
-        .device_index = 0,
-    };
 
-    const semaphore_submit_info: vk.SemaphoreSubmitInfo = .{
-        .semaphore = self.transfer.semaphore,
-        .value = next_val,
-        .stage_mask = .{ .all_transfer_bit = true },
-        .device_index = 0,
-    };
-
-    // Wait value 0 is immediately satisfied (semaphore initializes to 0);
-    // including the wait unconditionally lets validation trace the chain.
     const submit_info: vk.SubmitInfo2 = .{
         .flags = .{},
         .wait_semaphore_info_count = 1,
-        .p_wait_semaphore_infos = (&wait_semaphore_info)[0..1],
+        .p_wait_semaphore_infos = (&vk.SemaphoreSubmitInfo{
+            .semaphore = self.transfer.graphics_timeline_semaphore,
+            .value = current_graphics_val,
+            .stage_mask = .{ .all_transfer_bit = true },
+            .device_index = 0,
+        })[0..1],
         .command_buffer_info_count = @intCast(count),
         .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
         .signal_semaphore_info_count = 1,
-        .p_signal_semaphore_infos = (&semaphore_submit_info)[0..1],
+        .p_signal_semaphore_infos = (&vk.SemaphoreSubmitInfo{
+            .semaphore = self.transfer.semaphore,
+            .value = next_val,
+            .stage_mask = .{ .all_transfer_bit = true },
+            .device_index = 0,
+        })[0..1],
     };
 
     try self.dev.queueSubmit2(self.transfer.queue, (&submit_info)[0..1], .null_handle);
@@ -1074,12 +990,8 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
     self.submission_batch.count = 0;
 
     for (self.submission_batch.opaque_meshes[0..count], self.submission_batch.transparent_meshes[0..count], self.submission_batch.chunk_positions[0..count], self.submission_batch.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
-        if (opaque_mesh) |r| {
-            self.staging_ring.bind(io, r.staging_slice, next_val);
-        }
-        if (transparent_mesh) |r| {
-            self.staging_ring.bind(io, r.staging_slice, next_val);
-        }
+        if (opaque_mesh) |r| self.staging_ring.bind(io, r.staging_slice, next_val);
+        if (transparent_mesh) |r| self.staging_ring.bind(io, r.staging_slice, next_val);
         try self.pushPendingUpload(io, .{
             .chunk_pos = chunk_pos,
             .timeline_value = next_val,
@@ -1088,16 +1000,6 @@ fn submitBatchAlreadyLocked(self: *VulkanRenderer, io: std.Io) !void {
             .transparent_mesh = if (transparent_mesh) |r| r.mesh else null,
         });
     }
-}
-
-fn submitBatchLocked(self: *VulkanRenderer, io: std.Io) !void {
-    const count = self.submission_batch.count;
-    if (count == 0) return;
-    const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock_queue" });
-    self.vk_ctx.queue_mutex.lockUncancelable(io);
-    zone_queue.end();
-    defer self.vk_ctx.queue_mutex.unlock(io);
-    try self.submitBatchAlreadyLocked(io);
 }
 
 fn pushPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingMeshUpload) !void {
@@ -1131,9 +1033,7 @@ fn cancelUpload(self: *VulkanRenderer, io: std.Io, result: UploadResult) void {
 fn destroyPendingUpload(self: *VulkanRenderer, io: std.Io, pending: PendingMeshUpload) void {
     if (pending.opaque_mesh) |opaque_m| self.destroyMeshBuffer(io, opaque_m);
     if (pending.transparent_mesh) |transparent| self.destroyMeshBuffer(io, transparent);
-    if (pending.pool != .null_handle) {
-        self.pool_reservoir.returnPool(self.dev, pending.pool);
-    }
+    if (pending.pool != .null_handle) self.pool_reservoir.returnPool(self.dev, pending.pool);
 }
 
 fn enqueueRetiredMesh(self: *VulkanRenderer, gpu_index: u32, face_offset: u32, face_byte_count: vk.DeviceSize, free_index: bool) !void {
@@ -1168,9 +1068,7 @@ fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?MeshBuffer, ke
                 .face_offset = new_mesh.face_offset,
             };
             const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
-            if (removed) |old| {
-                try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, false);
-            }
+            if (removed) |old| try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, false);
         } else {
             const gpu_idx = while (true) {
                 if (self.index_pool.allocIndex(io)) |idx| break idx;
@@ -1203,9 +1101,7 @@ fn retireOnePendingItem(self: *VulkanRenderer, io: std.Io, mesh: ?MeshBuffer, ke
         }
     } else {
         const existing = self.meshes.fetchRemove(io, key);
-        if (existing) |old_mesh| {
-            try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count, true);
-        }
+        if (existing) |old_mesh| try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count, true);
     }
 }
 
@@ -1275,21 +1171,17 @@ fn uploadMeshBuffer(self: *VulkanRenderer, io: std.Io, faces: []const Mesher.Fac
     const face_buf = face_alloc.buffer;
     const face_buf_offset = face_alloc.buffer_offset;
 
-    const copy_region: vk.BufferCopy2 = .{
-        .src_offset = staging_info.offset,
-        .dst_offset = face_buf_offset + face_byte_offset,
-        .size = buffer_size,
-    };
-    const copy_buffer_info: vk.CopyBufferInfo2 = .{
+    self.dev.cmdCopyBuffer2(cmd, &.{
         .src_buffer = staging_info.buffer,
         .dst_buffer = face_buf,
         .region_count = 1,
-        .p_regions = (&copy_region)[0..1],
-    };
-    self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
+        .p_regions = (&vk.BufferCopy2{
+            .src_offset = staging_info.offset,
+            .dst_offset = face_buf_offset + face_byte_offset,
+            .size = buffer_size,
+        })[0..1],
+    });
 
-    // dst_access is empty — a cross-queue release makes data available;
-    // the graphics queue performs its own acquire barrier.
     self.dev.cmdPipelineBarrier2(cmd, &.{
         .dependency_flags = .{},
         .memory_barrier_count = 0,
@@ -1326,7 +1218,7 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         {
             self.submission_batch.mutex.lockUncancelable(io);
             defer self.submission_batch.mutex.unlock(io);
-            try self.submitBatchLocked(io);
+            try self.submitBatch(io);
         }
 
         self.vk_ctx.queue_mutex.lockUncancelable(io);
@@ -1337,16 +1229,13 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
         std.log.info("growing face data buffer...", .{});
         try self.drainInFlightFrames();
 
-        // The transfer batch submitted above writes to the old face buffer.
-        // Wait for it to complete before copying old→new on the graphics queue.
         const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
         if (transfer_done_val > 0) {
-            const wait_info: vk.SemaphoreWaitInfo = .{
+            _ = try self.dev.waitSemaphores(&.{
                 .semaphore_count = 1,
                 .p_semaphores = (&self.transfer.semaphore)[0..1],
                 .p_values = (&transfer_done_val)[0..1],
-            };
-            _ = try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
+            }, std.math.maxInt(u64));
         }
 
         const grow_info = try self.face_allocator.grow(io, self.gpu_only_gpa.allocator());
@@ -1359,18 +1248,16 @@ fn allocFaceRegion(self: *VulkanRenderer, io: std.Io, buffer_size: vk.DeviceSize
             @panic("allocFaceRegion: GPU command submission or wait failed - cannot safely continue");
         };
 
-        const copy_region: vk.BufferCopy2 = .{
-            .src_offset = grow_info.old_buffer_offset,
-            .dst_offset = self.face_allocator.buffer_offset,
-            .size = grow_info.old_used,
-        };
-        const copy_buffer_info: vk.CopyBufferInfo2 = .{
+        self.dev.cmdCopyBuffer2(cmd, &.{
             .src_buffer = grow_info.old_buffer,
             .dst_buffer = self.face_allocator.buffer.?,
             .region_count = 1,
-            .p_regions = (&copy_region)[0..1],
-        };
-        self.dev.cmdCopyBuffer2(cmd, &copy_buffer_info);
+            .p_regions = (&vk.BufferCopy2{
+                .src_offset = grow_info.old_buffer_offset,
+                .dst_offset = self.face_allocator.buffer_offset,
+                .size = grow_info.old_used,
+            })[0..1],
+        });
 
         try self.retired_face_buffers.append(self.allocator, .{
             .slice = grow_info.old_slice,
@@ -1390,26 +1277,24 @@ fn processPendingUploads(self: *VulkanRenderer, io: std.Io) !void {
         self.submission_batch.mutex.lockUncancelable(io);
         zone_mutex.end();
         defer self.submission_batch.mutex.unlock(io);
-        try self.submitBatchLocked(io);
+        try self.submitBatch(io);
     }
     try self.retireCompletedUploads(io);
 }
 
 fn setViewportAndScissor(self: *const VulkanRenderer, cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
-    const viewport = vk.Viewport{
+    self.dev.cmdSetViewport(cmd, 0, (&vk.Viewport{
         .x = 0.0,
         .y = 0.0,
         .width = @floatFromInt(extent.width),
         .height = @floatFromInt(extent.height),
         .min_depth = 0.0,
         .max_depth = 1.0,
-    };
-    self.dev.cmdSetViewport(cmd, 0, (&viewport)[0..1]);
-    const scissor = vk.Rect2D{
+    })[0..1]);
+    self.dev.cmdSetScissor(cmd, 0, (&vk.Rect2D{
         .offset = .{ .x = 0, .y = 0 },
         .extent = extent,
-    };
-    self.dev.cmdSetScissor(cmd, 0, (&scissor)[0..1]);
+    })[0..1]);
 }
 
 fn makeImageBarrier2(
@@ -1442,66 +1327,44 @@ fn makeImageBarrier2(
     };
 }
 
-fn cmdImageBarrier2(
-    cmd: vk.CommandBuffer,
-    dev: DeviceProxy,
-    image: vk.Image,
-    old_layout: vk.ImageLayout,
-    new_layout: vk.ImageLayout,
-    src_stage: vk.PipelineStageFlags2,
-    src_access: vk.AccessFlags2,
-    dst_stage: vk.PipelineStageFlags2,
-    dst_access: vk.AccessFlags2,
-    aspect: vk.ImageAspectFlags,
-) void {
-    const barrier = makeImageBarrier2(image, old_layout, new_layout, src_stage, src_access, dst_stage, dst_access, aspect);
-    dev.cmdPipelineBarrier2(cmd, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = 1,
-        .p_image_memory_barriers = (&barrier)[0..1],
-    });
-}
-
-fn cmdBufferBarrier2(
-    cmd: vk.CommandBuffer,
-    dev: DeviceProxy,
-    buffer: vk.Buffer,
-    offset: vk.DeviceSize,
-    size: vk.DeviceSize,
-    src_stage: vk.PipelineStageFlags2,
-    src_access: vk.AccessFlags2,
-    dst_stage: vk.PipelineStageFlags2,
-    dst_access: vk.AccessFlags2,
-) void {
-    const barrier = makeBufferBarrier2(buffer, offset, size, src_stage, src_access, dst_stage, dst_access);
-    dev.cmdPipelineBarrier2(cmd, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 1,
-        .p_buffer_memory_barriers = (&barrier)[0..1],
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    });
+fn pipelineBarrier(cmd: vk.CommandBuffer, dev: DeviceProxy, comptime barrier_type: type, barriers: []const barrier_type) void {
+    const info: vk.DependencyInfo = switch (barrier_type) {
+        vk.ImageMemoryBarrier2 => .{
+            .dependency_flags = .{},
+            .memory_barrier_count = 0,
+            .p_memory_barriers = null,
+            .buffer_memory_barrier_count = 0,
+            .p_buffer_memory_barriers = null,
+            .image_memory_barrier_count = @intCast(barriers.len),
+            .p_image_memory_barriers = barriers.ptr,
+        },
+        vk.BufferMemoryBarrier2 => .{
+            .dependency_flags = .{},
+            .memory_barrier_count = 0,
+            .p_memory_barriers = null,
+            .buffer_memory_barrier_count = @intCast(barriers.len),
+            .p_buffer_memory_barriers = barriers.ptr,
+            .image_memory_barrier_count = 0,
+            .p_image_memory_barriers = null,
+        },
+        else => @compileError("pipelineBarrier: unsupported type " ++ @typeName(barrier_type)),
+    };
+    dev.cmdPipelineBarrier2(cmd, &info);
 }
 
 fn cmdAcquireFaceBuffer(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer) void {
     if (self.face_allocator.used == 0) return;
-    cmdBufferBarrier2(
-        cmd_buffer,
-        self.dev,
-        self.face_allocator.buffer.?,
-        self.face_allocator.buffer_offset,
-        self.face_allocator.used,
-        .{ .vertex_attribute_input_bit = true },
-        .{},
-        .{ .vertex_attribute_input_bit = true },
-        .{ .vertex_attribute_read_bit = true },
-    );
+    pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&vk.BufferMemoryBarrier2{
+        .src_stage_mask = .{ .vertex_attribute_input_bit = true },
+        .src_access_mask = .{},
+        .dst_stage_mask = .{ .vertex_attribute_input_bit = true },
+        .dst_access_mask = .{ .vertex_attribute_read_bit = true },
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .buffer = self.face_allocator.buffer.?,
+        .offset = self.face_allocator.buffer_offset,
+        .size = self.face_allocator.used,
+    })[0..1]);
 }
 
 fn makeBufferBarrier2(
@@ -1518,9 +1381,6 @@ fn makeBufferBarrier2(
         .src_access_mask = src_access,
         .dst_stage_mask = dst_stage,
         .dst_access_mask = dst_access,
-        // Assumes transfer and graphics queues share a family (true on
-        // desktop GPUs). On split-family GPUs these must be the actual
-        // family indices for proper queue family ownership transfer.
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .buffer = buffer,
@@ -1529,10 +1389,19 @@ fn makeBufferBarrier2(
     };
 }
 
-fn destroyIfValidImageView(dev: DeviceProxy, view: *vk.ImageView) void {
-    if (view.* == .null_handle) return;
-    dev.destroyImageView(view.*, null);
-    view.* = .null_handle;
+fn destroyIfValid(dev: DeviceProxy, handle: anytype) void {
+    const T = @TypeOf(handle.*);
+    if (handle.* == .null_handle) return;
+    switch (T) {
+        vk.ImageView => dev.destroyImageView(handle.*, null),
+        vk.Image, vk.DeviceMemory => unreachable,
+        vk.Pipeline => dev.destroyPipeline(handle.*, null),
+        vk.PipelineLayout => dev.destroyPipelineLayout(handle.*, null),
+        vk.DescriptorSetLayout => dev.destroyDescriptorSetLayout(handle.*, null),
+        vk.Sampler => dev.destroySampler(handle.*, null),
+        else => @compileError("destroyIfValid: unsupported type " ++ @typeName(T)),
+    }
+    handle.* = .null_handle;
 }
 
 fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory) void {
@@ -1546,26 +1415,8 @@ fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMem
     }
 }
 
-fn destroyIfValidPipeline(dev: DeviceProxy, pipeline: *vk.Pipeline) void {
-    if (pipeline.* == .null_handle) return;
-    dev.destroyPipeline(pipeline.*, null);
-    pipeline.* = .null_handle;
-}
-
-fn destroyIfValidPipelineLayout(dev: DeviceProxy, layout: *vk.PipelineLayout) void {
-    if (layout.* == .null_handle) return;
-    dev.destroyPipelineLayout(layout.*, null);
-    layout.* = .null_handle;
-}
-
-fn destroyIfValidDescriptorSetLayout(dev: DeviceProxy, layout: *vk.DescriptorSetLayout) void {
-    if (layout.* == .null_handle) return;
-    dev.destroyDescriptorSetLayout(layout.*, null);
-    layout.* = .null_handle;
-}
-
 fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget) void {
-    destroyIfValidImageView(dev, &rt.view);
+    destroyIfValid(dev, &rt.view);
     destroyIfValidImage(dev, &rt.image, &rt.memory);
 }
 
@@ -1641,6 +1492,19 @@ fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageAspec
     };
 }
 
+fn dummyWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descriptor_type: vk.DescriptorType, buffer_info: *const vk.DescriptorBufferInfo) vk.WriteDescriptorSet {
+    return .{
+        .dst_set = dst_set,
+        .dst_binding = dst_binding,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = descriptor_type,
+        .p_image_info = (&vk.DescriptorImageInfo{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined })[0..1],
+        .p_buffer_info = (&buffer_info.*)[0..1],
+        .p_texel_buffer_view = (&@as(vk.BufferView, .null_handle))[0..1],
+    };
+}
+
 fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !RenderTarget {
     const image_info: vk.ImageCreateInfo = .{
         .flags = .{},
@@ -1660,10 +1524,7 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
     var mem_reqs2: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
-    self.dev.getDeviceImageMemoryRequirements(&.{
-        .p_create_info = &image_info,
-        .plane_aspect = .{},
-    }, &mem_reqs2);
+    self.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
     const mem_reqs = mem_reqs2.memory_requirements;
 
     const alloc_info: vk.MemoryAllocateInfo = .{
@@ -1688,21 +1549,14 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
     const frame = &self.frame_buffers.items[current_frame];
     self.dev.cmdFillBuffer(cmd_buffer, frame.count, frame.count_offset, @sizeOf(CullCount), 0);
 
-    cmdBufferBarrier2(cmd_buffer, self.dev, frame.count, frame.count_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true });
+    pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
 
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
     self.dev.cmdBindDescriptorSets(cmd_buffer, .compute, self.cull.pipeline_layout, 0, (&self.cull.descriptor_sets_per_frame[current_frame])[0..1], null);
 
     var push_consts: CullPushConstants = undefined;
-    for (frustum.planes, 0..) |plane, idx| {
-        push_consts.planes[idx] = plane;
-    }
-    push_consts.player_pos = .{
-        @floatCast(view_pos[0]),
-        @floatCast(view_pos[1]),
-        @floatCast(view_pos[2]),
-        1.0,
-    };
+    for (frustum.planes, 0..) |plane, idx| push_consts.planes[idx] = plane;
+    push_consts.player_pos = .{ @floatCast(view_pos[0]), @floatCast(view_pos[1]), @floatCast(view_pos[2]), 1.0 };
     push_consts.total_candidates = total_candidates;
     push_consts.draw_capacity = self.draw_capacity;
 
@@ -1716,24 +1570,11 @@ fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_
         makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, self.draw_capacity * draw_type_count * @sizeOf(MeshData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
         makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }),
     };
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = buffer_barriers.len,
-        .p_buffer_memory_barriers = &buffer_barriers,
-        .image_memory_barrier_count = 0,
-        .p_image_memory_barriers = null,
-    });
+    pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &buffer_barriers);
 
-    const region: vk.BufferCopy = .{
-        .src_offset = frame.count_offset,
-        .dst_offset = frame.stats_offset,
-        .size = @sizeOf(CullCount),
-    };
-    self.dev.cmdCopyBuffer(cmd_buffer, frame.count, frame.stats, (&region)[0..1]);
+    self.dev.cmdCopyBuffer(cmd_buffer, frame.count, frame.stats, (&vk.BufferCopy{ .src_offset = frame.count_offset, .dst_offset = frame.stats_offset, .size = @sizeOf(CullCount) })[0..1]);
 
-    cmdBufferBarrier2(cmd_buffer, self.dev, frame.stats, frame.stats_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true }, .{ .host_read_bit = true });
+    pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true }, .{ .host_read_bit = true }))[0..1]);
 }
 
 fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, depth_aspect_mask: vk.ImageAspectFlags) void {
@@ -1743,15 +1584,7 @@ fn emitFrameStartBarriers(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, d
         makeImageBarrier2(self.render_color.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
         makeImageBarrier2(self.render_depth.image, .undefined, .depth_stencil_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, depth_aspect_mask),
     };
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = pre_dispatch_img_barriers.len,
-        .p_image_memory_barriers = &pre_dispatch_img_barriers,
-    });
+    pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_dispatch_img_barriers);
 }
 
 fn recordOpaquePass(
@@ -1772,9 +1605,7 @@ fn recordOpaquePass(
 
     self.cmdAcquireFaceBuffer(cmd_buffer);
 
-    if (total_candidates > 0) {
-        self.dispatchCulling(cmd_buffer, current_frame, frustum, total_candidates, view_pos);
-    }
+    if (total_candidates > 0) self.dispatchCulling(cmd_buffer, current_frame, frustum, total_candidates, view_pos);
 
     const color_attachment = renderingAttachmentColor(self.render_color.view, .clear, .{ sky_color[0], sky_color[1], sky_color[2], sky_color[3] });
     const depth_attachment = renderingAttachmentDepth(self.render_depth.view, .depth_stencil_attachment_optimal, .clear);
@@ -1807,21 +1638,11 @@ fn recordOpaquePass(
         const face_buf_off: vk.DeviceSize = self.face_allocator.buffer_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buf)[0..1], (&face_buf_off)[0..1]);
 
-        self.dev.cmdDrawIndirectCount(
-            cmd_buffer,
-            frame.indirect_draw,
-            opaque_byte_offset,
-            frame.count,
-            opaque_count_byte_offset,
-            self.draw_capacity,
-            @sizeOf(vk.DrawIndirectCommand),
-        );
+        self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, opaque_byte_offset, frame.count, opaque_count_byte_offset, self.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
     }
 
     self.dev.cmdEndRendering(cmd_buffer);
-    cmdImageBarrier2(
-        cmd_buffer,
-        self.dev,
+    pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&makeImageBarrier2(
         self.render_depth.image,
         .depth_stencil_attachment_optimal,
         .depth_stencil_read_only_optimal,
@@ -1830,7 +1651,7 @@ fn recordOpaquePass(
         .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true },
         .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true },
         depth_aspect_mask,
-    );
+    ))[0..1]);
 }
 
 fn recordTransparentPass(
@@ -1849,15 +1670,7 @@ fn recordTransparentPass(
         makeImageBarrier2(self.oit.reveal.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
         makeImageBarrier2(self.oit.volume_weight.image, .undefined, .color_attachment_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect),
     };
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = 3,
-        .p_image_memory_barriers = &oit_pre_barriers,
-    });
+    pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &oit_pre_barriers);
 
     self.cmdAcquireFaceBuffer(cmd_buffer);
 
@@ -1881,8 +1694,6 @@ fn recordTransparentPass(
         .image_view = self.render_depth_sampled_view,
         .sampler = self.texture_manager.sampler,
     };
-    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
-    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const depth_write: vk.WriteDescriptorSet = .{
         .dst_set = .null_handle,
         .dst_binding = 0,
@@ -1890,8 +1701,8 @@ fn recordTransparentPass(
         .descriptor_count = 1,
         .descriptor_type = .combined_image_sampler,
         .p_image_info = (&depth_image_info)[0..1],
-        .p_buffer_info = (&dummy_buffer_info)[0..1],
-        .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+        .p_buffer_info = (&vk.DescriptorBufferInfo{ .buffer = .null_handle, .offset = 0, .range = 0 })[0..1],
+        .p_texel_buffer_view = (&@as(vk.BufferView, .null_handle))[0..1],
     };
     self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 2, (&depth_write)[0..1]);
 
@@ -1915,15 +1726,7 @@ fn recordTransparentPass(
         const face_buf_off: vk.DeviceSize = self.face_allocator.buffer_offset;
         self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buf)[0..1], (&face_buf_off)[0..1]);
 
-        self.dev.cmdDrawIndirectCount(
-            cmd_buffer,
-            frame.indirect_draw,
-            transparent_byte_offset,
-            frame.count,
-            transparent_count_byte_offset,
-            self.draw_capacity,
-            @sizeOf(vk.DrawIndirectCommand),
-        );
+        self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, transparent_byte_offset, frame.count, transparent_count_byte_offset, self.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
     }
 
     self.dev.cmdEndRendering(cmd_buffer);
@@ -1941,45 +1744,32 @@ fn recordCompositionPass(
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
     defer zone.end();
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const output_barrier = blk: {
-        const old = self.swapchain_image_old_layout;
-        const src_stage: vk.PipelineStageFlags2 = switch (old) {
-            .undefined => .{ .top_of_pipe_bit = true },
-            .present_src_khr => .{ .bottom_of_pipe_bit = true },
-            else => .{ .all_commands_bit = true },
-        };
-        const src_access: vk.AccessFlags2 = switch (old) {
-            .undefined => .{},
-            .present_src_khr => .{},
-            else => .{ .memory_write_bit = true },
-        };
-        break :blk makeImageBarrier2(
-            output_image,
-            old,
-            .color_attachment_optimal,
-            src_stage,
-            src_access,
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            color_aspect,
-        );
-    };
+
     const pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = .{
         makeImageBarrier2(self.render_color.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.accum.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.reveal.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(self.oit.volume_weight.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
-        output_barrier,
+        makeImageBarrier2(
+            output_image,
+            self.swapchain_image_old_layout,
+            .color_attachment_optimal,
+            switch (self.swapchain_image_old_layout) {
+                .undefined => .{ .top_of_pipe_bit = true },
+                .present_src_khr => .{ .bottom_of_pipe_bit = true },
+                else => .{ .all_commands_bit = true },
+            },
+            switch (self.swapchain_image_old_layout) {
+                .undefined => .{},
+                .present_src_khr => .{},
+                else => .{ .memory_write_bit = true },
+            },
+            .{ .color_attachment_output_bit = true },
+            .{ .color_attachment_write_bit = true },
+            color_aspect,
+        ),
     };
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = pre_comp_barriers.len,
-        .p_image_memory_barriers = &pre_comp_barriers,
-    });
+    pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_comp_barriers);
 
     const swapchain_attachment = renderingAttachmentColor(output_view, .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
     self.dev.cmdBeginRendering(cmd_buffer, &renderingInfo(extent, &.{swapchain_attachment}, null));
@@ -1994,21 +1784,9 @@ fn recordCompositionPass(
     self.dev.cmdDraw(cmd_buffer, 3, 1, 0, 0);
 
     self.dev.cmdEndRendering(cmd_buffer);
+    pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, color_aspect))[0..1]);
 
-    const post_comp_barrier = makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, color_aspect);
-    self.dev.cmdPipelineBarrier2(cmd_buffer, &.{
-        .dependency_flags = .{},
-        .memory_barrier_count = 0,
-        .p_memory_barriers = null,
-        .buffer_memory_barrier_count = 0,
-        .p_buffer_memory_barriers = null,
-        .image_memory_barrier_count = 1,
-        .p_image_memory_barriers = (&post_comp_barrier)[0..1],
-    });
-
-    if (self.swapchain_image_layout_ptr) |ptr| {
-        ptr.* = .present_src_khr;
-    }
+    if (self.swapchain_image_layout_ptr) |ptr| ptr.* = .present_src_khr;
 }
 
 fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
@@ -2036,46 +1814,43 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         self.frame_stats.transparent_faces = counts_ptr[0].transparent_face_count;
     }
 
-    const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
-
     self.render_options_lock.lockSharedUncancelable(io);
     defer self.render_options_lock.unlockShared(io);
+    const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     const inside_transparent = self.render_options.inside_transparent;
 
     const vp = self.computeViewProjection(aspect, fov);
-    const blue_sky = @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 };
-    const grey_sky = @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 };
-    const sky_color = std.math.lerp(blue_sky, grey_sky, @as(@Vector(4, f32), @splat(@floatCast(@min(1.0, @max(0.0, view_pos[1] / sky_height))))));
+    const sky_t: f32 = @floatCast(@min(1.0, @max(0.0, view_pos[1] / sky_height)));
+    const sky_color = std.math.lerp(
+        @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 },
+        @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 },
+        @as(@Vector(4, f32), @splat(sky_t)),
+    );
     const sun_dir = computeSunDirection(io, day_length_sec);
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const elapsed_sec = @as(f32, @floatFromInt(now_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
     const total_meshes = self.meshes.count(io);
-    if (total_meshes > self.draw_capacity) {
-        try self.growDrawCapacity(io, @intCast(total_meshes));
-    }
+    if (total_meshes > self.draw_capacity) try self.growDrawCapacity(io, @intCast(total_meshes));
 
+    const projview_array: [16]f32 = @bitCast(vp.projview);
     var pc: PushConstants = .{
         .projview = @splat(0),
         .sun_dir = sun_dir,
         .time = elapsed_sec,
         .mesh_base = 0,
     };
-    inline for (0..4) |row| {
-        inline for (0..4) |col| {
-            pc.projview[row * 4 + col] = @as([4][4]f32, @bitCast(vp.projview))[col][row];
-        }
+    for (&pc.projview, 0..) |*dst, i| {
+        const row = i / 4;
+        const col = i % 4;
+        dst.* = projview_array[col * 4 + row];
     }
 
     const total_candidates = self.max_allocated_index.load(.monotonic);
 
-    const begin_info: vk.CommandBufferBeginInfo = .{
-        .flags = .{ .one_time_submit_bit = true },
-        .p_inheritance_info = null,
-    };
-    try self.dev.beginCommandBuffer(cmd_buffer, &begin_info);
+    try self.dev.beginCommandBuffer(cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
 
     const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
     const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
@@ -2116,74 +1891,6 @@ fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.
     };
 }
 
-const GrowFrameBackup = struct {
-    mesh_data_ptr: [*]MeshData,
-    indirect_ptr: [*]vk.DrawIndirectCommand,
-    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-};
-
-const GrowFrameAllocation = struct {
-    mesh_data_slice: []MeshData,
-    indirect_draw_slice: []vk.DrawIndirectCommand,
-    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-};
-
-fn allocateGrowFrames(self: *VulkanRenderer, new_capacity: u32, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []GrowFrameAllocation) !void {
-    for (new_frames, 0..) |*new_frame, i| {
-        new_frame.* = .{
-            .mesh_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshData, new_capacity * draw_type_count),
-            .indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count),
-            .count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
-            .stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1),
-        };
-        new_frame.stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
-
-        if (old_draw_capacity > 0) {
-            @memcpy(new_frame.mesh_data_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].mesh_data_ptr[0 .. old_draw_capacity * draw_type_count]);
-            @memcpy(new_frame.indirect_draw_slice[0 .. old_draw_capacity * draw_type_count], old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
-        }
-    }
-}
-
-fn swapToNewGrowFrames(self: *VulkanRenderer, old_draw_capacity: u32, old_frames: []const GrowFrameBackup, new_frames: []const GrowFrameAllocation) void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "swapToNewGrowFrames" });
-    defer zone.end();
-    for (new_frames, 0..) |new_frame, i| {
-        const mesh_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.mesh_data_slice.ptr);
-        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.indirect_draw_slice.ptr);
-        const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, new_frame.count_slice.ptr);
-        const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_frame.stats_slice.ptr);
-
-        self.frame_buffers.items[i] = .{
-            .mesh_data = mesh_data_info.buffer,
-            .mesh_data_mapped = new_frame.mesh_data_slice.ptr,
-            .mesh_data_offset = mesh_data_info.offset,
-            .indirect_draw = indirect_draw_info.buffer,
-            .indirect_draw_mapped = new_frame.indirect_draw_slice.ptr,
-            .indirect_draw_offset = indirect_draw_info.offset,
-            .count = count_info.buffer,
-            .count_slice = new_frame.count_slice,
-            .count_offset = count_info.offset,
-            .stats = stats_info.buffer,
-            .stats_slice = new_frame.stats_slice,
-            .stats_offset = stats_info.offset,
-            .stats_mapped = new_frame.stats_slice.ptr,
-        };
-
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].mesh_data_ptr[0 .. old_draw_capacity * draw_type_count]);
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].indirect_ptr[0 .. old_draw_capacity * draw_type_count]);
-        self.gpu_only_gpa.allocator().free(old_frames[i].count_slice);
-        self.cpu_to_gpu_gpa.allocator().free(old_frames[i].stats_slice);
-    }
-
-    for (old_frames, 0..) |_, i| {
-        self.updateCullDescriptorSet(@intCast(i));
-        self.updateMeshDataDescriptorSet(@intCast(i));
-    }
-}
-
 fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
     defer zone.end();
@@ -2191,9 +1898,7 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     if (min_capacity <= self.draw_capacity) return;
 
     var new_capacity = self.draw_capacity;
-    while (new_capacity < min_capacity) {
-        new_capacity *= 2;
-    }
+    while (new_capacity < min_capacity) new_capacity *= 2;
 
     const clamped_capacity = @min(new_capacity, self.max_draw_indirect_count);
     if (clamped_capacity < new_capacity) {
@@ -2210,23 +1915,69 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     const old_draw_capacity = self.draw_capacity;
     const num_frames = self.frame_buffers.items.len;
 
-    const old_frames = try self.allocator.alloc(GrowFrameBackup, num_frames);
-    defer self.allocator.free(old_frames);
-    for (old_frames, 0..) |*frame, i| {
-        frame.* = .{
-            .mesh_data_ptr = self.frame_buffers.items[i].mesh_data_mapped.?,
-            .indirect_ptr = self.frame_buffers.items[i].indirect_draw_mapped.?,
-            .count_slice = self.frame_buffers.items[i].count_slice,
-            .stats_slice = self.frame_buffers.items[i].stats_slice,
-        };
+    // Backup old per-frame allocations
+    const old_mesh_data = try self.allocator.alloc([*]MeshData, num_frames);
+    defer self.allocator.free(old_mesh_data);
+    const old_indirect = try self.allocator.alloc([*]vk.DrawIndirectCommand, num_frames);
+    defer self.allocator.free(old_indirect);
+    const old_count_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_frames);
+    defer self.allocator.free(old_count_slices);
+    const old_stats_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_frames);
+    defer self.allocator.free(old_stats_slices);
+
+    for (self.frame_buffers.items[0..num_frames], old_mesh_data, old_indirect, old_count_slices, old_stats_slices) |frame, *mesh, *ind, *count, *stats| {
+        mesh.* = frame.mesh_data_mapped.?;
+        ind.* = frame.indirect_draw_mapped.?;
+        count.* = frame.count_slice;
+        stats.* = frame.stats_slice;
     }
 
-    const new_frames = try self.allocator.alloc(GrowFrameAllocation, num_frames);
-    defer self.allocator.free(new_frames);
-    try self.allocateGrowFrames(new_capacity, old_draw_capacity, old_frames, new_frames);
+    // Allocate and populate new per-frame buffers
+    for (self.frame_buffers.items[0..num_frames], old_mesh_data, old_indirect, old_count_slices, old_stats_slices) |*frame, old_mesh, old_ind, old_count, old_stats| {
+        const mesh_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshData, new_capacity * draw_type_count);
+        const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count);
+        const count_slice = try self.gpu_only_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
+        const stats_slice = try self.cpu_to_gpu_gpa.allocator().alignedAlloc(CullCount, cull_buffer_alignment, 1);
+        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
+
+        if (old_draw_capacity > 0) {
+            @memcpy(mesh_data_slice[0 .. old_draw_capacity * draw_type_count], old_mesh[0 .. old_draw_capacity * draw_type_count]);
+            @memcpy(indirect_draw_slice[0 .. old_draw_capacity * draw_type_count], old_ind[0 .. old_draw_capacity * draw_type_count]);
+        }
+
+        const mesh_data_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
+        const indirect_draw_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
+        const count_info = self.backing_allocator.getBufferAndOffset(.gpu_only, count_slice.ptr);
+        const stats_info = self.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
+
+        frame.* = .{
+            .mesh_data = mesh_data_info.buffer,
+            .mesh_data_mapped = mesh_data_slice.ptr,
+            .mesh_data_offset = mesh_data_info.offset,
+            .indirect_draw = indirect_draw_info.buffer,
+            .indirect_draw_mapped = indirect_draw_slice.ptr,
+            .indirect_draw_offset = indirect_draw_info.offset,
+            .count = count_info.buffer,
+            .count_slice = count_slice,
+            .count_offset = count_info.offset,
+            .stats = stats_info.buffer,
+            .stats_slice = stats_slice,
+            .stats_offset = stats_info.offset,
+            .stats_mapped = stats_slice.ptr,
+        };
+
+        self.cpu_to_gpu_gpa.allocator().free(old_mesh[0 .. old_draw_capacity * draw_type_count]);
+        self.cpu_to_gpu_gpa.allocator().free(old_ind[0 .. old_draw_capacity * draw_type_count]);
+        self.gpu_only_gpa.allocator().free(old_count);
+        self.cpu_to_gpu_gpa.allocator().free(old_stats);
+    }
 
     self.draw_capacity = new_capacity;
-    self.swapToNewGrowFrames(old_draw_capacity, old_frames, new_frames);
+
+    for (self.frame_buffers.items[0..num_frames], 0..) |_, i| {
+        self.updateCullDescriptorSet(@intCast(i));
+        self.updateMeshDataDescriptorSet(@intCast(i));
+    }
 }
 
 fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
@@ -2255,18 +2006,14 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     self.persistent.slice = new_slice;
 
     const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
-    {
-        try self.retired_candidate_slices.append(self.allocator, .{
-            .slice = old_slice,
-            .graphics_timeline_value = current_frame_num + self.num_in_flight,
-        });
-    }
+    try self.retired_candidate_slices.append(self.allocator, .{
+        .slice = old_slice,
+        .graphics_timeline_value = current_frame_num + self.num_in_flight,
+    });
 
     try self.index_pool.grow(io, self.allocator, @intCast(new_capacity));
 
-    for (self.cull.descriptor_sets_per_frame, 0..) |_, i| {
-        self.updateCullDescriptorSet(@intCast(i));
-    }
+    for (self.cull.descriptor_sets_per_frame, 0..) |_, i| self.updateCullDescriptorSet(@intCast(i));
 }
 
 pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
@@ -2297,13 +2044,13 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     defer zone.end();
     destroyRenderTarget(self.dev, &self.render_color);
     destroyRenderTarget(self.dev, &self.render_depth);
-    destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+    destroyIfValid(self.dev, &self.render_depth_sampled_view);
     self.destroyOitResources();
 
     errdefer {
         destroyRenderTarget(self.dev, &self.render_color);
         destroyRenderTarget(self.dev, &self.render_depth);
-        destroyIfValidImageView(self.dev, &self.render_depth_sampled_view);
+        destroyIfValid(self.dev, &self.render_depth_sampled_view);
         self.destroyOitResources();
     }
 
@@ -2328,17 +2075,11 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
     const oit_usage: vk.ImageUsageFlags = .{ .color_attachment_bit = true, .sampled_bit = true };
     const oit_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const accum = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
-    self.oit.accum = accum;
-    const reveal = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
-    self.oit.reveal = reveal;
+    self.oit.accum = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
+    self.oit.reveal = try self.createImageWithMemory(extent, .r16g16b16a16_sfloat, oit_usage, oit_aspect);
+    self.oit.volume_weight = try self.createImageWithMemory(extent, .r16_sfloat, oit_usage, oit_aspect);
 
-    const volume_weight = try self.createImageWithMemory(extent, .r16_sfloat, oit_usage, oit_aspect);
-    self.oit.volume_weight = volume_weight;
-
-    if (self.oit.descriptor_sets_per_frame.len > 0) {
-        self.updateOitDescriptorSets();
-    }
+    if (self.oit.descriptor_sets_per_frame.len > 0) self.updateOitDescriptorSets();
 
     std.log.info("VulkanRenderer.createRenderTargets: SUCCESS - Created render targets: color {any}, depth {any}, accum {any}, reveal {any}\n", .{ self.render_color.image, self.render_depth.image, self.oit.accum.image, self.oit.reveal.image });
 }
@@ -2346,8 +2087,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 fn createTransparentDepthDescriptorSetLayout(self: *VulkanRenderer) !void {
     if (self.graphics_state.transparent_depth_descriptor_set_layout == .null_handle) {
         const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = (&binding)[0..1] };
-        self.graphics_state.transparent_depth_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        self.graphics_state.transparent_depth_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
     }
 }
 
@@ -2356,63 +2096,22 @@ fn createMeshDataDescriptorResources(self: *VulkanRenderer) !void {
     defer zone.end();
     if (self.graphics_state.mesh_data_descriptor_set_layout == .null_handle) {
         const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] };
-        self.graphics_state.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        self.graphics_state.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
     }
 
-    const num_frames = VulkanContext.max_frames_in_flight;
-    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames) };
-    const pool_info: vk.DescriptorPoolCreateInfo = .{
-        .flags = .{},
-        .max_sets = @intCast(num_frames),
-        .pool_size_count = 1,
-        .p_pool_sizes = (&pool_size)[0..1].ptr,
-    };
-    self.graphics_state.mesh_data_descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
-    errdefer self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
+    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight) };
+    try self.createFrameDescriptorPool(&self.graphics_state.mesh_data_descriptor_pool, self.graphics_state.mesh_data_descriptor_set_layout, &self.graphics_state.mesh_data_descriptor_sets_per_frame, (&pool_size)[0..1]);
 
-    self.graphics_state.mesh_data_descriptor_sets_per_frame = try self.allocator.alloc(vk.DescriptorSet, num_frames);
-    errdefer if (self.graphics_state.mesh_data_descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
-        self.graphics_state.mesh_data_descriptor_pool = .null_handle;
-    };
-    @memset(self.graphics_state.mesh_data_descriptor_sets_per_frame, .null_handle);
-
-    const layouts = try self.allocator.alloc(vk.DescriptorSetLayout, num_frames);
-    defer self.allocator.free(layouts);
-    @memset(layouts, self.graphics_state.mesh_data_descriptor_set_layout);
-
-    const alloc_info: vk.DescriptorSetAllocateInfo = .{
-        .descriptor_pool = self.graphics_state.mesh_data_descriptor_pool,
-        .descriptor_set_count = @intCast(num_frames),
-        .p_set_layouts = layouts.ptr,
-    };
-    try self.dev.allocateDescriptorSets(&alloc_info, self.graphics_state.mesh_data_descriptor_sets_per_frame.ptr);
-
-    for (0..num_frames) |i| {
-        self.updateMeshDataDescriptorSet(@intCast(i));
-    }
+    for (0..VulkanContext.max_frames_in_flight) |i| self.updateMeshDataDescriptorSet(@intCast(i));
 }
 
 fn updateMeshDataDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
-    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
-    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const info: vk.DescriptorBufferInfo = .{
         .buffer = self.frame_buffers.items[frame_idx].mesh_data,
         .offset = self.frame_buffers.items[frame_idx].mesh_data_offset,
         .range = self.draw_capacity * draw_type_count * @sizeOf(MeshData),
     };
-    const write: vk.WriteDescriptorSet = .{
-        .dst_set = self.graphics_state.mesh_data_descriptor_sets_per_frame[frame_idx],
-        .dst_binding = 0,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .storage_buffer,
-        .p_image_info = (&dummy_image_info)[0..1],
-        .p_buffer_info = (&info)[0..1],
-        .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-    };
-    self.dev.updateDescriptorSets((&write)[0..1], null);
+    self.dev.updateDescriptorSets((&dummyWriteDescriptorSet(self.graphics_state.mesh_data_descriptor_sets_per_frame[frame_idx], 0, .storage_buffer, &info))[0..1], null);
 }
 
 fn destroyMeshDataDescriptorResources(self: *VulkanRenderer) void {
@@ -2436,45 +2135,16 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
             .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 3, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
         };
-        const layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-        self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, null);
     }
 
-    const num_frames = VulkanContext.max_frames_in_flight;
-    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(num_frames * 4) };
-    const pool_info: vk.DescriptorPoolCreateInfo = .{
-        .flags = .{},
-        .max_sets = @intCast(num_frames),
-        .pool_size_count = 1,
-        .p_pool_sizes = (&pool_size)[0..1].ptr,
-    };
-    errdefer if (self.cull.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.cull.descriptor_pool, null);
-    };
-    self.cull.descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
+    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
+    try self.createFrameDescriptorPool(&self.cull.descriptor_pool, self.cull.descriptor_set_layout, &self.cull.descriptor_sets_per_frame, (&pool_size)[0..1]);
 
-    self.cull.descriptor_sets_per_frame = try self.allocator.alloc(vk.DescriptorSet, num_frames);
-    errdefer self.allocator.free(self.cull.descriptor_sets_per_frame);
-
-    const layouts = try self.allocator.alloc(vk.DescriptorSetLayout, num_frames);
-    defer self.allocator.free(layouts);
-    @memset(layouts, self.cull.descriptor_set_layout);
-
-    const alloc_info: vk.DescriptorSetAllocateInfo = .{
-        .descriptor_pool = self.cull.descriptor_pool,
-        .descriptor_set_count = @intCast(num_frames),
-        .p_set_layouts = layouts.ptr,
-    };
-    try self.dev.allocateDescriptorSets(&alloc_info, self.cull.descriptor_sets_per_frame.ptr);
-
-    for (0..num_frames) |i| {
-        self.updateCullDescriptorSet(@intCast(i));
-    }
+    for (0..VulkanContext.max_frames_in_flight) |i| self.updateCullDescriptorSet(@intCast(i));
 }
 
 fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
-    const dummy_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
-    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const infos: [4]vk.DescriptorBufferInfo = .{
         .{ .buffer = self.persistent.buffer, .offset = self.persistent.offset, .range = self.persistent.slice.len * @sizeOf(MeshCandidate) },
         .{ .buffer = self.frame_buffers.items[frame_idx].indirect_draw, .offset = self.frame_buffers.items[frame_idx].indirect_draw_offset, .range = self.draw_capacity * draw_type_count * @sizeOf(vk.DrawIndirectCommand) },
@@ -2482,29 +2152,13 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
         .{ .buffer = self.frame_buffers.items[frame_idx].count, .offset = self.frame_buffers.items[frame_idx].count_offset, .range = @sizeOf(CullCount) },
     };
     var writes: [4]vk.WriteDescriptorSet = undefined;
-    inline for (infos, 0..) |info, i| {
-        writes[i] = .{
-            .dst_set = self.cull.descriptor_sets_per_frame[frame_idx],
-            .dst_binding = @intCast(i),
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .storage_buffer,
-            .p_image_info = (&dummy_image_info)[0..1],
-            .p_buffer_info = (&info)[0..1],
-            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
-        };
-    }
+    inline for (infos, 0..) |info, i| writes[i] = dummyWriteDescriptorSet(self.cull.descriptor_sets_per_frame[frame_idx], @intCast(i), .storage_buffer, &info);
     self.dev.updateDescriptorSets(&writes, null);
 }
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
     const num_frames = VulkanContext.max_frames_in_flight;
-    pool.* = try self.dev.createDescriptorPool(&.{
-        .flags = .{},
-        .max_sets = @intCast(num_frames),
-        .pool_size_count = @intCast(pool_sizes.len),
-        .p_pool_sizes = pool_sizes.ptr,
-    }, null);
+    pool.* = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = @intCast(num_frames), .pool_size_count = @intCast(pool_sizes.len), .p_pool_sizes = pool_sizes.ptr }, null);
     errdefer if (pool.* != .null_handle) {
         self.dev.destroyDescriptorPool(pool.*, null);
         pool.* = .null_handle;
@@ -2520,11 +2174,7 @@ fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, la
     defer self.allocator.free(layouts);
     @memset(layouts, layout);
 
-    try self.dev.allocateDescriptorSets(&.{
-        .descriptor_pool = pool.*,
-        .descriptor_set_count = @intCast(num_frames),
-        .p_set_layouts = layouts.ptr,
-    }, sets.*.ptr);
+    try self.dev.allocateDescriptorSets(&.{ .descriptor_pool = pool.*, .descriptor_set_count = @intCast(num_frames), .p_set_layouts = layouts.ptr }, sets.*.ptr);
 }
 
 fn buildGraphicsPipeline(
@@ -2578,11 +2228,7 @@ fn buildGraphicsPipeline(
         dyn_states.appendAssumeCapacity(.depth_compare_op);
         dyn_states.appendAssumeCapacity(.depth_write_enable);
     }
-    const dyn: vk.PipelineDynamicStateCreateInfo = .{
-        .flags = .{},
-        .dynamic_state_count = @intCast(dyn_states.items.len),
-        .p_dynamic_states = dyn_states.items.ptr,
-    };
+    const dyn: vk.PipelineDynamicStateCreateInfo = .{ .flags = .{}, .dynamic_state_count = @intCast(dyn_states.items.len), .p_dynamic_states = dyn_states.items.ptr };
 
     const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
         shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
@@ -2643,118 +2289,119 @@ fn buildGraphicsPipeline(
     return pipeline;
 }
 
-fn createGraphicsPipelines(self: *VulkanRenderer) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
-    defer zone.end();
+fn createOpaquePipeline(self: *VulkanRenderer, vert_module: vk.ShaderModule) !void {
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
         .offset = 0,
         .size = push_constants_size,
     };
+    const set_layouts: [2]vk.DescriptorSetLayout = .{
+        self.texture_manager.descriptor_set_layout,
+        self.graphics_state.mesh_data_descriptor_set_layout,
+    };
+    self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&.{
+        .flags = .{},
+        .set_layout_count = set_layouts.len,
+        .p_set_layouts = &set_layouts,
+        .push_constant_range_count = 1,
+        .p_push_constant_ranges = (&pc_range)[0..1],
+    }, null);
 
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len * @sizeOf(u32), .p_code = fragment_shader_spv.ptr }, null);
+    defer self.dev.destroyShaderModule(frag_module, null);
+
+    const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+        .flags = .{},
+        .depth_test_enable = .true,
+        .depth_write_enable = .true,
+        .depth_compare_op = .greater,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = undefined,
+        .back = undefined,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
+    const blend: vk.PipelineColorBlendAttachmentState = .{
+        .blend_enable = .false,
+        .src_color_blend_factor = .src_alpha,
+        .dst_color_blend_factor = .one_minus_src_alpha,
+        .color_blend_op = .add,
+        .src_alpha_blend_factor = .src_alpha,
+        .dst_alpha_blend_factor = .one_minus_src_alpha,
+        .alpha_blend_op = .add,
+        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+    };
     const face_vertex_input: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .{},
         .vertex_binding_description_count = 1,
-        .p_vertex_binding_descriptions = (&vk.VertexInputBindingDescription{
-            .binding = 0,
-            .stride = 8,
-            .input_rate = .instance,
-        })[0..1],
+        .p_vertex_binding_descriptions = (&vk.VertexInputBindingDescription{ .binding = 0, .stride = 8, .input_rate = .instance })[0..1],
         .vertex_attribute_description_count = 1,
-        .p_vertex_attribute_descriptions = (&vk.VertexInputAttributeDescription{
-            .location = 0,
-            .binding = 0,
-            .format = .r32g32_uint,
-            .offset = 0,
-        })[0..1],
+        .p_vertex_attribute_descriptions = (&vk.VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = .r32g32_uint, .offset = 0 })[0..1],
     };
+    self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, self.depth_format, depth_stencil, &.{blend}, self.graphics_state.opaque_pipeline_layout, face_vertex_input);
+}
+
+fn createTransparentPipeline(self: *VulkanRenderer, vert_module: vk.ShaderModule) !void {
+    const pc_range: vk.PushConstantRange = .{
+        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+        .offset = 0,
+        .size = push_constants_size,
+    };
+    const set_layouts: [4]vk.DescriptorSetLayout = .{
+        self.texture_manager.descriptor_set_layout,
+        self.graphics_state.mesh_data_descriptor_set_layout,
+        self.graphics_state.transparent_depth_descriptor_set_layout,
+        self.block_materials_descriptor_set_layout,
+    };
+    self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&.{
+        .flags = .{},
+        .set_layout_count = set_layouts.len,
+        .p_set_layouts = &set_layouts,
+        .push_constant_range_count = 1,
+        .p_push_constant_ranges = (&pc_range)[0..1],
+    }, null);
+
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len * @sizeOf(u32), .p_code = transparent_frag_spv.ptr }, null);
+    defer self.dev.destroyShaderModule(frag_module, null);
+
+    const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+        .flags = .{},
+        .depth_test_enable = .true,
+        .depth_write_enable = .false,
+        .depth_compare_op = .greater_or_equal,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = undefined,
+        .back = undefined,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
+    const blend_attachments: [3]vk.PipelineColorBlendAttachmentState = .{
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = false, .b_bit = false, .a_bit = false } },
+    };
+    const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
+    const face_vertex_input: vk.PipelineVertexInputStateCreateInfo = .{
+        .flags = .{},
+        .vertex_binding_description_count = 1,
+        .p_vertex_binding_descriptions = (&vk.VertexInputBindingDescription{ .binding = 0, .stride = 8, .input_rate = .instance })[0..1],
+        .vertex_attribute_description_count = 1,
+        .p_vertex_attribute_descriptions = (&vk.VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = .r32g32_uint, .offset = 0 })[0..1],
+    };
+    self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, self.graphics_state.transparent_pipeline_layout, face_vertex_input);
+}
+
+fn createGraphicsPipelines(self: *VulkanRenderer) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
+    defer zone.end();
 
     const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len * @sizeOf(u32), .p_code = vertex_shader_spv.ptr }, null);
     defer self.dev.destroyShaderModule(vert_module, null);
 
-    // 1. Opaque Pipeline
-    {
-        const set_layouts: [2]vk.DescriptorSetLayout = .{
-            self.texture_manager.descriptor_set_layout,
-            self.graphics_state.mesh_data_descriptor_set_layout,
-        };
-        const layout_info: vk.PipelineLayoutCreateInfo = .{
-            .flags = .{},
-            .set_layout_count = set_layouts.len,
-            .p_set_layouts = &set_layouts,
-            .push_constant_range_count = 1,
-            .p_push_constant_ranges = (&pc_range)[0..1],
-        };
-        self.graphics_state.opaque_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
-
-        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len * @sizeOf(u32), .p_code = fragment_shader_spv.ptr }, null);
-        defer self.dev.destroyShaderModule(frag_module, null);
-
-        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
-            .flags = .{},
-            .depth_test_enable = .true,
-            .depth_write_enable = .true,
-            .depth_compare_op = .greater,
-            .depth_bounds_test_enable = .false,
-            .stencil_test_enable = .false,
-            .front = undefined,
-            .back = undefined,
-            .min_depth_bounds = 0.0,
-            .max_depth_bounds = 1.0,
-        };
-        const blend: vk.PipelineColorBlendAttachmentState = .{
-            .blend_enable = .false,
-            .src_color_blend_factor = .src_alpha,
-            .dst_color_blend_factor = .one_minus_src_alpha,
-            .color_blend_op = .add,
-            .src_alpha_blend_factor = .src_alpha,
-            .dst_alpha_blend_factor = .one_minus_src_alpha,
-            .alpha_blend_op = .add,
-            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-        };
-        self.graphics_state.pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, self.depth_format, depth_stencil, &.{blend}, self.graphics_state.opaque_pipeline_layout, face_vertex_input);
-    }
-
-    // 2. Transparent Pipeline
-    {
-        const set_layouts: [4]vk.DescriptorSetLayout = .{
-            self.texture_manager.descriptor_set_layout,
-            self.graphics_state.mesh_data_descriptor_set_layout,
-            self.graphics_state.transparent_depth_descriptor_set_layout,
-            self.block_materials_descriptor_set_layout,
-        };
-        const layout_info: vk.PipelineLayoutCreateInfo = .{
-            .flags = .{},
-            .set_layout_count = set_layouts.len,
-            .p_set_layouts = &set_layouts,
-            .push_constant_range_count = 1,
-            .p_push_constant_ranges = (&pc_range)[0..1],
-        };
-        self.graphics_state.transparent_pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
-
-        const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len * @sizeOf(u32), .p_code = transparent_frag_spv.ptr }, null);
-        defer self.dev.destroyShaderModule(frag_module, null);
-
-        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
-            .flags = .{},
-            .depth_test_enable = .true,
-            .depth_write_enable = .false,
-            .depth_compare_op = .greater_or_equal,
-            .depth_bounds_test_enable = .false,
-            .stencil_test_enable = .false,
-            .front = undefined,
-            .back = undefined,
-            .min_depth_bounds = 0.0,
-            .max_depth_bounds = 1.0,
-        };
-        const blend_attachments: [3]vk.PipelineColorBlendAttachmentState = .{
-            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-            .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = false, .b_bit = false, .a_bit = false } },
-        };
-        const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
-        self.graphics_state.transparent_pipeline = try self.buildGraphicsPipeline(vert_module, frag_module, &formats, self.depth_format, depth_stencil, &blend_attachments, self.graphics_state.transparent_pipeline_layout, face_vertex_input);
-    }
+    try self.createOpaquePipeline(vert_module);
+    try self.createTransparentPipeline(vert_module);
 }
 
 fn createCullPipeline(self: *VulkanRenderer) !void {
@@ -2765,14 +2412,13 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
         .offset = 0,
         .size = @sizeOf(CullPushConstants),
     };
-    const layout_info: vk.PipelineLayoutCreateInfo = .{
+    self.cull.pipeline_layout = try self.dev.createPipelineLayout(&.{
         .flags = .{},
         .set_layout_count = 1,
         .p_set_layouts = (&self.cull.descriptor_set_layout)[0..1],
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
-    };
-    self.cull.pipeline_layout = try self.dev.createPipelineLayout(&layout_info, null);
+    }, null);
     errdefer {
         self.dev.destroyPipelineLayout(self.cull.pipeline_layout, null);
         self.cull.pipeline_layout = .null_handle;
@@ -2809,27 +2455,21 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
             .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 3, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
-        var layout_info: vk.DescriptorSetLayoutCreateInfo = .{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] };
-        self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&layout_info, null);
+        self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, null);
     }
 
     if (self.oit.composition_layout == .null_handle) {
-        const pc_range: vk.PushConstantRange = .{
-            .stage_flags = .{ .fragment_bit = true },
-            .offset = 0,
-            .size = @sizeOf(u32),
-        };
-        const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{
+        const pc_range: vk.PushConstantRange = .{ .stage_flags = .{ .fragment_bit = true }, .offset = 0, .size = @sizeOf(u32) };
+        self.oit.composition_layout = try self.dev.createPipelineLayout(&.{
             .flags = .{},
             .set_layout_count = 1,
             .p_set_layouts = (&self.oit.descriptor_set_layout)[0..1],
             .push_constant_range_count = 1,
             .p_push_constant_ranges = (&pc_range)[0..1],
-        };
-        self.oit.composition_layout = try self.dev.createPipelineLayout(&pipeline_layout_info, null);
+        }, null);
     }
 
-    const sampler_info = vk.SamplerCreateInfo{
+    self.oit.sampler = try self.dev.createSampler(&.{
         .flags = .{},
         .mag_filter = .linear,
         .min_filter = .linear,
@@ -2846,8 +2486,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
         .max_lod = 0,
         .border_color = .float_opaque_black,
         .unnormalized_coordinates = .false,
-    };
-    self.oit.sampler = try self.dev.createSampler(&sampler_info, null);
+    }, null);
     errdefer {
         self.dev.destroySampler(self.oit.sampler, null);
         self.oit.sampler = .null_handle;
@@ -2883,14 +2522,14 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
 }
 
 fn updateOitDescriptorSets(self: *VulkanRenderer) void {
-    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
-    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     const image_infos: [4]vk.DescriptorImageInfo = .{
         .{ .sampler = self.oit.sampler, .image_view = self.render_color.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.accum.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.reveal.view, .image_layout = .shader_read_only_optimal },
         .{ .sampler = self.oit.sampler, .image_view = self.oit.volume_weight.view, .image_layout = .shader_read_only_optimal },
     };
+    const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+    const dummy_texel_buffer_view: vk.BufferView = .null_handle;
     for (self.oit.descriptor_sets_per_frame) |desc_set| {
         const writes: [4]vk.WriteDescriptorSet = .{
             .{ .dst_set = desc_set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = .combined_image_sampler, .p_image_info = image_infos[0..1], .p_buffer_info = (&dummy_buffer_info)[0..1], .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1] },
@@ -2903,13 +2542,10 @@ fn updateOitDescriptorSets(self: *VulkanRenderer) void {
 }
 
 fn destroyOitPipelinesAndDescriptors(self: *VulkanRenderer) void {
-    destroyIfValidPipeline(self.dev, &self.oit.composition_pipeline);
-    destroyIfValidPipelineLayout(self.dev, &self.oit.composition_layout);
-    destroyIfValidDescriptorSetLayout(self.dev, &self.oit.descriptor_set_layout);
-    if (self.oit.sampler != .null_handle) {
-        self.dev.destroySampler(self.oit.sampler, null);
-        self.oit.sampler = .null_handle;
-    }
+    destroyIfValid(self.dev, &self.oit.composition_pipeline);
+    destroyIfValid(self.dev, &self.oit.composition_layout);
+    destroyIfValid(self.dev, &self.oit.descriptor_set_layout);
+    destroyIfValid(self.dev, &self.oit.sampler);
 }
 
 fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
@@ -2924,41 +2560,44 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.transfer.graphics_timeline_semaphore);
 
     {
-        const len = self.retired_meshes.items.len;
-        for (0..len) |i| {
-            const idx = len - 1 - i;
-            const entry = self.retired_meshes.items[idx];
+        const items = &self.retired_meshes;
+        var i: usize = items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = items.items[i];
             if (current_graphics_val >= entry.graphics_timeline_value) {
                 if (entry.free_index) {
                     self.persistent.mapped[entry.gpu_index].face_count = 0;
                     self.index_pool.freeIndex(io, entry.gpu_index);
                 }
                 self.face_allocator.freeRegion(io, entry.face_offset, entry.face_length);
-                _ = self.retired_meshes.swapRemove(idx);
+                _ = items.swapRemove(i);
             }
         }
     }
 
     {
-        const len = self.retired_candidate_slices.items.len;
-        for (0..len) |i| {
-            const idx = len - 1 - i;
-            const entry = self.retired_candidate_slices.items[idx];
+        const items = &self.retired_candidate_slices;
+        var i: usize = items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = items.items[i];
             if (current_graphics_val >= entry.graphics_timeline_value) {
                 self.cpu_to_gpu_gpa.allocator().free(entry.slice);
-                _ = self.retired_candidate_slices.swapRemove(idx);
+                _ = items.swapRemove(i);
             }
         }
     }
 
     {
-        const len = self.retired_face_buffers.items.len;
-        for (0..len) |i| {
-            const idx = len - 1 - i;
-            const entry = self.retired_face_buffers.items[idx];
+        const items = &self.retired_face_buffers;
+        var i: usize = items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = items.items[i];
             if (current_graphics_val >= entry.graphics_timeline_value) {
                 self.gpu_only_gpa.allocator().free(entry.slice);
-                _ = self.retired_face_buffers.swapRemove(idx);
+                _ = items.swapRemove(i);
             }
         }
     }
@@ -2967,20 +2606,11 @@ fn processRetiredMeshes(self: *VulkanRenderer, io: std.Io) !void {
 pub fn beginSingleTimeCommands(self: *VulkanRenderer) !vk.CommandBuffer {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "beginSingleTimeCommands" });
     defer zone.end();
-    const alloc_info: vk.CommandBufferAllocateInfo = .{
-        .level = .primary,
-        .command_pool = self.upload_command_pool,
-        .command_buffer_count = 1,
-    };
     var cmd: vk.CommandBuffer = undefined;
-    try self.dev.allocateCommandBuffers(&alloc_info, (&cmd)[0..1]);
+    try self.dev.allocateCommandBuffers(&.{ .level = .primary, .command_pool = self.upload_command_pool, .command_buffer_count = 1 }, (&cmd)[0..1]);
     errdefer self.dev.freeCommandBuffers(self.upload_command_pool, &.{cmd});
 
-    const begin_info: vk.CommandBufferBeginInfo = .{
-        .flags = .{ .one_time_submit_bit = true },
-        .p_inheritance_info = null,
-    };
-    try self.dev.beginCommandBuffer(cmd, &begin_info);
+    try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
 
     return cmd;
 }
@@ -2995,10 +2625,7 @@ fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !vo
         .wait_semaphore_info_count = 0,
         .p_wait_semaphore_infos = null,
         .command_buffer_info_count = 1,
-        .p_command_buffer_infos = (&vk.CommandBufferSubmitInfo{
-            .command_buffer = cmd,
-            .device_mask = 0,
-        })[0..1],
+        .p_command_buffer_infos = (&vk.CommandBufferSubmitInfo{ .command_buffer = cmd, .device_mask = 0 })[0..1],
         .signal_semaphore_info_count = 0,
         .p_signal_semaphore_infos = null,
     };
@@ -3079,8 +2706,4 @@ test "findMemoryType" {
 test "MeshData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(MeshData));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(MeshData));
-}
-
-test "ref decls" {
-    std.testing.refAllDecls(@This());
 }

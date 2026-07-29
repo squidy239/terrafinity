@@ -50,10 +50,10 @@ layout(push_constant) uniform PushConsts {
     uint draw_capacity;
 } pc;
 
-bool boxInFrustum(vec3 bmin, vec3 bmax) {
+bool boxInFrustum(vec3 b_min, vec3 b_max) {
     for (int i = 0; i < 6; i++) {
         vec4 plane = pc.planes[i];
-        if (dot(plane.xyz, mix(bmin, bmax, greaterThan(plane.xyz, vec3(0.0)))) + plane.w < 0.0) return false;
+        if (dot(plane.xyz, mix(b_min, b_max, greaterThan(plane.xyz, vec3(0.0)))) + plane.w < 0.0) return false;
     }
     return true;
 }

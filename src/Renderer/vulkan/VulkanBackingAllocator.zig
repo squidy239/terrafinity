@@ -1,6 +1,5 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const DeviceProxy = vk.DeviceProxy;
 const tracy = @import("tracy");
 
 const log = std.log.scoped(.vulkan_backing_allocator);
@@ -11,7 +10,7 @@ const log = std.log.scoped(.vulkan_backing_allocator);
 pub const GpuBlock = struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
-    raw_alloc: []u8 = &.{}, // safety sentinel for getBlock range check
+    raw_alloc: []u8 = &.{}, // safety sentinel for range check
 };
 
 pub const MemoryPool = enum {
@@ -23,7 +22,7 @@ pub const MemoryPool = enum {
 /// destroys it on free. No sub-allocation, no free list — each allocation
 /// maps 1:1 to a VkBuffer and its backing VkDeviceMemory.
 pub const VulkanBackingAllocator = struct {
-    dev: DeviceProxy,
+    dev: vk.DeviceProxy,
     mem_props: vk.PhysicalDeviceMemoryProperties,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
@@ -31,7 +30,7 @@ pub const VulkanBackingAllocator = struct {
     blocks: [std.meta.fields(MemoryPool).len]std.AutoHashMapUnmanaged(usize, GpuBlock) = .{ .{}, .{} },
     meta_allocator: std.mem.Allocator,
 
-    pub fn init(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, io: std.Io, hashmap_allocator: std.mem.Allocator) VulkanBackingAllocator {
+    pub fn init(dev: vk.DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, io: std.Io, hashmap_allocator: std.mem.Allocator) VulkanBackingAllocator {
         return .{
             .dev = dev,
             .mem_props = mem_props,
@@ -64,42 +63,25 @@ pub const VulkanBackingAllocator = struct {
     /// The caller must own the pointer and may not call this concurrently with
     /// any alloc or free in this pool.
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
-        const block = self.getBlock(pool, ptr);
-        const offset = @intFromPtr(ptr) - @intFromPtr(block.raw_alloc.ptr);
-        return .{ .buffer = block.buffer, .offset = @intCast(offset) };
-    }
-
-    fn getBlock(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) GpuBlock {
         const addr = @intFromPtr(ptr);
         var it = self.blocks[@intFromEnum(pool)].valueIterator();
         while (it.next()) |block| {
             const start = @intFromPtr(block.raw_alloc.ptr);
-            if (addr >= start and addr < start + block.raw_alloc.len) return block.*;
+            if (addr >= start and addr < start + block.raw_alloc.len) {
+                return .{ .buffer = block.buffer, .offset = @intCast(addr - start) };
+            }
         }
         std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{addr});
     }
 
     fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
-        const count = @min(self.mem_props.memory_type_count, self.mem_props.memory_types.len);
-        for (self.mem_props.memory_types[0..count], 0..) |memory_type, index| {
-            const bit = @as(u5, @intCast(index));
-            if ((type_filter & (@as(u32, 1) << bit)) != 0 and (memory_type.property_flags.toInt() & required_properties.toInt()) == required_properties.toInt()) {
-                return @as(u32, bit);
-            }
+        const required_bits = required_properties.toInt();
+        for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |memory_type, i| {
+            if (type_filter & (@as(u32, 1) << @as(u5, @intCast(i))) == 0) continue;
+            if (memory_type.property_flags.toInt() & required_bits != required_bits) continue;
+            return @intCast(i);
         }
         return error.MemoryTypeNotFound;
-    }
-
-    fn destroyBlockResources(self: *VulkanBackingAllocator, block: GpuBlock, pool: MemoryPool) void {
-        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "destroyBlockResources" });
-        defer zone.end();
-
-        self.dev.destroyBuffer(block.buffer, null);
-
-        if (pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
-        self.dev.freeMemory(block.memory, null);
-
-        if (pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 
     fn allocBlock(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ![]u8 {
@@ -107,46 +89,29 @@ pub const VulkanBackingAllocator = struct {
         defer zone.end();
 
         const alignment_bytes = alignment.toByteUnits();
-        const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len; // room for alignment padding
+        const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len;
 
         const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, alloc_len);
         errdefer self.dev.freeMemory(memory, null);
         errdefer self.dev.destroyBuffer(buffer, null);
 
-        var raw_cpu_guard: ?[]u8 = null;
-        errdefer {
-            if (raw_cpu_guard) |rc| {
-                if (pool == .cpu_to_gpu) {
-                    self.dev.unmapMemory(memory);
-                } else {
-                    self.meta_allocator.free(rc);
-                }
-            }
-        }
-
-        const raw_cpu: []u8 = if (pool == .cpu_to_gpu) blk: {
-            const mapped: [*]u8 = @ptrCast(try self.dev.mapMemory(memory, 0, mem_size, .{}));
-            raw_cpu_guard = mapped[0..mem_size];
-            break :blk mapped[0..mem_size];
-        } else blk: {
-            const alloc = try self.meta_allocator.alloc(u8, mem_size);
-            raw_cpu_guard = alloc;
-            break :blk alloc;
-        };
+        const raw_cpu: []u8 = if (pool == .cpu_to_gpu)
+            (@as([*]u8, @ptrCast(try self.dev.mapMemory(memory, 0, mem_size, .{}))))[0..mem_size]
+        else
+            try self.meta_allocator.alloc(u8, mem_size);
+        errdefer if (pool == .cpu_to_gpu) self.dev.unmapMemory(memory) else self.meta_allocator.free(raw_cpu);
 
         const raw_addr = @intFromPtr(raw_cpu.ptr);
         const aligned_addr = alignment.forward(raw_addr);
         const result: []u8 = (@as([*]u8, @ptrFromInt(aligned_addr)))[0..len];
 
-        const block: GpuBlock = .{
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.blocks[@intFromEnum(pool)].put(self.meta_allocator, @intFromPtr(result.ptr), .{
             .memory = memory,
             .buffer = buffer,
             .raw_alloc = raw_cpu,
-        };
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        try self.blocks[@intFromEnum(pool)].put(self.meta_allocator, @intFromPtr(result.ptr), block);
+        });
 
         return result;
     }
@@ -202,26 +167,34 @@ pub const VulkanBackingAllocator = struct {
         };
         self.mutex.unlock(self.io);
 
-        self.destroyBlockResources(fetch_result.value, pool);
+        const block = fetch_result.value;
+        self.dev.destroyBuffer(block.buffer, null);
+        if (pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
+        self.dev.freeMemory(block.memory, null);
+        if (pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 };
 
-fn allocGpuOnly(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+fn allocPool(ctx: *anyopaque, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
     const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    const slice = self.allocBlock(.gpu_only, len, alignment) catch |err| {
-        log.err("VulkanBackingAllocator: allocGpuOnly of size {d} failed: {any}", .{ len, err });
+    const slice = self.allocBlock(pool, len, alignment) catch |err| {
+        log.err("VulkanBackingAllocator: alloc({s}) of size {d} failed: {any}", .{ @tagName(pool), len, err });
         return null;
     };
     return slice.ptr;
 }
 
-fn allocCpuToGpu(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+fn freePool(ctx: *anyopaque, pool: MemoryPool, buf: []u8) void {
     const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    const slice = self.allocBlock(.cpu_to_gpu, len, alignment) catch |err| {
-        log.err("VulkanBackingAllocator: allocCpuToGpu of size {d} failed: {any}", .{ len, err });
-        return null;
-    };
-    return slice.ptr;
+    self.freeBlock(pool, buf);
+}
+
+fn allocGpuOnly(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    return allocPool(ctx, .gpu_only, len, alignment);
+}
+
+fn allocCpuToGpu(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    return allocPool(ctx, .cpu_to_gpu, len, alignment);
 }
 
 fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
@@ -233,13 +206,11 @@ fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u
 }
 
 fn freeGpuOnly(ctx: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
-    const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    self.freeBlock(.gpu_only, buf);
+    freePool(ctx, .gpu_only, buf);
 }
 
 fn freeCpuToGpu(ctx: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
-    const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
-    self.freeBlock(.cpu_to_gpu, buf);
+    freePool(ctx, .cpu_to_gpu, buf);
 }
 
 const gpu_only_vtable = std.mem.Allocator.VTable{

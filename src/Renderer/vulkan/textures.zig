@@ -26,6 +26,36 @@ const Texture = struct {
     num_mip_levels: u16 = 0,
 };
 
+const StageAccess = struct {
+    stage: vk.PipelineStageFlags2,
+    access: vk.AccessFlags2,
+};
+
+const Transition = struct {
+    src: StageAccess,
+    dst: StageAccess,
+};
+
+fn transitionFor(old: vk.ImageLayout, new: vk.ImageLayout) Transition {
+    switch (old) {
+        .undefined => switch (new) {
+            .transfer_dst_optimal => return .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } } },
+            .transfer_src_optimal => return .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
+            else => unreachable,
+        },
+        .transfer_dst_optimal => switch (new) {
+            .transfer_src_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
+            .shader_read_only_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            else => unreachable,
+        },
+        .transfer_src_optimal => switch (new) {
+            .shader_read_only_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true, .transfer_write_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            else => unreachable,
+        },
+        else => unreachable,
+    }
+}
+
 pub const TextureManager = struct {
     renderer: *VulkanRenderer,
     gamma_correction: bool,
@@ -119,7 +149,7 @@ pub const TextureManager = struct {
 
         var cmd = try self.renderer.beginSingleTimeCommands();
         errdefer if (cmd != .null_handle)
-            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
+            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, (&cmd)[0..1]);
 
         var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
         try staging_slices.ensureTotalCapacity(allocator, entry_names.items.len);
@@ -155,14 +185,7 @@ pub const TextureManager = struct {
 
         for (entry_blocks.items) |block_type| {
             const tex = self.textures.getPtr(block_type);
-            tex.view = try self.renderer.dev.createImageView(&.{
-                .flags = .{},
-                .image = tex.image,
-                .view_type = .@"2d",
-                .format = format,
-                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-                .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
-            }, null);
+            tex.view = try self.createTextureView(tex, format);
         }
 
         try self.createDescriptorResources();
@@ -197,7 +220,7 @@ pub const TextureManager = struct {
 
         var cmd = try self.renderer.beginSingleTimeCommands();
         errdefer if (cmd != .null_handle)
-            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, &.{cmd});
+            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, (&cmd)[0..1]);
 
         {
             const staging = try self.uploadSingleTexture(cmd, &self.default_texture, 1, 1, &default_pixels, format);
@@ -207,15 +230,19 @@ pub const TextureManager = struct {
             cmd = .null_handle;
         }
 
-        self.default_texture.view = try self.renderer.dev.createImageView(&.{
+        self.default_texture.view = try self.createTextureView(&self.default_texture, format);
+        errdefer self.destroyTexture(&self.default_texture);
+    }
+
+    fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {
+        return self.renderer.dev.createImageView(&.{
             .flags = .{},
-            .image = self.default_texture.image,
+            .image = tex.image,
             .view_type = .@"2d",
             .format = format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
+            .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
         }, null);
-        errdefer self.destroyTexture(&self.default_texture);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
@@ -265,8 +292,6 @@ pub const TextureManager = struct {
             info.* = .{ .sampler = self.sampler, .image_view = tex.view, .image_layout = .shader_read_only_optimal };
         }
 
-        const dummy_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
-        const dummy_texel_buffer_view: vk.BufferView = .null_handle;
         self.renderer.dev.updateDescriptorSets(&.{vk.WriteDescriptorSet{
             .dst_set = self.descriptor_set,
             .dst_binding = 0,
@@ -274,8 +299,8 @@ pub const TextureManager = struct {
             .descriptor_count = @intCast(num_textures),
             .descriptor_type = .combined_image_sampler,
             .p_image_info = &image_infos,
-            .p_buffer_info = (&dummy_buffer_info)[0..1],
-            .p_texel_buffer_view = (&dummy_texel_buffer_view)[0..1],
+            .p_buffer_info = (&vk.DescriptorBufferInfo{ .buffer = .null_handle, .offset = 0, .range = 0 })[0..1],
+            .p_texel_buffer_view = (&@as(vk.BufferView, .null_handle))[0..1],
         }}, null);
     }
 
@@ -351,38 +376,50 @@ pub const TextureManager = struct {
             .image_extent = .{ .width = width, .height = height, .depth = 1 },
         }});
 
-        if (num_mip_levels > 1) {
-            self.imageBarrier(cmd, image, .transfer_dst_optimal, .transfer_src_optimal, 0, 1);
-
-            var mip: u32 = 1;
-            while (mip < num_mip_levels) : (mip += 1) {
-                const dw = @max(1, width >> @intCast(mip));
-                const dh = @max(1, height >> @intCast(mip));
-
-                self.imageBarrier(cmd, image, .undefined, .transfer_dst_optimal, mip, 1);
-
-                self.renderer.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
-                    vk.ImageBlit{
-                        .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
-                        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(width), .y = @intCast(height), .z = 1 } },
-                        .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
-                        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(dw), .y = @intCast(dh), .z = 1 } },
-                    },
-                }, .linear);
-
-                self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, mip, 1);
-            }
-
-            self.imageBarrier(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1);
-        } else {
-            self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, 0, 1);
-        }
+        self.generateMipmaps(cmd, image, width, height, num_mip_levels);
 
         tex.image = image;
         tex.memory = memory;
         tex.num_mip_levels = num_mip_levels;
 
         return staging;
+    }
+
+    fn generateMipmaps(
+        self: *TextureManager,
+        cmd: vk.CommandBuffer,
+        image: vk.Image,
+        width: u32,
+        height: u32,
+        num_mip_levels: u16,
+    ) void {
+        if (num_mip_levels == 1) {
+            self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, 0, 1);
+            return;
+        }
+
+        self.imageBarrier(cmd, image, .transfer_dst_optimal, .transfer_src_optimal, 0, 1);
+
+        var mip: u32 = 1;
+        while (mip < num_mip_levels) : (mip += 1) {
+            const dw = @max(1, width >> @intCast(mip));
+            const dh = @max(1, height >> @intCast(mip));
+
+            self.imageBarrier(cmd, image, .undefined, .transfer_dst_optimal, mip, 1);
+
+            self.renderer.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
+                vk.ImageBlit{
+                    .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+                    .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(width), .y = @intCast(height), .z = 1 } },
+                    .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
+                    .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(dw), .y = @intCast(dh), .z = 1 } },
+                },
+            }, .linear);
+
+            self.imageBarrier(cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, mip, 1);
+        }
+
+        self.imageBarrier(cmd, image, .transfer_src_optimal, .shader_read_only_optimal, 0, 1);
     }
 
     fn imageBarrier(
@@ -394,40 +431,7 @@ pub const TextureManager = struct {
         base_mip: u32,
         mip_count: u32,
     ) void {
-        var barrier = vk.ImageMemoryBarrier2{
-            .src_stage_mask = .{},
-            .src_access_mask = .{},
-            .dst_stage_mask = .{},
-            .dst_access_mask = .{},
-            .old_layout = old_layout,
-            .new_layout = new_layout,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
-        };
-        if (old_layout == .undefined and new_layout == .transfer_dst_optimal) {
-            barrier.dst_access_mask = .{ .transfer_write_bit = true };
-            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
-        } else if (old_layout == .transfer_dst_optimal and new_layout == .transfer_src_optimal) {
-            barrier.src_access_mask = .{ .transfer_write_bit = true };
-            barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            barrier.src_stage_mask = .{ .all_transfer_bit = true };
-            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
-        } else if (old_layout == .transfer_src_optimal and new_layout == .shader_read_only_optimal) {
-            barrier.src_access_mask = .{ .transfer_read_bit = true, .transfer_write_bit = true };
-            barrier.dst_access_mask = .{ .shader_read_bit = true };
-            barrier.src_stage_mask = .{ .all_transfer_bit = true };
-            barrier.dst_stage_mask = .{ .fragment_shader_bit = true };
-        } else if (old_layout == .undefined and new_layout == .transfer_src_optimal) {
-            barrier.dst_access_mask = .{ .transfer_read_bit = true };
-            barrier.dst_stage_mask = .{ .all_transfer_bit = true };
-        } else if (old_layout == .transfer_dst_optimal and new_layout == .shader_read_only_optimal) {
-            barrier.src_access_mask = .{ .transfer_write_bit = true };
-            barrier.dst_access_mask = .{ .shader_read_bit = true };
-            barrier.src_stage_mask = .{ .all_transfer_bit = true };
-            barrier.dst_stage_mask = .{ .fragment_shader_bit = true };
-        }
+        const t = transitionFor(old_layout, new_layout);
         self.renderer.dev.cmdPipelineBarrier2(cmd, &.{
             .dependency_flags = .{},
             .memory_barrier_count = 0,
@@ -435,25 +439,27 @@ pub const TextureManager = struct {
             .buffer_memory_barrier_count = 0,
             .p_buffer_memory_barriers = null,
             .image_memory_barrier_count = 1,
-            .p_image_memory_barriers = (&barrier)[0..1],
+            .p_image_memory_barriers = (&vk.ImageMemoryBarrier2{
+                .src_stage_mask = t.src.stage,
+                .src_access_mask = t.src.access,
+                .dst_stage_mask = t.dst.stage,
+                .dst_access_mask = t.dst.access,
+                .old_layout = old_layout,
+                .new_layout = new_layout,
+                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
+            })[0..1],
         });
     }
 
     pub fn deinit(self: *TextureManager) void {
-        if (self.descriptor_pool != .null_handle) {
-            self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, null);
-            self.descriptor_pool = .null_handle;
-        }
-        if (self.descriptor_set_layout != .null_handle) {
-            self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
-            self.descriptor_set_layout = .null_handle;
-        }
-        self.destroyTexture(&self.default_texture);
-        if (self.sampler != .null_handle) {
-            self.renderer.dev.destroySampler(self.sampler, null);
-            self.sampler = .null_handle;
-        }
         for (self.textures.values[0..]) |*tex| self.destroyTexture(tex);
+        self.destroyTexture(&self.default_texture);
+        if (self.descriptor_pool != .null_handle) self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, null);
+        if (self.descriptor_set_layout != .null_handle) self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
+        if (self.sampler != .null_handle) self.renderer.dev.destroySampler(self.sampler, null);
     }
 };
 

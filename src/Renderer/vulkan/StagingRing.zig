@@ -1,11 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
-const Slot = struct {
-    ptr: [*]const u8,
-    timeline_value: ?u64,
-};
-
 pub const StagingRing = struct {
     const transfer_alignment: vk.DeviceSize = 256;
 
@@ -15,7 +10,7 @@ pub const StagingRing = struct {
     buffer: ?vk.Buffer,
 
     head: vk.DeviceSize,
-    entries: std.ArrayList(Slot),
+    entries: std.ArrayList(struct { ptr: [*]const u8, timeline_value: ?u64 }),
     mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, cpu_to_gpu_allocator: std.mem.Allocator, capacity_bytes: vk.DeviceSize) !StagingRing {
@@ -45,17 +40,13 @@ pub const StagingRing = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.buffer == null)
-            return null;
+        if (self.buffer == null) return null;
 
         const aligned = std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
-
-        if (aligned > self.mapping.len)
-            return null;
+        if (aligned > self.mapping.len) return null;
 
         if (self.head + aligned > self.mapping.len) {
-            if (self.entries.items.len > 0)
-                return null;
+            if (self.entries.items.len > 0) return null;
             self.head = 0;
         }
 
@@ -78,11 +69,6 @@ pub const StagingRing = struct {
         }
     }
 
-    fn maybeReset(self: *StagingRing) void {
-        if (self.entries.items.len == 0)
-            self.head = 0;
-    }
-
     pub fn retire(self: *StagingRing, io: std.Io, current_transfer_val: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -94,7 +80,7 @@ pub const StagingRing = struct {
             _ = self.entries.orderedRemove(0);
         }
 
-        self.maybeReset();
+        if (self.entries.items.len == 0) self.head = 0;
     }
 
     pub fn cancel(self: *StagingRing, io: std.Io, slice: []const u8) void {
@@ -105,7 +91,7 @@ pub const StagingRing = struct {
             if (e.ptr == slice.ptr) {
                 std.debug.assert(e.timeline_value == null);
                 _ = self.entries.swapRemove(i);
-                self.maybeReset();
+                if (self.entries.items.len == 0) self.head = 0;
                 return;
             }
         }

@@ -61,13 +61,13 @@ pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroT
     return true;
 }
 
-pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
-    const mem = try allocator.create(@TypeOf(tempentity));
+pub fn make(temp_entity: anytype, allocator: std.mem.Allocator) !*Entity {
+    const mem = try allocator.create(@TypeOf(temp_entity));
     errdefer allocator.destroy(mem);
-    mem.* = tempentity;
+    mem.* = temp_entity;
 
     const en = Entity{
-        .type = @TypeOf(tempentity).Type,
+        .type = @TypeOf(temp_entity).Type,
         .ptr = @ptrCast(mem),
         .ref_count = .init(1),
         .vtable = mem.getInterface(),

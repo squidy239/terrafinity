@@ -34,19 +34,19 @@ pub const Frustum = struct {
         planes[5] = @Vector(4, f32){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
 
         // Normalize planes
-        for (0..6) |i| {
-            const n = @Vector(3, f32){ planes[i][0], planes[i][1], planes[i][2] };
+        for (&planes) |*p| {
+            const n = @Vector(3, f32){ p[0], p[1], p[2] };
             const len = @sqrt(zm.Vec3f.dot(.{ .data = n }, .{ .data = n }));
-            planes[i] /= @splat(len);
+            p.* /= @splat(len);
         }
 
         return Frustum{ .planes = planes };
     }
 
-    pub fn boxInFrustum(self: *const @This(), bmin: @Vector(3, f32), bmax: @Vector(3, f32)) bool {
+    pub fn boxInFrustum(self: *const @This(), b_min: @Vector(3, f32), b_max: @Vector(3, f32)) bool {
         for (self.planes) |plane| {
             const plane_normal = @Vector(3, f32){ plane[0], plane[1], plane[2] };
-            const p_vertex = @select(f32, plane_normal > @Vector(3, f32){ 0, 0, 0 }, bmax, bmin);
+            const p_vertex = @select(f32, plane_normal > @Vector(3, f32){ 0, 0, 0 }, b_max, b_min);
             if (zm.Vec3f.dot(.{ .data = plane_normal }, .{ .data = p_vertex }) + plane[3] < 0.0) return false;
         }
         return true;

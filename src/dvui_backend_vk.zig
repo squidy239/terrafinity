@@ -120,7 +120,7 @@ pub fn clipboardTextSet(self: *@This(), text: []const u8) !void {
     self.window.setClipboardText(text);
 }
 
-pub fn openURL(_: *@This(), url: []const u8, _: bool) !void {
+pub fn openUrl(_: *@This(), url: []const u8, _: bool) !void {
     wio.openUri(url);
 }
 

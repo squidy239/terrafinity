@@ -50,8 +50,8 @@ pub fn recreateSwapchain(self: *@This(), io: std.Io) void {
     self.vtable.recreateSwapchain(self.userdata, io);
 }
 
-pub fn updateCameraDirection(self: *@This(), viewDir: @Vector(3, f32)) void {
-    return self.vtable.updateCameraDirection(self.userdata, viewDir);
+pub fn updateCameraDirection(self: *@This(), view_dir: @Vector(3, f32)) void {
+    return self.vtable.updateCameraDirection(self.userdata, view_dir);
 }
 
 pub fn forEachMesh(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {

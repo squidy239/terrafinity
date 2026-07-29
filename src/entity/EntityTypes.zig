@@ -74,10 +74,10 @@ pub const Player = struct {
         return self.physics.pos;
     }
 
-    pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
-        self.game_mode.store(gameMode, .monotonic);
+    pub fn switchGameMode(self: *@This(), game_mode: GameMode) void {
+        self.game_mode.store(game_mode, .monotonic);
 
-        switch (gameMode) {
+        switch (game_mode) {
             .Spectator => {
                 self.physics.elements.mover.enabled.store(true, .monotonic);
                 self.physics.elements.mover.zero_velocity.store(true, .monotonic);

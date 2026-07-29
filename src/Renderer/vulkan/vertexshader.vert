@@ -15,7 +15,7 @@ layout(push_constant) uniform PushConsts {
 layout(location = 0) in uvec2 in_face_data;
 
 layout(location = 1) out vec3 out_coords;
-layout(location = 2) out vec3 fragpos;
+layout(location = 2) out vec3 frag_pos;
 layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
@@ -92,20 +92,22 @@ void main() {
     vec3 coords = CUBE_FACES[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
-    vec3 local_fragcoords = vec3(local_pos) * scale + coords;
-    fragpos = local_fragcoords + relative_position;
-    vec3 absolute_fragpos = local_fragcoords + absolute_position;
+    vec3 local_frag_coords = vec3(local_pos) * scale + coords;
+    frag_pos = local_frag_coords + relative_position;
+    vec3 absolute_frag_pos = local_frag_coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
     // TODO: Replace hardcoded surface animation with a data-driven block material system
-    if ((local_pos + absolute_position).y == 0.0 && block_type_local == 3u) {
+    // Water block surface animation (block type 3 is water)
+    const uint water_block_type = 3u;
+    if ((local_pos + absolute_position).y == 0.0 && block_type_local == water_block_type) {
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
-        float safe_y = max(abs(absolute_fragpos.y), 1e-10);
-        float safe_z = max(abs(absolute_fragpos.z), 1e-10);
+        float safe_y = max(abs(absolute_frag_pos.y), 1e-10);
+        float safe_z = max(abs(absolute_frag_pos.z), 1e-10);
         float p     = 1.0 + bouncingMod(
-            absolute_fragpos.x * absolute_fragpos.y * absolute_fragpos.z * (absolute_fragpos.x / (safe_y * safe_z)) *
-            (sin(absolute_fragpos.x) * sin(absolute_fragpos.y) * sin(absolute_fragpos.z)),
+            absolute_frag_pos.x * absolute_frag_pos.y * absolute_frag_pos.z * (absolute_frag_pos.x / (safe_y * safe_z)) *
+            (sin(absolute_frag_pos.x) * sin(absolute_frag_pos.y) * sin(absolute_frag_pos.z)),
             400.0) / 400.0;
         coords.y -= bouncingMod(p * t * speed, 0.4);
         coords.y = max(coords.y, -0.5);

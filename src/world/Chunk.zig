@@ -70,9 +70,9 @@ pub const Encoding = union(enum(u1)) {
                 }
             }
         } else {
-            for (0..len) |i| {
-                if (flat_merge_array[i] != comptime @intFromEnum(Block.null)) {
-                    flat_array.*[i] = flat_merge_array[i];
+            for (flat_merge_array[0..len], flat_array.*[0..len]) |src, *dest| {
+                if (src != comptime @intFromEnum(Block.null)) {
+                    dest.* = src;
                 }
             }
         }

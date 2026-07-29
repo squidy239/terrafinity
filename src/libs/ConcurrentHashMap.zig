@@ -1,95 +1,95 @@
 const std = @import("std");
 
-pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime bucketamount: u32) type {
+pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime bucket_amount: u32) type {
     return struct {
         const Map = @This();
         pub const Bkt = Bucket(K, V, Context);
         ctx: Context,
-        buckets: [bucketamount]Bkt,
+        buckets: [bucket_amount]Bkt,
 
         const Self = @This();
 
         pub fn get(self: *Self, io: std.Io, key: K) ?V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].get(io, key);
         }
 
         pub fn getBucket(self: *Self, key: K) *Bkt {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return &self.buckets[bucket_index];
         }
 
         pub fn contains(self: *Self, io: std.Io, key: K) bool {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].contains(io, key);
         }
 
         /// Returns null if item wasn't present, else returns old value and adds a ref to it.
         pub fn putNoOverrideAddRef(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return try self.buckets[bucket_index].putNoOverrideAddRef(io, allocator, key, value);
         }
 
         pub fn getOrPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !Map.Bkt.Map.Entry {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return try self.buckets[bucket_index].getOrPut(io, allocator, key, value);
         }
 
         pub fn getAndAddRef(self: *Self, io: std.Io, key: K) ?V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].getAndAddRef(io, key);
         }
 
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].fetchRemove(io, key);
         }
 
         pub fn getPtr(self: *Self, io: std.Io, key: K) ?*V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].getPtr(io, key);
         }
 
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             try self.buckets[bucket_index].put(io, allocator, key, value);
         }
 
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return try self.buckets[bucket_index].fetchPut(io, allocator, key, value);
         }
 
         pub fn remove(self: *Self, io: std.Io, key: K) bool {
             const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucketamount);
+            const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].remove(io, key);
         }
 
         pub fn count(self: *Self, io: std.Io) usize {
-            var totalcount: usize = 0;
+            var total_count: usize = 0;
             for (&self.buckets) |*bucket| {
                 bucket.lock.lockSharedUncancelable(io);
                 defer bucket.lock.unlockShared(io);
-                totalcount += bucket.hash_map.count();
+                total_count += bucket.hash_map.count();
             }
-            return totalcount;
+            return total_count;
         }
 
         pub const init = blk: {
-            var bkts: [bucketamount]Bucket(K, V, Context) = undefined;
-            for (0..bucketamount) |i| {
-                bkts[i] = Bucket(K, V, Context).init();
+            var bkts: [bucket_amount]Bucket(K, V, Context) = undefined;
+            for (&bkts) |*bkt| {
+                bkt.* = Bucket(K, V, Context).init();
             }
             break :blk @This(){
                 .ctx = Context{},

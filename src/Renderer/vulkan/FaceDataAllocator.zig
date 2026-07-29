@@ -61,20 +61,28 @@ pub const FaceDataAllocator = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.buffer == null)
-            return null;
+        if (self.buffer == null) return null;
 
-        const sum, const overflow = @addWithOverflow(self.used, length);
-        const offset = if (overflow == 0 and sum <= self.buffer_slice.len)
-            self.allocFromEnd(length)
-        else
-            self.findFreeRegion(length);
+        if (self.findFreeRegion(length)) |offset| {
+            return .{
+                .offset = offset,
+                .buffer = self.buffer.?,
+                .buffer_offset = self.buffer_offset,
+            };
+        }
 
-        return if (offset) |off| AllocResult{
-            .offset = off,
-            .buffer = self.buffer.?,
-            .buffer_offset = self.buffer_offset,
-        } else null;
+        const new_used, const overflow = @addWithOverflow(self.used, length);
+        if (overflow == 0 and new_used <= self.buffer_slice.len) {
+            const offset = self.used;
+            self.used = new_used;
+            return .{
+                .offset = offset,
+                .buffer = self.buffer.?,
+                .buffer_offset = self.buffer_offset,
+            };
+        }
+
+        return null;
     }
 
     fn findFreeRegion(self: *FaceDataAllocator, length: vk.DeviceSize) ?vk.DeviceSize {
@@ -95,34 +103,18 @@ pub const FaceDataAllocator = struct {
         return null;
     }
 
-    fn allocFromEnd(self: *FaceDataAllocator, length: vk.DeviceSize) ?vk.DeviceSize {
-        if (self.findFreeRegion(length)) |offset| return offset;
-
-        const offset = self.used;
-        const new_used, const ovfl = @addWithOverflow(self.used, length);
-        std.debug.assert(ovfl == 0);
-        self.used = new_used;
-        return offset;
-    }
-
-    fn overlaps(region: Region, offset: vk.DeviceSize, length: vk.DeviceSize) bool {
-        return offset < region.offset + region.length and region.offset < offset + length;
-    }
-
     pub fn freeRegion(self: *FaceDataAllocator, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         const insertion_index = for (self.free_regions.items, 0..) |region, i| {
-            if (overlaps(region, offset, length)) {
+            if (offset < region.offset + region.length and region.offset < offset + length) {
                 std.debug.panic("FaceDataAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
             }
             if (region.offset > offset) break i;
         } else self.free_regions.items.len;
 
         self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length }) catch @panic("FaceDataAllocator.freeRegion: insert OOM");
-
-        // merge with adjacent free regions
 
         var i = insertion_index;
         while (i > 0) {

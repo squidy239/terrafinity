@@ -261,7 +261,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menuchanged: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
     const settings = dvui.box(
         @src(),
@@ -305,7 +305,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     }
 
     if (config_changed) try self.config.save(io, self.config_path, self.config_lock);
-    return menuchanged;
+    return menu_changed;
 }
 
 pub fn crossHair(self: *@This()) void {
@@ -319,7 +319,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menuchanged: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
     const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer options.deinit();
@@ -337,8 +337,8 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             std.log.info("Creating world: {any}\n", .{world_name});
             var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
             defer worlds_dir.close(io);
-            var worldfolder = try worlds_dir.createDirPathOpen(io, world_name, .{});
-            defer worldfolder.close(io);
+            var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
+            defer world_folder.close(io);
             const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(io, game_path);
@@ -352,7 +352,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     defer scroll.deinit();
     dvui.structUI(@src(), "World Options", &new_world_options, 32, .{}, .{ .background = false, .color_fill = .transparent });
 
-    return menuchanged;
+    return menu_changed;
 }
 
 pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {

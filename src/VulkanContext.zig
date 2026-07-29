@@ -75,7 +75,6 @@ swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 swapchain_needs_recreate: std.atomic.Value(bool) = .init(false),
 present_mode: PresentMode = .mailbox,
 last_present_mode_requested: PresentMode = .mailbox,
-swapchain_present_mode: vk.PresentModeKHR = .fifo_khr,
 
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
@@ -340,10 +339,10 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     }
     std.log.info("Physical device supports VK_KHR_push_descriptor: {}", .{has_push_desc});
 
-    const qfamilies = try self.selectQueueFamilies(allocator);
-    self.queue_family_index = qfamilies.graphics;
-    self.present_queue_family_index = qfamilies.present;
-    self.transfer_queue_family_index = qfamilies.transfer;
+    const queue_families = try self.selectQueueFamilies(allocator);
+    self.queue_family_index = queue_families.graphics;
+    self.present_queue_family_index = queue_families.present;
+    self.transfer_queue_family_index = queue_families.transfer;
 
     var device_extensions: []const [*:0]const u8 = &.{};
     if (has_push_desc) {
@@ -363,7 +362,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     const queue_priority: f32 = 1.0;
     var queue_create_infos: [3]vk.DeviceQueueCreateInfo = undefined;
     var queue_count: u32 = 0;
-    const families: [3]u32 = .{ qfamilies.graphics, qfamilies.present, qfamilies.transfer };
+    const families: [3]u32 = .{ queue_families.graphics, queue_families.present, queue_families.transfer };
     for (families) |f| {
         for (queue_create_infos[0..queue_count]) |q| {
             if (q.queue_family_index == f) break;
@@ -435,20 +434,20 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         self.dev_wrapper = null;
     }
 
-    self.graphics_queue = self.dev.getDeviceQueue(qfamilies.graphics, 0);
-    self.present_queue = self.dev.getDeviceQueue(qfamilies.present, 0);
-    self.transfer_queue = self.dev.getDeviceQueue(qfamilies.transfer, 0);
+    self.graphics_queue = self.dev.getDeviceQueue(queue_families.graphics, 0);
+    self.present_queue = self.dev.getDeviceQueue(queue_families.present, 0);
+    self.transfer_queue = self.dev.getDeviceQueue(queue_families.transfer, 0);
 
     const pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true },
-        .queue_family_index = qfamilies.graphics,
+        .queue_family_index = queue_families.graphics,
     };
     self.command_pool = try self.dev.createCommandPool(&pool_info, null);
     errdefer self.dev.destroyCommandPool(self.command_pool, null);
 
     const upload_pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
-        .queue_family_index = qfamilies.graphics,
+        .queue_family_index = queue_families.graphics,
     };
     self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
     errdefer self.dev.destroyCommandPool(self.upload_command_pool, null);
@@ -523,11 +522,9 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
         self.swapchain = .null_handle;
     }
 
-    if (self.cmd_buffers.len > 0) {
-        self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-        self.allocator.free(self.cmd_buffers);
-        self.cmd_buffers = &.{};
-    }
+    self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
+    self.allocator.free(self.cmd_buffers);
+    self.cmd_buffers = &.{};
 
     for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     self.allocator.free(self.image_acquired_semaphores);
@@ -593,9 +590,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
     const old_swapchain = self.swapchain;
-    const old_views = self.swapchain_views;
-    const old_images = self.swapchain_images;
-    const old_image_layouts = self.swapchain_image_layouts;
+    self.destroySwapchainResources();
 
     const actual_extent = if (caps.current_extent.width != 0xFFFFFFFF)
         caps.current_extent
@@ -708,14 +703,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         }, null);
     }
 
-    // New resources created successfully, now safely destroy old resources
-    for (old_views) |view| {
-        if (view != .null_handle) self.dev.destroyImageView(view, null);
-    }
-    self.allocator.free(old_images);
-    self.allocator.free(old_views);
-    self.allocator.free(old_image_layouts);
-
     if (old_swapchain != .null_handle) {
         self.dev.destroySwapchainKHR(old_swapchain, null);
     }
@@ -723,9 +710,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
-    self.swapchain_present_mode = present_mode;
     self.last_present_mode_requested = self.present_mode;
-    self.swapchain_image_layouts = &.{};
     self.swapchain_image_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
     for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
 }
@@ -922,9 +907,6 @@ fn debugCallback(
     _ = p_user_data;
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
-    switch (cb_data.message_id_number) {
-        else => {},
-    }
 
     if (message_severity.error_bit_ext) {
         vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
