@@ -83,6 +83,8 @@ ui_command_pool: vk.CommandPool = .null_handle,
 transfer_semaphore: vk.Semaphore = .null_handle,
 transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
+// Cross-thread frame counter: read with .acquire by submitBatch / drainInFlightFrames and
+// advanced with .release by submitFrameWithExtra; the pair orders the two submit paths.
 frame_number: std.atomic.Value(u64) = .init(0),
 queue_mutex: std.Io.Mutex = .init,
 
@@ -117,12 +119,25 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             .timeline_semaphore = .false,
             .p_next = @ptrCast(&features13),
         };
-        var features2: vk.PhysicalDeviceFeatures2 = .{ .features = .{ .multi_draw_indirect = .false }, .p_next = @ptrCast(&features12) };
+        var features11: vk.PhysicalDeviceVulkan11Features = .{
+            .shader_draw_parameters = .false,
+            .p_next = @ptrCast(&features12),
+        };
+        var features2: vk.PhysicalDeviceFeatures2 = .{
+            .features = .{ .multi_draw_indirect = .false, .draw_indirect_first_instance = .false },
+            .p_next = @ptrCast(&features11),
+        };
         self.instance.getPhysicalDeviceFeatures2(pdev, &features2);
+
+        const props = self.instance.getPhysicalDeviceProperties(pdev);
+        // An instance API of 1.3 does not guarantee every enumerated device exposes device API 1.3.
+        if (props.api_version < vk.API_VERSION_1_3.toU32()) continue;
 
         const anisotropy_supported = features2.features.sampler_anisotropy == .true;
         const required = features2.features.multi_draw_indirect == .true and
+            features2.features.draw_indirect_first_instance == .true and
             features2.features.shader_int_64 == .true and features2.features.independent_blend == .true and
+            features11.shader_draw_parameters == .true and
             features12.draw_indirect_count == .true and features12.descriptor_indexing == .true and
             features12.shader_sampled_image_array_non_uniform_indexing == .true and
             features12.descriptor_binding_sampled_image_update_after_bind == .true and
@@ -144,13 +159,29 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         }
         if (!has_graphics or !has_present) continue;
 
+        const ext_props = try self.instance.enumerateDeviceExtensionPropertiesAlloc(pdev, null, allocator);
+        defer allocator.free(ext_props);
+        var has_swapchain = false;
+        var has_robustness2 = false;
+        var has_push_desc = false;
+        for (ext_props) |ext| {
+            const name = std.mem.sliceTo(&ext.extension_name, 0);
+            if (std.mem.eql(u8, name, vk.extensions.khr_swapchain.name)) {
+                has_swapchain = true;
+            } else if (std.mem.eql(u8, name, vk.extensions.ext_robustness_2.name)) {
+                has_robustness2 = true;
+            } else if (std.mem.eql(u8, name, vk.extensions.khr_push_descriptor.name)) {
+                has_push_desc = true;
+            }
+        }
+        if (!has_swapchain or !has_robustness2 or !has_push_desc) continue;
+
         const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, self.surface, allocator);
         defer allocator.free(surface_formats);
         const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, self.surface, allocator);
         defer allocator.free(present_modes);
         if (surface_formats.len == 0 or present_modes.len == 0) continue;
 
-        const props = self.instance.getPhysicalDeviceProperties(pdev);
         var score: u32 = if (props.device_type == .discrete_gpu) 10 else if (props.device_type == .integrated_gpu) 5 else 1;
         // NVIDIA's Vulkan driver produces false-positive thread sanitizer errors,
         // making TSAN builds unusable with NVIDIA hardware. Demote to lowest priority
@@ -317,7 +348,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     if (has_debug_utils) {
         self.debug_callback = try self.instance.createDebugUtilsMessengerEXT(&callback_create_info, null);
     }
-    errdefer if (has_debug_utils) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
+    errdefer if (self.debug_callback != .null_handle) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
 
     var surface: vk.SurfaceKHR = .null_handle;
     try window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface));
@@ -332,10 +363,13 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     const ext_props = try self.instance.enumerateDeviceExtensionPropertiesAlloc(self.pdev, null, allocator);
     defer allocator.free(ext_props);
     var has_push_desc = false;
+    var has_portability_subset = false;
     for (ext_props) |ext| {
         const name = std.mem.sliceTo(&ext.extension_name, 0);
         if (std.mem.eql(u8, name, "VK_KHR_push_descriptor")) {
             has_push_desc = true;
+        } else if (std.mem.eql(u8, name, "VK_KHR_portability_subset")) {
+            has_portability_subset = true;
         }
         if (std.mem.eql(u8, name, "VK_EXT_pipeline_creation_feedback")) {
             self.pipeline_creation_feedback = true;
@@ -349,24 +383,27 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.present_queue_family_index = queue_families.present;
     self.transfer_queue_family_index = queue_families.transfer;
 
-    // khr_swapchain (1) + ext_robustness_2 (1) + push_descriptor (?) + pipeline_creation_feedback (?) = max 4
-    const max_device_extensions = 4;
+    // khr_swapchain (1) + ext_robustness_2 (1) + push_descriptor (1) + pipeline_creation_feedback (1) + portability_subset (1) = max 5
+    const max_device_extensions = 5;
     comptime {
         const min_unconditional: usize = 2;
-        if (max_device_extensions < min_unconditional + 2) @compileError("device_extension_buf too small: need at least " ++ std.fmt.comptimePrint("{d}", .{min_unconditional + 2}) ++ ", got " ++ std.fmt.comptimePrint("{d}", .{max_device_extensions}));
+        if (max_device_extensions < min_unconditional + 3) @compileError("device_extension_buf too small: need at least " ++ std.fmt.comptimePrint("{d}", .{min_unconditional + 3}) ++ ", got " ++ std.fmt.comptimePrint("{d}", .{max_device_extensions}));
     }
     var device_extension_buf: [max_device_extensions][*:0]const u8 = undefined;
     var device_extensions = std.ArrayList([*:0]const u8).initBuffer(&device_extension_buf);
 
     device_extensions.appendAssumeCapacity(vk.extensions.khr_swapchain.name);
     device_extensions.appendAssumeCapacity(vk.extensions.ext_robustness_2.name);
+    // Guaranteed by selectPhysicalDevice, which rejects devices missing push descriptors.
     if (has_push_desc) {
         device_extensions.appendAssumeCapacity(vk.extensions.khr_push_descriptor.name);
-    } else {
-        std.log.warn("VK_KHR_push_descriptor not supported, device creation will likely fail", .{});
     }
     if (self.pipeline_creation_feedback) {
         device_extensions.appendAssumeCapacity(vk.extensions.ext_pipeline_creation_feedback.name);
+    }
+    // Mandatory to enable when exposed by portability implementations (e.g. MoltenVK).
+    if (has_portability_subset) {
+        device_extensions.appendAssumeCapacity(vk.extensions.khr_portability_subset.name);
     }
 
     const queue_priority: f32 = 1.0;
@@ -430,15 +467,28 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .p_next = @ptrCast(&features),
     };
 
-    self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
-
+    // Fetch vkGetDeviceProcAddr before device creation so the MissingDeviceProcAddr error path
+    // cannot leave a live device behind.
     const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
 
-    const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
+    self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
 
+    // The raw handle must be destroyed even if the wrapper setup below fails, otherwise it would
+    // leak and the instance errdefer would destroy the instance while the device is still alive.
+    // vkDestroyDevice is a device-level command, so reach it through a scratch DeviceWrapper.
+    var owns_raw_device = true;
+    errdefer if (owns_raw_device) {
+        var scratch_wrapper = DeviceWrapper.load(self.dev_handle, gdpa);
+        scratch_wrapper.destroyDevice(self.dev_handle, null);
+    };
+
+    const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
     dev_wrapper_ptr.* = .load(self.dev_handle, gdpa);
+
     self.dev_wrapper = dev_wrapper_ptr;
     self.dev = .init(self.dev_handle, dev_wrapper_ptr);
+
+    owns_raw_device = false;
     errdefer {
         self.dev.destroyDevice(null);
         allocator.destroy(dev_wrapper_ptr);
@@ -456,6 +506,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.command_pool = try self.dev.createCommandPool(&pool_info, null);
     errdefer self.dev.destroyCommandPool(self.command_pool, null);
 
+    // Graphics family on purpose: single-time upload command buffers from this pool are
+    // submitted to the graphics queue (see VulkanRenderer.endSingleTimeCommandsLocked).
     const upload_pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
         .queue_family_index = queue_families.graphics,
@@ -552,8 +604,8 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.dev.destroySemaphore(self.transfer_semaphore, null);
     self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
 
-    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, null);
     self.dev.destroyDevice(null);
+    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, null);
 
     if (self.instance_wrapper) |wrapper| {
         if (self.debug_callback != .null_handle) {
@@ -586,15 +638,14 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         return error.InvalidWindowSize;
     }
 
-    if (self.swapchain != .null_handle) {
+    // The cache only applies when nothing forced a recreation: after OUT_OF_DATE / suboptimal the
+    // configuration may be unchanged while the swapchain is still stale, so the flag must bypass it.
+    if (self.swapchain != .null_handle and !self.swapchain_needs_recreate.load(.acquire)) {
         const current_gamma = self.swapchain_gamma.load(.monotonic);
         const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
             self.swapchain_extent_actual.height == self.swapchain_extent.height;
         if (current_gamma == gamma_correction and extent_same and self.present_mode == self.last_present_mode_requested) return;
     }
-
-    self.swapchain_extent_actual = self.swapchain_extent;
-    self.swapchain_gamma.store(gamma_correction, .monotonic);
 
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
@@ -607,15 +658,13 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     const old_swapchain = self.swapchain;
     self.destroySwapchainResources();
 
-    const actual_extent = if (caps.current_extent.width != 0xFFFFFFFF)
+    const actual_extent = if (caps.current_extent.width != std.math.maxInt(u32))
         caps.current_extent
     else
         vk.Extent2D{
             .width = std.math.clamp(self.swapchain_extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
             .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
         };
-
-    self.swapchain_extent = actual_extent;
 
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
@@ -634,8 +683,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
             }
         }
     }
-    self.swapchain_format = surface_format.format;
-
     const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(present_modes);
 
@@ -678,7 +725,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     const new_swapchain = try self.dev.createSwapchainKHR(&.{
         .surface = self.surface,
         .min_image_count = image_count,
-        .image_format = self.swapchain_format,
+        .image_format = surface_format.format,
         .image_color_space = surface_format.color_space,
         .image_extent = actual_extent,
         .image_array_layers = 1,
@@ -712,34 +759,51 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
             .flags = .{},
             .image = image,
             .view_type = .@"2d",
-            .format = self.swapchain_format,
+            .format = surface_format.format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
         }, null);
     }
 
+    // Finish all fallible work before tearing down the old swapchain and semaphores:
+    // a mid-creation failure then leaves self.swapchain / self.render_complete_semaphores
+    // still referencing valid, owned resources for deinit to clean up.
+    const new_render_complete = try self.allocator.alloc(vk.Semaphore, new_images.len);
+    @memset(new_render_complete, .null_handle);
+    errdefer {
+        for (new_render_complete) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+        self.allocator.free(new_render_complete);
+    }
+    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
+    for (new_render_complete) |*complete| {
+        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+    }
+
+    const new_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
+    errdefer self.allocator.free(new_layouts);
+    @memset(new_layouts, .undefined);
+
     if (old_swapchain != .null_handle) {
         self.dev.destroySwapchainKHR(old_swapchain, null);
     }
-
     for (self.render_complete_semaphores) |sem| {
         if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
     }
     self.allocator.free(self.render_complete_semaphores);
 
-    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, new_images.len);
-    @memset(self.render_complete_semaphores, .null_handle);
-    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
-    for (self.render_complete_semaphores) |*complete| {
-        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-    }
-
+    self.render_complete_semaphores = new_render_complete;
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
+    self.swapchain_image_layouts = new_layouts;
     self.last_present_mode_requested = self.present_mode;
-    self.swapchain_image_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
-    for (self.swapchain_image_layouts) |*layout| layout.* = .undefined;
+    // Cache/state fields commit only after creation succeeds, so a failed recreation cannot leave
+    // a stale config that makes a retry early-return without a valid replacement swapchain.
+    self.swapchain_extent = actual_extent;
+    self.swapchain_extent_actual = actual_extent;
+    self.swapchain_gamma.store(gamma_correction, .monotonic);
+    self.swapchain_format = surface_format.format;
+    self.swapchain_needs_recreate.store(false, .monotonic);
 }
 
 pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
@@ -758,6 +822,8 @@ pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: 
     const barrier = vk.ImageMemoryBarrier2{
         .src_stage_mask = src_stage,
         .src_access_mask = src_access,
+        // present_src_khr uses bottom_of_pipe with an empty access mask on purpose: the present
+        // engine's reads are ordered by the render-complete semaphore, not by barrier access.
         .dst_stage_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_output_bit = true } else .{ .bottom_of_pipe_bit = true },
         .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true, .color_attachment_read_bit = true } else .{},
         .old_layout = old_layout,
@@ -825,10 +891,18 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
             self.image_acquired_semaphores[current_frame_idx],
             .null_handle,
         ) catch |err| switch (err) {
-            error.OutOfDateKHR, error.SurfaceLostKHR => return error.OutOfDate,
+            error.OutOfDateKHR => {
+                self.swapchain_needs_recreate.store(true, .monotonic);
+                return error.OutOfDate;
+            },
+            error.SurfaceLostKHR => return error.SurfaceLost,
             else => return err,
         };
     };
+
+    if (acquire_result.result == .suboptimal_khr) {
+        self.swapchain_needs_recreate.store(true, .monotonic);
+    }
 
     return acquire_result.image_index;
 }
@@ -848,6 +922,8 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
 
     const current_transfer_val = self.transfer_semaphore_value.load(.monotonic);
     const current_graphics_val = self.frame_number.fetchAdd(1, .release) + 1;
+    // On frame 0 prev_graphics_val is 0, equal to the timeline's initial value, so the wait
+    // on it below is immediately satisfied; it only gates on prior frames from then on.
     const prev_graphics_val = current_graphics_val - 1;
 
     const wait_semaphore_infos: [3]vk.SemaphoreSubmitInfo = .{
@@ -879,11 +955,11 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     const submit_info: vk.SubmitInfo2 = .{
         .flags = .{},
         .wait_semaphore_info_count = wait_semaphore_infos.len,
-        .p_wait_semaphore_infos = wait_semaphore_infos[0..wait_semaphore_infos.len],
+        .p_wait_semaphore_infos = &wait_semaphore_infos,
         .command_buffer_info_count = cmd_buffer_count,
         .p_command_buffer_infos = cmd_buffer_infos[0..cmd_buffer_count].ptr,
         .signal_semaphore_info_count = signal_semaphore_infos.len,
-        .p_signal_semaphore_infos = signal_semaphore_infos[0..signal_semaphore_infos.len],
+        .p_signal_semaphore_infos = &signal_semaphore_infos,
     };
 
     const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit2" });
@@ -903,6 +979,7 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         .p_image_indices = (&ctx.image_index)[0..1],
         .p_results = null,
     };
+    const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
     const present_result = blk: {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "present_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
@@ -912,16 +989,20 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         const zone_present = tracy.Zone.begin(.{ .src = @src(), .name = "queuePresent" });
         defer zone_present.end();
         break :blk self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
-            error.OutOfDateKHR, error.SurfaceLostKHR => {
-                const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
+            error.OutOfDateKHR => {
+                self.swapchain_needs_recreate.store(true, .monotonic);
                 self.current_frame_idx.store(next_frame, .monotonic);
                 return error.OutOfDate;
+            },
+            error.SurfaceLostKHR => {
+                self.current_frame_idx.store(next_frame, .monotonic);
+                return error.SurfaceLost;
             },
             else => return err,
         };
     };
     if (present_result == .success or present_result == .suboptimal_khr) {
-        const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
+        if (present_result == .suboptimal_khr) self.swapchain_needs_recreate.store(true, .monotonic);
         self.current_frame_idx.store(next_frame, .monotonic);
     }
 }

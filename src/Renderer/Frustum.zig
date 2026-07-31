@@ -33,7 +33,6 @@ pub const Frustum = struct {
         planes[4] = @Vector(4, f32){ m30 + m20, m31 + m21, m32 + m22, m33 + m23 }; // Near
         planes[5] = @Vector(4, f32){ m30 - m20, m31 - m21, m32 - m22, m33 - m23 }; // Far
 
-        // Normalize planes
         for (&planes) |*p| {
             const n = @Vector(3, f32){ p[0], p[1], p[2] };
             const len = @sqrt(zm.Vec3f.dot(.{ .data = n }, .{ .data = n }));

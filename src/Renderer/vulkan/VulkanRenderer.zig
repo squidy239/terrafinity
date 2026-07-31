@@ -114,7 +114,7 @@ const FrameDebugStats = struct {
             self.camera_front[0], self.camera_front[1], self.camera_front[2],
         });
         std.log.info("Meshes in map: {d}  drawn opaque: {d}  transparent: {d}", .{ self.total_meshes, self.opaque_drawn, self.transparent_drawn });
-        std.log.info("Faces drawn — opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
+        std.log.info("Faces drawn - opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
         std.log.info("Time: {d:.2} ms", .{ms});
         std.log.info("========================", .{});
     }
@@ -300,6 +300,7 @@ comptime {
     if (@sizeOf(CullPushConstants) != 128) @compileError("CullPushConstants size mismatch with GLSL layout");
 }
 
+/// Internal core of findMemoryType; takes explicit mem_props so tests can exercise it without a renderer instance.
 fn findMemoryTypeRaw(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     const count = @min(mem_props.memory_type_count, 32);
     for (mem_props.memory_types[0..count], 0..) |mem_type, i| {
@@ -487,12 +488,6 @@ init_time_ns: u64 = 0,
 last_stat_log_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
-current_frame: u32 = 0,
-output_cmd_buffer: vk.CommandBuffer = .null_handle,
-output_color_image: vk.Image = .null_handle,
-output_color_view: vk.ImageView = .null_handle,
-swapchain_image_old_layout: vk.ImageLayout = .undefined,
-swapchain_image_layout_ptr: ?*vk.ImageLayout = null,
 /// Monotonically increasing frame counter used to detect the first frame after initialization
 /// or swapchain recreation. Frame 0 uses `.undefined` as the old layout for render targets
 /// (skipping layout transition on initial layout). Subsequent frames use the actual prior
@@ -525,33 +520,38 @@ fn loadBlockMaterials(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allo
     const indexer = std.enums.EnumIndexer(World.Block);
     const count = indexer.count;
     const slice = try self.cpu_to_gpu_gpa.allocator().alloc(MaterialGpu, count);
+    errdefer self.cpu_to_gpu_gpa.allocator().free(slice);
     @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
 
-    const zon_file = pack_dir.openFile(io, "materials.zon", .{}) catch {
-        std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{});
-        self.block_materials_mapped = slice;
-        try self.createBlockMaterialsDescriptorResources();
-        return;
-    };
-    defer zon_file.close(io);
+    var zon_file: ?std.Io.File = null;
+    if (pack_dir.openFile(io, "materials.zon", .{})) |f| {
+        zon_file = f;
+    } else |err| switch (err) {
+        error.FileNotFound => std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{}),
+        else => |e| return e,
+    }
+    defer if (zon_file) |f| f.close(io);
 
-    var temp_arena = std.heap.ArenaAllocator.init(allocator);
-    defer temp_arena.deinit();
-    const parsed = try utils.loadZon(BlockMaterialsZon, io, zon_file, temp_arena.allocator(), allocator);
+    if (zon_file) |f| {
+        var temp_arena = std.heap.ArenaAllocator.init(allocator);
+        defer temp_arena.deinit();
+        const parsed = try utils.loadZon(BlockMaterialsZon, io, f, temp_arena.allocator(), allocator);
 
-    inline for (std.meta.fields(World.Block)) |fld| {
-        if (!@field(World.Block, fld.name).isVisible()) continue;
-        const mat = &@field(parsed, fld.name);
-        const idx = indexer.indexOf(@field(World.Block, fld.name));
-        slice[idx] = .{
-            .density = mat.density,
-            .fresnel_power = mat.fresnel_power,
-            .min_opacity = mat.min_opacity,
-            .volume_color = mat.volume_color,
-        };
+        inline for (std.meta.fields(World.Block)) |fld| {
+            if (!@field(World.Block, fld.name).isVisible()) continue;
+            const mat = &@field(parsed, fld.name);
+            const idx = indexer.indexOf(@field(World.Block, fld.name));
+            slice[idx] = .{
+                .density = mat.density,
+                .fresnel_power = mat.fresnel_power,
+                .min_opacity = mat.min_opacity,
+                .volume_color = mat.volume_color,
+            };
+        }
     }
 
     self.block_materials_mapped = slice;
+    errdefer self.block_materials_mapped = &.{};
     try self.createBlockMaterialsDescriptorResources();
 }
 
@@ -917,8 +917,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.backing_allocator.deinit();
 
     self.texture_manager.deinit();
-
-    self.swapchain_image_layout_ptr = null;
 }
 
 pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
@@ -1388,6 +1386,8 @@ fn makeImageBarrier2(
     };
 }
 
+/// The barrier slice must outlive the cmdPipelineBarrier2 call below (it is consumed
+/// synchronously during recording). Do not extract the DependencyInfo and defer the call.
 fn pipelineBarrier(cmd: vk.CommandBuffer, dev: DeviceProxy, comptime barrier_type: type, barriers: []const barrier_type) void {
     const info: vk.DependencyInfo = switch (barrier_type) {
         vk.ImageMemoryBarrier2 => .{
@@ -1574,6 +1574,10 @@ fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageAspec
     };
 }
 
+pub const null_image_info: [1]vk.DescriptorImageInfo = .{.{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined }};
+pub const null_buffer_info: [1]vk.DescriptorBufferInfo = .{.{ .buffer = .null_handle, .offset = 0, .range = 0 }};
+pub const null_buffer_view: [1]vk.BufferView = .{vk.BufferView.null_handle};
+
 fn dummyWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descriptor_type: vk.DescriptorType, buffer_info: *const vk.DescriptorBufferInfo) vk.WriteDescriptorSet {
     return .{
         .dst_set = dst_set,
@@ -1581,15 +1585,27 @@ fn dummyWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descript
         .dst_array_element = 0,
         .descriptor_count = 1,
         .descriptor_type = descriptor_type,
-        .p_image_info = (&vk.DescriptorImageInfo{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined })[0..1],
+        .p_image_info = &null_image_info,
         .p_buffer_info = (&buffer_info.*)[0..1],
-        .p_texel_buffer_view = (&@as(vk.BufferView, .null_handle))[0..1],
+        .p_texel_buffer_view = &null_buffer_view,
+    };
+}
+
+fn imageWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, image_info: *const vk.DescriptorImageInfo) vk.WriteDescriptorSet {
+    return .{
+        .dst_set = dst_set,
+        .dst_binding = dst_binding,
+        .dst_array_element = 0,
+        .descriptor_count = 1,
+        .descriptor_type = .combined_image_sampler,
+        .p_image_info = (&image_info.*)[0..1],
+        .p_buffer_info = &null_buffer_info,
+        .p_texel_buffer_view = &null_buffer_view,
     };
 }
 
 fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !RenderTarget {
     const image_info: vk.ImageCreateInfo = .{
-        .flags = .{},
         .image_type = .@"2d",
         .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
         .mip_levels = 1,
@@ -1600,8 +1616,6 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
         .usage = usage,
         .sharing_mode = .exclusive,
         .samples = .{ .@"1_bit" = true },
-        .queue_family_index_count = 0,
-        .p_queue_family_indices = undefined,
     };
     var mem_reqs2: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
@@ -1613,16 +1627,15 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
         .allocation_size = mem_reqs.size,
         .memory_type_index = try self.findMemoryType(mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
     };
-    const memory = try self.dev.allocateMemory(&alloc_info, null);
-    errdefer self.dev.freeMemory(memory, null);
 
-    const image = try self.dev.createImage(&image_info, null);
-    errdefer self.dev.destroyImage(image, null);
+    var target: RenderTarget = .{};
+    errdefer destroyRenderTarget(self.dev, &target);
 
-    try self.dev.bindImageMemory(image, memory, 0);
-
-    const view = try self.dev.createImageView(&imageViewCreateInfo(image, format, aspect), null);
-    return .{ .image = image, .memory = memory, .view = view };
+    target.memory = try self.dev.allocateMemory(&alloc_info, null);
+    target.image = try self.dev.createImage(&image_info, null);
+    try self.dev.bindImageMemory(target.image, target.memory, 0);
+    target.view = try self.dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), null);
+    return target;
 }
 
 fn dispatchCulling(self: *VulkanRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32, frustum: Frustum, total_candidates: u32, view_pos: @Vector(3, f64)) void {
@@ -1781,16 +1794,8 @@ fn recordTransparentPass(
         .image_view = self.render_depth_sampled_view,
         .sampler = self.texture_manager.sampler,
     };
-    const depth_write: vk.WriteDescriptorSet = .{
-        .dst_set = .null_handle,
-        .dst_binding = 0,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .combined_image_sampler,
-        .p_image_info = (&depth_image_info)[0..1],
-        .p_buffer_info = (&vk.DescriptorBufferInfo{ .buffer = .null_handle, .offset = 0, .range = 0 })[0..1],
-        .p_texel_buffer_view = (&@as(vk.BufferView, .null_handle))[0..1],
-    };
+    // dst_set is ignored by cmdPushDescriptorSetKHR, so null_handle is intentional.
+    const depth_write = imageWriteDescriptorSet(.null_handle, 0, &depth_image_info);
     self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 2, (&depth_write)[0..1]);
 
     const mesh_desc_set = self.graphics_state.mesh_data_descriptor_sets_per_frame[current_frame];
@@ -1827,6 +1832,8 @@ fn recordCompositionPass(
     output_view: vk.ImageView,
     current_frame: u32,
     scatter_enabled: u32,
+    swapchain_old_layout: vk.ImageLayout,
+    swapchain_layout_ptr: ?*vk.ImageLayout,
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
     defer zone.end();
@@ -1839,14 +1846,14 @@ fn recordCompositionPass(
         makeImageBarrier2(self.oit.volume_weight.image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect),
         makeImageBarrier2(
             output_image,
-            self.swapchain_image_old_layout,
+            swapchain_old_layout,
             .color_attachment_optimal,
-            switch (self.swapchain_image_old_layout) {
+            switch (swapchain_old_layout) {
                 .undefined => .{ .top_of_pipe_bit = true },
                 .present_src_khr => .{ .color_attachment_output_bit = true },
                 else => .{ .all_commands_bit = true },
             },
-            switch (self.swapchain_image_old_layout) {
+            switch (swapchain_old_layout) {
                 .undefined => .{},
                 .present_src_khr => .{},
                 else => .{ .memory_write_bit = true },
@@ -1873,25 +1880,23 @@ fn recordCompositionPass(
     self.dev.cmdEndRendering(cmd_buffer);
     pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{}, color_aspect))[0..1]);
 
-    if (self.swapchain_image_layout_ptr) |ptr| ptr.* = .present_src_khr;
+    if (swapchain_layout_ptr) |ptr| ptr.* = .present_src_khr;
 }
 
 fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
     const c = tracy.Zone.begin(.{ .src = @src() });
     defer c.end();
 
-    self.current_frame = frame_ctx.frame_index;
-    self.output_cmd_buffer = frame_ctx.cmd_buffer;
-    self.output_color_image = frame_ctx.output_image;
-    self.output_color_view = frame_ctx.output_view;
-    self.swapchain_image_old_layout = frame_ctx.swapchain_image_layout.*;
-    self.swapchain_image_layout_ptr = frame_ctx.swapchain_image_layout;
+    const current_frame = frame_ctx.frame_index;
+    const cmd_buffer = frame_ctx.cmd_buffer;
+    const output_image = frame_ctx.output_image;
+    const output_view = frame_ctx.output_view;
+    const swapchain_old_layout = frame_ctx.swapchain_image_layout.*;
+    const swapchain_layout_ptr = frame_ctx.swapchain_image_layout;
 
     try self.processPendingUploads(io);
     try self.processRetiredMeshes(io);
 
-    const current_frame = self.current_frame;
-    const cmd_buffer = self.output_cmd_buffer;
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
     if (self.frame_buffers.items[current_frame].stats_mapped) |counts_ptr| {
@@ -1966,7 +1971,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     }
 
     const scatter_enabled: u32 = @intFromBool(!inside_transparent);
-    self.recordCompositionPass(cmd_buffer, extent, self.output_color_image, self.output_color_view, current_frame, scatter_enabled);
+    self.recordCompositionPass(cmd_buffer, extent, output_image, output_view, current_frame, scatter_enabled, swapchain_old_layout, swapchain_layout_ptr);
 
     // Release this frame's vertex reads so the next upload batch can write;
     // pairs with cmdAcquireFaceBuffer at frame start.
@@ -2009,7 +2014,6 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
     const old_draw_capacity = self.draw_capacity;
     const num_frames = self.frame_buffers.items.len;
 
-    // Backup old per-frame allocations
     const old_mesh_data = try self.allocator.alloc([*]MeshData, num_frames);
     defer self.allocator.free(old_mesh_data);
     const old_indirect = try self.allocator.alloc([*]vk.DrawIndirectCommand, num_frames);
@@ -2026,7 +2030,6 @@ fn growDrawCapacity(self: *VulkanRenderer, io: std.Io, min_capacity: u32) !void 
         stats.* = frame.stats_slice;
     }
 
-    // Allocate and populate new per-frame buffers
     for (self.frame_buffers.items[0..num_frames], old_mesh_data, old_indirect, old_count_slices, old_stats_slices) |*frame, old_mesh, old_ind, old_count, old_stats| {
         const mesh_data_slice = try self.cpu_to_gpu_gpa.allocator().alloc(MeshData, new_capacity * draw_type_count);
         const indirect_draw_slice = try self.cpu_to_gpu_gpa.allocator().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count);
@@ -2110,6 +2113,8 @@ fn growPersistentCandidates(self: *VulkanRenderer, io: std.Io) !void {
     for (self.cull.descriptor_sets_per_frame, 0..) |_, i| self.updateCullDescriptorSet(@intCast(i));
 }
 
+/// Public API: finds a memory type on this renderer's device.
+/// findMemoryTypeRaw is kept as a separate function so the unit test can exercise it without a live device.
 pub fn findMemoryType(self: *const VulkanRenderer, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
     return findMemoryTypeRaw(self.vk_ctx.mem_props, type_filter, properties);
 }

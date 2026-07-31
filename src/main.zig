@@ -123,6 +123,7 @@ pub fn main(init: std.process.Init) !void {
     var prev_window_size = window_size;
     var current_window_mode: wio.WindowMode = .maximized;
     var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
+    var swapchain_recreate_failures: u32 = 0;
 
     var ui_cmd_buffers: [VulkanContext.max_frames_in_flight]vk.CommandBuffer = undefined;
     const ui_cmd_bufs_slice: []vk.CommandBuffer = &ui_cmd_buffers;
@@ -165,14 +166,21 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
-            recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction);
+            recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures) catch |err| return err;
             continue;
         }
 
         const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
-            error.OutOfDate, error.SurfaceLostKHR => {
-                recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction);
+            error.OutOfDate => {
+                recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures) catch |recreate_err| return recreate_err;
                 continue;
+            },
+            error.SurfaceLost => {
+                // Surface recreation requires destroying and recreating the VkSurfaceKHR through
+                // the windowing layer, which is not implemented; a retry against the lost surface
+                // would keep failing, so terminate instead of spinning on errors.
+                std.log.err("Vulkan surface lost; windowing-layer surface recreation is not implemented", .{});
+                return err;
             },
             error.DrawFailed => {
                 std.log.err("beginFrame failed: draw error", .{});
@@ -199,8 +207,13 @@ pub fn main(init: std.process.Init) !void {
         try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
-            error.OutOfDate, error.SurfaceLostKHR => {
+            error.OutOfDate => {
+                // present() already flagged swapchain_needs_recreate; recreate on the next loop pass.
                 vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+            },
+            error.SurfaceLost => {
+                std.log.err("Vulkan surface lost during present; windowing-layer surface recreation is not implemented", .{});
+                return err;
             },
             else => {
                 std.log.err("present failed: {}", .{err});
@@ -281,24 +294,44 @@ fn pollInitialSize(io: std.Io, events: *wio.EventQueue, size: *wio.Size) void {
     }
 }
 
-fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) void {
+const max_swapchain_recreate_failures: u32 = 120;
+
+// Recreates the swapchain while tracking consecutive failures: a persistent recreation error would
+// otherwise retry every frame (each attempt stalls the GPU with a deviceWaitIdle) and spin forever.
+fn recreateSwapchainOrFail(
+    io: std.Io,
+    vk_ctx: *VulkanContext,
+    ui: *Ui,
+    game: *Game,
+    present_mode: VulkanContext.PresentMode,
+    gamma_correction: bool,
+    consecutive_failures: *u32,
+) !void {
+    recreateSwapchainForMenuOrGame(io, vk_ctx, ui, game, present_mode, gamma_correction) catch |err| {
+        consecutive_failures.* += 1;
+        if (consecutive_failures.* >= max_swapchain_recreate_failures) {
+            std.log.err("swapchain recreation failed {d} consecutive times; last error: {}", .{ consecutive_failures.*, err });
+            return err;
+        }
+        std.log.warn("swapchain recreation failed (attempt {d} of {d}): {}", .{ consecutive_failures.*, max_swapchain_recreate_failures, err });
+        return;
+    };
+    consecutive_failures.* = 0;
+}
+
+fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) !void {
     vk_ctx.queue_mutex.lockUncancelable(io);
     defer vk_ctx.queue_mutex.unlock(io);
     vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
         std.log.err("queueWaitIdle failed during swapchain recreate: {}", .{err});
+        return err;
     };
 
     vk_ctx.present_mode = present_mode;
     if (ui.menu_state.ingame) {
-        game.renderer.recreateSwapchain(io) catch |err| {
-            std.log.err("recreateSwapchain failed: {}", .{err});
-            return;
-        };
+        try game.renderer.recreateSwapchain(io);
     } else {
-        vk_ctx.createSwapchainLocked(gamma_correction) catch |err| {
-            std.log.err("createSwapchainLocked failed: {}", .{err});
-            return;
-        };
+        try vk_ctx.createSwapchainLocked(gamma_correction);
     }
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
 }
