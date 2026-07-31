@@ -1234,39 +1234,6 @@ test "VulkanRenderer mesh upload" {
     try iface.addMesh(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
 }
 
-test "VulkanBackingAllocator alloc and free both pools" {
-    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
-    defer wio.deinit();
-
-    var events: wio.EventQueue = .empty;
-    defer events.deinit();
-
-    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
-    defer window.destroy();
-
-    const ctx = try VulkanContext.init(std.testing.allocator, &window);
-    defer ctx.deinit(std.testing.io);
-
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
-    defer backing.deinit();
-
-    const gpu_alloc = backing.allocator(.gpu_only);
-    const cpu_alloc = backing.allocator(.cpu_to_gpu);
-
-    const gpu_slice = try gpu_alloc.alloc(u8, 1024);
-    defer gpu_alloc.free(gpu_slice);
-    const gpu_info = backing.getBufferAndOffset(.gpu_only, gpu_slice.ptr);
-    try std.testing.expect(gpu_info.buffer != .null_handle);
-    try std.testing.expect(gpu_info.offset < 1024);
-
-    const cpu_slice = try cpu_alloc.alloc(u64, 256);
-    defer cpu_alloc.free(cpu_slice);
-    const cpu_info = backing.getBufferAndOffset(.cpu_to_gpu, cpu_slice.ptr);
-    try std.testing.expect(cpu_info.buffer != .null_handle);
-    try std.testing.expect(cpu_info.offset < 256 * @sizeOf(u64));
-    cpu_slice[0] = 42;
-}
-
 test "StagingRing alloc wrap-around" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
@@ -1280,7 +1247,7 @@ test "StagingRing alloc wrap-around" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const cpu_alloc = backing.allocator(.cpu_to_gpu);
@@ -1334,7 +1301,7 @@ test "FaceDataAllocator init and deinit" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -1343,7 +1310,7 @@ test "FaceDataAllocator init and deinit" {
     defer alloc.deinit(gpu_alloc);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(buf_info.buffer, buf_info.offset);
+    alloc.resolve(std.testing.io, buf_info.buffer, buf_info.offset);
 }
 
 test "FaceDataAllocator grow and retire old buffer" {
@@ -1359,7 +1326,7 @@ test "FaceDataAllocator grow and retire old buffer" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -1367,7 +1334,7 @@ test "FaceDataAllocator grow and retire old buffer" {
     var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(buf_info.buffer, buf_info.offset);
+    alloc.resolve(std.testing.io, buf_info.buffer, buf_info.offset);
 
     const grow_info = try alloc.grow(std.testing.io, gpu_alloc);
     gpu_alloc.free(grow_info.old_slice);

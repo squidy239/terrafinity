@@ -8,7 +8,8 @@ const Block = @import("../../world/Block.zig").Block;
 
 const visible_block_count = Block.visible_count;
 
-const visible_block_names: [visible_block_count][]const u8 = blk: {
+/// Visible block names in Block declaration order (filtered by isVisible); the order is a contract for BlockMaterialsZon's materials.zon schema.
+pub const visible_block_names: [visible_block_count][]const u8 = blk: {
     var names: [visible_block_count][]const u8 = undefined;
     var i: usize = 0;
     for (std.meta.fields(Block)) |field| {
@@ -109,9 +110,9 @@ pub const TextureManager = struct {
         allocator: std.mem.Allocator,
         keyword: []const u8,
     ) !void {
-        self.createSampler();
+        try self.createSampler();
         errdefer if (self.sampler != .null_handle) {
-            self.renderer.dev.destroySampler(self.sampler, null);
+            self.renderer.dev.destroySampler(self.sampler, &self.renderer.vk_ctx.vkalloc);
             self.sampler = .null_handle;
         };
 
@@ -196,9 +197,9 @@ pub const TextureManager = struct {
         std.log.info("Loaded {d} bindless textures", .{entry_names.items.len});
     }
 
-    fn createSampler(self: *TextureManager) void {
+    fn createSampler(self: *TextureManager) !void {
         const anisotropy = self.renderer.vk_ctx.sampler_anisotropy;
-        self.sampler = self.renderer.dev.createSampler(&.{
+        self.sampler = try self.renderer.dev.createSampler(&.{
             .mag_filter = .nearest,
             .min_filter = .linear,
             .mipmap_mode = .linear,
@@ -214,7 +215,7 @@ pub const TextureManager = struct {
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_black,
             .unnormalized_coordinates = .false,
-        }, &self.renderer.vk_ctx.vkalloc) catch |err| @panic(@errorName(err));
+        }, &self.renderer.vk_ctx.vkalloc);
     }
 
     fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {

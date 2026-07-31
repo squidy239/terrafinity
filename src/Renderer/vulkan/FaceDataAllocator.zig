@@ -25,9 +25,10 @@ pub const FaceDataAllocator = struct {
     };
 
     buffer_slice: []align(buf_align.toByteUnits()) u8,
-    buffer: ?vk.Buffer,
-    buffer_offset: vk.DeviceSize,
-    used: vk.DeviceSize,
+    // Atomic so the render thread can size barriers without taking the allocator mutex.
+    buffer: std.atomic.Value(vk.Buffer) = .init(.null_handle),
+    buffer_offset: std.atomic.Value(vk.DeviceSize) = .init(0),
+    used: std.atomic.Value(vk.DeviceSize) = .init(0),
 
     free_regions: std.ArrayList(Region),
     free_list_allocator: std.mem.Allocator,
@@ -38,10 +39,7 @@ pub const FaceDataAllocator = struct {
 
         return FaceDataAllocator{
             .buffer_slice = slice,
-            .buffer = null,
-            .buffer_offset = 0,
-            .used = 0,
-            .free_regions = std.ArrayList(Region).initCapacity(free_list_allocator, 0) catch unreachable,
+            .free_regions = .empty,
             .free_list_allocator = free_list_allocator,
         };
     }
@@ -53,32 +51,33 @@ pub const FaceDataAllocator = struct {
 
     pub fn resolve(self: *FaceDataAllocator, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) void {
         std.debug.assert(buffer != .null_handle);
-        self.buffer = buffer;
-        self.buffer_offset = buffer_offset;
+        self.buffer.store(buffer, .release);
+        self.buffer_offset.store(buffer_offset, .release);
     }
 
     pub fn allocRegion(self: *FaceDataAllocator, io: std.Io, length: vk.DeviceSize) ?AllocResult {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.buffer == null) return null;
+        if (self.buffer.load(.monotonic) == .null_handle) return null;
 
         if (self.findFreeRegion(length)) |offset| {
             return .{
                 .offset = offset,
-                .buffer = self.buffer.?,
-                .buffer_offset = self.buffer_offset,
+                .buffer = self.buffer.load(.monotonic),
+                .buffer_offset = self.buffer_offset.load(.monotonic),
             };
         }
 
-        const new_used, const overflow = @addWithOverflow(self.used, length);
+        const current_used = self.used.load(.monotonic);
+        const new_used, const overflow = @addWithOverflow(current_used, length);
         if (overflow == 0 and new_used <= self.buffer_slice.len) {
-            const offset = self.used;
-            self.used = new_used;
+            const offset = current_used;
+            self.used.store(new_used, .monotonic);
             return .{
                 .offset = offset,
-                .buffer = self.buffer.?,
-                .buffer_offset = self.buffer_offset,
+                .buffer = self.buffer.load(.monotonic),
+                .buffer_offset = self.buffer_offset.load(.monotonic),
             };
         }
 
@@ -137,7 +136,7 @@ pub const FaceDataAllocator = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const new_capacity = self.buffer_slice.len * 2;
+        const new_capacity = std.math.mul(vk.DeviceSize, @as(vk.DeviceSize, @intCast(self.buffer_slice.len)), 2) catch return error.OutOfMemory;
         log.info("growing from {d} MB to {d} MB", .{
             self.buffer_slice.len / (1024 * 1024),
             new_capacity / (1024 * 1024),
@@ -147,16 +146,29 @@ pub const FaceDataAllocator = struct {
 
         const old_info: GrowInfo = .{
             .old_slice = self.buffer_slice,
-            .old_buffer = self.buffer.?,
-            .old_buffer_offset = self.buffer_offset,
-            .old_used = self.used,
+            .old_buffer = self.buffer.load(.monotonic),
+            .old_buffer_offset = self.buffer_offset.load(.monotonic),
+            .old_used = self.used.load(.monotonic),
         };
 
         self.buffer_slice = new_slice;
-        self.free_regions.clearRetainingCapacity();
+        // Freed regions stay reusable: the caller copies [0, used) into the new buffer,
+        // so their offsets remain valid. buffer is nulled until resolve() pairs it
+        // with the new handle — allocRegion returns null in the interim.
+        self.buffer.store(.null_handle, .release);
+        self.buffer_offset.store(0, .release);
 
         log.info("grew to {d} MB", .{self.buffer_slice.len / (1024 * 1024)});
 
         return old_info;
     }
 };
+
+fn faceDataAllocInitDeinit(alloc: std.mem.Allocator) !void {
+    var allocator = try FaceDataAllocator.init(alloc, alloc, 1024 * 1024);
+    allocator.deinit(alloc);
+}
+
+test "FaceDataAllocator checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, faceDataAllocInitDeinit, .{});
+}

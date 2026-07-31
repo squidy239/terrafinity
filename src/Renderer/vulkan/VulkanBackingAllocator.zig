@@ -84,20 +84,15 @@ pub const VulkanBackingAllocator = struct {
         while (it.next()) |block| {
             const start = @intFromPtr(block.raw_alloc.ptr);
             if (addr >= start and addr < start + block.raw_alloc.len) {
-                return .{ .buffer = block.buffer, .offset = @intCast(addr - start) };
+                // gpu_only blocks have no real CPU mapping; their alignment padding is a
+                // sentinel artifact of the dummy allocation, so the data always sits at
+                // buffer offset 0. cpu_to_gpu blocks share the mapping with the buffer,
+                // making the pointer delta the true offset.
+                const offset: vk.DeviceSize = if (pool == .gpu_only) 0 else @intCast(addr - start);
+                return .{ .buffer = block.buffer, .offset = offset };
             }
         }
         std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{addr});
-    }
-
-    fn findMemoryType(self: *const VulkanBackingAllocator, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
-        const required_bits = required_properties.toInt();
-        for (self.mem_props.memory_types[0..self.mem_props.memory_type_count], 0..) |memory_type, i| {
-            if (type_filter & (@as(u32, 1) << @as(u5, @intCast(i))) == 0) continue;
-            if (memory_type.property_flags.toInt() & required_bits != required_bits) continue;
-            return @intCast(i);
-        }
-        return error.MemoryTypeNotFound;
     }
 
     fn allocBlock(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ![]u8 {
@@ -163,7 +158,7 @@ pub const VulkanBackingAllocator = struct {
             .gpu_only => vk.MemoryPropertyFlags{ .device_local_bit = true },
             .cpu_to_gpu => vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
         };
-        const mem_type = try self.findMemoryType(mem_reqs.memory_type_bits, required_flags);
+        const mem_type = try findMemoryType(self.mem_props, mem_reqs.memory_type_bits, required_flags);
 
         const memory = try self.dev.allocateMemory(&.{
             .allocation_size = mem_reqs.size,
@@ -193,6 +188,17 @@ pub const VulkanBackingAllocator = struct {
         if (pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 };
+
+pub fn findMemoryType(mem_props: vk.PhysicalDeviceMemoryProperties, type_filter: u32, required_properties: vk.MemoryPropertyFlags) !u32 {
+    const required_bits = required_properties.toInt();
+    const count = @min(mem_props.memory_type_count, 32);
+    for (mem_props.memory_types[0..count], 0..) |memory_type, i| {
+        if (type_filter & (@as(u32, 1) << @truncate(i)) == 0) continue;
+        if (memory_type.property_flags.toInt() & required_bits != required_bits) continue;
+        return @intCast(i);
+    }
+    return error.MemoryTypeNotFound;
+}
 
 fn allocPool(ctx: *anyopaque, pool: MemoryPool, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
     const self: *VulkanBackingAllocator = @ptrCast(@alignCast(ctx));
@@ -262,7 +268,7 @@ test "VulkanBackingAllocator alloc and free both pools" {
     const vk_ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer vk_ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator, vk_ctx.queue_family_index, vk_ctx.transfer_queue_family_index);
+    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator, vk_ctx.queue_family_index, vk_ctx.transfer_queue_family_index, vk_ctx.vkalloc);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -280,28 +286,4 @@ test "VulkanBackingAllocator alloc and free both pools" {
     try std.testing.expect(cpu_info.buffer != .null_handle);
     try std.testing.expect(cpu_info.offset < 256 * @sizeOf(u64));
     cpu_slice[0] = 42;
-}
-
-test "VulkanBackingAllocator getBufferAndOffset rejects unknown pointer" {
-    const wio_mod = @import("wio");
-    const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
-
-    try wio_mod.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio_mod.EventQueue.eventFn });
-    defer wio_mod.deinit();
-
-    var events: wio_mod.EventQueue = .empty;
-    defer events.deinit();
-
-    var window = try wio_mod.Window.create(.{ .title = "test", .event_fn_data = &events });
-    defer window.destroy();
-
-    const vk_ctx = try VulkanContext.init(std.testing.allocator, &window);
-    defer vk_ctx.deinit(std.testing.io);
-
-    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator, vk_ctx.queue_family_index, vk_ctx.transfer_queue_family_index);
-    defer backing.deinit();
-
-    // This should panic - pointer was never allocated through us
-    // Can't easily test this without catching the panic, but the fact that
-    // normal alloc/free works validates the bookkeeping is intact.
 }

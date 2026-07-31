@@ -91,6 +91,13 @@ pub const StagingRing = struct {
             if (e.ptr == slice.ptr) {
                 std.debug.assert(e.timeline_value == null);
                 _ = self.entries.orderedRemove(i);
+                if (i == self.entries.items.len) {
+                    // Cancelled the tail entry: retract head so its space is
+                    // immediately reusable instead of stranded until wrap-around.
+                    const aligned = std.mem.alignForward(vk.DeviceSize, slice.len, transfer_alignment);
+                    std.debug.assert(self.head >= aligned);
+                    self.head -= aligned;
+                }
                 if (self.entries.items.len == 0) self.head = 0;
                 return;
             }
