@@ -6,7 +6,7 @@ const tracy = @import("tracy");
 const Entity = @import("Entity.zig");
 const World = @import("../world/World.zig");
 
-map: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 80, 32) = .init,
+map: ConcurrentHashMap(u128, *Entity, std.hash_map.AutoContext(u128), 32) = .init,
 
 pub fn init() @This() {
     return .{
@@ -31,19 +31,22 @@ pub fn spawn(
     io: std.Io,
     allocator: std.mem.Allocator,
     entity: anytype,
-    comptime return_entity: bool,
-) !if (return_entity) *Entity else void {
+) !*Entity {
     const uuid_value = blk: {
         var random_uuid: u128 = undefined;
         io.random(std.mem.asBytes(&random_uuid));
         break :blk random_uuid;
     };
     const allocated_entity = try Entity.make(entity, allocator);
-    //errdefer allocated_entity.unload(io, world, uuid_value, allocator, false) catch unreachable;
+    errdefer {
+        const ptr = @as(*@TypeOf(entity), @ptrCast(@alignCast(allocated_entity.ptr)));
+        allocator.destroy(ptr);
+        allocator.destroy(allocated_entity);
+    }
 
-    if (return_entity) _ = allocated_entity.ref_count.fetchAdd(1, .seq_cst);
+    _ = allocated_entity.ref_count.fetchAdd(1, .seq_cst);
     std.debug.assert((try self.map.putNoOverrideAddRef(io, allocator, uuid_value, allocated_entity)) == null);
-    if (return_entity) return allocated_entity;
+    return allocated_entity;
 }
 
 pub fn update(

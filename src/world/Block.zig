@@ -8,9 +8,9 @@ pub const Block = enum(Tag) {
     dirt = normal_start + 2,
     wood = normal_start + 3,
     snow = normal_start + 4,
+    leaves = normal_start + 5,
 
     water = transparent_end - 1, //position is 7 hardcoded for waves, TODO make this a property
-    leaves = transparent_end - 2,
 
     air = invis_end - 1,
     null = invis_end - 2,
@@ -51,6 +51,14 @@ pub const Block = enum(Tag) {
             else => false,
         };
     }
+
+    pub const visible_count: usize = blk: {
+        var count: usize = 0;
+        for (std.meta.fields(@This())) |field| {
+            if (@field(@This(), field.name).isVisible()) count += 1;
+        }
+        break :blk count;
+    };
 };
 
 test "Block properties" {

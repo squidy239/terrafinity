@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 
 const tracy = @import("tracy");
 
-const Options = @import("../Game.zig").Options;
 const Cache = @import("../libs/Cache.zig").Cache;
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
@@ -993,14 +992,20 @@ fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
     try makeTestingWorld(&world, &generator, allocator, 256, 256);
     defer world.deinit(io, allocator);
 
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 970, 0, -655 }, .level = 2 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 432234, 0, 0 }, .level = 3 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 54, 0 }, .level = 4 }, false)).release();
-    (try world.loadChunk(io, allocator, .{ .position = .{ 54, 0, 54 }, .level = 5 }, false)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 76564678 }, .level = -1 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 0, 0 }, .level = 0 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 432, 0 }, .level = 1 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 970, 0, -655 }, .level = 2 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 432234, 0, 0 }, .level = 3 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 0, 54, 0 }, .level = 4 }, true)).release();
+    (try world.loadChunk(io, allocator, .{ .position = .{ 54, 0, 54 }, .level = 5 }, true)).release();
     (try world.loadChunk(io, allocator, .{ .position = .{ 0, 23, -4323 }, .level = 6 }, false)).release();
+    var editor: Editor = .{ .world = &world, .temp_allocator = allocator };
+    defer editor.clear();
+    try editor.placeBlock(.wood, .{ 0, 0, 0 }, 0);
+    try editor.placeBlock(.wood, .{ 0, 5, 222 }, 5);
+
+    try editor.flush(io, allocator);
 }
 
 test "loadChunk allocation failure" {
@@ -1010,22 +1015,64 @@ test "loadChunk allocation failure" {
         .{std.Io.Threaded.global_single_threaded.io()},
     );
 }
+const FuzzGenerator = @import("generators/Fuzz.zig").FuzzGenerator;
 
 test "fuzz world" {
     var world: World = undefined;
-    var generator: DefaultGenerator = undefined;
-    try makeTestingWorld(&world, &generator, std.testing.allocator, 1000, 100);
-    defer world.deinit(std.testing.io, std.testing.allocator);
-    try std.testing.fuzz(&world, fuzzChunkLoad, .{});
+    var dba: std.heap.DebugAllocator(.{}) = .init;
+    defer dba.deinitWithoutLeakChecks();
+    const allocator = dba.allocator();
+
+    var threaded: std.Io.Threaded = .init(dba.allocator(), .{});
+    const chunk_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
+    const grid_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
+
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, chunkPosHash, .{}, 1).init(
+        allocator,
+        chunk_count,
+        .{ .name = "test chunk cache" },
+    );
+    errdefer {
+        var c = chunk_cache;
+        c.deinit(allocator);
+    }
+
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, 1).init(
+        allocator,
+        grid_count,
+        .{ .name = "test grid cache" },
+    );
+    errdefer {
+        var g = grid_cache;
+        g.deinit(allocator);
+    }
+
+    world = .{
+        .chunks = chunk_cache,
+        .grids = grid_cache,
+        .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
+        .chunk_sources = undefined,
+    };
+    defer world.deinit(threaded.io(), dba.allocator());
+    try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = dba.allocator(), .world = &world }, fuzzChunkLoad, .{});
 }
 
-fn fuzzChunkLoad(world: *World, smith: *std.testing.Smith) !void {
-    const test_chunk = try world.loadChunk(
-        std.testing.io,
-        std.testing.allocator,
+const Context = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    world: *World,
+};
+
+fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
+    var generator: FuzzGenerator = try .init(smith);
+    context.world.chunk_sources = .{ generator.getSource(), null, null, null };
+
+    const test_chunk = try context.world.loadChunk(
+        context.io,
+        context.allocator,
         .{
-            .level = smith.valueRangeAtMost(i32, -2, 12),
-            .position = @mod(smith.value(@Vector(3, i32)), @Vector(3, i32){ 1000, 1000, 1000 }),
+            .level = smith.value(i32),
+            .position = smith.value(@Vector(3, i32)),
         },
         smith.value(bool),
     );

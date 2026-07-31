@@ -1,9 +1,11 @@
 const std = @import("std");
 
 const dvui = @import("dvui");
-const gl = @import("gl");
 const wio = @import("wio");
-const zigimg = @import("zigimg");
+const zignal = @import("zignal");
+const tracy = @import("tracy");
+const vk = @import("vulkan");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 
 const Config = @import("main.zig").Config;
 const EntityTypes = @import("entity/EntityTypes.zig");
@@ -16,10 +18,8 @@ const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 const Ui = @This();
 
-proc_table: *const gl.ProcTable,
 window: *wio.Window,
-ui_context: *wio.GlContext,
-gl_options: wio.GlOptions,
+vk_ctx: *VulkanContext,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
@@ -38,6 +38,8 @@ menu_state: struct {
     newgame: bool = false,
     crosshair: bool = true,
 
+    pending_game_deinit: bool = false,
+
     /// Returns true if the player is ingame without a menu open
     pub fn is_playing_game(self: @This()) bool {
         return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
@@ -50,12 +52,11 @@ menu_state: struct {
 },
 
 pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
-    var image = try zigimg.Image.fromMemory(allocator, menu_background_image);
+    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
     defer image.deinit(allocator);
-    try image.convert(allocator, .rgba32);
-    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.pixels.rgba32), .{
-        .width = @intCast(image.width),
-        .height = @intCast(image.height),
+    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
+        .width = @intCast(image.cols),
+        .height = @intCast(image.rows),
         .format = .rgba_32,
         .interpolation = .linear,
     });
@@ -63,6 +64,95 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
 
 pub fn deinit(self: *@This()) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
+}
+
+fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
+    var error_buffer: [65536]u8 = undefined;
+    var error_writer: std.Io.Writer = .fixed(&error_buffer);
+    switch (err) {
+        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
+        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
+        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
+        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+        else => error_writer.print("{any}", .{err}) catch unreachable,
+    }
+    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
+}
+
+pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time: std.Io.Timestamp) !void {
+    const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
+    defer dw.end();
+
+    try self.ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+    var menu_changed: bool = false;
+    {
+        const ov = dvui.overlay(@src(), .{ .expand = .both });
+        defer ov.deinit();
+
+        if (self.menu_state.debug_info and self.menu_state.ingame and !menu_changed) self.debugInfo(io) catch |err| {
+            std.log.err("debugInfo failed: {}", .{err});
+        };
+        if (self.menu_state.crosshair and self.menu_state.ingame and !menu_changed) self.crossHair();
+        if (self.menu_state.esc and !menu_changed) menu_changed = self.escMenu(io) catch false;
+        if (self.menu_state.main and !menu_changed) menu_changed = self.mainPage(io, gpa) catch |err| blk: {
+            showWorldError(frame_time, err);
+            break :blk false;
+        };
+        if (self.menu_state.settings and !menu_changed) menu_changed = self.settingsMenu(io) catch false;
+        if (self.menu_state.newgame and !menu_changed) menu_changed = self.newGameMenu(io, gpa) catch |err| blk: {
+            showWorldError(frame_time, err);
+            break :blk false;
+        };
+    }
+    _ = try self.ui_window.end(.{});
+}
+
+pub fn recordCommandBuffer(
+    self: *@This(),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    backend: *dvui.backend,
+    cmd: vk.CommandBuffer,
+    frame_ctx: VulkanContext.FrameContext,
+    frame_time: std.Io.Timestamp,
+) !void {
+    const extent = self.vk_ctx.swapchain_extent;
+    const image_index = frame_ctx.image_index;
+    const image = self.vk_ctx.swapchain_images[image_index];
+    const view = self.vk_ctx.swapchain_views[image_index];
+    const initial_layout = self.vk_ctx.swapchain_image_layouts[image_index];
+    try self.vk_ctx.dev.resetCommandBuffer(cmd, .{});
+    try self.vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
+
+    VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, initial_layout, .color_attachment_optimal);
+    self.vk_ctx.swapchain_image_layouts[image_index] = .color_attachment_optimal;
+
+    const color_attachment = vk.RenderingAttachmentInfo{
+        .image_view = view,
+        .image_layout = .color_attachment_optimal,
+        .resolve_mode = .{},
+        .resolve_image_layout = .undefined,
+        .load_op = .load,
+        .store_op = .store,
+        .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+    };
+    self.vk_ctx.dev.cmdBeginRendering(cmd, &vk.RenderingInfo{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .layer_count = 1,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachments = (&color_attachment)[0..1],
+    });
+
+    backend.setCommandBuffer(cmd, extent);
+    defer backend.setCommandBuffer(.null_handle, .{ .width = 0, .height = 0 });
+    backend.beginFrame();
+    try self.drawFrame(io, gpa, frame_time);
+    self.vk_ctx.dev.cmdEndRendering(cmd);
+
+    VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
+    self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+    try self.vk_ctx.dev.endCommandBuffer(cmd);
 }
 
 fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
@@ -88,6 +178,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
 }
 
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
+    _ = io;
     std.debug.assert(self.menu_state.ingame);
     const size = @Vector(2, usize){ 640, 480 };
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
@@ -107,8 +198,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
-        self.game.deinit(io);
-        self.window.glMakeContextCurrent(self.ui_context.*);
+        self.menu_state.pending_game_deinit = true;
         return true;
     }
 
@@ -145,6 +235,8 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
+        \\opaque faces: {d}
+        \\transparent faces: {d}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\chunk hit ratio: {d:.2}
@@ -152,6 +244,8 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),
             self.game.debug_menu.meshes.load(.unordered),
+            self.game.debug_menu.opaque_faces.load(.unordered),
+            self.game.debug_menu.transparent_faces.load(.unordered),
             chunk_count,
             grid_count,
             chunk_hit_ratio,
@@ -171,7 +265,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menuchanged: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
     const settings = dvui.box(
         @src(),
@@ -200,11 +294,22 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     const firstconfig = self.config.*;
     dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 
+    // Remove config strings from struct_ui's string_map to prevent double-free.
+    // struct_ui.deinit (called by Window.deinit) would otherwise free these strings,
+    // and then Config.deinit would free them again via allocator.free.
+    _ = dvui.struct_ui.string_map.remove(&self.config.game_config.render_options.selected_pack);
+
     const config_changed = !std.meta.eql(firstconfig, self.config.*);
+    const gamma_changed = firstconfig.game_config.render_options.gamma_correction != self.config.game_config.render_options.gamma_correction;
+    const present_mode_changed = firstconfig.game_config.render_options.present_mode != self.config.game_config.render_options.present_mode;
     self.config_lock.unlock(io);
 
+    if (gamma_changed or present_mode_changed) {
+        self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+    }
+
     if (config_changed) try self.config.save(io, self.config_path, self.config_lock);
-    return menuchanged;
+    return menu_changed;
 }
 
 pub fn crossHair(self: *@This()) void {
@@ -218,7 +323,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menuchanged: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
     const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer options.deinit();
@@ -236,9 +341,9 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
             std.log.info("Creating world: {any}\n", .{world_name});
             var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
             defer worlds_dir.close(io);
-            var worldfolder = try worlds_dir.createDirPathOpen(io, world_name, .{});
-            defer worldfolder.close(io);
-            const game_path = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, world_name });
+            var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
+            defer world_folder.close(io);
+            const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
             defer allocator.free(game_path);
             try new_world_options.save(io, game_path);
             try self.openGame(io, allocator, game_path);
@@ -251,7 +356,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     defer scroll.deinit();
     dvui.structUI(@src(), "World Options", &new_world_options, 32, .{}, .{ .background = false, .color_fill = .transparent });
 
-    return menuchanged;
+    return menu_changed;
 }
 
 pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
@@ -358,7 +463,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         text.deinit();
         if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
             std.log.info("Joining game: {s}", .{item.name});
-            const jpath = try std.fs.path.join(allocator, &[_][]const u8{ self.worlds_path, item.name });
+            const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
             try self.openGame(io, allocator, jpath);
             self.menu_state.ingame = true;
@@ -374,7 +479,8 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.window, self.gl_options, self.ui_context, self.proc_table);
+    self.vk_ctx.swapchain_gamma.store(self.config.game_config.render_options.gamma_correction, .monotonic);
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx);
     std.log.info("opening game\n", .{});
 }
 

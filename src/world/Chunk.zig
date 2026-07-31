@@ -70,9 +70,9 @@ pub const Encoding = union(enum(u1)) {
                 }
             }
         } else {
-            for (0..len) |i| {
-                if (flat_merge_array[i] != comptime @intFromEnum(Block.null)) {
-                    flat_array.*[i] = flat_merge_array[i];
+            for (flat_merge_array[0..len], flat_array.*[0..len]) |src, *dest| {
+                if (src != comptime @intFromEnum(Block.null)) {
+                    dest.* = src;
                 }
             }
         }
@@ -175,12 +175,10 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub fn fuzzerMakeEncoding(grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block, smith: *std.testing.Smith) Encoding {
-        @disableInstrumentation();
-        @setRuntimeSafety(false);
         return switch (smith.value(@typeInfo(Encoding).@"union".tag_type.?)) {
             .grid => blk: {
                 grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-                break :blk Encoding{ .grid = grid };
+                break :blk .fromBlocks(grid);
             },
             .uniform => .{ .uniform = smith.value(Block) },
         };
@@ -326,18 +324,9 @@ pub const Encoding = union(enum(u1)) {
         const et = std.Io.Timestamp.now(std.testing.io, .awake);
         const dt = st.durationTo(et);
         const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
-        std.log.warn("Simplify benchmark: completed with an avg time of {d} us per chunk, {d} ns per block", .{ us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
+        std.log.info("Simplify benchmark: completed with an avg time of {d} us per chunk, {d} ns per block", .{ us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
     }
 };
-
-/// Returns a chunk made from a given blockencoding. The chunk is allocated from the pool.
-pub fn from(block_encoding: Encoding, chunk: *@This()) !*@This() {
-    chunk.* = .{
-        .encoding = block_encoding,
-        .ref_count = std.atomic.Value(u32).init(1),
-    };
-    return chunk;
-}
 
 ///checks if the block array is all the same block
 pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
@@ -353,18 +342,6 @@ pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceR
     try self.addAndLockShared(io);
     defer self.releaseAndUnlockShared(io);
     return self.encoding.extractFace(rotation);
-}
-
-pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, max_micro_time: ?u64) error{Canceled}!bool {
-    std.debug.assert(self.encoding == .grid or self.encoding == .uniform);
-    if (self.ref_count.load(.seq_cst) == amount) return true;
-    const st = std.Io.Timestamp.now(io, .awake);
-    while (self.ref_count.load(.seq_cst) != amount) {
-        @branchHint(.unlikely);
-        if (max_micro_time != null and st.untilNow(io, .awake).toMicroseconds() > max_micro_time.?) return false;
-        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
-    }
-    return true;
 }
 
 pub fn modify(self: *@This()) void {

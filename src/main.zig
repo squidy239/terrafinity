@@ -1,14 +1,13 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
 const dvui = @import("dvui");
-const gl = @import("gl");
 const options = @import("options");
 pub const tracy = @import("tracy");
 pub const tracy_impl = @import("tracy_impl");
 const wio = @import("wio");
-const wio_backend = @import("wio-backend");
-pub const zm = @import("zm");
+const vk = @import("vulkan");
+const Renderer = @import("Renderer.zig");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
+const dvui_vk_renderer = @import("dvui_vk_renderer");
 
 pub const Entity = @import("entity/Entity.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
@@ -28,73 +27,56 @@ pub const tracy_options: tracy.Options = .{
     .verbose = false,
 };
 
-fn exiter(io: std.Io, running: *std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(60), .awake) catch unreachable;
-    running.store(false, .unordered);
-}
-
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
-
-    var tracy_allocator = tracy.Allocator{ .parent = init.gpa };
-
-    const gpa = tracy_allocator.allocator();
+    const gpa = init.gpa;
     const io = init.io;
 
-    var exit = if (options.test_play)
-        try io.concurrent(exiter, .{ io, &running })
-    else {};
-    defer if (options.test_play) exit.await(io);
-
-    //TODO make this an argument once std.cli is added
     const config_path: []const u8 = "Config.zon";
     const worlds_path: []const u8 = "worlds";
 
     var config_lock: std.Io.RwLock = .init;
-
     var config: Config = try .load(gpa, io, config_path);
     defer config.deinit(gpa);
+    try config.save(io, config_path, &config_lock);
 
-    try config.save(io, config_path, &config_lock); //save the config to format it or create it if it dident exist
-
-    try wio.init(gpa, io, wio.EventQueue.eventFn, .{});
+    try wio.init(.{ .allocator = gpa, .io = io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
     var events: wio.EventQueue = .empty;
     defer events.deinit();
 
-    const gl_options: wio.GlOptions = .{
-        .major_version = 4,
-        .minor_version = 5,
-        .profile = .core,
-        .forward_compatible = true,
-        .debug = builtin.mode == .Debug,
-        .samples = 4,
-        .alpha_bits = 0,
-    };
-
-    var window = try wio.Window.create(.{ .title = "terrafinity", .gl_options = gl_options, .event_fn_data = &events });
+    var window = try wio.Window.create(.{ .title = "terrafinity", .event_fn_data = &events });
     defer window.destroy();
+    window.setMode(.maximized);
 
-    if (!options.test_play) window.setMode(.maximized);
+    pollInitialSize(io, &events, &window_size);
+    var vk_ctx = try VulkanContext.init(gpa, &window);
+    defer vk_ctx.deinit(io);
 
-    var ui_context = try window.glCreateContext(.{ .options = gl_options });
-    defer ui_context.destroy();
-    window.glMakeContextCurrent(ui_context);
+    vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
+    vk_ctx.present_mode = config.game_config.render_options.present_mode;
+    vk_ctx.queue_mutex.lockUncancelable(io);
+    try vk_ctx.createSwapchainLocked(false);
+    vk_ctx.queue_mutex.unlock(io);
 
-    var proc_table: gl.ProcTable = undefined;
-    if (!gl.ProcTable.init(&proc_table, wio.glGetProcAddress))
-        return error.FailedToInitProcTable;
-    gl.makeProcTableCurrent(&proc_table);
-    setCallback();
-
-    var backend = try wio_backend.init(.{ .io = io, .window = window });
+    var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
     defer backend.deinit();
 
-    var render_backend = try dvui.render_backend.init(gpa, wio.glGetProcAddress, "450");
-    defer render_backend.deinit();
+    const vk_memory = dvui_vk_renderer.VkMemory.init(vk_ctx.mem_props) orelse return error.NoSuitableMemory;
+    try backend.initVulkan(
+        vk_ctx.dev,
+        vk_ctx.pdev,
+        vk_memory,
+        vk_ctx.graphics_queue,
+        vk_ctx.ui_command_pool,
+        gpa,
+        VulkanContext.max_frames_in_flight,
+        vk_ctx.swapchain_format,
+    );
 
-    var ui_window = try dvui.Window.init(@src(), gpa, backend.backend(&render_backend), .{});
+    const dvui_backend = dvui.Backend.init(&backend);
+    var ui_window = try dvui.Window.init(@src(), gpa, dvui_backend, .{});
     defer ui_window.deinit();
 
     try Ui.loadFonts(&ui_window);
@@ -103,113 +85,158 @@ pub fn main(init: std.process.Init) !void {
     defer keymap.map.deinit();
 
     var single_press = Key.Singlepress.empty;
-    //TODO load keymap from file
     try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
-
+    try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
     single_press.insert(.escape_menu);
+    single_press.insert(.fullscreen);
 
-    try keymap.setActionKey(io, .{ .key = .w }, .forward);
-    try keymap.setActionKey(io, .{ .key = .s }, .backward);
-    try keymap.setActionKey(io, .{ .key = .a }, .left);
-    try keymap.setActionKey(io, .{ .key = .d }, .right);
-    try keymap.setActionKey(io, .{ .key = .space }, .up);
-    try keymap.setActionKey(io, .{ .key = .left_shift }, .down);
-    try keymap.setActionKey(io, .{ .key = .mouse_left }, .use_item_primary);
-    try keymap.setActionKey(io, .{ .key = .mouse_right }, .use_item_secondary);
-    try keymap.setActionKey(io, .{ .key = .f }, .use_item_tertiary);
+    inline for (.{ .{ .key = .w, .action = .forward }, .{ .key = .s, .action = .backward }, .{ .key = .a, .action = .left }, .{ .key = .d, .action = .right }, .{ .key = .space, .action = .up }, .{ .key = .left_shift, .action = .down }, .{ .key = .mouse_left, .action = .use_item_primary }, .{ .key = .mouse_right, .action = .use_item_secondary }, .{ .key = .f, .action = .use_item_tertiary } }) |bind| {
+        try keymap.setActionKey(io, .{ .key = bind.key }, bind.action);
+    }
 
     var game: Game = undefined;
-    if (options.test_play) {
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, &window, gl_options, &ui_context, &proc_table);
+    if (options.test_play != null) {
+        vk_ctx.swapchain_gamma.store(config.game_config.render_options.gamma_correction, .monotonic);
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, vk_ctx);
     }
     var ui: Ui = .{
-        .proc_table = &proc_table,
         .window = &window,
+        .vk_ctx = vk_ctx,
         .config = &config,
         .config_lock = &config_lock,
         .game = &game,
-        .menu_state = if (options.test_play) .{ .ingame = true } else .{ .main = true },
+        .menu_state = if (options.test_play != null) .{ .ingame = true } else .{ .main = true },
         .config_path = config_path,
         .worlds_path = worlds_path,
-        .ui_context = &ui_context,
-        .gl_options = gl_options,
         .running = &running,
         .ui_window = &ui_window,
         .menu_background = undefined,
     };
     try ui.initAssets(gpa);
     defer ui.deinit();
-
     defer if (ui.menu_state.ingame) game.deinit(io);
-    var frame_time: std.Io.Timestamp = .now(io, .awake);
+
+    const start_time: std.Io.Timestamp = .now(io, .awake);
+    var frame_time: std.Io.Timestamp = start_time;
     var action_set = Key.ActionSet.empty;
+    var prev_window_size = window_size;
+    var current_window_mode: wio.WindowMode = .maximized;
+    var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
+    var swapchain_recreate_failures: u32 = 0;
+
+    var ui_cmd_buffers: [VulkanContext.max_frames_in_flight]vk.CommandBuffer = undefined;
+    const ui_cmd_bufs_slice: []vk.CommandBuffer = &ui_cmd_buffers;
+    try vk_ctx.dev.allocateCommandBuffers(&.{
+        .command_pool = vk_ctx.ui_command_pool,
+        .level = .primary,
+        .command_buffer_count = VulkanContext.max_frames_in_flight,
+    }, ui_cmd_bufs_slice.ptr);
+    defer vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, ui_cmd_bufs_slice);
+
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, frame_time.untilNow(io, .awake));
+        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui);
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
-        frame_time = .now(io, .awake);
-        if (ui.menu_state.ingame) {
-            try game.frame(io, gpa);
-            window.glMakeContextCurrent(ui_context);
-        }
-        {
-            const dw = tracy.Zone.begin(.{ .src = @src(), .name = "draw ui" });
-            defer dw.end();
-            window.glMakeContextCurrent(ui_context);
-            try ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
-            var menu_changed: bool = false;
-            {
-                const ov = dvui.overlay(@src(), .{ .expand = .both });
-                defer ov.deinit();
-
-                if (ui.menu_state.debug_info and ui.menu_state.ingame and !menu_changed) try ui.debugInfo(io);
-                if (ui.menu_state.crosshair and ui.menu_state.ingame and !menu_changed) ui.crossHair();
-                if (ui.menu_state.esc and !menu_changed) menu_changed = try ui.escMenu(io);
-                if (ui.menu_state.main and !menu_changed) menu_changed = ui.mainPage(io, gpa) catch |err| err: {
-                    var error_buffer: [65536]u8 = undefined;
-                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
-
-                    switch (err) {
-                        error.RocksDBOpen => error_writer.print("World is already open in another instance.", .{}) catch unreachable,
-                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                        error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
-                        else => error_writer.print("{any}", .{err}) catch unreachable,
-                    }
-
-                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem opening the world                " });
-                    break :err false;
-                };
-                if (ui.menu_state.settings and !menu_changed) menu_changed = try ui.settingsMenu(io);
-                if (ui.menu_state.newgame and !menu_changed) menu_changed = ui.newGameMenu(io, gpa) catch |err| err: {
-                    var error_buffer: [65536]u8 = undefined;
-                    var error_writer: std.Io.Writer = .fixed(&error_buffer);
-
-                    switch (err) {
-                        error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
-                        error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
-                        else => error_writer.print("{any}", .{err}) catch unreachable,
-                    }
-
-                    dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem creating the world                " });
-                    break :err false;
-                };
+        if (action_set.contains(.fullscreen)) {
+            if (current_window_mode == .fullscreen) {
+                window.setMode(pre_fullscreen_window_mode);
+                current_window_mode = pre_fullscreen_window_mode;
+            } else {
+                pre_fullscreen_window_mode = current_window_mode;
+                current_window_mode = .fullscreen;
+                window.setMode(current_window_mode);
             }
-            _ = try ui_window.end(.{});
+            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+        }
+        frame_time = .now(io, .awake);
+
+        if (prev_window_size.width != window_size.width or prev_window_size.height != window_size.height) {
+            vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
+            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+            prev_window_size = window_size;
         }
 
-        const sw = tracy.Zone.begin(.{ .src = @src(), .name = "swap" });
-        window.glSwapBuffers();
-        sw.end();
+        if (options.test_play) |timeout| {
+            if (start_time.untilNow(io, .awake).toSeconds() >= timeout) {
+                std.log.info("Test play timeout reached", .{});
+                running.store(false, .unordered);
+                break;
+            }
+        }
+
+        if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
+            recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures) catch |err| return err;
+            continue;
+        }
+
+        const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
+            error.OutOfDate => {
+                recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures) catch |recreate_err| return recreate_err;
+                continue;
+            },
+            error.SurfaceLost => {
+                // Surface recreation requires destroying and recreating the VkSurfaceKHR through
+                // the windowing layer, which is not implemented; a retry against the lost surface
+                // would keep failing, so terminate instead of spinning on errors.
+                std.log.err("Vulkan surface lost; windowing-layer surface recreation is not implemented", .{});
+                return err;
+            },
+            error.DrawFailed => {
+                std.log.err("beginFrame failed: draw error", .{});
+                continue;
+            },
+            else => return err,
+        };
+
+        const is_ingame = ui.menu_state.ingame;
+        if (is_ingame) {
+            const draw_ctx: Renderer.FrameDrawContext = .{
+                .frame_index = frame_ctx.frame_index,
+                .cmd_buffer = frame_ctx.cmd_buffer,
+                .output_image = vk_ctx.swapchain_images[frame_ctx.image_index],
+                .output_view = vk_ctx.swapchain_views[frame_ctx.image_index],
+                .swapchain_image_layout = &vk_ctx.swapchain_image_layouts[frame_ctx.image_index],
+            };
+            try game.frame(io, gpa, draw_ctx, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
+        }
+
+        try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
+
+        const submit_game = is_ingame and ui.menu_state.ingame;
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
+
+        vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
+            error.OutOfDate => {
+                // present() already flagged swapchain_needs_recreate; recreate on the next loop pass.
+                vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+            },
+            error.SurfaceLost => {
+                std.log.err("Vulkan surface lost during present; windowing-layer surface recreation is not implemented", .{});
+                return err;
+            },
+            else => {
+                std.log.err("present failed: {}", .{err});
+            },
+        };
+
+        if (ui.menu_state.pending_game_deinit) {
+            ui.menu_state.pending_game_deinit = false;
+            _ = vk_ctx.dev.deviceWaitIdle() catch {};
+            game.deinit(io);
+            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+        }
+
         tracy.frameMark(null);
     }
+    window.disableRelativeMouse();
+    _ = vk_ctx.dev.deviceWaitIdle() catch {};
 }
 
 test {
     std.testing.refAllDecls(@This());
 }
 
-///must be locked by the caller
 pub const Config = struct {
     game_config: Game.Options = .{},
 
@@ -223,8 +250,11 @@ pub const Config = struct {
         };
         defer if (config_file) |file| file.close(io);
         var config: Config = undefined;
-        config = if (config_file) |file| try utils.loadZON(Config, io, file, allocator, allocator) else .{};
-
+        config = if (config_file) |file| try utils.loadZon(Config, io, file, allocator, allocator) else blk: {
+            var default_config: Config = .{};
+            default_config.game_config.render_options.selected_pack = try allocator.dupe(u8, "default");
+            break :blk default_config;
+        };
         return config;
     }
 
@@ -242,90 +272,120 @@ pub const Config = struct {
     }
 
     pub fn deinit(self: *const Config, allocator: std.mem.Allocator) void {
-        std.zon.parse.free(allocator, self.*);
+        allocator.free(self.game_config.render_options.selected_pack);
     }
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
 
 var window_size: wio.Size = .{ .height = 480, .width = 640 };
+
+fn pollInitialSize(io: std.Io, events: *wio.EventQueue, size: *wio.Size) void {
+    _ = io;
+    var count: u32 = 0;
+    while (count < 100) : (count += 1) {
+        wio.update();
+        while (events.pop()) |event| {
+            if (event == .size_physical) {
+                size.* = event.size_physical;
+                return;
+            }
+        }
+    }
+}
+
+const max_swapchain_recreate_failures: u32 = 120;
+
+// Recreates the swapchain while tracking consecutive failures: a persistent recreation error would
+// otherwise retry every frame (each attempt stalls the GPU with a deviceWaitIdle) and spin forever.
+fn recreateSwapchainOrFail(
+    io: std.Io,
+    vk_ctx: *VulkanContext,
+    ui: *Ui,
+    game: *Game,
+    present_mode: VulkanContext.PresentMode,
+    gamma_correction: bool,
+    consecutive_failures: *u32,
+) !void {
+    recreateSwapchainForMenuOrGame(io, vk_ctx, ui, game, present_mode, gamma_correction) catch |err| {
+        consecutive_failures.* += 1;
+        if (consecutive_failures.* >= max_swapchain_recreate_failures) {
+            std.log.err("swapchain recreation failed {d} consecutive times; last error: {}", .{ consecutive_failures.*, err });
+            return err;
+        }
+        std.log.warn("swapchain recreation failed (attempt {d} of {d}): {}", .{ consecutive_failures.*, max_swapchain_recreate_failures, err });
+        return;
+    };
+    consecutive_failures.* = 0;
+}
+
+fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) !void {
+    vk_ctx.queue_mutex.lockUncancelable(io);
+    defer vk_ctx.queue_mutex.unlock(io);
+    vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
+        std.log.err("queueWaitIdle failed during swapchain recreate: {}", .{err});
+        return err;
+    };
+
+    vk_ctx.present_mode = present_mode;
+    if (ui.menu_state.ingame) {
+        try game.renderer.recreateSwapchain(io);
+    } else {
+        try vk_ctx.createSwapchainLocked(gamma_correction);
+    }
+    vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
+}
+
 fn handleEvents(
     io: std.Io,
     key_map: *Key.Map,
     single_press: Key.Singlepress,
     action_set: *Key.ActionSet,
     running: *std.atomic.Value(bool),
-    ui_backend: *wio_backend,
+    backend: *dvui.backend,
     win: *wio.Window,
     events: *wio.EventQueue,
     ui_window: *dvui.Window,
     ui: *Ui,
-    dt: std.Io.Duration,
 ) !void {
-    ui_backend.textInputRect(ui_window.textInputRequested());
+    backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.is_playing_game()) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();
-        ui_backend.setCursor(ui_window.cursorRequested());
+        backend.setCursor(ui_window.cursorRequested());
     }
 
-    //set all single press buttons like escape to false
     var it = action_set.iterator();
     while (it.next()) |action| {
         if (single_press.contains(action)) action_set.remove(action);
     }
-    {
-        while (events.pop()) |event| {
-            _ = try ui_backend.addEvent(ui_window, event);
-            switch (event) {
-                .button_press => |key| {
-                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
-                    action_set.insert(action);
-                },
-                .button_release => |key| {
-                    const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
-                    action_set.remove(action);
-                },
-                .close => {
-                    running.store(false, .unordered);
-                },
-                .scroll_vertical => |scroll| {
-                    if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
-                },
-                .mouse_relative => |mouse| {
-                    const mouse_moved = (mouse.x != 0 or mouse.y != 0);
-                    if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(io, mouse);
-                },
-                .size_physical => |size| {
-                    window_size = size;
-                },
-                else => {},
-            }
+
+    while (events.pop()) |event| {
+        _ = try backend.addEvent(ui_window, event);
+        switch (event) {
+            .button_press => |key| {
+                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                action_set.insert(action);
+            },
+            .button_release => |key| {
+                const action = key_map.getAction(io, Key.Key{ .key = key }) orelse continue;
+                action_set.remove(action);
+            },
+            .close => running.store(false, .unordered),
+            .scroll_vertical => |scroll| {
+                if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
+            },
+            .mouse_relative => |mouse| {
+                const mouse_moved = (mouse.x != 0 or mouse.y != 0);
+                if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(io, mouse);
+            },
+            .size_physical => |size| window_size = size,
+            else => {},
         }
     }
-    if (ui.menu_state.ingame) try ui.game.renderer.setViewport(.{ window_size.width, window_size.height });
-    if (ui.menu_state.ingame) try ui.game.handleButtonActions(io, action_set, dt);
-}
 
-pub fn setCallback() void {
-    switch (builtin.mode) {
-        .Debug, .ReleaseSafe => {},
-        .ReleaseFast, .ReleaseSmall => return,
-    }
-    gl.Enable(gl.DEBUG_OUTPUT);
-    gl.DebugMessageCallback(glCallback, null);
-}
-
-fn glCallback(source: gl.@"enum", kind: gl.@"enum", id: gl.uint, severity: gl.@"enum", length: gl.sizei, message: [*:0]const u8, user_param: ?*const anyopaque) callconv(.c) void {
-    _ = kind;
-    _ = id;
-    _ = user_param;
-    switch (severity) {
-        gl.DEBUG_SEVERITY_NOTIFICATION => return,
-        gl.DEBUG_SEVERITY_HIGH => std.log.err("{d}: {s}", .{ source, message[0..@intCast(length)] }),
-        gl.DEBUG_SEVERITY_MEDIUM => std.log.warn("{d}: {s}", .{ source, message[0..@intCast(length)] }),
-        gl.DEBUG_SEVERITY_LOW => std.log.info("{d}: {s}", .{ source, message[0..@intCast(length)] }),
-        else => unreachable,
+    if (ui.menu_state.ingame) {
+        try ui.game.handleButtonActions(io, action_set);
     }
 }

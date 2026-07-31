@@ -3,13 +3,14 @@ const std = @import("std");
 const EntityTypes = @import("EntityTypes");
 const tracy = @import("tracy");
 
-const Renderer = @import("../Game.zig").Renderer;
 const World = @import("../world/World.zig");
 
 const Entity = @This();
 
+pub const Implementation = opaque {};
+
 type: Type,
-ptr: *anyopaque,
+ptr: *Implementation,
 ref_count: std.atomic.Value(u32),
 vtable: Interface,
 
@@ -19,8 +20,7 @@ pub const Interface = struct {
     /// Unloads the entity and frees all resources allocated by it.
     /// The entity ptr is not valid after this.
     unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
-    getPos: ?*const fn (self: *anyopaque, io: std.Io) @Vector(3, f64) = null,
-    draw: ?*const fn (self: *anyopaque, world: *World, uuid: u128, allocator: std.mem.Allocator, playerPos: @Vector(3, f64), renderer: *Renderer) error{Unrecoverable}!void = null,
+    getPos: ?*const fn (self: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
 /// Removes a ref from entity when it returns.
@@ -31,12 +31,6 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
         const unloaded = try updateFn(self, io, world, uuid, allocator);
         if (!unloaded) _ = self.ref_count.fetchSub(1, .seq_cst);
     } else _ = self.ref_count.fetchSub(1, .seq_cst);
-}
-
-pub fn draw(self: *@This(), playerPos: @Vector(3, f64), uuid: u128, world: *World, r: *Renderer) !void {
-    if (self.vtable.draw) |drawFn| {
-        return try drawFn(self.ptr, world, uuid, world.allocator, playerPos, r);
-    }
 }
 
 pub fn getPos(self: *@This()) ?@Vector(3, f64) {
@@ -67,14 +61,14 @@ pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroT
     return true;
 }
 
-pub fn make(tempentity: anytype, allocator: std.mem.Allocator) !*Entity {
-    const mem = try allocator.create(@TypeOf(tempentity));
+pub fn make(temp_entity: anytype, allocator: std.mem.Allocator) !*Entity {
+    const mem = try allocator.create(@TypeOf(temp_entity));
     errdefer allocator.destroy(mem);
-    mem.* = tempentity;
+    mem.* = temp_entity;
 
     const en = Entity{
-        .type = @TypeOf(tempentity).Type,
-        .ptr = mem,
+        .type = @TypeOf(temp_entity).Type,
+        .ptr = @ptrCast(mem),
         .ref_count = .init(1),
         .vtable = mem.getInterface(),
     };
@@ -90,13 +84,12 @@ pub fn release(self: *@This()) void {
 
 pub const Type = enum(u32) {
     Player = 0,
-    Cube = 1,
     Explosive = 2,
 };
 
 test "Entity.make allocation failure" {
     const DummyEntity = struct {
-        pub const Type = Entity.Type.Cube;
+        pub const Type = Entity.Type.Player;
         pos: @Vector(3, f64) = .{ 0, 0, 0 },
         pub fn getInterface(self: *@This()) Entity.Interface {
             _ = self;

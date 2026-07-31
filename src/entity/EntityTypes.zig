@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const gl = @import("gl");
-const obj = @import("obj");
 const tracy = @import("tracy");
 const zm = @import("zm");
 
@@ -12,80 +10,11 @@ const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
 
-const pack = "default";
-
-const EntityMeshBufferIds = struct {
-    vbo: c_uint,
-    vao: c_uint,
-    ebo: c_uint,
-};
-
-var entity_meshes: [@typeInfo(Entity.Type).@"enum".fields.len]?EntityMeshBufferIds = @splat(null);
-var entity_meshes_len: [@typeInfo(Entity.Type).@"enum".fields.len]c_int = undefined;
-
-pub fn loadMeshes(allocator: std.mem.Allocator, io: std.Io) !void {
-    var cwd = std.Io.Dir.cwd();
-    var packs = try cwd.createDirPathOpen(io, "packs", .{});
-    defer packs.close();
-    var packdir = try packs.createDirPathOpen(io, pack, .{});
-    defer packdir.close();
-    var entities = try packdir.createDirPathOpen(io, "Entities", .{});
-    defer entities.close();
-    for (&entity_meshes, 0..) |*mesh, i| {
-        const entity: Entity.Type = @enumFromInt(i);
-        std.log.debug("reading: {s}\n", .{@tagName(entity)});
-        const file_contents = entities.readFileAlloc(allocator, @tagName(entity), 1_000_000_000) catch {
-            std.log.err("failed to read: {s}\n", .{@tagName(entity)});
-            continue;
-        };
-        defer allocator.free(file_contents);
-        var parsed_obj = try obj.parseObj(allocator, file_contents);
-        defer parsed_obj.deinit(allocator);
-        mesh.* = try glLoadEntity(parsed_obj, &entity_meshes_len[i], allocator);
-    }
-}
-
-pub fn glLoadEntity(entity: obj.ObjData, entity_mesh_len: *c_int, allocator: std.mem.Allocator) !?EntityMeshBufferIds {
-    if (entity.meshes.len == 0) return null;
-    var buffer_ids: EntityMeshBufferIds = undefined;
-    gl.GenBuffers(1, @ptrCast(&buffer_ids.vbo));
-    gl.BindBuffer(gl.ARRAY_BUFFER, buffer_ids.vbo);
-    gl.BufferData(gl.ARRAY_BUFFER, @intCast(@sizeOf(f32) * entity.vertices.len), @ptrCast(entity.vertices), gl.STATIC_DRAW);
-    gl.GenVertexArrays(1, @ptrCast(&buffer_ids.vao));
-    gl.BindVertexArray(buffer_ids.vao);
-    gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 3 * @sizeOf(f32), 0);
-    gl.GenBuffers(1, @ptrCast(&buffer_ids.ebo));
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer_ids.ebo);
-    gl.EnableVertexAttribArray(0);
-    var indices = try allocator.alloc(u32, 4_000_000);
-    defer allocator.free(indices);
-    var pos: usize = 0;
-    for (entity.meshes) |mesh| {
-        for (mesh.indices) |index| {
-            indices[pos] = index.vertex.?;
-            pos += 1;
-        }
-    }
-    entity_mesh_len.* = @intCast(pos);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(@sizeOf(u32) * pos), @ptrCast(indices[0..pos]), gl.STATIC_DRAW);
-    return buffer_ids;
-}
-
-pub fn freeMeshes() void {
-    for (entity_meshes) |m| {
-        if (m) |mesh| {
-            gl.DeleteBuffers(1, @ptrCast(@constCast(&mesh.vbo)));
-            gl.DeleteBuffers(1, @ptrCast(@constCast(&mesh.ebo)));
-            gl.DeleteVertexArrays(1, @ptrCast(@constCast(&mesh.vao)));
-        }
-    }
-}
-
 pub const Player = struct {
     pub const Type = Entity.Type.Player;
     player_name: Name,
     game_mode: std.atomic.Value(GameMode),
-    fly_speed: std.atomic.Value(f32) = .init(100),
+    fly_speed: std.atomic.Value(f32) = .init(1024),
     walk_speed: std.atomic.Value(f32) = .init(8),
     jump_strength: std.atomic.Value(f32) = .init(8),
     fly_speed_linear: std.atomic.Value(f32) = .init(10),
@@ -137,7 +66,7 @@ pub const Player = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
+    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.physics.mutex.lockUncancelable(io);
         defer self.physics.mutex.unlock(io);
@@ -145,10 +74,10 @@ pub const Player = struct {
         return self.physics.pos;
     }
 
-    pub fn switchGameMode(self: *@This(), gameMode: GameMode) void {
-        self.game_mode.store(gameMode, .monotonic);
+    pub fn switchGameMode(self: *@This(), game_mode: GameMode) void {
+        self.game_mode.store(game_mode, .monotonic);
 
-        switch (gameMode) {
+        switch (game_mode) {
             .Spectator => {
                 self.physics.elements.mover.enabled.store(true, .monotonic);
                 self.physics.elements.mover.zero_velocity.store(true, .monotonic);
@@ -260,7 +189,7 @@ pub const Explosive = struct {
         allocator.destroy(entity);
     }
 
-    pub fn getPos(ptr: *anyopaque, io: std.Io) @Vector(3, f64) {
+    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
@@ -273,17 +202,6 @@ pub const Explosive = struct {
             .getPos = getPos,
             .unload = unload,
             .update = update,
-            .draw = null,
         };
     }
 };
-
-fn texture(u: f64, v: f64, args: anytype) f64 {
-    const noise = World.DefaultGenerator.Noise.Noise(f32){
-        .noise_type = .simplex,
-        .frequency = 0.5,
-    };
-    _ = args;
-    const sampled = noise.genNoise2DRange(@floatCast(u), @floatCast(v), f32, 0, 1);
-    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0), @as(f32, 0.75)));
-}

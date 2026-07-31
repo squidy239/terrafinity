@@ -1,0 +1,101 @@
+#version 460 core
+#extension GL_ARB_gpu_shader_int64 : require
+
+layout(local_size_x = 64) in;
+
+struct MeshCandidate {
+    vec4 absolute_position;
+    uint face_offset;
+    float scale;
+    uint face_count;
+    uint is_transparent;
+};
+
+struct MeshData {
+    vec4 absolute_position;
+    vec4 relative_position;
+    float scale;
+};
+
+struct DrawIndirectCommand {
+    uint vertex_count;
+    uint instance_count;
+    uint first_vertex;
+    uint first_instance;
+};
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    MeshCandidate candidate_meshes[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputIndirectBuffer {
+    DrawIndirectCommand out_indirect[];
+};
+
+layout(std430, binding = 2) writeonly buffer OutputMeshDataBuffer {
+    MeshData out_meshes[];
+};
+
+layout(std430, binding = 3) buffer CountBuffer {
+    uint opaque_count;
+    uint transparent_count;
+    uint opaque_face_count;
+    uint transparent_face_count;
+};
+
+layout(push_constant) uniform PushConsts {
+    vec4 planes[6];
+    vec4 player_pos;
+    uint total_candidates;
+    uint draw_capacity;
+} pc;
+
+bool boxInFrustum(vec3 b_min, vec3 b_max) {
+    for (int i = 0; i < 6; i++) {
+        vec4 plane = pc.planes[i];
+        if (dot(plane.xyz, mix(b_min, b_max, greaterThan(plane.xyz, vec3(0.0)))) + plane.w < 0.0) return false;
+    }
+    return true;
+}
+
+void main() {
+    uint g_idx = gl_GlobalInvocationID.x;
+    if (g_idx >= pc.total_candidates) return;
+
+    MeshCandidate candidate = candidate_meshes[g_idx];
+    if (candidate.face_count == 0u) return;
+
+    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
+    float size = candidate.scale * 32.0;
+    if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
+
+    uint idx;
+    if (candidate.is_transparent == 0u) {
+        idx = atomicAdd(opaque_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(opaque_count, pc.draw_capacity);
+            return;
+        }
+        atomicAdd(opaque_face_count, candidate.face_count);
+    } else {
+        idx = atomicAdd(transparent_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(transparent_count, pc.draw_capacity);
+            return;
+        }
+        atomicAdd(transparent_face_count, candidate.face_count);
+    }
+
+    uint out_idx = idx + (candidate.is_transparent * pc.draw_capacity);
+    out_indirect[out_idx] = DrawIndirectCommand(
+        6u,
+        candidate.face_count,
+        0u,
+        candidate.face_offset
+    );
+    out_meshes[out_idx] = MeshData(
+        candidate.absolute_position,
+        vec4(relative_pos, 1.0),
+        candidate.scale
+    );
+}

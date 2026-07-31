@@ -159,11 +159,7 @@ pub const NaturalCubicInterpolator3D = struct {
         const seg_idx: usize = @trunc(@min(@floor(t / one_third), 2));
         const local_t: Type = t * 3.0 - @as(Type, @floatFromInt(seg_idx));
         const a = 1.0 - local_t;
-        return (a * values[seg_idx]
-            + local_t * values[seg_idx + 1]
-            + ((a * a * a - a) * m[seg_idx]
-                + (local_t * local_t * local_t - local_t) * m[seg_idx + 1])
-            * one_over_six);
+        return (a * values[seg_idx] + local_t * values[seg_idx + 1] + ((a * a * a - a) * m[seg_idx] + (local_t * local_t * local_t - local_t) * m[seg_idx + 1]) * one_over_six);
     }
 
     /// Compile-time variant of [`splineEval`].
@@ -172,11 +168,7 @@ pub const NaturalCubicInterpolator3D = struct {
         const seg_idx: usize = comptime @trunc(@min(@floor(t / one_third), 2));
         const local_t: Type = comptime t * 3.0 - @as(Type, @floatFromInt(seg_idx));
         const a = comptime 1.0 - local_t;
-        return (a * values[seg_idx]
-            + local_t * values[seg_idx + 1]
-            + ((comptime (a * a * a - a)) * m[seg_idx]
-                + (comptime (local_t * local_t * local_t - local_t)) * m[seg_idx + 1])
-            * one_over_six);
+        return (a * values[seg_idx] + local_t * values[seg_idx + 1] + ((comptime (a * a * a - a)) * m[seg_idx] + (comptime (local_t * local_t * local_t - local_t)) * m[seg_idx + 1]) * one_over_six);
     }
 
     /// Transpose an N×M 2D array into an M×N array at compile time.
@@ -205,11 +197,7 @@ pub const NaturalCubicInterpolator3D = struct {
         const local_t_vec: @Vector(len, T) = @splat(local_t);
         const a_vec: @Vector(len, T) = @splat(1.0 - local_t);
         const one_over_six_vec: @Vector(len, T) = comptime @splat(one_over_six);
-        return (a_vec * values[seg_idx]
-            + local_t_vec * values[seg_idx + 1]
-            + ((a_vec * a_vec * a_vec - a_vec) * m[seg_idx]
-                + (local_t_vec * local_t_vec * local_t_vec - local_t_vec) * m[seg_idx + 1])
-            * one_over_six_vec);
+        return (a_vec * values[seg_idx] + local_t_vec * values[seg_idx + 1] + ((a_vec * a_vec * a_vec - a_vec) * m[seg_idx] + (local_t_vec * local_t_vec * local_t_vec - local_t_vec) * m[seg_idx + 1]) * one_over_six_vec);
     }
 
     /// Compile-time SIMD variant of [`splineEvalSimd`].
@@ -225,10 +213,6 @@ pub const NaturalCubicInterpolator3D = struct {
         const local_t_vec: @Vector(len, T) = comptime @splat(local_t);
         const a_vec: @Vector(len, T) = comptime @splat(1.0 - local_t);
         const one_over_six_vec: @Vector(len, T) = comptime @splat(one_over_six);
-        return (a_vec * values[seg_idx]
-            + local_t_vec * values[seg_idx + 1]
-            + ((comptime (a_vec * a_vec * a_vec - a_vec)) * m[seg_idx]
-                + (comptime (local_t_vec * local_t_vec * local_t_vec - local_t_vec)) * m[seg_idx + 1])
-            * one_over_six_vec);
+        return (a_vec * values[seg_idx] + local_t_vec * values[seg_idx + 1] + ((comptime (a_vec * a_vec * a_vec - a_vec)) * m[seg_idx] + (comptime (local_t_vec * local_t_vec * local_t_vec - local_t_vec)) * m[seg_idx + 1]) * one_over_six_vec);
     }
 };
