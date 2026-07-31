@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const builtin = @import("builtin");
 
 const options = @import("options");
@@ -12,14 +11,14 @@ const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 
-const VulkanBackingAllocator = @import("Renderer/vulkan/VulkanBackingAllocator.zig").VulkanBackingAllocator;
-const StagingRing = @import("Renderer/vulkan/StagingRing.zig").StagingRing;
-const FaceDataAllocator = @import("Renderer/vulkan/FaceDataAllocator.zig").FaceDataAllocator;
-const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
-const Renderer = @import("Renderer.zig");
 const Mesher = @import("Mesher.zig");
-const World = @import("world/World.zig");
+const Renderer = @import("Renderer.zig");
+const FaceDataAllocator = @import("Renderer/vulkan/FaceDataAllocator.zig").FaceDataAllocator;
+const StagingRing = @import("Renderer/vulkan/StagingRing.zig").StagingRing;
+const VulkanBackingAllocator = @import("Renderer/vulkan/VulkanBackingAllocator.zig").VulkanBackingAllocator;
+const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
 const Block = @import("world/Block.zig").Block;
+const World = @import("world/World.zig");
 
 pub const PresentMode = enum {
     vsync,
@@ -87,6 +86,9 @@ graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 // advanced with .release by submitFrameWithExtra; the pair orders the two submit paths.
 frame_number: std.atomic.Value(u64) = .init(0),
 queue_mutex: std.Io.Mutex = .init,
+
+vulkan_host_allocator: VulkanHostAllocator = undefined,
+vkalloc: vk.AllocationCallbacks = undefined,
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
     return @ptrCast(wio.vkGetInstanceProcAddr(@intFromEnum(instance), procname));
@@ -188,7 +190,7 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         // so the integrated GPU (or another vendor's discrete GPU) is preferred instead.
         if (options.sanitize_thread) {
             const device_name = std.mem.sliceTo(&props.device_name, 0);
-            if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != null) score = 1;
+            if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != &self.vkalloc) score = 1;
         }
         if (score > best_score) {
             best_score = score;
@@ -236,6 +238,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     errdefer allocator.destroy(self);
 
     self.* = .{
+        .vulkan_host_allocator = .{ .allocator = allocator },
         .debug_callback = .null_handle,
         .allocator = allocator,
         .window = window,
@@ -256,6 +259,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .command_pool = undefined,
     };
 
+    self.vkalloc = self.vulkan_host_allocator.getCallbacks();
     self.vkb = .load(getProcAddr);
 
     const app_info: vk.ApplicationInfo = .{
@@ -312,11 +316,11 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .pp_enabled_extension_names = @ptrCast(extension_names.items.ptr),
     };
 
-    self.instance_handle = try self.vkb.createInstance(&instance_create_info, null);
+    self.instance_handle = try self.vkb.createInstance(&instance_create_info, &self.vkalloc);
     errdefer if (self.instance_wrapper == null) {
         var local_wrapper = InstanceWrapper.load(self.instance_handle, getProcAddr);
         const local_instance = InstanceProxy.init(self.instance_handle, &local_wrapper);
-        local_instance.destroyInstance(null);
+        local_instance.destroyInstance(&self.vkalloc);
     };
 
     const instance_wrapper_ptr = try allocator.create(InstanceWrapper);
@@ -325,7 +329,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.instance_wrapper = instance_wrapper_ptr;
     self.instance = .init(self.instance_handle, instance_wrapper_ptr);
     errdefer {
-        self.instance.destroyInstance(null);
+        self.instance.destroyInstance(&self.vkalloc);
         allocator.destroy(instance_wrapper_ptr);
         self.instance_wrapper = null;
     }
@@ -346,15 +350,15 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .pfn_user_callback = &debugCallback,
     };
     if (has_debug_utils) {
-        self.debug_callback = try self.instance.createDebugUtilsMessengerEXT(&callback_create_info, null);
+        self.debug_callback = try self.instance.createDebugUtilsMessengerEXT(&callback_create_info, &self.vkalloc);
     }
-    errdefer if (self.debug_callback != .null_handle) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
+    errdefer if (self.debug_callback != .null_handle) self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, &self.vkalloc);
 
     var surface: vk.SurfaceKHR = .null_handle;
-    try window.vkCreateSurface(@intFromEnum(self.instance.handle), null, @ptrCast(&surface));
+    try window.vkCreateSurface(@intFromEnum(self.instance.handle), &self.vkalloc, @ptrCast(&surface));
 
     self.surface = surface;
-    errdefer self.instance.destroySurfaceKHR(self.surface, null);
+    errdefer self.instance.destroySurfaceKHR(self.surface, &self.vkalloc);
 
     self.pdev = try self.selectPhysicalDevice(allocator);
     self.props = self.instance.getPhysicalDeviceProperties(self.pdev);
@@ -471,7 +475,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     // cannot leave a live device behind.
     const gdpa = self.instance.wrapper.dispatch.vkGetDeviceProcAddr orelse return error.MissingDeviceProcAddr;
 
-    self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, null);
+    self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, &self.vkalloc);
 
     // The raw handle must be destroyed even if the wrapper setup below fails, otherwise it would
     // leak and the instance errdefer would destroy the instance while the device is still alive.
@@ -479,7 +483,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     var owns_raw_device = true;
     errdefer if (owns_raw_device) {
         var scratch_wrapper = DeviceWrapper.load(self.dev_handle, gdpa);
-        scratch_wrapper.destroyDevice(self.dev_handle, null);
+        scratch_wrapper.destroyDevice(self.dev_handle, &self.vkalloc);
     };
 
     const dev_wrapper_ptr = try allocator.create(DeviceWrapper);
@@ -490,7 +494,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
 
     owns_raw_device = false;
     errdefer {
-        self.dev.destroyDevice(null);
+        self.dev.destroyDevice(&self.vkalloc);
         allocator.destroy(dev_wrapper_ptr);
         self.dev_wrapper = null;
     }
@@ -503,8 +507,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .flags = .{ .reset_command_buffer_bit = true },
         .queue_family_index = queue_families.graphics,
     };
-    self.command_pool = try self.dev.createCommandPool(&pool_info, null);
-    errdefer self.dev.destroyCommandPool(self.command_pool, null);
+    self.command_pool = try self.dev.createCommandPool(&pool_info, &self.vkalloc);
+    errdefer self.dev.destroyCommandPool(self.command_pool, &self.vkalloc);
 
     // Graphics family on purpose: single-time upload command buffers from this pool are
     // submitted to the graphics queue (see VulkanRenderer.endSingleTimeCommandsLocked).
@@ -512,11 +516,11 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
         .queue_family_index = queue_families.graphics,
     };
-    self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, null);
-    errdefer self.dev.destroyCommandPool(self.upload_command_pool, null);
+    self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, &self.vkalloc);
+    errdefer self.dev.destroyCommandPool(self.upload_command_pool, &self.vkalloc);
 
-    self.ui_command_pool = try self.dev.createCommandPool(&pool_info, null);
-    errdefer self.dev.destroyCommandPool(self.ui_command_pool, null);
+    self.ui_command_pool = try self.dev.createCommandPool(&pool_info, &self.vkalloc);
+    errdefer self.dev.destroyCommandPool(self.ui_command_pool, &self.vkalloc);
 
     var timeline_info: vk.SemaphoreTypeCreateInfo = .{
         .semaphore_type = .timeline,
@@ -526,30 +530,30 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .p_next = &timeline_info,
         .flags = .{},
     };
-    self.transfer_semaphore = try self.dev.createSemaphore(&timeline_sem_info, null);
-    errdefer self.dev.destroySemaphore(self.transfer_semaphore, null);
+    self.transfer_semaphore = try self.dev.createSemaphore(&timeline_sem_info, &self.vkalloc);
+    errdefer self.dev.destroySemaphore(self.transfer_semaphore, &self.vkalloc);
 
-    self.graphics_timeline_semaphore = try self.dev.createSemaphore(&timeline_sem_info, null);
-    errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
+    self.graphics_timeline_semaphore = try self.dev.createSemaphore(&timeline_sem_info, &self.vkalloc);
+    errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
 
     self.image_acquired_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
     @memset(self.image_acquired_semaphores, .null_handle);
     errdefer {
-        for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+        for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
         allocator.free(self.image_acquired_semaphores);
     }
 
     self.render_complete_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
     @memset(self.render_complete_semaphores, .null_handle);
     errdefer {
-        for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+        for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
         allocator.free(self.render_complete_semaphores);
     }
 
     const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
     for (self.image_acquired_semaphores, self.render_complete_semaphores) |*acq, *complete| {
-        acq.* = try self.dev.createSemaphore(&semaphore_create_info, null);
-        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+        acq.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
+        complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
     }
 
     const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
@@ -581,7 +585,7 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.destroySwapchainResources();
 
     if (self.swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(self.swapchain, null);
+        self.dev.destroySwapchainKHR(self.swapchain, &self.vkalloc);
         self.swapchain = .null_handle;
     }
 
@@ -589,30 +593,30 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.allocator.free(self.cmd_buffers);
     self.cmd_buffers = &.{};
 
-    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.image_acquired_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
     self.allocator.free(self.image_acquired_semaphores);
     self.image_acquired_semaphores = &.{};
 
-    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
     self.allocator.free(self.render_complete_semaphores);
     self.render_complete_semaphores = &.{};
 
-    self.dev.destroyCommandPool(self.command_pool, null);
-    if (self.upload_command_pool != .null_handle) self.dev.destroyCommandPool(self.upload_command_pool, null);
-    if (self.ui_command_pool != .null_handle) self.dev.destroyCommandPool(self.ui_command_pool, null);
+    self.dev.destroyCommandPool(self.command_pool, &self.vkalloc);
+    if (self.upload_command_pool != .null_handle) self.dev.destroyCommandPool(self.upload_command_pool, &self.vkalloc);
+    if (self.ui_command_pool != .null_handle) self.dev.destroyCommandPool(self.ui_command_pool, &self.vkalloc);
 
-    self.dev.destroySemaphore(self.transfer_semaphore, null);
-    self.dev.destroySemaphore(self.graphics_timeline_semaphore, null);
+    self.dev.destroySemaphore(self.transfer_semaphore, &self.vkalloc);
+    self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
 
-    self.dev.destroyDevice(null);
-    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, null);
+    self.dev.destroyDevice(&self.vkalloc);
+    if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, &self.vkalloc);
 
     if (self.instance_wrapper) |wrapper| {
         if (self.debug_callback != .null_handle) {
-            self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, null);
+            self.instance.destroyDebugUtilsMessengerEXT(self.debug_callback, &self.vkalloc);
             self.debug_callback = .null_handle;
         }
-        self.instance.destroyInstance(null);
+        self.instance.destroyInstance(&self.vkalloc);
         self.allocator.destroy(wrapper);
     }
     if (self.dev_wrapper) |wrapper| {
@@ -624,7 +628,7 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
 }
 
 fn destroySwapchainResources(self: *VulkanContext) void {
-    for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, null);
+    for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, &self.vkalloc);
     self.allocator.free(self.swapchain_images);
     self.allocator.free(self.swapchain_views);
     self.allocator.free(self.swapchain_image_layouts);
@@ -738,9 +742,9 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         .present_mode = present_mode,
         .clipped = .true,
         .old_swapchain = old_swapchain,
-    }, null);
+    }, &self.vkalloc);
 
-    errdefer self.dev.destroySwapchainKHR(new_swapchain, null);
+    errdefer self.dev.destroySwapchainKHR(new_swapchain, &self.vkalloc);
 
     const new_images = try self.dev.getSwapchainImagesAllocKHR(new_swapchain, self.allocator);
     errdefer self.allocator.free(new_images);
@@ -749,7 +753,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     @memset(new_views, .null_handle);
     errdefer {
         for (new_views) |view| {
-            if (view != .null_handle) self.dev.destroyImageView(view, null);
+            if (view != .null_handle) self.dev.destroyImageView(view, &self.vkalloc);
         }
         self.allocator.free(new_views);
     }
@@ -762,7 +766,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
             .format = surface_format.format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
-        }, null);
+        }, &self.vkalloc);
     }
 
     // Finish all fallible work before tearing down the old swapchain and semaphores:
@@ -771,12 +775,12 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     const new_render_complete = try self.allocator.alloc(vk.Semaphore, new_images.len);
     @memset(new_render_complete, .null_handle);
     errdefer {
-        for (new_render_complete) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+        for (new_render_complete) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
         self.allocator.free(new_render_complete);
     }
     const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
     for (new_render_complete) |*complete| {
-        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+        complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
     }
 
     const new_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
@@ -784,10 +788,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
     @memset(new_layouts, .undefined);
 
     if (old_swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(old_swapchain, null);
+        self.dev.destroySwapchainKHR(old_swapchain, &self.vkalloc);
     }
     for (self.render_complete_semaphores) |sem| {
-        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+        if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
     }
     self.allocator.free(self.render_complete_semaphores);
 
@@ -1037,6 +1041,108 @@ fn debugCallback(
 
     return .false;
 }
+
+pub const VulkanHostAllocator = struct {
+    allocator: std.mem.Allocator,
+
+    const Header = struct {
+        size: usize,
+        padding: usize,
+        align_bytes: usize,
+    };
+
+    pub fn getCallbacks(self: *VulkanHostAllocator) vk.AllocationCallbacks {
+        return .{
+            .p_user_data = self,
+            .pfn_allocation = allocationCallback,
+            .pfn_reallocation = reallocationCallback,
+            .pfn_free = freeCallback,
+            .pfn_internal_allocation = null,
+            .pfn_internal_free = null,
+        };
+    }
+
+    fn allocationCallback(
+        p_user_data: ?*anyopaque,
+        size: usize,
+        alignment: usize,
+        allocation_scope: vk.SystemAllocationScope,
+    ) callconv(.c) ?*anyopaque {
+        _ = allocation_scope;
+        if (size == 0) return null;
+
+        const user_data = p_user_data orelse return null;
+        const self: *VulkanHostAllocator = @ptrCast(@alignCast(user_data));
+
+        const align_bytes = @max(alignment, @alignOf(usize));
+        const padding = std.mem.alignForward(usize, @sizeOf(Header), align_bytes);
+        const total_bytes = size + padding;
+
+        const raw_mem = self.allocator.rawAlloc(
+            total_bytes,
+            .fromByteUnits(align_bytes),
+            @returnAddress(),
+        ) orelse return null;
+
+        const header_ptr: *Header = @ptrCast(@alignCast(raw_mem + padding - @sizeOf(Header)));
+        header_ptr.* = .{
+            .size = total_bytes,
+            .padding = padding,
+            .align_bytes = align_bytes,
+        };
+
+        return raw_mem + padding;
+    }
+
+    fn reallocationCallback(
+        p_user_data: ?*anyopaque,
+        p_original: ?*anyopaque,
+        size: usize,
+        alignment: usize,
+        allocation_scope: vk.SystemAllocationScope,
+    ) callconv(.c) ?*anyopaque {
+        const original_ptr = p_original orelse {
+            return allocationCallback(p_user_data, size, alignment, allocation_scope);
+        };
+
+        if (size == 0) {
+            freeCallback(p_user_data, p_original);
+            return null;
+        }
+
+        const new_ptr = allocationCallback(p_user_data, size, alignment, allocation_scope) orelse return null;
+
+        const orig_bytes: [*]u8 = @ptrCast(original_ptr);
+        const header_ptr: *Header = @ptrCast(@alignCast(orig_bytes - @sizeOf(Header)));
+
+        const old_payload_size = header_ptr.size - header_ptr.padding;
+        const copy_size = @min(size, old_payload_size);
+
+        const new_bytes: [*]u8 = @ptrCast(new_ptr);
+        @memcpy(new_bytes[0..copy_size], orig_bytes[0..copy_size]);
+
+        freeCallback(p_user_data, p_original);
+        return new_ptr;
+    }
+
+    fn freeCallback(p_user_data: ?*anyopaque, p_memory: ?*anyopaque) callconv(.c) void {
+        const memory = p_memory orelse return;
+        const user_data = p_user_data orelse return;
+        const self: *VulkanHostAllocator = @ptrCast(@alignCast(user_data));
+
+        const mem_bytes: [*]u8 = @ptrCast(memory);
+        const header_ptr: *Header = @ptrCast(@alignCast(mem_bytes - @sizeOf(Header)));
+
+        const raw_ptr = mem_bytes - header_ptr.padding;
+        const full_slice = raw_ptr[0..header_ptr.size];
+
+        self.allocator.rawFree(
+            full_slice,
+            .fromByteUnits(header_ptr.align_bytes),
+            @returnAddress(),
+        );
+    }
+};
 
 test "VulkanContext init and deinit" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });

@@ -214,7 +214,7 @@ pub const TextureManager = struct {
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_black,
             .unnormalized_coordinates = .false,
-        }, null) catch |err| @panic(@errorName(err));
+        }, &self.renderer.vk_ctx.vkalloc) catch |err| @panic(@errorName(err));
     }
 
     fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {
@@ -224,7 +224,7 @@ pub const TextureManager = struct {
             .format = format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
-        }, null);
+        }, &self.renderer.vk_ctx.vkalloc);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
@@ -243,9 +243,9 @@ pub const TextureManager = struct {
                 .stage_flags = .{ .fragment_bit = true },
                 .p_immutable_samplers = null,
             }},
-        }, null);
+        }, &self.renderer.vk_ctx.vkalloc);
         errdefer {
-            self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
+            self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.renderer.vk_ctx.vkalloc);
             self.descriptor_set_layout = .null_handle;
         }
 
@@ -254,9 +254,9 @@ pub const TextureManager = struct {
             .max_sets = 1,
             .pool_size_count = 1,
             .p_pool_sizes = &.{.{ .type = .combined_image_sampler, .descriptor_count = @intCast(num_textures) }},
-        }, null);
+        }, &self.renderer.vk_ctx.vkalloc);
         errdefer {
-            self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, null);
+            self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, &self.renderer.vk_ctx.vkalloc);
             self.descriptor_pool = .null_handle;
         }
 
@@ -288,15 +288,15 @@ pub const TextureManager = struct {
 
     fn destroyTexture(self: *TextureManager, tex: *Texture) void {
         if (tex.view != .null_handle) {
-            self.renderer.dev.destroyImageView(tex.view, null);
+            self.renderer.dev.destroyImageView(tex.view, &self.renderer.vk_ctx.vkalloc);
             tex.view = .null_handle;
         }
         if (tex.image != .null_handle) {
-            self.renderer.dev.destroyImage(tex.image, null);
+            self.renderer.dev.destroyImage(tex.image, &self.renderer.vk_ctx.vkalloc);
             tex.image = .null_handle;
         }
         if (tex.memory != .null_handle) {
-            self.renderer.dev.freeMemory(tex.memory, null);
+            self.renderer.dev.freeMemory(tex.memory, &self.renderer.vk_ctx.vkalloc);
             tex.memory = .null_handle;
         }
     }
@@ -331,11 +331,11 @@ pub const TextureManager = struct {
         const memory = try self.renderer.dev.allocateMemory(&.{
             .allocation_size = mem_reqs2.memory_requirements.size,
             .memory_type_index = try self.renderer.findMemoryType(mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local_bit = true }),
-        }, null);
-        errdefer self.renderer.dev.freeMemory(memory, null);
+        }, &self.renderer.vk_ctx.vkalloc);
+        errdefer self.renderer.dev.freeMemory(memory, &self.renderer.vk_ctx.vkalloc);
 
-        const image = try self.renderer.dev.createImage(&image_info, null);
-        errdefer self.renderer.dev.destroyImage(image, null);
+        const image = try self.renderer.dev.createImage(&image_info, &self.renderer.vk_ctx.vkalloc);
+        errdefer self.renderer.dev.destroyImage(image, &self.renderer.vk_ctx.vkalloc);
 
         try self.renderer.dev.bindImageMemory(image, memory, 0);
 
@@ -434,9 +434,9 @@ pub const TextureManager = struct {
     pub fn deinit(self: *TextureManager) void {
         for (&self.textures.values) |*tex| self.destroyTexture(tex);
         self.destroyTexture(&self.default_texture);
-        if (self.descriptor_pool != .null_handle) self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, null);
-        if (self.descriptor_set_layout != .null_handle) self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
-        if (self.sampler != .null_handle) self.renderer.dev.destroySampler(self.sampler, null);
+        if (self.descriptor_pool != .null_handle) self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, &self.renderer.vk_ctx.vkalloc);
+        if (self.descriptor_set_layout != .null_handle) self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.renderer.vk_ctx.vkalloc);
+        if (self.sampler != .null_handle) self.renderer.dev.destroySampler(self.sampler, &self.renderer.vk_ctx.vkalloc);
     }
 };
 

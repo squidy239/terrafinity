@@ -232,16 +232,16 @@ const CommandPoolReservoir = struct {
 
     pub const Borrowed = struct { pool: vk.CommandPool, cmd: vk.CommandBuffer };
 
-    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, init_count: usize) !void {
+    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, init_count: usize, vkalloc: *const vk.AllocationCallbacks) !void {
         self.count = init_count;
         for (self.pools[0..init_count], self.cmds[0..init_count]) |*pool, *cmd| {
-            pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = queue_family }, null);
+            pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = queue_family }, vkalloc);
             try dev.allocateCommandBuffers(&.{ .command_pool = pool.*, .level = .primary, .command_buffer_count = 1 }, (&cmd.*)[0..1]);
         }
     }
 
-    pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy) void {
-        for (self.pools[0..self.count]) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, null);
+    pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks) void {
+        for (self.pools[0..self.count]) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, vkalloc);
     }
 
     pub fn tryBorrowPool(self: *CommandPoolReservoir) ?Borrowed {
@@ -564,12 +564,12 @@ fn createBlockMaterialsDescriptorResources(self: *VulkanRenderer) !void {
             .stage_flags = .{ .fragment_bit = true },
             .p_immutable_samplers = null,
         };
-        self.block_materials_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
+        self.block_materials_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
     }
 
     if (self.block_materials_descriptor_pool == .null_handle) {
         const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 1 };
-        self.block_materials_descriptor_pool = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = 1, .pool_size_count = 1, .p_pool_sizes = (&pool_size)[0..1].ptr }, null);
+        self.block_materials_descriptor_pool = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = 1, .pool_size_count = 1, .p_pool_sizes = (&pool_size)[0..1].ptr }, &self.vk_ctx.vkalloc);
     }
 
     if (self.block_materials_descriptor_set == .null_handle) {
@@ -664,16 +664,16 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     if (self.graphics_state.opaque_pipeline_layout != .null_handle) {
         if (self.graphics_state.pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.graphics_state.pipeline, null);
+            self.dev.destroyPipeline(self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
             self.graphics_state.pipeline = .null_handle;
         }
         if (self.graphics_state.transparent_pipeline != .null_handle) {
-            self.dev.destroyPipeline(self.graphics_state.transparent_pipeline, null);
+            self.dev.destroyPipeline(self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
             self.graphics_state.transparent_pipeline = .null_handle;
         }
-        self.dev.destroyPipelineLayout(self.graphics_state.opaque_pipeline_layout, null);
+        self.dev.destroyPipelineLayout(self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
         self.graphics_state.opaque_pipeline_layout = .null_handle;
-        self.dev.destroyPipelineLayout(self.graphics_state.transparent_pipeline_layout, null);
+        self.dev.destroyPipelineLayout(self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
         self.graphics_state.transparent_pipeline_layout = .null_handle;
         try self.createGraphicsPipelines();
     }
@@ -687,9 +687,9 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     }
 
     if (self.oit.descriptor_set_layout != .null_handle) {
-        destroyIfValid(self.dev, &self.oit.composition_pipeline);
-        destroyIfValid(self.dev, &self.oit.composition_layout);
-        destroyIfValid(self.dev, &self.oit.descriptor_set_layout);
+        destroyIfValid(self.dev, &self.oit.composition_pipeline, &self.vk_ctx.vkalloc);
+        destroyIfValid(self.dev, &self.oit.composition_layout, &self.vk_ctx.vkalloc);
+        destroyIfValid(self.dev, &self.oit.descriptor_set_layout, &self.vk_ctx.vkalloc);
         // oit.sampler is resolution-independent — keep it across resizes
         try self.createOitPipelinesAndDescriptors();
     }
@@ -701,9 +701,9 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
-    destroyRenderTarget(self.dev, &self.render_color);
-    destroyRenderTarget(self.dev, &self.render_depth);
-    destroyIfValid(self.dev, &self.render_depth_sampled_view);
+    destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
+    destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
     self.frame_buffers.deinit(self.allocator, self.cpu_to_gpu_gpa.allocator(), self.gpu_only_gpa.allocator(), self.draw_capacity);
     self.destroyMeshDataDescriptorResources();
     self.destroyOitResources();
@@ -752,6 +752,7 @@ fn initMemoryManagement(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Al
         allocator,
         self.vk_ctx.queue_family_index,
         self.vk_ctx.transfer_queue_family_index,
+        self.vk_ctx.vkalloc,
     );
     errdefer self.backing_allocator.deinit();
 
@@ -810,7 +811,7 @@ fn initResources(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator
 fn initFinalize(self: *VulkanRenderer) !void {
     self.meshes = .init;
 
-    try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512);
+    try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512, &self.vk_ctx.vkalloc);
 
     self.interface = .{
         .userdata = @ptrCast(self),
@@ -849,7 +850,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
             self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch {};
         }
         if (self.single_time_fence != .null_handle) {
-            self.dev.destroyFence(self.single_time_fence, null);
+            self.dev.destroyFence(self.single_time_fence, &self.vk_ctx.vkalloc);
             self.single_time_fence = .null_handle;
         }
         for (self.pool_reservoir.pools[0..self.pool_reservoir.count]) |pool| {
@@ -878,31 +879,31 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.destroyRendererSwapchainResources();
     self.destroyOitPipelinesAndDescriptors();
 
-    destroyIfValid(self.dev, &self.graphics_state.pipeline);
-    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline);
-    destroyIfValid(self.dev, &self.cull.pipeline);
-    destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout);
-    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout);
-    destroyIfValid(self.dev, &self.cull.pipeline_layout);
-    destroyIfValid(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout);
-    destroyIfValid(self.dev, &self.cull.descriptor_set_layout);
-    destroyIfValid(self.dev, &self.graphics_state.mesh_data_descriptor_set_layout);
-    destroyIfValid(self.dev, &self.block_materials_descriptor_set_layout);
+    destroyIfValid(self.dev, &self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.cull.pipeline, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.cull.pipeline_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.graphics_state.transparent_depth_descriptor_set_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.cull.descriptor_set_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.graphics_state.mesh_data_descriptor_set_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.block_materials_descriptor_set_layout, &self.vk_ctx.vkalloc);
 
     if (self.block_materials_descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, null);
+        self.dev.destroyDescriptorPool(self.block_materials_descriptor_pool, &self.vk_ctx.vkalloc);
         self.block_materials_descriptor_pool = .null_handle;
     }
     if (self.block_materials_mapped.len > 0) self.cpu_to_gpu_gpa.allocator().free(self.block_materials_mapped);
 
     if (self.cull.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.cull.descriptor_pool, null);
+        self.dev.destroyDescriptorPool(self.cull.descriptor_pool, &self.vk_ctx.vkalloc);
         self.cull.descriptor_pool = .null_handle;
     }
     self.allocator.free(self.cull.descriptor_sets_per_frame);
     self.cull.descriptor_sets_per_frame = &.{};
 
-    self.pool_reservoir.deinit(self.dev);
+    self.pool_reservoir.deinit(self.dev, &self.vk_ctx.vkalloc);
 
     for (self.retired_candidate_slices.items) |entry| self.cpu_to_gpu_gpa.allocator().free(entry.slice);
     self.retired_candidate_slices.deinit(self.allocator);
@@ -1471,35 +1472,35 @@ fn makeBufferBarrier2(
     };
 }
 
-fn destroyIfValid(dev: DeviceProxy, handle: anytype) void {
+fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.AllocationCallbacks) void {
     const T = @TypeOf(handle.*);
     if (handle.* == .null_handle) return;
     switch (T) {
-        vk.ImageView => dev.destroyImageView(handle.*, null),
+        vk.ImageView => dev.destroyImageView(handle.*, vkalloc),
         vk.Image, vk.DeviceMemory => unreachable,
-        vk.Pipeline => dev.destroyPipeline(handle.*, null),
-        vk.PipelineLayout => dev.destroyPipelineLayout(handle.*, null),
-        vk.DescriptorSetLayout => dev.destroyDescriptorSetLayout(handle.*, null),
-        vk.Sampler => dev.destroySampler(handle.*, null),
+        vk.Pipeline => dev.destroyPipeline(handle.*, vkalloc),
+        vk.PipelineLayout => dev.destroyPipelineLayout(handle.*, vkalloc),
+        vk.DescriptorSetLayout => dev.destroyDescriptorSetLayout(handle.*, vkalloc),
+        vk.Sampler => dev.destroySampler(handle.*, vkalloc),
         else => @compileError("destroyIfValid: unsupported type " ++ @typeName(T)),
     }
     handle.* = .null_handle;
 }
 
-fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory) void {
+fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory, vkalloc: *const vk.AllocationCallbacks) void {
     if (image.* != .null_handle) {
-        dev.destroyImage(image.*, null);
+        dev.destroyImage(image.*, vkalloc);
         image.* = .null_handle;
     }
     if (memory.* != .null_handle) {
-        dev.freeMemory(memory.*, null);
+        dev.freeMemory(memory.*, vkalloc);
         memory.* = .null_handle;
     }
 }
 
-fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget) void {
-    destroyIfValid(dev, &rt.view);
-    destroyIfValidImage(dev, &rt.image, &rt.memory);
+fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget, vkalloc: *const vk.AllocationCallbacks) void {
+    destroyIfValid(dev, &rt.view, vkalloc);
+    destroyIfValidImage(dev, &rt.image, &rt.memory, vkalloc);
 }
 
 fn renderingAttachmentColor(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
@@ -1629,12 +1630,12 @@ fn createImageWithMemory(self: *VulkanRenderer, extent: vk.Extent2D, format: vk.
     };
 
     var target: RenderTarget = .{};
-    errdefer destroyRenderTarget(self.dev, &target);
+    errdefer destroyRenderTarget(self.dev, &target, &self.vk_ctx.vkalloc);
 
-    target.memory = try self.dev.allocateMemory(&alloc_info, null);
-    target.image = try self.dev.createImage(&image_info, null);
+    target.memory = try self.dev.allocateMemory(&alloc_info, &self.vk_ctx.vkalloc);
+    target.image = try self.dev.createImage(&image_info, &self.vk_ctx.vkalloc);
     try self.dev.bindImageMemory(target.image, target.memory, 0);
-    target.view = try self.dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), null);
+    target.view = try self.dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), &self.vk_ctx.vkalloc);
     return target;
 }
 
@@ -2124,12 +2125,12 @@ fn depthHasStencil(self: *const VulkanRenderer) bool {
 }
 
 fn destroyOitResources(self: *VulkanRenderer) void {
-    destroyRenderTarget(self.dev, &self.oit.accum);
-    destroyRenderTarget(self.dev, &self.oit.reveal);
-    destroyRenderTarget(self.dev, &self.oit.volume_weight);
+    destroyRenderTarget(self.dev, &self.oit.accum, &self.vk_ctx.vkalloc);
+    destroyRenderTarget(self.dev, &self.oit.reveal, &self.vk_ctx.vkalloc);
+    destroyRenderTarget(self.dev, &self.oit.volume_weight, &self.vk_ctx.vkalloc);
 
     if (self.oit.descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.oit.descriptor_pool, null);
+        self.dev.destroyDescriptorPool(self.oit.descriptor_pool, &self.vk_ctx.vkalloc);
         self.oit.descriptor_pool = .null_handle;
     }
     if (self.oit.descriptor_sets_per_frame.len > 0) {
@@ -2141,15 +2142,15 @@ fn destroyOitResources(self: *VulkanRenderer) void {
 fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
     defer zone.end();
-    destroyRenderTarget(self.dev, &self.render_color);
-    destroyRenderTarget(self.dev, &self.render_depth);
-    destroyIfValid(self.dev, &self.render_depth_sampled_view);
+    destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
+    destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
     self.destroyOitResources();
 
     errdefer {
-        destroyRenderTarget(self.dev, &self.render_color);
-        destroyRenderTarget(self.dev, &self.render_depth);
-        destroyIfValid(self.dev, &self.render_depth_sampled_view);
+        destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
+        destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
+        destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
         self.destroyOitResources();
     }
 
@@ -2170,7 +2171,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
     const depth = try self.createImageWithMemory(extent, depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, depth_aspect_mask);
     self.render_depth = depth;
-    self.render_depth_sampled_view = try self.dev.createImageView(&imageViewCreateInfo(depth.image, depth_format, .{ .depth_bit = true }), null);
+    self.render_depth_sampled_view = try self.dev.createImageView(&imageViewCreateInfo(depth.image, depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
 
     const oit_usage: vk.ImageUsageFlags = .{ .color_attachment_bit = true, .sampled_bit = true };
     const oit_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
@@ -2187,7 +2188,7 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 fn createTransparentDepthDescriptorSetLayout(self: *VulkanRenderer) !void {
     if (self.graphics_state.transparent_depth_descriptor_set_layout == .null_handle) {
         const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null };
-        self.graphics_state.transparent_depth_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
+        self.graphics_state.transparent_depth_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
     }
 }
 
@@ -2196,7 +2197,7 @@ fn createMeshDataDescriptorResources(self: *VulkanRenderer) !void {
     defer zone.end();
     if (self.graphics_state.mesh_data_descriptor_set_layout == .null_handle) {
         const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
-        self.graphics_state.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, null);
+        self.graphics_state.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
     }
 
     const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight) };
@@ -2216,7 +2217,7 @@ fn updateMeshDataDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
 
 fn destroyMeshDataDescriptorResources(self: *VulkanRenderer) void {
     if (self.graphics_state.mesh_data_descriptor_pool != .null_handle) {
-        self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, null);
+        self.dev.destroyDescriptorPool(self.graphics_state.mesh_data_descriptor_pool, &self.vk_ctx.vkalloc);
         self.graphics_state.mesh_data_descriptor_pool = .null_handle;
     }
     if (self.graphics_state.mesh_data_descriptor_sets_per_frame.len > 0) {
@@ -2235,7 +2236,7 @@ fn createCullDescriptorSetLayoutAndPool(self: *VulkanRenderer) !void {
             .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 3, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null },
         };
-        self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, null);
+        self.cull.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, &self.vk_ctx.vkalloc);
     }
 
     const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
@@ -2258,9 +2259,9 @@ fn updateCullDescriptorSet(self: *VulkanRenderer, frame_idx: u32) void {
 
 fn createFrameDescriptorPool(self: *VulkanRenderer, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {
     const num_frames = VulkanContext.max_frames_in_flight;
-    pool.* = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = @intCast(num_frames), .pool_size_count = @intCast(pool_sizes.len), .p_pool_sizes = pool_sizes.ptr }, null);
+    pool.* = try self.dev.createDescriptorPool(&.{ .flags = .{}, .max_sets = @intCast(num_frames), .pool_size_count = @intCast(pool_sizes.len), .p_pool_sizes = pool_sizes.ptr }, &self.vk_ctx.vkalloc);
     errdefer if (pool.* != .null_handle) {
-        self.dev.destroyDescriptorPool(pool.*, null);
+        self.dev.destroyDescriptorPool(pool.*, &self.vk_ctx.vkalloc);
         pool.* = .null_handle;
     };
 
@@ -2375,7 +2376,7 @@ fn buildGraphicsPipeline(
         .base_pipeline_index = -1,
     };
     var pipeline: vk.Pipeline = undefined;
-    if (self.dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], null, (&pipeline)[0..1])) |res| {
+    if (self.dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], &self.vk_ctx.vkalloc, (&pipeline)[0..1])) |res| {
         if (res != .success) return error.PipelineCreationFailed;
     } else |err| return err;
 
@@ -2405,10 +2406,10 @@ fn createOpaquePipeline(self: *VulkanRenderer, vert_module: vk.ShaderModule) !vo
         .p_set_layouts = &set_layouts,
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
-    }, null);
+    }, &self.vk_ctx.vkalloc);
 
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len * @sizeOf(u32), .p_code = fragment_shader_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(frag_module, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = fragment_shader_spv.len * @sizeOf(u32), .p_code = fragment_shader_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
     const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
         .flags = .{},
@@ -2460,10 +2461,10 @@ fn createTransparentPipeline(self: *VulkanRenderer, vert_module: vk.ShaderModule
         .p_set_layouts = &set_layouts,
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
-    }, null);
+    }, &self.vk_ctx.vkalloc);
 
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len * @sizeOf(u32), .p_code = transparent_frag_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(frag_module, null);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = transparent_frag_spv.len * @sizeOf(u32), .p_code = transparent_frag_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
     const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
         .flags = .{},
@@ -2497,8 +2498,8 @@ fn createGraphicsPipelines(self: *VulkanRenderer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
     defer zone.end();
 
-    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len * @sizeOf(u32), .p_code = vertex_shader_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(vert_module, null);
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = vertex_shader_spv.len * @sizeOf(u32), .p_code = vertex_shader_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
 
     try self.createOpaquePipeline(vert_module);
     try self.createTransparentPipeline(vert_module);
@@ -2518,14 +2519,14 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
         .p_set_layouts = (&self.cull.descriptor_set_layout)[0..1],
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
-    }, null);
+    }, &self.vk_ctx.vkalloc);
     errdefer {
-        self.dev.destroyPipelineLayout(self.cull.pipeline_layout, null);
+        self.dev.destroyPipelineLayout(self.cull.pipeline_layout, &self.vk_ctx.vkalloc);
         self.cull.pipeline_layout = .null_handle;
     }
 
-    const comp_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = cull_shader_spv.len * @sizeOf(u32), .p_code = cull_shader_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(comp_module, null);
+    const comp_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = cull_shader_spv.len * @sizeOf(u32), .p_code = cull_shader_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(comp_module, &self.vk_ctx.vkalloc);
 
     const cpci: vk.ComputePipelineCreateInfo = .{
         .flags = .{},
@@ -2540,7 +2541,7 @@ fn createCullPipeline(self: *VulkanRenderer) !void {
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
     };
-    if (self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], null, (&self.cull.pipeline)[0..1])) |res| {
+    if (self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], &self.vk_ctx.vkalloc, (&self.cull.pipeline)[0..1])) |res| {
         if (res != .success) return error.PipelineCreationFailed;
     } else |err| return err;
 }
@@ -2555,7 +2556,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
             .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
             .{ .binding = 3, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         };
-        self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, null);
+        self.oit.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = bindings.len, .p_bindings = bindings[0..] }, &self.vk_ctx.vkalloc);
     }
 
     if (self.oit.composition_layout == .null_handle) {
@@ -2566,7 +2567,7 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
             .p_set_layouts = (&self.oit.descriptor_set_layout)[0..1],
             .push_constant_range_count = 1,
             .p_push_constant_ranges = (&pc_range)[0..1],
-        }, null);
+        }, &self.vk_ctx.vkalloc);
     }
 
     if (self.oit.sampler == .null_handle) {
@@ -2587,17 +2588,17 @@ fn createOitPipelinesAndDescriptors(self: *VulkanRenderer) !void {
             .max_lod = 0,
             .border_color = .float_opaque_black,
             .unnormalized_coordinates = .false,
-        }, null);
+        }, &self.vk_ctx.vkalloc);
         errdefer {
-            self.dev.destroySampler(self.oit.sampler, null);
+            self.dev.destroySampler(self.oit.sampler, &self.vk_ctx.vkalloc);
             self.oit.sampler = .null_handle;
         }
     }
 
-    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_vert_spv.len * @sizeOf(u32), .p_code = composite_vert_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(vert_module, null);
-    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_frag_spv.len * @sizeOf(u32), .p_code = composite_frag_spv.ptr }, null);
-    defer self.dev.destroyShaderModule(frag_module, null);
+    const vert_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_vert_spv.len * @sizeOf(u32), .p_code = composite_vert_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
+    const frag_module = try self.dev.createShaderModule(&.{ .flags = .{}, .code_size = composite_frag_spv.len * @sizeOf(u32), .p_code = composite_frag_spv.ptr }, &self.vk_ctx.vkalloc);
+    defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
     const blend: vk.PipelineColorBlendAttachmentState = .{
         .blend_enable = .false,
@@ -2644,10 +2645,10 @@ fn updateOitDescriptorSets(self: *VulkanRenderer) void {
 }
 
 fn destroyOitPipelinesAndDescriptors(self: *VulkanRenderer) void {
-    destroyIfValid(self.dev, &self.oit.composition_pipeline);
-    destroyIfValid(self.dev, &self.oit.composition_layout);
-    destroyIfValid(self.dev, &self.oit.descriptor_set_layout);
-    destroyIfValid(self.dev, &self.oit.sampler);
+    destroyIfValid(self.dev, &self.oit.composition_pipeline, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.oit.composition_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.oit.descriptor_set_layout, &self.vk_ctx.vkalloc);
+    destroyIfValid(self.dev, &self.oit.sampler, &self.vk_ctx.vkalloc);
 }
 
 fn tryShrinkMaxAllocatedIndex(self: *VulkanRenderer, freed_gpu_index: u32) void {
@@ -2754,7 +2755,7 @@ fn endSingleTimeCommandsLocked(self: *VulkanRenderer, cmd: vk.CommandBuffer) !vo
     defer zone_submit.end();
 
     if (self.single_time_fence == .null_handle) {
-        self.single_time_fence = try self.dev.createFence(&.{}, null);
+        self.single_time_fence = try self.dev.createFence(&.{}, &self.vk_ctx.vkalloc);
     } else {
         try self.dev.resetFences((&self.single_time_fence)[0..1]);
     }

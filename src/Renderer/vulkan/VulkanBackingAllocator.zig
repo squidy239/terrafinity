@@ -30,6 +30,8 @@ pub const VulkanBackingAllocator = struct {
     graphics_queue_family: u32 = 0,
     transfer_queue_family: u32 = 0,
 
+    vkalloc: vk.AllocationCallbacks,
+
     blocks: [std.meta.fields(MemoryPool).len]std.AutoHashMapUnmanaged(usize, GpuBlock) = .{ .{}, .{} },
     meta_allocator: std.mem.Allocator,
 
@@ -40,6 +42,7 @@ pub const VulkanBackingAllocator = struct {
         hashmap_allocator: std.mem.Allocator,
         graphics_queue_family: u32,
         transfer_queue_family: u32,
+        vkalloc: vk.AllocationCallbacks,
     ) VulkanBackingAllocator {
         return .{
             .dev = dev,
@@ -48,6 +51,7 @@ pub const VulkanBackingAllocator = struct {
             .meta_allocator = hashmap_allocator,
             .graphics_queue_family = graphics_queue_family,
             .transfer_queue_family = transfer_queue_family,
+            .vkalloc = vkalloc,
         };
     }
 
@@ -104,8 +108,8 @@ pub const VulkanBackingAllocator = struct {
         const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len;
 
         const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, alloc_len);
-        errdefer self.dev.freeMemory(memory, null);
-        errdefer self.dev.destroyBuffer(buffer, null);
+        errdefer self.dev.freeMemory(memory, &self.vkalloc);
+        errdefer self.dev.destroyBuffer(buffer, &self.vkalloc);
 
         const raw_cpu: []u8 = if (pool == .cpu_to_gpu)
             (@as([*]u8, @ptrCast(try self.dev.mapMemory(memory, 0, mem_size, .{}))))[0..mem_size]
@@ -148,8 +152,8 @@ pub const VulkanBackingAllocator = struct {
             .p_queue_family_indices = if (is_concurrent) queue_family_indices[0..2].ptr else null,
         };
 
-        const buffer = try self.dev.createBuffer(&buffer_info, null);
-        errdefer self.dev.destroyBuffer(buffer, null);
+        const buffer = try self.dev.createBuffer(&buffer_info, &self.vkalloc);
+        errdefer self.dev.destroyBuffer(buffer, &self.vkalloc);
 
         var mem_requirements: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
         self.dev.getDeviceBufferMemoryRequirements(&.{ .p_create_info = &buffer_info }, &mem_requirements);
@@ -165,7 +169,7 @@ pub const VulkanBackingAllocator = struct {
             .allocation_size = mem_reqs.size,
             .memory_type_index = mem_type,
             .p_next = @ptrCast(&vk.MemoryAllocateFlagsInfo{ .flags = .{ .device_address_bit = true }, .device_mask = 0 }),
-        }, null);
+        }, &self.vkalloc);
         try self.dev.bindBufferMemory(buffer, memory, 0);
 
         return .{ buffer, memory, mem_reqs.size };
@@ -183,9 +187,9 @@ pub const VulkanBackingAllocator = struct {
         self.mutex.unlock(self.io);
 
         const block = fetch_result.value;
-        self.dev.destroyBuffer(block.buffer, null);
+        self.dev.destroyBuffer(block.buffer, &self.vkalloc);
         if (pool == .cpu_to_gpu) self.dev.unmapMemory(block.memory);
-        self.dev.freeMemory(block.memory, null);
+        self.dev.freeMemory(block.memory, &self.vkalloc);
         if (pool == .gpu_only) self.meta_allocator.free(block.raw_alloc);
     }
 };
