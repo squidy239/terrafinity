@@ -71,6 +71,12 @@ pub fn init(options: InitOptions) !@This() {
 pub fn deinit(back: *@This()) void {
     const gpa = back.renderer_gpa orelse return;
     const r = &(back.renderer orelse return);
+    // Workaround: dvui_vk_renderer creates render_target_pipeline during init but omits
+    // destroying it in its deinit(), causing a leaked VkPipeline handle on device destruction.
+    if (r.render_target_pipeline != .null_handle) {
+        r.dev.destroyPipeline(r.render_target_pipeline, r.vk_alloc);
+        r.render_target_pipeline = .null_handle;
+    }
     r.deinit(gpa);
     back.renderer = null;
 }

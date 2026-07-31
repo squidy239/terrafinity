@@ -28,9 +28,6 @@
             .url = "git+https://github.com/david-vanderson/dvui#07d510db8e9310172bb4a91a13309ff82e322a06",
             .hash = "dvui-0.5.0-dev-AQFJmYXU9gD-ISak0ThV_OscVn4tn7gz95iBolDEqQQD",
         },
-        .wio = .{
-            .path = "../wio",
-        },
         .tracy = .{
             .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
             .hash = "tracy-1.0.0+0.13.1-R7l8BUhQAQCLinsSpkKfLYpdgnI8aVTJG3v0XLBkJE5T",
@@ -50,6 +47,10 @@
         .zignal = .{
             .url = "git+https://github.com/arrufat/zignal#9c824ba7a600e611fb6e3a708fc243be9f5b7693",
             .hash = "zignal-0.11.0-dev-OrZ3s58cKADge6xp3X_XwEFOC07xk_WyoxaMf3Su5a5w",
+        },
+        .wio = .{
+            .url = "git+https://github.com/ypsvlq/wio#c7a0b1ec889c8c17841ffb04ae3d31810328cc64",
+            .hash = "wio-0.0.0-8xHrr_kECABNBaGmnTW2ymwtaa-Oqg3CWN_tXK6KGFkZ",
         },
     },
 

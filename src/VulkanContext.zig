@@ -1020,32 +1020,10 @@ fn debugCallback(
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
 
-    // Suppressions disabled — validate against latest SDK; remaining errors are real.
-    // switch (cb_data.message_id_number) {
-    //     // WRITE-AFTER-WRITE: false positive with timeline semaphore-mediated buffer reuse across command buffer resets.
-    //     // The timeline semaphore correctly handles cross-frame synchronization, but the validation layer does not
-    //     // properly clear per-resource buffer access tracking on vkResetCommandBuffer.
-    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7457
-    //     0x5c0ec5d6,
-    //     // WRITE-RACING-WRITE: known false positive when mixing vkDeviceWaitIdle with timeline semaphore synchronization.
-    //     // The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait
-    //     // stage and the device idle state.
-    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7600
-    //     0x743c6069,
-    //     // READ-RACING-WRITE: false positive with transfer queue writes to suballocated buffers read by indirect draws.
-    //     // The validation layer assumes the entire buffer is accessed by the indirect draw, but only sub-allocated
-    //     // ranges are actually read. The transfer semaphore correctly bridges cross-queue visibility.
-    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/8664
-    //     0x29910a35,
-    //     // NO-MATCHING-RELEASE: submit-time QFO check ignores timeline semaphore reordering. The transfer batch
-    //     // is submitted before the graphics cmd containing the matching release, but the graphics timeline wait
-    //     // in submitBatch orders them at execution time. Confirmed VVL deficiency (image variant, same code path):
-    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/4427
-    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/2441
-    //     @as(i32, @bitCast(@as(u32,0x991fd38f))),
-    //     => return .false,
-    //     else => {},
-    // }
+    // No suppressions for the latest validation layer version, previous ones have false positives
+    switch (cb_data.message_id_number) {
+        else => {},
+    }
 
     if (message_severity.error_bit_ext) {
         vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });

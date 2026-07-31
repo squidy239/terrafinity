@@ -97,9 +97,8 @@ void main() {
     vec3 absolute_frag_pos = local_frag_coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
 
-    // TODO: Replace hardcoded surface animation with a data-driven block material system
-    // Water block surface animation (block type 3 is water)
-    const uint water_block_type = 3u;
+    // TODO: Replace hardcoded surface animation with the block material system and a better block surface system
+    const uint water_block_type = 2u;
     if ((local_pos + absolute_position).y == 0.0 && block_type_local == water_block_type) {
         float speed = 0.1;
         float t     = 1.0 + push_consts.pc.time;
