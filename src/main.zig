@@ -131,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
         .level = .primary,
         .command_buffer_count = VulkanContext.max_frames_in_flight,
     }, ui_cmd_bufs_slice.ptr);
+    defer vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, ui_cmd_bufs_slice);
 
     while (running.load(.unordered)) {
         wio.update();
@@ -164,13 +165,13 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
-            recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode);
+            recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction);
             continue;
         }
 
         const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
             error.OutOfDate, error.SurfaceLostKHR => {
-                recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode);
+                recreateSwapchainForMenuOrGame(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction);
                 continue;
             },
             error.DrawFailed => {
@@ -206,9 +207,17 @@ pub fn main(init: std.process.Init) !void {
             },
         };
 
+        if (ui.menu_state.pending_game_deinit) {
+            ui.menu_state.pending_game_deinit = false;
+            _ = vk_ctx.dev.deviceWaitIdle() catch {};
+            game.deinit(io);
+            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+        }
+
         tracy.frameMark(null);
     }
     window.disableRelativeMouse();
+    _ = vk_ctx.dev.deviceWaitIdle() catch {};
 }
 
 test {
@@ -272,7 +281,7 @@ fn pollInitialSize(io: std.Io, events: *wio.EventQueue, size: *wio.Size) void {
     }
 }
 
-fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode) void {
+fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) void {
     vk_ctx.queue_mutex.lockUncancelable(io);
     defer vk_ctx.queue_mutex.unlock(io);
     vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
@@ -281,9 +290,12 @@ fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, g
 
     vk_ctx.present_mode = present_mode;
     if (ui.menu_state.ingame) {
-        game.renderer.recreateSwapchain(io);
+        game.renderer.recreateSwapchain(io) catch |err| {
+            std.log.err("recreateSwapchain failed: {}", .{err});
+            return;
+        };
     } else {
-        vk_ctx.createSwapchainLocked(false) catch |err| {
+        vk_ctx.createSwapchainLocked(gamma_correction) catch |err| {
             std.log.err("createSwapchainLocked failed: {}", .{err});
             return;
         };

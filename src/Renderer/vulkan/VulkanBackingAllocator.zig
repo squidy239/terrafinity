@@ -27,15 +27,27 @@ pub const VulkanBackingAllocator = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
 
+    graphics_queue_family: u32 = 0,
+    transfer_queue_family: u32 = 0,
+
     blocks: [std.meta.fields(MemoryPool).len]std.AutoHashMapUnmanaged(usize, GpuBlock) = .{ .{}, .{} },
     meta_allocator: std.mem.Allocator,
 
-    pub fn init(dev: vk.DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, io: std.Io, hashmap_allocator: std.mem.Allocator) VulkanBackingAllocator {
+    pub fn init(
+        dev: vk.DeviceProxy,
+        mem_props: vk.PhysicalDeviceMemoryProperties,
+        io: std.Io,
+        hashmap_allocator: std.mem.Allocator,
+        graphics_queue_family: u32,
+        transfer_queue_family: u32,
+    ) VulkanBackingAllocator {
         return .{
             .dev = dev,
             .mem_props = mem_props,
             .io = io,
             .meta_allocator = hashmap_allocator,
+            .graphics_queue_family = graphics_queue_family,
+            .transfer_queue_family = transfer_queue_family,
         };
     }
 
@@ -117,6 +129,9 @@ pub const VulkanBackingAllocator = struct {
     }
 
     fn createBufferAndMemory(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize) !struct { vk.Buffer, vk.DeviceMemory, usize } {
+        const queue_family_indices: [2]u32 = .{ self.graphics_queue_family, self.transfer_queue_family };
+        const is_concurrent = self.graphics_queue_family != self.transfer_queue_family;
+
         const buffer_info: vk.BufferCreateInfo = .{
             .flags = .{},
             .size = len,
@@ -128,9 +143,9 @@ pub const VulkanBackingAllocator = struct {
                 .indirect_buffer_bit = true,
                 .vertex_buffer_bit = true,
             },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 0,
-            .p_queue_family_indices = undefined,
+            .sharing_mode = if (is_concurrent) .concurrent else .exclusive,
+            .queue_family_index_count = if (is_concurrent) 2 else 0,
+            .p_queue_family_indices = if (is_concurrent) queue_family_indices[0..2].ptr else null,
         };
 
         const buffer = try self.dev.createBuffer(&buffer_info, null);
@@ -243,7 +258,7 @@ test "VulkanBackingAllocator alloc and free both pools" {
     const vk_ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer vk_ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator, vk_ctx.queue_family_index, vk_ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -279,7 +294,7 @@ test "VulkanBackingAllocator getBufferAndOffset rejects unknown pointer" {
     const vk_ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer vk_ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(vk_ctx.dev, vk_ctx.mem_props, std.testing.io, std.testing.allocator, vk_ctx.queue_family_index, vk_ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     // This should panic - pointer was never allocated through us

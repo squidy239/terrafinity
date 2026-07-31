@@ -38,6 +38,8 @@ menu_state: struct {
     newgame: bool = false,
     crosshair: bool = true,
 
+    pending_game_deinit: bool = false,
+
     /// Returns true if the player is ingame without a menu open
     pub fn is_playing_game(self: @This()) bool {
         return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
@@ -143,6 +145,7 @@ pub fn recordCommandBuffer(
     });
 
     backend.setCommandBuffer(cmd, extent);
+    defer backend.setCommandBuffer(.null_handle, .{ .width = 0, .height = 0 });
     backend.beginFrame();
     try self.drawFrame(io, gpa, frame_time);
     self.vk_ctx.dev.cmdEndRendering(cmd);
@@ -175,6 +178,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
 }
 
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
+    _ = io;
     std.debug.assert(self.menu_state.ingame);
     const size = @Vector(2, usize){ 640, 480 };
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
@@ -194,7 +198,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
-        self.game.deinit(io);
+        self.menu_state.pending_game_deinit = true;
         return true;
     }
 

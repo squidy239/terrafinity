@@ -1,6 +1,8 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
 
+layout(early_fragment_tests) in;
+
 layout(location = 0) out vec4 frag_color;
 
 layout(location = 1) in vec3 in_coords;

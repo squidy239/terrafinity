@@ -42,6 +42,9 @@ pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, pdev: vk.PhysicalDevice, 
 pub fn setCommandBuffer(back: *@This(), cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
     back.cmd_buffer = cmd;
     back.framebuffer_extent = extent;
+    if (back.renderer) |*r| {
+        r.beginFrame(cmd, extent);
+    }
 }
 
 pub fn getRenderer(back: *@This()) *vk_renderer {
@@ -291,6 +294,7 @@ pub fn renderPresent(_: *@This()) void {}
 // Rendering methods (called by dvui.Backend when render_backend.kind == .default)
 
 pub fn drawClippedTriangles(self: *@This(), texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const dvui.Vertex.Index, clipr: ?dvui.Rect.Physical) !void {
+    if (self.cmd_buffer == .null_handle) return;
     const r = self.getRenderer();
     r.drawClippedTriangles(texture, vtx, idx, clipr);
 }

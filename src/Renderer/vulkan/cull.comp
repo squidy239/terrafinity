@@ -72,12 +72,19 @@ void main() {
     uint idx;
     if (candidate.is_transparent == 0u) {
         idx = atomicAdd(opaque_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(opaque_count, pc.draw_capacity);
+            return;
+        }
         atomicAdd(opaque_face_count, candidate.face_count);
     } else {
         idx = atomicAdd(transparent_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(transparent_count, pc.draw_capacity);
+            return;
+        }
         atomicAdd(transparent_face_count, candidate.face_count);
     }
-    if (idx >= pc.draw_capacity) return;
 
     uint out_idx = idx + (candidate.is_transparent * pc.draw_capacity);
     out_indirect[out_idx] = DrawIndirectCommand(

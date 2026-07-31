@@ -595,7 +595,7 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     const player_pos = self.player.physics.pos;
     self.player.physics.mutex.unlock(io);
     self.player.view_direction_mutex.lockUncancelable(io);
-    const looking = moveCameraFront(self.player.view_direction);
+    const looking = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
 
     try self.options_lock.lockShared(io);
@@ -619,18 +619,11 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     try editor.flush(io, self.allocator);
 }
 
-fn moveCameraFront(dir: @Vector(3, f32)) @Vector(3, f32) {
-    return @Vector(3, f32){
-        @sin(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(dir[0])),
-        @sin(std.math.degreesToRadians(dir[0])),
-        @cos(std.math.degreesToRadians(dir[1])) * @cos(std.math.degreesToRadians(dir[0])),
-    };
-}
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "flyMove" });
     defer z.end();
     self.player.view_direction_mutex.lockUncancelable(io);
-    const camera_front = moveCameraFront(self.player.view_direction);
+    const camera_front = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
     const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
@@ -639,6 +632,10 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     {
         self.player.physics.mutex.lockUncancelable(io);
         defer self.player.physics.mutex.unlock(io);
+        // Reset velocity so fly input is frame-independent and doesn't accumulate.
+        // Mover.zero_velocity (active in Spectator mode) already does this after
+        // physics.update, but Creative mode leaves velocity intact between frames.
+        self.player.physics.velocity = .{ 0, 0, 0 };
         if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * camera_front));
         if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * camera_front));
         if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(vel_diff[1]), 0 };
@@ -655,7 +652,7 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const dt_ns = now.nanoseconds -| self.last_frametime.nanoseconds;
     const delta_time_seconds = @as(f32, @floatFromInt(dt_ns)) / std.time.ns_per_s;
     self.player.view_direction_mutex.lockUncancelable(io);
-    const camera_front = moveCameraFront(self.player.view_direction);
+    const camera_front = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
     self.player.view_direction_mutex.unlock(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
@@ -857,6 +854,15 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         group.async(io, loadChunksSpiral, .{ self, io, allocator, level, &error_int });
     }
     try group.await(io);
+
+    // group.async swallows task errors, so the spirals record them in error_int;
+    // surface the first recorded error instead of dropping it.
+    const load_error = @errorFromInt(error_int.swap(@intFromError(error.NoError), .seq_cst));
+    switch (load_error) {
+        error.NoError => {},
+        error.Canceled => unreachable, // loadChunksSpiral re-raises cancelations instead of recording them
+        else => |e| return e,
+    }
 }
 
 ///loads chunks from top to bottom and in a spiral on a y level

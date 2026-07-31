@@ -8,6 +8,15 @@ const ChunkPos = @import("world/World.zig").ChunkPos;
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
+/// Shared camera math: converts view direction (pitch in [0], yaw in [1]) to a unit front vector.
+pub fn cameraFrontFromViewDirection(view_dir: @Vector(3, f32)) @Vector(3, f32) {
+    return @Vector(3, f32){
+        @sin(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0])),
+        @sin(std.math.degreesToRadians(view_dir[0])),
+        @cos(std.math.degreesToRadians(view_dir[1])) * @cos(std.math.degreesToRadians(view_dir[0])),
+    };
+}
+
 pub const Implementation = opaque {};
 vtable: *const VTable,
 userdata: *Implementation,
@@ -29,7 +38,7 @@ pub const VTable = struct {
     /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
     addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void,
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
-    recreateSwapchain: *const fn (*Implementation, io: std.Io) void,
+    recreateSwapchain: *const fn (*Implementation, io: std.Io) anyerror!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
     forEachMesh: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void,
 };
@@ -46,8 +55,8 @@ pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, frame_ctx: FrameDraw
 }
 
 /// Notifies the renderer that the swapchain has been resized/changed and resources must be recreated.
-pub fn recreateSwapchain(self: *@This(), io: std.Io) void {
-    self.vtable.recreateSwapchain(self.userdata, io);
+pub fn recreateSwapchain(self: *@This(), io: std.Io) !void {
+    return self.vtable.recreateSwapchain(self.userdata, io);
 }
 
 pub fn updateCameraDirection(self: *@This(), view_dir: @Vector(3, f32)) void {

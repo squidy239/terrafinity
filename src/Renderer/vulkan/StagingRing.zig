@@ -90,7 +90,7 @@ pub const StagingRing = struct {
         for (self.entries.items, 0..) |e, i| {
             if (e.ptr == slice.ptr) {
                 std.debug.assert(e.timeline_value == null);
-                _ = self.entries.swapRemove(i);
+                _ = self.entries.orderedRemove(i);
                 if (self.entries.items.len == 0) self.head = 0;
                 return;
             }

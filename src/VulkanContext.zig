@@ -46,6 +46,7 @@ pdev: vk.PhysicalDevice,
 props: vk.PhysicalDeviceProperties,
 mem_props: vk.PhysicalDeviceMemoryProperties,
 sampler_anisotropy: bool = false,
+pipeline_creation_feedback: bool = false,
 
 dev_handle: vk.Device,
 dev_wrapper: ?*DeviceWrapper,
@@ -336,27 +337,36 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         if (std.mem.eql(u8, name, "VK_KHR_push_descriptor")) {
             has_push_desc = true;
         }
+        if (std.mem.eql(u8, name, "VK_EXT_pipeline_creation_feedback")) {
+            self.pipeline_creation_feedback = true;
+        }
     }
     std.log.info("Physical device supports VK_KHR_push_descriptor: {}", .{has_push_desc});
+    std.log.info("Physical device supports VK_EXT_pipeline_creation_feedback: {}", .{self.pipeline_creation_feedback});
 
     const queue_families = try self.selectQueueFamilies(allocator);
     self.queue_family_index = queue_families.graphics;
     self.present_queue_family_index = queue_families.present;
     self.transfer_queue_family_index = queue_families.transfer;
 
-    var device_extensions: []const [*:0]const u8 = &.{};
+    // khr_swapchain (1) + ext_robustness_2 (1) + push_descriptor (?) + pipeline_creation_feedback (?) = max 4
+    const max_device_extensions = 4;
+    comptime {
+        const min_unconditional: usize = 2;
+        if (max_device_extensions < min_unconditional + 2) @compileError("device_extension_buf too small: need at least " ++ std.fmt.comptimePrint("{d}", .{min_unconditional + 2}) ++ ", got " ++ std.fmt.comptimePrint("{d}", .{max_device_extensions}));
+    }
+    var device_extension_buf: [max_device_extensions][*:0]const u8 = undefined;
+    var device_extensions = std.ArrayList([*:0]const u8).initBuffer(&device_extension_buf);
+
+    device_extensions.appendAssumeCapacity(vk.extensions.khr_swapchain.name);
+    device_extensions.appendAssumeCapacity(vk.extensions.ext_robustness_2.name);
     if (has_push_desc) {
-        device_extensions = &.{
-            vk.extensions.khr_swapchain.name,
-            vk.extensions.ext_robustness_2.name,
-            vk.extensions.khr_push_descriptor.name,
-        };
+        device_extensions.appendAssumeCapacity(vk.extensions.khr_push_descriptor.name);
     } else {
         std.log.warn("VK_KHR_push_descriptor not supported, device creation will likely fail", .{});
-        device_extensions = &.{
-            vk.extensions.khr_swapchain.name,
-            vk.extensions.ext_robustness_2.name,
-        };
+    }
+    if (self.pipeline_creation_feedback) {
+        device_extensions.appendAssumeCapacity(vk.extensions.ext_pipeline_creation_feedback.name);
     }
 
     const queue_priority: f32 = 1.0;
@@ -404,6 +414,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     var features: vk.PhysicalDeviceFeatures2 = .{
         .features = .{
             .multi_draw_indirect = .true,
+            .draw_indirect_first_instance = .true,
             .shader_int_64 = .true,
             .independent_blend = .true,
             .sampler_anisotropy = if (self.sampler_anisotropy) .true else .false,
@@ -414,8 +425,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     const device_info: vk.DeviceCreateInfo = .{
         .queue_create_info_count = @intCast(queue_count),
         .p_queue_create_infos = queue_create_infos[0..queue_count].ptr,
-        .enabled_extension_count = @intCast(device_extensions.len),
-        .pp_enabled_extension_names = device_extensions[0..device_extensions.len].ptr,
+        .enabled_extension_count = @intCast(device_extensions.items.len),
+        .pp_enabled_extension_names = device_extensions.items.ptr,
         .p_next = @ptrCast(&features),
     };
 
@@ -589,6 +600,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
 
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
+    _ = self.dev.deviceWaitIdle() catch {};
+    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
+    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+
     const old_swapchain = self.swapchain;
     self.destroySwapchainResources();
 
@@ -707,6 +722,18 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
         self.dev.destroySwapchainKHR(old_swapchain, null);
     }
 
+    for (self.render_complete_semaphores) |sem| {
+        if (sem != .null_handle) self.dev.destroySemaphore(sem, null);
+    }
+    self.allocator.free(self.render_complete_semaphores);
+
+    self.render_complete_semaphores = try self.allocator.alloc(vk.Semaphore, new_images.len);
+    @memset(self.render_complete_semaphores, .null_handle);
+    const semaphore_create_info: vk.SemaphoreCreateInfo = .{ .flags = .{} };
+    for (self.render_complete_semaphores) |*complete| {
+        complete.* = try self.dev.createSemaphore(&semaphore_create_info, null);
+    }
+
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
     self.swapchain_views = new_views;
@@ -718,7 +745,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
 pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
     const src_stage: vk.PipelineStageFlags2 = switch (old_layout) {
         .undefined => .{ .top_of_pipe_bit = true },
-        .present_src_khr => .{ .bottom_of_pipe_bit = true },
+        .present_src_khr => .{ .color_attachment_output_bit = true },
         .color_attachment_optimal => .{ .color_attachment_output_bit = true },
         else => .{ .all_commands_bit = true },
     };
@@ -732,7 +759,7 @@ pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: 
         .src_stage_mask = src_stage,
         .src_access_mask = src_access,
         .dst_stage_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_output_bit = true } else .{ .bottom_of_pipe_bit = true },
-        .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true } else .{},
+        .dst_access_mask = if (new_layout == .color_attachment_optimal) .{ .color_attachment_write_bit = true, .color_attachment_read_bit = true } else .{},
         .old_layout = old_layout,
         .new_layout = new_layout,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -824,13 +851,17 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     const prev_graphics_val = current_graphics_val - 1;
 
     const wait_semaphore_infos: [3]vk.SemaphoreSubmitInfo = .{
-        .{ .semaphore = self.image_acquired_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .color_attachment_output_bit = true }, .device_index = 0 },
+        // ALL_COMMANDS_BIT ensures the semaphore dependency covers all pipeline stages
+        // the validation layer tracks for the swapchain acquire. COLOR_ATTACHMENT_OUTPUT
+        // alone is insufficient because VkPipelineStageFlags2 access scopes only include
+        // explicitly specified stages, and the present engine read barriers span multiple stages.
+        .{ .semaphore = self.image_acquired_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
         .{ .semaphore = self.transfer_semaphore, .value = current_transfer_val, .stage_mask = .{ .vertex_attribute_input_bit = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = prev_graphics_val, .stage_mask = .{ .top_of_pipe_bit = true }, .device_index = 0 },
     };
 
     const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
-        .{ .semaphore = self.render_complete_semaphores[ctx.frame_index], .value = 0, .stage_mask = .{ .bottom_of_pipe_bit = true }, .device_index = 0 },
+        .{ .semaphore = self.render_complete_semaphores[ctx.image_index], .value = 0, .stage_mask = .{ .bottom_of_pipe_bit = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = current_graphics_val, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
@@ -866,7 +897,7 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
 
     const present_info: vk.PresentInfoKHR = .{
         .wait_semaphore_count = 1,
-        .p_wait_semaphores = (&self.render_complete_semaphores[ctx.frame_index])[0..1],
+        .p_wait_semaphores = (&self.render_complete_semaphores[ctx.image_index])[0..1],
         .swapchain_count = 1,
         .p_swapchains = (&self.swapchain)[0..1],
         .p_image_indices = (&ctx.image_index)[0..1],
@@ -907,6 +938,33 @@ fn debugCallback(
     _ = p_user_data;
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
+
+    // Suppressions disabled — validate against latest SDK; remaining errors are real.
+    // switch (cb_data.message_id_number) {
+    //     // WRITE-AFTER-WRITE: false positive with timeline semaphore-mediated buffer reuse across command buffer resets.
+    //     // The timeline semaphore correctly handles cross-frame synchronization, but the validation layer does not
+    //     // properly clear per-resource buffer access tracking on vkResetCommandBuffer.
+    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7457
+    //     0x5c0ec5d6,
+    //     // WRITE-RACING-WRITE: known false positive when mixing vkDeviceWaitIdle with timeline semaphore synchronization.
+    //     // The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait
+    //     // stage and the device idle state.
+    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7600
+    //     0x743c6069,
+    //     // READ-RACING-WRITE: false positive with transfer queue writes to suballocated buffers read by indirect draws.
+    //     // The validation layer assumes the entire buffer is accessed by the indirect draw, but only sub-allocated
+    //     // ranges are actually read. The transfer semaphore correctly bridges cross-queue visibility.
+    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/8664
+    //     0x29910a35,
+    //     // NO-MATCHING-RELEASE: submit-time QFO check ignores timeline semaphore reordering. The transfer batch
+    //     // is submitted before the graphics cmd containing the matching release, but the graphics timeline wait
+    //     // in submitBatch orders them at execution time. Confirmed VVL deficiency (image variant, same code path):
+    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/4427
+    //     // https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/2441
+    //     @as(i32, @bitCast(@as(u32,0x991fd38f))),
+    //     => return .false,
+    //     else => {},
+    // }
 
     if (message_severity.error_bit_ext) {
         vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
@@ -1008,7 +1066,7 @@ test "VulkanRenderer mesh upload" {
     }
 
     const chunk_pos: World.ChunkPos = .{ .level = 0, .position = .{ 0, 0, 0 } };
-    try iface.addChunk(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
+    try iface.addMesh(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
 }
 
 test "VulkanBackingAllocator alloc and free both pools" {
@@ -1024,7 +1082,7 @@ test "VulkanBackingAllocator alloc and free both pools" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -1057,7 +1115,7 @@ test "StagingRing alloc wrap-around" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     const cpu_alloc = backing.allocator(.cpu_to_gpu);
@@ -1111,7 +1169,7 @@ test "FaceDataAllocator init and deinit" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
@@ -1136,7 +1194,7 @@ test "FaceDataAllocator grow and retire old buffer" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator);
+    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
