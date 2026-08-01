@@ -1,10 +1,13 @@
 const std = @import("std");
 
-const vk = @import("vulkan");
 const zignal = @import("zignal");
 
-const VulkanRenderer = @import("VulkanRenderer.zig");
-const Block = @import("../../world/Block.zig").Block;
+const vk = @import("vulkan");
+const DeviceProxy = vk.DeviceProxy;
+const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
+const core = @import("../core.zig");
+const gpu = @import("../gpu.zig");
+const Block = @import("../../../world/Block.zig").Block;
 
 const visible_block_count = Block.visible_count;
 
@@ -57,8 +60,15 @@ fn transitionFor(old: vk.ImageLayout, new: vk.ImageLayout) Transition {
     }
 }
 
+pub const Services = struct {
+    dev: DeviceProxy,
+    vk_ctx: *VulkanContext,
+    memory: *gpu.GpuMemory,
+    single_time: *core.SingleTime,
+};
+
 pub const TextureManager = struct {
-    renderer: *VulkanRenderer,
+    services: Services,
     gamma_correction: bool,
     sampler: vk.Sampler = .null_handle,
     textures: std.enums.EnumArray(Block, Texture) = .initFill(.{}),
@@ -67,8 +77,8 @@ pub const TextureManager = struct {
     descriptor_pool: vk.DescriptorPool = .null_handle,
     descriptor_set: vk.DescriptorSet = .null_handle,
 
-    pub fn init(renderer: *VulkanRenderer, gamma_correction: bool) TextureManager {
-        return .{ .renderer = renderer, .gamma_correction = gamma_correction };
+    pub fn init(services: Services, gamma_correction: bool) TextureManager {
+        return .{ .services = services, .gamma_correction = gamma_correction };
     }
 
     pub fn loadTextures(self: *TextureManager, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
@@ -112,7 +122,7 @@ pub const TextureManager = struct {
     ) !void {
         try self.createSampler();
         errdefer if (self.sampler != .null_handle) {
-            self.renderer.dev.destroySampler(self.sampler, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.destroySampler(self.sampler, &self.services.vk_ctx.vkalloc);
             self.sampler = .null_handle;
         };
 
@@ -146,14 +156,14 @@ pub const TextureManager = struct {
 
         const format: vk.Format = if (self.gamma_correction) .r8g8b8a8_srgb else .r8g8b8a8_unorm;
 
-        var cmd = try self.renderer.beginSingleTimeCommands();
+        var cmd = try self.services.single_time.begin();
         errdefer if (cmd != .null_handle)
-            self.renderer.dev.freeCommandBuffers(self.renderer.upload_command_pool, (&cmd)[0..1]);
+            self.services.single_time.free(cmd);
 
         var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
         try staging_slices.ensureTotalCapacity(allocator, entry_names.items.len + 1);
         defer {
-            for (staging_slices.items) |s| self.renderer.cpu_to_gpu_gpa.allocator().free(s);
+            for (staging_slices.items) |s| self.services.memory.cpuToGpu().free(s);
             staging_slices.deinit(allocator);
         }
 
@@ -183,7 +193,7 @@ pub const TextureManager = struct {
             staging_slices.appendAssumeCapacity(staging);
         }
 
-        const end_err = self.renderer.endSingleTimeCommands(io, cmd);
+        const end_err = self.services.single_time.end(io, cmd);
         cmd = .null_handle;
         try end_err;
 
@@ -198,8 +208,8 @@ pub const TextureManager = struct {
     }
 
     fn createSampler(self: *TextureManager) !void {
-        const anisotropy = self.renderer.vk_ctx.sampler_anisotropy;
-        self.sampler = try self.renderer.dev.createSampler(&.{
+        const anisotropy = self.services.vk_ctx.sampler_anisotropy;
+        self.sampler = try self.services.dev.createSampler(&.{
             .mag_filter = .nearest,
             .min_filter = .linear,
             .mipmap_mode = .linear,
@@ -215,17 +225,17 @@ pub const TextureManager = struct {
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_black,
             .unnormalized_coordinates = .false,
-        }, &self.renderer.vk_ctx.vkalloc);
+        }, &self.services.vk_ctx.vkalloc);
     }
 
     fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {
-        return self.renderer.dev.createImageView(&.{
+        return self.services.dev.createImageView(&.{
             .image = tex.image,
             .view_type = .@"2d",
             .format = format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
-        }, &self.renderer.vk_ctx.vkalloc);
+        }, &self.services.vk_ctx.vkalloc);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
@@ -233,7 +243,7 @@ pub const TextureManager = struct {
         const binding_flags = vk.DescriptorBindingFlags{ .update_after_bind_bit = true, .partially_bound_bit = true };
         const flags_info = vk.DescriptorSetLayoutBindingFlagsCreateInfo{ .binding_count = 1, .p_binding_flags = (&binding_flags)[0..1] };
 
-        self.descriptor_set_layout = try self.renderer.dev.createDescriptorSetLayout(&.{
+        self.descriptor_set_layout = try self.services.dev.createDescriptorSetLayout(&.{
             .flags = .{ .update_after_bind_pool_bit = true },
             .p_next = &flags_info,
             .binding_count = 1,
@@ -244,24 +254,24 @@ pub const TextureManager = struct {
                 .stage_flags = .{ .fragment_bit = true },
                 .p_immutable_samplers = null,
             }},
-        }, &self.renderer.vk_ctx.vkalloc);
+        }, &self.services.vk_ctx.vkalloc);
         errdefer {
-            self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.services.vk_ctx.vkalloc);
             self.descriptor_set_layout = .null_handle;
         }
 
-        self.descriptor_pool = try self.renderer.dev.createDescriptorPool(&.{
+        self.descriptor_pool = try self.services.dev.createDescriptorPool(&.{
             .flags = .{ .update_after_bind_bit = true },
             .max_sets = 1,
             .pool_size_count = 1,
             .p_pool_sizes = &.{.{ .type = .combined_image_sampler, .descriptor_count = @intCast(num_textures) }},
-        }, &self.renderer.vk_ctx.vkalloc);
+        }, &self.services.vk_ctx.vkalloc);
         errdefer {
-            self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.destroyDescriptorPool(self.descriptor_pool, &self.services.vk_ctx.vkalloc);
             self.descriptor_pool = .null_handle;
         }
 
-        try self.renderer.dev.allocateDescriptorSets(&.{
+        try self.services.dev.allocateDescriptorSets(&.{
             .descriptor_pool = self.descriptor_pool,
             .descriptor_set_count = 1,
             .p_set_layouts = (&self.descriptor_set_layout)[0..1],
@@ -275,29 +285,29 @@ pub const TextureManager = struct {
             info.* = .{ .sampler = self.sampler, .image_view = tex.view, .image_layout = .shader_read_only_optimal };
         }
 
-        self.renderer.dev.updateDescriptorSets(&.{vk.WriteDescriptorSet{
+        self.services.dev.updateDescriptorSets(&.{vk.WriteDescriptorSet{
             .dst_set = self.descriptor_set,
             .dst_binding = 0,
             .dst_array_element = 0,
             .descriptor_count = @intCast(num_textures),
             .descriptor_type = .combined_image_sampler,
             .p_image_info = &image_infos,
-            .p_buffer_info = &VulkanRenderer.null_buffer_info,
-            .p_texel_buffer_view = &VulkanRenderer.null_buffer_view,
+            .p_buffer_info = &core.null_buffer_info,
+            .p_texel_buffer_view = &core.null_buffer_view,
         }}, null);
     }
 
     fn destroyTexture(self: *TextureManager, tex: *Texture) void {
         if (tex.view != .null_handle) {
-            self.renderer.dev.destroyImageView(tex.view, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.destroyImageView(tex.view, &self.services.vk_ctx.vkalloc);
             tex.view = .null_handle;
         }
         if (tex.image != .null_handle) {
-            self.renderer.dev.destroyImage(tex.image, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.destroyImage(tex.image, &self.services.vk_ctx.vkalloc);
             tex.image = .null_handle;
         }
         if (tex.memory != .null_handle) {
-            self.renderer.dev.freeMemory(tex.memory, &self.renderer.vk_ctx.vkalloc);
+            self.services.dev.freeMemory(tex.memory, &self.services.vk_ctx.vkalloc);
             tex.memory = .null_handle;
         }
     }
@@ -327,27 +337,27 @@ pub const TextureManager = struct {
         };
 
         var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
-        self.renderer.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
+        self.services.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
 
-        const memory = try self.renderer.dev.allocateMemory(&.{
+        const memory = try self.services.dev.allocateMemory(&.{
             .allocation_size = mem_reqs2.memory_requirements.size,
-            .memory_type_index = try self.renderer.findMemoryType(mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local_bit = true }),
-        }, &self.renderer.vk_ctx.vkalloc);
-        errdefer self.renderer.dev.freeMemory(memory, &self.renderer.vk_ctx.vkalloc);
+            .memory_type_index = try core.findMemoryType(self.services.vk_ctx.mem_props, mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local_bit = true }),
+        }, &self.services.vk_ctx.vkalloc);
+        errdefer self.services.dev.freeMemory(memory, &self.services.vk_ctx.vkalloc);
 
-        const image = try self.renderer.dev.createImage(&image_info, &self.renderer.vk_ctx.vkalloc);
-        errdefer self.renderer.dev.destroyImage(image, &self.renderer.vk_ctx.vkalloc);
+        const image = try self.services.dev.createImage(&image_info, &self.services.vk_ctx.vkalloc);
+        errdefer self.services.dev.destroyImage(image, &self.services.vk_ctx.vkalloc);
 
-        try self.renderer.dev.bindImageMemory(image, memory, 0);
+        try self.services.dev.bindImageMemory(image, memory, 0);
 
-        const staging = try self.renderer.cpu_to_gpu_gpa.allocator().alloc(u8, image_size);
+        const staging = try self.services.memory.cpuToGpu().alloc(u8, image_size);
         @memcpy(staging, rgba_data);
 
-        const staging_info = self.renderer.backing_allocator.getBufferAndOffset(.cpu_to_gpu, staging.ptr);
+        const staging_info = self.services.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, staging.ptr);
 
         self.imageBarrier(cmd, image, .undefined, .transfer_dst_optimal, 0, 1);
 
-        self.renderer.dev.cmdCopyBufferToImage(cmd, staging_info.buffer, image, .transfer_dst_optimal, &.{vk.BufferImageCopy{
+        self.services.dev.cmdCopyBufferToImage(cmd, staging_info.buffer, image, .transfer_dst_optimal, &.{vk.BufferImageCopy{
             .buffer_offset = staging_info.offset,
             .buffer_row_length = 0,
             .buffer_image_height = 0,
@@ -390,7 +400,7 @@ pub const TextureManager = struct {
             self.imageBarrier(cmd, image, .transfer_dst_optimal, .transfer_src_optimal, mip - 1, 1);
             self.imageBarrier(cmd, image, .undefined, .transfer_dst_optimal, mip, 1);
 
-            self.renderer.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
+            self.services.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
                 vk.ImageBlit{
                     .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip - 1, .base_array_layer = 0, .layer_count = 1 },
                     .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(sw), .y = @intCast(sh), .z = 1 } },
@@ -415,7 +425,7 @@ pub const TextureManager = struct {
         mip_count: u32,
     ) void {
         const t = transitionFor(old_layout, new_layout);
-        self.renderer.dev.cmdPipelineBarrier2(cmd, &.{
+        self.services.dev.cmdPipelineBarrier2(cmd, &.{
             .image_memory_barrier_count = 1,
             .p_image_memory_barriers = (&vk.ImageMemoryBarrier2{
                 .src_stage_mask = t.src.stage,
@@ -435,9 +445,9 @@ pub const TextureManager = struct {
     pub fn deinit(self: *TextureManager) void {
         for (&self.textures.values) |*tex| self.destroyTexture(tex);
         self.destroyTexture(&self.default_texture);
-        if (self.descriptor_pool != .null_handle) self.renderer.dev.destroyDescriptorPool(self.descriptor_pool, &self.renderer.vk_ctx.vkalloc);
-        if (self.descriptor_set_layout != .null_handle) self.renderer.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.renderer.vk_ctx.vkalloc);
-        if (self.sampler != .null_handle) self.renderer.dev.destroySampler(self.sampler, &self.renderer.vk_ctx.vkalloc);
+        if (self.descriptor_pool != .null_handle) self.services.dev.destroyDescriptorPool(self.descriptor_pool, &self.services.vk_ctx.vkalloc);
+        if (self.descriptor_set_layout != .null_handle) self.services.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.services.vk_ctx.vkalloc);
+        if (self.sampler != .null_handle) self.services.dev.destroySampler(self.sampler, &self.services.vk_ctx.vkalloc);
     }
 };
 

@@ -13,9 +13,8 @@ const wio = @import("wio");
 
 const Mesher = @import("Mesher.zig");
 const Renderer = @import("Renderer.zig");
-const FaceDataAllocator = @import("Renderer/vulkan/FaceDataAllocator.zig").FaceDataAllocator;
-const StagingRing = @import("Renderer/vulkan/StagingRing.zig").StagingRing;
-const VulkanBackingAllocator = @import("Renderer/vulkan/VulkanBackingAllocator.zig").VulkanBackingAllocator;
+const core = @import("Renderer/vulkan/core.zig");
+const gpu = @import("Renderer/vulkan/gpu.zig");
 const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
 const Block = @import("world/Block.zig").Block;
 const World = @import("world/World.zig");
@@ -511,7 +510,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     errdefer self.dev.destroyCommandPool(self.command_pool, &self.vkalloc);
 
     // Graphics family on purpose: single-time upload command buffers from this pool are
-    // submitted to the graphics queue (see VulkanRenderer.endSingleTimeCommandsLocked).
+    // submitted to the graphics queue (see core.SingleTime.endLocked in vulkan/core.zig).
     const upload_pool_info: vk.CommandPoolCreateInfo = .{
         .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
         .queue_family_index = queue_families.graphics,
@@ -1247,13 +1246,13 @@ test "StagingRing alloc wrap-around" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
+    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const cpu_alloc = backing.allocator(.cpu_to_gpu);
 
     const ring_capacity: vk.DeviceSize = Mesher.max_face_bytes;
-    var ring = try StagingRing.init(std.testing.allocator, cpu_alloc, ring_capacity);
+    var ring = try gpu.StagingRing.init(std.testing.allocator, cpu_alloc, ring_capacity);
     defer ring.deinit(cpu_alloc);
 
     const staging_info = backing.getBufferAndOffset(.cpu_to_gpu, ring.mapping.ptr);
@@ -1280,7 +1279,7 @@ test "StagingRing alloc wrap-around" {
 }
 
 fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
-    var ring = try StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
+    var ring = try gpu.StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
     ring.deinit(alloc);
 }
 
@@ -1288,7 +1287,7 @@ test "StagingRing checkAllAllocationFailures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
 }
 
-test "FaceDataAllocator init and deinit" {
+test "GpuRegionAllocator init and deinit" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
@@ -1301,19 +1300,19 @@ test "FaceDataAllocator init and deinit" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
+    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
 
-    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
+    var alloc = try gpu.GpuRegionAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
     defer alloc.deinit(gpu_alloc);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(std.testing.io, buf_info.buffer, buf_info.offset);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
 }
 
-test "FaceDataAllocator grow and retire old buffer" {
+test "GpuRegionAllocator grow and retire old buffer" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
 
@@ -1326,15 +1325,15 @@ test "FaceDataAllocator grow and retire old buffer" {
     const ctx = try VulkanContext.init(std.testing.allocator, &window);
     defer ctx.deinit(std.testing.io);
 
-    var backing = VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
+    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
     defer backing.deinit();
 
     const gpu_alloc = backing.allocator(.gpu_only);
 
-    var alloc = try FaceDataAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
+    var alloc = try gpu.GpuRegionAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
 
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(std.testing.io, buf_info.buffer, buf_info.offset);
+    alloc.resolve(buf_info.buffer, buf_info.offset);
 
     const grow_info = try alloc.grow(std.testing.io, gpu_alloc);
     gpu_alloc.free(grow_info.old_slice);

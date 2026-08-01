@@ -26,15 +26,15 @@ pub fn build(b: *std.Build) void {
 
     const vert_cmd = b.addSystemCommand(&shader_cmd);
     const vert_spv = vert_cmd.addOutputFileArg("vertexshader.spv");
-    vert_cmd.addFileArg(b.path("src/Renderer/vulkan/vertexshader.vert"));
+    vert_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/vertexshader.vert"));
 
     const frag_cmd = b.addSystemCommand(&shader_cmd);
     const frag_spv = frag_cmd.addOutputFileArg("fragshader.spv");
-    frag_cmd.addFileArg(b.path("src/Renderer/vulkan/fragshader.frag"));
+    frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
 
     const trans_frag_cmd = b.addSystemCommand(&shader_cmd);
     const trans_frag_spv = trans_frag_cmd.addOutputFileArg("transparent_frag.spv");
-    trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/transparent_frag.frag"));
+    trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/transparent_frag.frag"));
 
     const comp_vert_cmd = b.addSystemCommand(&shader_cmd);
     const comp_vert_spv = comp_vert_cmd.addOutputFileArg("composite_vert.spv");
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
 
     const cull_cmd = b.addSystemCommand(&shader_cmd);
     const cull_spv = cull_cmd.addOutputFileArg("cull.spv");
-    cull_cmd.addFileArg(b.path("src/Renderer/vulkan/cull.comp"));
+    cull_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/cull.comp"));
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
