@@ -5,7 +5,9 @@ const vk = @import("vulkan");
 const DeviceProxy = vk.DeviceProxy;
 
 const ConcurrentHashMap = @import("../../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
-const Mesher = @import("../../../Mesher.zig");
+const Mesher = @import("../../Mesher.zig");
+const BFA = @import("../../../world/BufferFirstAllocator.zig");
+const Chunk = @import("../../../world/Chunk.zig");
 const Renderer = @import("../../../Renderer.zig");
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
 const World = @import("../../../world/World.zig");
@@ -254,6 +256,25 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
 fn flushUploads(ctx: *anyopaque, io: std.Io) !void {
     const self: *ChunkRenderer = @ptrCast(@alignCast(ctx));
     try self.processPendingUploads(io);
+}
+
+pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
+    defer zone.end();
+
+    var buffer: [65536]u8 = undefined;
+    var bfa: BFA = .init(&buffer, self.allocator);
+    var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
+    defer opaque_faces.deinit(bfa.allocator());
+    var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
+    defer transparent_faces.deinit(bfa.allocator());
+    try Mesher.mesh(bfa.allocator(), encoding, neighbor_faces, &opaque_faces, &transparent_faces);
+
+    try self.addMesh(io, chunk_pos, opaque_faces.items, transparent_faces.items);
+}
+
+pub fn removeChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos) !void {
+    try self.addMesh(io, chunk_pos, &.{}, &.{});
 }
 
 pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {

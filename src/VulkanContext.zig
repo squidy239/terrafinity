@@ -11,12 +11,13 @@ const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 
-const Mesher = @import("Mesher.zig");
+const Mesher = @import("Renderer/Mesher.zig");
 const Renderer = @import("Renderer.zig");
 const core = @import("Renderer/vulkan/core.zig");
 const gpu = @import("Renderer/vulkan/gpu.zig");
 const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
 const Block = @import("world/Block.zig").Block;
+const Chunk = @import("world/Chunk.zig");
 const World = @import("world/World.zig");
 
 pub const PresentMode = enum {
@@ -1224,13 +1225,12 @@ test "VulkanRenderer mesh upload" {
 
     var iface = renderer.interface;
 
-    var opaque_faces: [6]Mesher.Face = undefined;
-    for (&opaque_faces) |*f| {
-        f.* = .{ .block_type = @intFromEnum(Block.stone), .x = 0, .y = 0, .z = 0, .x_length = 0, .y_length = 0, .z_length = 0, .rotation = .xplus };
-    }
+    var grid: [World.ChunkSize][World.ChunkSize][World.ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
+    grid[1][1][1] = .stone;
+    const neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
 
     const chunk_pos: World.ChunkPos = .{ .level = 0, .position = .{ 0, 0, 0 } };
-    try iface.addMesh(std.testing.io, chunk_pos, opaque_faces[0..], &.{});
+    try iface.addChunk(std.testing.io, chunk_pos, .{ .grid = &grid }, &neighbor_faces);
 }
 
 test "StagingRing alloc wrap-around" {

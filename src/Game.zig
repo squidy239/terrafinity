@@ -12,10 +12,8 @@ const EntityTypes = @import("entity/EntityTypes.zig");
 const Key = @import("Key.zig");
 const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const utils = @import("libs/utils.zig");
-const Mesher = @import("Mesher.zig");
 pub const Renderer = @import("Renderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
-const BFA = @import("world/BufferFirstAllocator.zig");
 const Chunk = @import("world/Chunk.zig");
 const Cone = @import("world/structures/Cone.zig").Cone;
 const Sphere = @import("world/structures/Sphere.zig").Sphere;
@@ -760,7 +758,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     // Prevent an old version of the chunk from staying loaded
     if (!self.keepChunkLoaded(io, chunk_pos) and self.canUnloadMesh(io, chunk_pos)) {
-        try self.renderer.addMesh(io, chunk_pos, &.{}, &.{});
+        try self.renderer.removeChunk(io, chunk_pos);
         try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
     }
@@ -771,32 +769,12 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
         face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
 
-    var buffer: [65536]u8 = undefined;
-    var bfa: BFA = .init(&buffer, self.allocator);
-    var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer opaque_faces.deinit(bfa.allocator());
-    var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
-    defer transparent_faces.deinit(bfa.allocator());
-    {
-        try chunk.lockShared(io);
-        defer chunk.unlockShared(io);
-        try Mesher.mesh(
-            bfa.allocator(),
-            chunk.encoding,
-            &neighbor_faces,
-            &opaque_faces,
-            &transparent_faces,
-        );
-    }
-
     {
         const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
         defer chunk_add.end();
-        if (opaque_faces.items.len > 0 or transparent_faces.items.len > 0) {
-            try self.renderer.addMesh(io, chunk_pos, opaque_faces.items, transparent_faces.items);
-        } else {
-            try self.renderer.addMesh(io, chunk_pos, &.{}, &.{});
-        }
+        try chunk.lockShared(io);
+        defer chunk.unlockShared(io);
+        try self.renderer.addChunk(io, chunk_pos, chunk.encoding, &neighbor_faces);
     }
     const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
     defer mark.end();
@@ -1015,7 +993,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
                 return error.Failed;
             };
 
-            ctx.game.renderer.addMesh(ctx.io, chunk_pos, &.{}, &.{}) catch |err| {
+            ctx.game.renderer.removeChunk(ctx.io, chunk_pos) catch |err| {
                 ctx.err = err;
                 return error.Failed;
             };

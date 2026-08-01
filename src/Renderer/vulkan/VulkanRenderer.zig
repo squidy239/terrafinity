@@ -9,7 +9,8 @@ const DeviceProxy = vk.DeviceProxy;
 const Renderer = @import("../../Renderer.zig");
 const FrameDrawContext = Renderer.FrameDrawContext;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
-const Mesher = @import("../../Mesher.zig");
+const Mesher = @import("../Mesher.zig");
+const Chunk = @import("../../world/Chunk.zig");
 const World = @import("../../world/World.zig");
 const ChunkPos = World.ChunkPos;
 const core = @import("core.zig");
@@ -123,7 +124,8 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.interface = .{
         .userdata = @ptrCast(self),
         .vtable = &.{
-            .addMesh = vtableAddMesh,
+            .addChunk = vtableAddChunk,
+            .removeChunk = vtableRemoveChunk,
             .draw = vtableDraw,
             .recreateSwapchain = vtableRecreateSwapchain,
             .updateCameraDirection = vtableUpdateCameraDirection,
@@ -239,8 +241,12 @@ fn depthHasStencil(self: *const VulkanRenderer) bool {
     return self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
 }
 
-pub fn addMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
-    try self.chunk.addMesh(io, chunk_pos, opaque_mesh, transparent_mesh);
+pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
+    try self.chunk.addChunk(io, chunk_pos, encoding, neighbor_faces);
+}
+
+pub fn removeChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) !void {
+    try self.chunk.removeChunk(io, chunk_pos);
 }
 
 fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
@@ -331,11 +337,19 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     try self.dev.endCommandBuffer(cmd_buffer);
 }
 
-fn vtableAddMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void {
+fn vtableAddChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.addMesh(io, chunk_pos, opaque_mesh, transparent_mesh) catch |err| switch (err) {
+    self.addChunk(io, chunk_pos, encoding, neighbor_faces) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        else => return error.AddMeshFailed,
+        else => return error.AddChunkFailed,
+    };
+}
+
+fn vtableRemoveChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void {
+    const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
+    self.removeChunk(io, chunk_pos) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.RemoveChunkFailed,
     };
 }
 

@@ -1,7 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
-const Mesher = @import("Mesher.zig");
+const Chunk = @import("world/Chunk.zig");
 pub const Vulkan = @import("Renderer/vulkan/VulkanRenderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const ChunkPos = @import("world/World.zig").ChunkPos;
@@ -35,18 +35,27 @@ pub const FrameDrawContext = struct {
 };
 
 pub const VTable = struct {
-    /// This may not return any error other than canceled if both `opaque_mesh` and `transparent_mesh` have a length of 0.
-    addMesh: *const fn (*Implementation, std.Io, ChunkPos, []Mesher.Face, []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void,
+    /// Adds or replaces a chunk mesh, meshing the given chunk encoding against the provided neighbor faces.
+    /// May be called from any thread. The encoding and neighbor faces must remain valid for the duration of the call.
+    addChunk: *const fn (*Implementation, std.Io, ChunkPos, Chunk.Encoding, *const [6]Chunk.Encoding.Face) (std.Io.Cancelable || error{AddChunkFailed})!void,
+    /// Removes the chunk mesh for the given position.
+    /// May be called from any thread.
+    removeChunk: *const fn (*Implementation, std.Io, ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void,
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     recreateSwapchain: *const fn (*Implementation, io: std.Io) anyerror!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
     forEachMesh: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void,
 };
 
-///adds a chunk mesh to the renderer, this function may be called on any thread
-///After this call opaque mesh and transparent mesh are in an undefined state and may not be read
-pub fn addMesh(self: *@This(), io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []Mesher.Face, transparent_mesh: []Mesher.Face) (std.Io.Cancelable || error{AddMeshFailed})!void {
-    return self.vtable.addMesh(self.userdata, io, chunk_pos, opaque_mesh, transparent_mesh);
+/// Adds a chunk mesh to the renderer, this function may be called on any thread.
+/// The chunk encoding and neighbor faces must remain valid for the duration of the call.
+pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
+    return self.vtable.addChunk(self.userdata, io, chunk_pos, encoding, neighbor_faces);
+}
+
+/// Removes the chunk mesh for the given position, this function may be called on any thread.
+pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void {
+    return self.vtable.removeChunk(self.userdata, io, chunk_pos);
 }
 
 ///draws all loaded chunk meshes to the screen, this function should only be called on the main thread

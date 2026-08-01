@@ -1,10 +1,9 @@
 const std = @import("std");
 
-const Block = @import("world/Block.zig").Block;
-const Chunk = @import("world/Chunk.zig");
+const Block = @import("../world/Block.zig").Block;
+const Chunk = @import("../world/Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 pub const FaceRotation = Chunk.Encoding.FaceRotation;
-const ChunkPos = @import("world/World.zig").ChunkPos;
 
 const Mesher = @This();
 
