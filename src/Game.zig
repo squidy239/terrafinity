@@ -69,9 +69,6 @@ debug_menu: struct {
 const NodeData = struct {
     /// How many direct children are currently subtree-covered.
     covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = @splat(@splat(@splat(false))),
-    /// True for each direct child whose subtree contains a queued (not yet active) chunk.
-    /// Lets a higher-res chunk's ancestor stay loaded until the queued chunk activates.
-    pending_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = @splat(@splat(@splat(false))),
     /// True when this chunk is queued or currently in the renderer.
     /// False for ghost entries that exist only to track child coverage.
     is_active: bool = false,
@@ -91,52 +88,18 @@ const NodeData = struct {
     pub fn isCovering(state: NodeData) bool {
         return state.allCoveredChildren() or state.is_active;
     }
-
-    pub fn noPendingChildren(state: NodeData) bool {
-        return std.meta.eql(state.pending_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false)))));
-    }
-
-    pub fn hasPending(state: NodeData) bool {
-        return state.is_queued or !state.noPendingChildren();
-    }
 };
 
-/// Indices into the per-child-slot arrays of a parent's NodeData.
-const SlotIndex = @Vector(3, @Int(.unsigned, std.math.log2(World.scale_factor)));
-
-/// covered and pending both record one fact per direct-child slot of a parent and
-/// aggregate it (all slots for covered, any for pending); the bubble-up is shared.
-const SubtreeField = enum {
-    covered,
-    pending,
-
-    fn aggregate(field: SubtreeField, state: NodeData) bool {
-        return switch (field) {
-            .covered => state.isCovering(),
-            .pending => state.hasPending(),
-        };
-    }
-
-    fn setSlot(field: SubtreeField, state: *NodeData, pos_in_parent: SlotIndex, val: bool) void {
-        const p = pos_in_parent;
-        switch (field) {
-            .covered => state.covered_children[p[0]][p[1]][p[2]] = val,
-            .pending => state.pending_children[p[0]][p[1]][p[2]] = val,
-        }
-    }
-};
-
-/// Sets or clears pos's slot in its parent, bubbling up while the parent's aggregate
-/// flips. Setting creates the parent ghost if absent; clearing prunes it when it
-/// tracks nothing. The aggregate is monotonic in the slot value, so `was != is` is the
-/// directed transition condition for both directions.
+/// Sets or clears pos's covered slot in its parent, bubbling up while the parent's
+/// aggregate flips. Setting creates the parent ghost if absent; clearing prunes it
+/// when it tracks nothing. The aggregate is monotonic in the slot value, so
+/// `was != is` is the directed transition condition for both directions of the walk.
 fn markSubtree(
     self: *@This(),
     io: std.Io,
     allocator: std.mem.Allocator,
     pos: World.ChunkPos,
-    field: SubtreeField,
-    mark: bool,
+    covered: bool,
 ) !void {
     _, const highest = self.getLevels(io);
     const parent = pos.parent();
@@ -149,29 +112,36 @@ fn markSubtree(
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
 
-        var state: NodeData = if (mark)
+        var state: NodeData = if (covered)
             bucket.hash_map.get(parent) orelse .{ .structures_generated = false }
         else
             bucket.hash_map.get(parent) orelse return;
 
-        const was = field.aggregate(state);
-        field.setSlot(&state, pos_in_parent, mark);
-        const is = field.aggregate(state);
+        const p = pos_in_parent;
+        // The slot already holds the target value: nothing changed, so the put
+        // and the bubble-up can be skipped entirely.
+        if (state.covered_children[p[0]][p[1]][p[2]] == covered) {
+            return;
+        }
+
+        const was_covering = state.isCovering();
+        state.covered_children[p[0]][p[1]][p[2]] = covered;
+        const is_covering = state.isCovering();
 
         // The thread sanitizer warning that points here may be indirectly related to https://codeberg.org/ziglang/zig/issues/35250
         // If its not I have no idea but I will come back to it once 35250 is fixed
         // It repos better with 1 loaded_or_meshed bucket and 128 threads for Io
-        if (!mark and state.noCoveredChildren() and state.noPendingChildren() and !state.is_active and !state.is_queued) {
+        if (!covered and state.noCoveredChildren() and !state.is_active and !state.is_queued) {
             _ = bucket.hash_map.remove(parent);
         } else {
             try bucket.hash_map.put(allocator, parent, state);
         }
 
-        bubble_up = was != is;
+        bubble_up = was_covering != is_covering;
     }
 
     if (bubble_up) {
-        try self.markSubtree(io, allocator, parent, field, mark);
+        try self.markSubtree(io, allocator, parent, covered);
     }
 }
 
@@ -179,15 +149,24 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     var parent = chunk_pos;
     _, const highest_level = self.getLevels(io);
     if (parent.level > highest_level) return true;
+    self.player.physics.mutex.lockUncancelable(io);
+    const player_pos = self.player.physics.pos;
+    self.player.physics.mutex.unlock(io);
+    const render_distance = self.getRenderDistance(io);
     while (parent.level < highest_level) {
         parent = parent.parent();
         std.debug.assert(parent.level <= highest_level);
         if (self.loaded_or_meshed.get(io, parent)) |par| {
             if (par.is_active) {
-                // Keep this mesh until queued higher-res chunks finish loading, so a
-                // stale low-res view does not flash before the refinement lands.
                 const state = self.loaded_or_meshed.get(io, chunk_pos) orelse return true;
-                return state.noPendingChildren();
+                if (state.allCoveredChildren()) return true;
+                // Keep this mesh while the player is close enough that the loader
+                // could still be refining the area, so a stale low-res view does
+                // not flash before the higher-res chunks land. The check is
+                // geometric only, so it cannot race the loader or leak if the
+                // loader stalls.
+                const refine_radius = render_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+                return !keepLoaded(null, null, player_pos, chunk_pos, null, refine_radius);
             }
         }
     }
@@ -195,10 +174,6 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
 
     {
         // Check if the highest level parent is out of render distance.
-        self.player.physics.mutex.lockUncancelable(io);
-        const player_pos = self.player.physics.pos;
-        self.player.physics.mutex.unlock(io);
-        const render_distance = self.getRenderDistance(io);
         const inside_range = keepLoaded(null, null, player_pos, parent, null, render_distance);
         if (!inside_range) return true;
     }
@@ -219,8 +194,6 @@ fn tryRemoveChunkFromLoaded(
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     var was_covering: bool = undefined;
     var is_covering: bool = undefined;
-    var was_pending: bool = undefined;
-    var is_pending: bool = undefined;
     {
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
@@ -230,22 +203,20 @@ fn tryRemoveChunkFromLoaded(
         const was_active = state.is_active;
         const was_queued = state.is_queued;
 
-        // Leave ghost nodes that still track coverage or pending children alone.
+        // Leave ghost nodes that still track coverage alone.
         if (!was_active and !was_queued) {
-            std.debug.assert(!state.noCoveredChildren() or !state.noPendingChildren());
+            std.debug.assert(!state.noCoveredChildren());
             return;
         }
 
         was_covering = state.isCovering();
-        was_pending = state.hasPending();
 
         state.is_active = false;
         state.is_queued = false;
 
         is_covering = state.isCovering();
-        is_pending = state.hasPending();
 
-        if (state.noCoveredChildren() and state.noPendingChildren()) {
+        if (state.noCoveredChildren()) {
             _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
         } else {
             try bucket.hash_map.put(allocator, chunk_pos, state);
@@ -253,11 +224,7 @@ fn tryRemoveChunkFromLoaded(
     }
 
     if (was_covering and !is_covering) {
-        try self.markSubtree(io, allocator, chunk_pos, .covered, false);
-    }
-
-    if (was_pending and !is_pending) {
-        try self.markSubtree(io, allocator, chunk_pos, .pending, false);
+        try self.markSubtree(io, allocator, chunk_pos, false);
     }
 }
 
@@ -781,8 +748,6 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     var was_covering = false;
     var is_covering = false;
-    var was_pending = false;
-    var is_pending = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
@@ -790,39 +755,27 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{ .structures_generated = generate_structures };
 
         was_covering = state.isCovering();
-        was_pending = state.hasPending();
 
         state.is_active = true;
         state.is_queued = false;
         if (generate_structures) state.structures_generated = true;
 
         is_covering = state.isCovering();
-        is_pending = state.hasPending();
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
 
     if (!was_covering and is_covering) {
-        try self.markSubtree(io, allocator, chunk_pos, .covered, true);
-    }
-
-    if (was_pending and !is_pending) {
-        try self.markSubtree(io, allocator, chunk_pos, .pending, false);
+        try self.markSubtree(io, allocator, chunk_pos, true);
     }
 }
 
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool) !void {
-    var was_pending = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
         const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = gen_structures });
-        was_pending = entry.value_ptr.hasPending();
         entry.value_ptr.is_queued = true;
-    }
-
-    if (!was_pending) {
-        try self.markSubtree(io, allocator, chunk_pos, .pending, true);
     }
 
     self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, gen_structures });
