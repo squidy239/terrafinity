@@ -267,18 +267,20 @@ pub const DefaultGenerator = struct {
     fn generateCavesInterpolate(chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, chunk_scale: f32, gen_params: Params) void {
         const caves = tracy.Zone.begin(.{ .src = @src() });
         defer caves.end();
-        var grid: [4][4][4]f32 = undefined;
+        const cave_grid_size: usize = 4;
+        const CaveInterp = Interpolation.TrilinearInterpolator3D(f32, cave_grid_size, cave_grid_size, cave_grid_size, ChunkSize, ChunkSize, ChunkSize);
+        var grid: [cave_grid_size][cave_grid_size][cave_grid_size]f32 = undefined;
         const float_pos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
-        const one_third_vec: @Vector(3, f32) = comptime @splat(1.0 / 3.0);
         const one_d_terrain_scale_vec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunk_scale));
         const cave_noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });
-        for (0..4) |x| {
-            for (0..4) |y| {
-                for (0..4) |z| {
-                    const xyz = @Vector(3, f32){ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) };
-                    const sample_offset = xyz * one_third_vec;
-                    const pos = (float_pos + sample_offset) * one_d_terrain_scale_vec;
-                    grid[x][y][z] = gen_params.cave_noise.genNoise3D(pos[0], pos[1], pos[2]);
+        var grid_flat: [cave_grid_size * cave_grid_size * cave_grid_size]f32 = undefined;
+        const grid_origin = float_pos * one_d_terrain_scale_vec;
+        const grid_spacing = (1.0 / @as(f32, @floatFromInt(cave_grid_size - 1))) * one_d_terrain_scale_vec[0];
+        gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], grid_spacing);
+        for (0..cave_grid_size) |z| {
+            for (0..cave_grid_size) |y| {
+                for (0..cave_grid_size) |x| {
+                    grid[z][y][x] = grid_flat[(z * cave_grid_size + y) * cave_grid_size + x];
                 }
             }
         }
@@ -287,25 +289,19 @@ pub const DefaultGenerator = struct {
         const inter = tracy.Zone.begin(.{ .src = @src() });
         defer inter.end();
         const init_interp = tracy.Zone.begin(.{ .src = @src(), .name = "init_interp" });
-        var interpolator = Interpolation.NaturalCubicInterpolator3D.init(grid);
+        const interpolator = CaveInterp.init(grid);
         init_interp.end();
-        const one_d_32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
-        comptime var zs: @Vector(ChunkSize, f32) = undefined;
-        comptime for (0..ChunkSize) |i| {
-            zs[i] = @as(f32, @floatFromInt(i)) * one_d_32;
-        };
-        const xs: @Vector(ChunkSize, f32) = comptime zs;
-        const ys: @Vector(ChunkSize, f32) = comptime zs;
+        const cave_values = interpolator.sampleGrid();
 
-        @setEvalBranchQuota(32000);
-        inline for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |y| {
-                const real_y = ((float_pos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * one_d_terrain_scale_vec[0];
-                const expansion_factor: f32 = 1 - (1 / -@min(-1, (real_y / gen_params.cave_expansion_max) - 1));
-                const cave_threshold: f32 = gen_params.cave_threshold + (expansion_factor * 2);
-                inline for (0..ChunkSize) |z| {
-                    if (interpolator.sampleComptimeXz(xs[x], ys[y], zs[z]) < cave_threshold) {
-                        chunk_blocks[x][y][z] = .air;
+        for (0..ChunkSize) |y| {
+            const real_y = ((float_pos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * one_d_terrain_scale_vec[0];
+            const expansion_factor: f32 = 1 - (1 / -@min(-1, (real_y / gen_params.cave_expansion_max) - 1));
+            const cave_threshold: f32 = gen_params.cave_threshold + (expansion_factor * 2);
+            for (0..ChunkSize) |z| {
+                const is_cave = cave_values[y][z] < @as(@Vector(ChunkSize, f32), @splat(cave_threshold));
+                if (std.simd.firstTrue(is_cave)) |_| {
+                    inline for (0..ChunkSize) |x| {
+                        if (is_cave[x]) chunk_blocks[x][y][z] = .air;
                     }
                 }
             }
@@ -353,27 +349,46 @@ pub const DefaultGenerator = struct {
         const float_max: f32 = @floatFromInt(params.terrain_max);
         const float_bounds = [2]f32{ float_min, float_max };
         const one_d_terrain_scale: f32 = 1.0 / scale;
-        for (0..ChunkSize) |sx| {
+        const sample_count = ChunkSize * ChunkSize;
+
+        // Domain warp is inherently per-point, so warp the base coordinate grid
+        // into two irregular coordinate sets, then sample both in one batched pass.
+        var terrain_warped_x: [sample_count]f32 = undefined;
+        var terrain_warped_z: [sample_count]f32 = undefined;
+        var large_warped_x: [sample_count]f32 = undefined;
+        var large_warped_z: [sample_count]f32 = undefined;
+        for (0..sample_count) |i| {
+            const sx = i % ChunkSize;
+            const sz = i / ChunkSize;
             const x: f32 = ((@as(f32, @floatFromInt(sx)) * d32) + float_pos[0]) * one_d_terrain_scale;
-            for (0..ChunkSize) |sz| {
-                const z: f32 = ((@as(f32, @floatFromInt(sz)) * d32) + float_pos[1]) * one_d_terrain_scale;
-                var gen_x = x;
-                var gen_z = z;
-                params.terrain_noise.domainWarp2D(&gen_x, &gen_z);
-                var large_gen_x = x;
-                var large_gen_z = z;
-                params.large_terrain_noise_warp.domainWarp2D(&large_gen_x, &large_gen_z);
-                var terrain_noise_raw = std.math.pow(f32, params.terrain_noise.genNoise2D(gen_x, gen_z), 1);
-                const large_terrain_noise = params.large_terrain_noise.genNoise2D(large_gen_x, large_gen_z);
-                if (terrain_noise_raw < 0.0) terrain_noise_raw = 0.0;
-                const P = 2.0;
-                const warped_terrain = large_terrain_noise * (if (terrain_noise_raw < 0.5)
-                    (std.math.pow(f32, terrain_noise_raw * 2, P) * 0.5)
-                else
-                    (1 - (std.math.pow(f32, (1 - terrain_noise_raw) * 2, P) * 0.5)));
-                const block_height: i32 = @floor(warped_terrain * @abs(float_bounds[@intFromBool(warped_terrain > 0)]) * scale);
-                height[sx][sz] = block_height;
-            }
+            const z: f32 = ((@as(f32, @floatFromInt(sz)) * d32) + float_pos[1]) * one_d_terrain_scale;
+            var gen_x = x;
+            var gen_z = z;
+            params.terrain_noise.domainWarp2D(&gen_x, &gen_z);
+            terrain_warped_x[i] = gen_x;
+            terrain_warped_z[i] = gen_z;
+            var large_gen_x = x;
+            var large_gen_z = z;
+            params.large_terrain_noise_warp.domainWarp2D(&large_gen_x, &large_gen_z);
+            large_warped_x[i] = large_gen_x;
+            large_warped_z[i] = large_gen_z;
+        }
+
+        var terrain_noise_raw: [sample_count]f32 = undefined;
+        var large_terrain_noise: [sample_count]f32 = undefined;
+        params.terrain_noise.fillNoise2DGrid(&terrain_noise_raw, &terrain_warped_x, &terrain_warped_z);
+        params.large_terrain_noise.fillNoise2DGrid(&large_terrain_noise, &large_warped_x, &large_warped_z);
+
+        const P = 2.0;
+        for (0..sample_count) |i| {
+            var raw = terrain_noise_raw[i];
+            if (raw < 0.0) raw = 0.0;
+            const warped_terrain = large_terrain_noise[i] * (if (raw < 0.5)
+                (std.math.pow(f32, raw * 2, P) * 0.5)
+            else
+                (1 - (std.math.pow(f32, (1 - raw) * 2, P) * 0.5)));
+            const block_height: i32 = @floor(warped_terrain * @abs(float_bounds[@intFromBool(warped_terrain > 0)]) * scale);
+            height[i % ChunkSize][i / ChunkSize] = block_height;
         }
         return height;
     }

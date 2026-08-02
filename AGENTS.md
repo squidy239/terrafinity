@@ -23,8 +23,43 @@ When in doubt, rely on the core philosophy: **Meaning dictates casing.**
 ## Core Philosophy: Simplicity & Self-Documenting Code
 
 - **Code must be self-documenting:** The structure, variable names, and logic should clearly communicate intent without relying on external explanations.
-- **Comments are a last resort:** Only add comments when absolutely necessary to explain the _why_ behind a non-obvious decision, complex algorithm, or temporary hack. Do not use comments to explain _what_ the code is doing.
 - **Prioritize elegance:** Code should be as simple and elegant as possible. Avoid clever tricks in favor of readable, straightforward implementations.
+
+---
+
+## Comments
+
+Comments must be simple and unobtrusive. They exist to clarify, not to decorate.
+
+- **When to comment:** Use comments sparingly. They are appropriate for explaining _why_ behind a non-obvious decision, flagging `TODO` items, or documenting a genuinely confusing piece of logic that cannot be clarified through renaming or restructuring.
+- **Never use decorative characters:** No ASCII art, no dashes or equals signs used as separators, no box-drawing, no banner comments. A comment is plain text.
+- **Keep them simple:** One or two plain English sentences. If you need a paragraph, the code is too complex.
+- **Doc comments (`///`):** Doc comments are the exception — they are expected on public declarations. They must still follow the same style rules: no decorative characters, no banners, plain and direct.
+
+```zig
+// ✗ WRONG — decorative cruft
+// ==========================================
+// INITIALIZATION PHASE
+// ==========================================
+
+// ✗ WRONG — ASCII art
+// /\_/\  meow
+
+// ✗ WRONG — stating the obvious
+// increment i by 1
+i += 1;
+
+// ✓ CORRECT — explains why
+// The order matters here: upstream expects sorted keys.
+std.sort.insertion(Key, keys, {}, Key.lessThan);
+
+// ✓ CORRECT — TODO marker
+// TODO: replace with arena allocation once the allocator is threaded through.
+
+// ✓ CORRECT — doc comment on a public declaration
+/// Returns the number of active connections, or 0 if the pool is uninitialized.
+pub fn activeConnectionCount(self: *const Pool) u32 {
+```
 
 ---
 
