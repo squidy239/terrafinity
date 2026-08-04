@@ -215,6 +215,7 @@ config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
 
+/// This function is not threadsafe
 pub fn deinit(self: *World, io: std.Io, allocator: std.mem.Allocator) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -270,7 +271,8 @@ pub fn loadChunk(
     return chunk;
 }
 
-pub fn saveAll(self: *World, io: std.Io) void {
+/// Ensure all chunks are saved to disk. This function is not threadsafe.
+fn saveAll(self: *World, io: std.Io) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 

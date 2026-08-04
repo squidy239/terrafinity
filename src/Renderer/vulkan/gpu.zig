@@ -175,6 +175,9 @@ const buf_align: std.mem.Alignment = .fromByteUnits(256);
 const Region = struct {
     offset: vk.DeviceSize,
     length: vk.DeviceSize,
+    /// Graphics timeline value at which every frame that could read this region has
+    /// completed. A transfer reusing this region must wait until graphics passes it.
+    safe_graphics: u64,
 };
 
 pub const GrowInfo = struct {
@@ -189,6 +192,8 @@ pub const GpuRegionAllocator = struct {
         offset: vk.DeviceSize,
         buffer: vk.Buffer,
         buffer_offset: vk.DeviceSize,
+        /// 0 for a fresh (never-read) region; the free-time graphics value for a reused one.
+        safe_graphics: u64,
     };
 
     buffer_slice: []align(buf_align.toByteUnits()) u8,
@@ -228,11 +233,12 @@ pub const GpuRegionAllocator = struct {
 
         if (self.buffer.load(.monotonic) == .null_handle) return null;
 
-        if (self.findFreeRegion(length)) |offset| {
+        if (self.findFreeRegion(length)) |found| {
             return .{
-                .offset = offset,
+                .offset = found.offset,
                 .buffer = self.buffer.load(.monotonic),
                 .buffer_offset = self.buffer_offset.load(.monotonic),
+                .safe_graphics = found.safe_graphics,
             };
         }
 
@@ -245,13 +251,14 @@ pub const GpuRegionAllocator = struct {
                 .offset = offset,
                 .buffer = self.buffer.load(.monotonic),
                 .buffer_offset = self.buffer_offset.load(.monotonic),
+                .safe_graphics = 0,
             };
         }
 
         return null;
     }
 
-    fn findFreeRegion(self: *GpuRegionAllocator, length: vk.DeviceSize) ?vk.DeviceSize {
+    fn findFreeRegion(self: *GpuRegionAllocator, length: vk.DeviceSize) ?struct { offset: vk.DeviceSize, safe_graphics: u64 } {
         for (self.free_regions.items, 0..) |region, i| {
             if (region.length < length) continue;
 
@@ -262,14 +269,15 @@ pub const GpuRegionAllocator = struct {
                 self.free_regions.items[i] = .{
                     .offset = region.offset + length,
                     .length = region.length - length,
+                    .safe_graphics = region.safe_graphics,
                 };
             }
-            return result;
+            return .{ .offset = result, .safe_graphics = region.safe_graphics };
         }
         return null;
     }
 
-    pub fn freeRegion(self: *GpuRegionAllocator, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize) void {
+    pub fn freeRegion(self: *GpuRegionAllocator, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize, current_graphics_val: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
@@ -280,11 +288,12 @@ pub const GpuRegionAllocator = struct {
             if (region.offset > offset) break i;
         } else self.free_regions.items.len;
 
-        self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length }) catch @panic("GpuRegionAllocator.freeRegion: insert OOM");
+        self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length, .safe_graphics = current_graphics_val }) catch @panic("GpuRegionAllocator.freeRegion: insert OOM");
 
         var i = insertion_index;
         while (i > 0) {
             if (self.free_regions.items[i - 1].offset + self.free_regions.items[i - 1].length == self.free_regions.items[i].offset) {
+                self.free_regions.items[i - 1].safe_graphics = @max(self.free_regions.items[i - 1].safe_graphics, self.free_regions.items[i].safe_graphics);
                 self.free_regions.items[i - 1].length += self.free_regions.items[i].length;
                 _ = self.free_regions.orderedRemove(i);
                 i -= 1;
@@ -293,6 +302,7 @@ pub const GpuRegionAllocator = struct {
 
         while (i + 1 < self.free_regions.items.len) {
             if (self.free_regions.items[i].offset + self.free_regions.items[i].length == self.free_regions.items[i + 1].offset) {
+                self.free_regions.items[i].safe_graphics = @max(self.free_regions.items[i].safe_graphics, self.free_regions.items[i + 1].safe_graphics);
                 self.free_regions.items[i].length += self.free_regions.items[i + 1].length;
                 _ = self.free_regions.orderedRemove(i + 1);
             } else break;
@@ -446,6 +456,8 @@ pub const MeshBuffer = struct {
 pub const UploadResult = struct {
     mesh: MeshBuffer,
     staging_slice: []u8,
+    /// Max graphics value the face regions in this upload depend on (0 if none).
+    safe_graphics: u64,
 };
 
 const TransferState = struct {
@@ -627,17 +639,18 @@ pub const MeshUploader = struct {
         }
     }
 
-    pub fn freeRegion(self: *MeshUploader, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize) void {
-        self.region_allocator.freeRegion(io, offset, length);
+    pub fn freeRegion(self: *MeshUploader, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize, current_graphics_val: u64) void {
+        self.region_allocator.freeRegion(io, offset, length, current_graphics_val);
     }
 
-    pub fn freeMesh(self: *MeshUploader, io: std.Io, mesh: MeshBuffer) void {
-        self.region_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(mesh.face_offset)) * face_stride, mesh.face_byte_count);
+    pub fn freeMesh(self: *MeshUploader, io: std.Io, mesh: MeshBuffer, current_graphics_val: u64) void {
+        self.region_allocator.freeRegion(io, @as(vk.DeviceSize, @intCast(mesh.face_offset)) * face_stride, mesh.face_byte_count, current_graphics_val);
     }
 
     /// Submits command buffers on the transfer queue, gated by the graphics timeline
-    /// semaphore, and signals the transfer timeline. Returns the new transfer value.
-    pub fn submitToTransferQueue(self: *MeshUploader, io: std.Io, cmds: []const vk.CommandBuffer) !u64 {
+    /// only as far as the batch's reused face regions require, and signals the
+    /// transfer timeline. Returns the new transfer value.
+    pub fn submitToTransferQueue(self: *MeshUploader, io: std.Io, cmds: []const vk.CommandBuffer, wait_graphics_value: u64) !u64 {
         const count = cmds.len;
         if (count == 0) return self.vk_ctx.transfer_semaphore_value.load(.monotonic);
         std.debug.assert(count <= max_batch);
@@ -656,7 +669,7 @@ pub const MeshUploader = struct {
         var cb_submit_infos: [max_batch]vk.CommandBufferSubmitInfo = undefined;
         for (cb_submit_infos[0..count], cmds) |*info, cmd| info.* = .{ .command_buffer = cmd, .device_mask = 0 };
 
-        const current_graphics_val = self.vk_ctx.frame_number.load(.acquire);
+        const current_graphics_val = wait_graphics_value;
 
         const submit_info: vk.SubmitInfo2 = .{
             .flags = .{},
@@ -1204,6 +1217,26 @@ test "GpuRegionAllocator checkAllAllocationFailures" {
         }
     }.run;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocFn, .{});
+}
+
+test "GpuRegionAllocator safe_graphics propagation" {
+    const io = std.testing.io;
+    var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
+    defer allocator.deinit(std.testing.allocator);
+    allocator.resolve(@enumFromInt(1), 0);
+
+    const fresh = allocator.allocRegion(io, 64).?;
+    try std.testing.expectEqual(@as(u64, 0), fresh.safe_graphics);
+
+    allocator.freeRegion(io, fresh.offset, 64, 42);
+    const reused = allocator.allocRegion(io, 64).?;
+    try std.testing.expectEqual(@as(u64, 42), reused.safe_graphics);
+
+    // Adjacent frees merge, and the merged region keeps the max safety value.
+    allocator.freeRegion(io, fresh.offset, 32, 7);
+    allocator.freeRegion(io, fresh.offset + 32, 32, 13);
+    const merged = allocator.allocRegion(io, 64).?;
+    try std.testing.expectEqual(@as(u64, 13), merged.safe_graphics);
 }
 
 test "MeshData size" {

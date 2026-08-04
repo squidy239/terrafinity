@@ -46,6 +46,9 @@ const SubmissionBatch = struct {
     transparent_meshes: [batch_size]?gpu.UploadResult = undefined,
     chunk_positions: [batch_size]ChunkPos = undefined,
     count: usize = 0,
+    /// Max graphics value the batch's face regions depend on; the transfer submit
+    /// waits for this instead of the newest frame so fresh regions drain ungated.
+    max_safe_graphics: u64 = 0,
     mutex: std.Io.Mutex = .init,
 };
 
@@ -227,12 +230,12 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
         if (got == 0) break;
         self.destroyPendingUpload(io, buf);
     }
-    for (self.retired_meshes.items) |entry| self.uploader.freeRegion(io, entry.face_offset, entry.face_length);
+    for (self.retired_meshes.items) |entry| self.uploader.freeRegion(io, entry.face_offset, entry.face_length, 0);
     self.retired_meshes.deinit(self.allocator);
 
     var it = self.meshes.iterator();
     defer it.deinit(io);
-    while (it.next(io) catch unreachable) |entry| self.uploader.freeMesh(io, entry.value_ptr.*);
+    while (it.next(io) catch unreachable) |entry| self.uploader.freeMesh(io, entry.value_ptr.*, 0);
     self.meshes.deinit(io, self.allocator);
 
     core.destroyIfValid(self.dev, &self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
@@ -299,22 +302,27 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
 
     try self.dev.endCommandBuffer(cmd);
 
-    {
+    while (true) {
         const zone_batch = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh_lock_batch" });
         self.submission_batch.mutex.lockUncancelable(io);
         zone_batch.end();
-        defer self.submission_batch.mutex.unlock(io);
-
-        if (self.submission_batch.count == batch_size) try self.submitBatch(io);
-
-        const count = self.submission_batch.count;
-        self.submission_batch.cmds[count] = cmd;
-        self.submission_batch.pools[count] = pool;
-        self.submission_batch.opaque_meshes[count] = opaque_res;
-        self.submission_batch.transparent_meshes[count] = transparent_res;
-        self.submission_batch.chunk_positions[count] = chunk_pos;
-        self.submission_batch.count += 1;
+        if (self.submission_batch.count < batch_size) break;
+        self.submission_batch.mutex.unlock(io);
+        // The batch is full: flush it outside the lock. Submit and queue pushes can
+        // block on the GPU, which must not stall other addMesh calls.
+        try self.submitBatch(io);
     }
+    defer self.submission_batch.mutex.unlock(io);
+
+    const count = self.submission_batch.count;
+    self.submission_batch.cmds[count] = cmd;
+    self.submission_batch.pools[count] = pool;
+    self.submission_batch.opaque_meshes[count] = opaque_res;
+    self.submission_batch.transparent_meshes[count] = transparent_res;
+    self.submission_batch.chunk_positions[count] = chunk_pos;
+    if (opaque_res) |r| self.submission_batch.max_safe_graphics = @max(self.submission_batch.max_safe_graphics, r.safe_graphics);
+    if (transparent_res) |r| self.submission_batch.max_safe_graphics = @max(self.submission_batch.max_safe_graphics, r.safe_graphics);
+    self.submission_batch.count += 1;
 }
 
 fn uploadMeshBuffer(self: *ChunkRenderer, io: std.Io, faces: []const Mesher.Face, cmd: vk.CommandBuffer) !gpu.UploadResult {
@@ -383,20 +391,41 @@ fn uploadMeshBuffer(self: *ChunkRenderer, io: std.Io, faces: []const Mesher.Face
             .gpu_index = 0,
         },
         .staging_slice = staging_slice,
+        .safe_graphics = face_alloc.safe_graphics,
     };
 }
 
 fn submitBatch(self: *ChunkRenderer, io: std.Io) !void {
-    const count = self.submission_batch.count;
-    if (count == 0) return;
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch" });
     defer zone.end();
 
-    const next_val = try self.uploader.submitToTransferQueue(io, self.submission_batch.cmds[0..count]);
+    // Swap the batch out under the lock; submit and queue pushes happen outside it
+    // because they can block on the GPU and must not hold up other addMesh calls.
+    var batch_copy: SubmissionBatch = undefined;
+    const count, const wait_graphics = blk: {
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock" });
+        defer zone_lock.end();
+        
+        self.submission_batch.mutex.lockUncancelable(io);
+        defer self.submission_batch.mutex.unlock(io);
+        if (self.submission_batch.count == 0) return;
+        batch_copy = self.submission_batch;
+        self.submission_batch.count = 0;
+        self.submission_batch.max_safe_graphics = 0;
+        break :blk .{ batch_copy.count, batch_copy.max_safe_graphics };
+    };
 
-    self.submission_batch.count = 0;
+    const next_val = self.uploader.submitToTransferQueue(io, batch_copy.cmds[0..count], wait_graphics) catch |err| {
+        // Nothing was submitted, so staging, regions, and pools can be released safely.
+        for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count]) |opaque_mesh, transparent_mesh| {
+            if (opaque_mesh) |r| self.cancelUpload(io, r);
+            if (transparent_mesh) |r| self.cancelUpload(io, r);
+        }
+        for (batch_copy.pools[0..count]) |pool| self.uploader.returnPool(pool);
+        return err;
+    };
 
-    for (self.submission_batch.opaque_meshes[0..count], self.submission_batch.transparent_meshes[0..count], self.submission_batch.chunk_positions[0..count], self.submission_batch.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
+    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count], batch_copy.chunk_positions[0..count], batch_copy.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
         if (opaque_mesh) |r| self.uploader.bindStaging(io, r.staging_slice, next_val);
         if (transparent_mesh) |r| self.uploader.bindStaging(io, r.staging_slice, next_val);
         try self.pushPendingUpload(io, .{
@@ -416,17 +445,25 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
     while (true) {
         if (try self.pending_uploads_queue.put(io, &.{pending}, 0) == 1) return;
         try self.retireCompletedUploads(io);
-        try std.Io.sleep(io, .fromNanoseconds(0), .awake);
+        // Queue still full: suspend until the transfer queue completes its next
+        // batch, whose retirement frees queue slots. The front item's batch is
+        // always the next pending transfer, so this wait always makes progress.
+        const transfer_done_val = try self.dev.getSemaphoreCounterValue(self.uploader.transfer.semaphore);
+        _ = try self.dev.waitSemaphores(&.{
+            .semaphore_count = 1,
+            .p_semaphores = (&self.uploader.transfer.semaphore)[0..1],
+            .p_values = (&(transfer_done_val + 1))[0..1],
+        }, std.math.maxInt(u64));
     }
 }
 
 fn destroyMeshBuffer(self: *ChunkRenderer, io: std.Io, mesh: gpu.MeshBuffer) void {
-    self.uploader.freeMesh(io, mesh);
+    self.uploader.freeMesh(io, mesh, self.vk_ctx.frame_number.load(.acquire));
 }
 
 fn cancelUpload(self: *ChunkRenderer, io: std.Io, result: gpu.UploadResult) void {
     self.uploader.cancelStaging(io, result.staging_slice);
-    self.uploader.freeMesh(io, result.mesh);
+    self.uploader.freeMesh(io, result.mesh, self.vk_ctx.frame_number.load(.acquire));
 }
 
 fn destroyPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUpload) void {
@@ -535,19 +572,11 @@ pub fn processPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processPendingUploads" });
     defer zone.end();
 
-    {
-        const zone_mutex = tracy.Zone.begin(.{ .src = @src(), .name = "processPendingUploads_lock" });
-        self.submission_batch.mutex.lockUncancelable(io);
-        zone_mutex.end();
-        defer self.submission_batch.mutex.unlock(io);
-        try self.submitBatch(io);
-    }
+    try self.submitBatch(io);
     try self.retireCompletedUploads(io);
 }
 
 pub fn flushPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
-    self.submission_batch.mutex.lockUncancelable(io);
-    defer self.submission_batch.mutex.unlock(io);
     try self.submitBatch(io);
 }
 
@@ -573,7 +602,7 @@ pub fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
             if (entry.free_index) {
                 self.scene.releaseCandidate(io, entry.gpu_index);
             }
-            self.uploader.freeRegion(io, entry.face_offset, entry.face_length);
+            self.uploader.freeRegion(io, entry.face_offset, entry.face_length, current_graphics_val);
             _ = items.swapRemove(i);
         }
     }
