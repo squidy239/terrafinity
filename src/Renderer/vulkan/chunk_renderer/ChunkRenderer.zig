@@ -25,8 +25,6 @@ const fragment_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @e
 const transparent_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("trans_frag_spv")));
 const cull_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("cull_spv")));
 
-const sky_height: f32 = 4096.0;
-
 const RenderBufferKey = union(enum) {
     @"opaque": ChunkPos,
     transparent: ChunkPos,
@@ -111,7 +109,6 @@ const CullState = struct {
 
 /// Per-frame data the composer gathers before chunk passes are recorded.
 pub const PassContext = struct {
-    io: std.Io,
     cmd_buffer: vk.CommandBuffer,
     frame_idx: u32,
     extent: vk.Extent2D,
@@ -120,7 +117,7 @@ pub const PassContext = struct {
     frustum: Frustum,
     total_candidates: u32,
     elapsed_sec: f32,
-    day_length_sec: f32,
+    sun_dir: @Vector(3, f32),
     inside_transparent: bool,
     swapchain_old_layout: vk.ImageLayout,
     swapchain_layout_ptr: ?*vk.ImageLayout,
@@ -840,18 +837,10 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     self.updateCullDescriptorsIfNeeded();
     self.uploader.cmdAcquireFaceBuffer(ctx.cmd_buffer);
 
-    const sun_dir = core.computeSunDirection(ctx.io, ctx.day_length_sec);
-    const sky_t: f32 = @floatCast(@min(1.0, @max(0.0, ctx.view_pos[1] / sky_height)));
-    const sky_color = std.math.lerp(
-        @Vector(4, f32){ 0.0, 0.4, 0.8, 1.0 },
-        @Vector(4, f32){ 0.5, 0.5, 0.5, 1.0 },
-        @as(@Vector(4, f32), @splat(sky_t)),
-    );
-
     const projview_array: [16]f32 = @bitCast(ctx.projview);
     var pc: PushConstants = .{
         .projview = @splat(0),
-        .sun_dir = sun_dir,
+        .sun_dir = ctx.sun_dir,
         .time = ctx.elapsed_sec,
         .mesh_base = 0,
     };
@@ -861,7 +850,7 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         dst.* = projview_array[col * 4 + row];
     }
 
-    self.recordOpaquePass(ctx, pc, sky_color);
+    self.recordOpaquePass(ctx, pc);
     self.recordTransparentPass(ctx, pc);
 
     const scatter_enabled: u32 = @intFromBool(!ctx.inside_transparent);
@@ -870,32 +859,13 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     self.uploader.cmdReleaseFaceBuffer(ctx.cmd_buffer);
 }
 
-fn emitFrameStartBarriers(self: *ChunkRenderer, ctx: *const PassContext) void {
-    const cmd_buffer = ctx.cmd_buffer;
-    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
-    const color_old_layout: vk.ImageLayout = if (ctx.frame_sequence > 0) .shader_read_only_optimal else .undefined;
-    const depth_old_layout: vk.ImageLayout = if (ctx.frame_sequence > 0) .depth_stencil_read_only_optimal else .undefined;
-    const color_src_stage: vk.PipelineStageFlags2 = if (ctx.frame_sequence > 0) .{ .fragment_shader_bit = true } else .{ .top_of_pipe_bit = true };
-    const color_src_access: vk.AccessFlags2 = if (ctx.frame_sequence > 0) .{ .shader_read_bit = true } else .{};
-    const depth_src_stage: vk.PipelineStageFlags2 = if (ctx.frame_sequence > 0) .{ .fragment_shader_bit = true } else .{ .top_of_pipe_bit = true };
-    const depth_src_access: vk.AccessFlags2 = if (ctx.frame_sequence > 0) .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true } else .{};
-
-    const pre_dispatch_img_barriers: [2]vk.ImageMemoryBarrier2 = .{
-        core.makeImageBarrier2(ctx.color_image, color_old_layout, .color_attachment_optimal, color_src_stage, color_src_access, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect),
-        core.makeImageBarrier2(ctx.depth_image, depth_old_layout, .depth_stencil_attachment_optimal, depth_src_stage, depth_src_access, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, ctx.depth_aspect_mask),
-    };
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_dispatch_img_barriers);
-}
-
-fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants, sky_color: @Vector(4, f32)) void {
+fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
     defer zone.end();
-    self.emitFrameStartBarriers(ctx);
-
     if (ctx.total_candidates > 0) self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum, ctx.total_candidates, ctx.view_pos);
 
-    const color_attachment = core.renderingAttachmentColor(ctx.color_view, .clear, .{ sky_color[0], sky_color[1], sky_color[2], sky_color[3] });
-    const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .clear);
+    const color_attachment = core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
+    const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);
 
     self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{color_attachment}, &depth_attachment));
 

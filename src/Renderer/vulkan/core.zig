@@ -12,7 +12,6 @@ const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 // ---------------------------------------------------------------------------
 
 const near_plane: f32 = 0.01;
-const degrees_per_circle: f32 = 360.0;
 
 pub const Camera = struct {
     front_x: std.atomic.Value(f32) = .init(0),
@@ -45,14 +44,6 @@ pub const Camera = struct {
         return .{ .projview = projview, .frustum = Frustum.extractFrustumPlanes(projview) };
     }
 };
-
-pub fn computeSunDirection(io: std.Io, day_length_sec: f32) @Vector(3, f32) {
-    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const now_ns_f = @as(f64, @floatFromInt(now_ns));
-    const sun_angle = @rem(now_ns_f / ((@as(f64, @max(0.001, day_length_sec)) * std.time.ns_per_s) / degrees_per_circle), degrees_per_circle);
-    const sun_rot_mat = zm.Mat4f.rotationRH(.{ .data = @Vector(3, f32){ 1.0, 0.0, 0.0 } }, @floatCast(std.math.degreesToRadians(sun_angle)));
-    return .{ sun_rot_mat.data[1][0], sun_rot_mat.data[1][1], sun_rot_mat.data[1][2] };
-}
 
 fn makeInfReversedZProjRh(fov_y_radians: f32, aspect_w_by_h: f32, z_near: f32) zm.Mat4f {
     const f: f32 = 1.0 / @tan(fov_y_radians / 2.0);

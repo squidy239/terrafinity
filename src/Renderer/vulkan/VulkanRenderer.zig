@@ -17,6 +17,7 @@ const core = @import("core.zig");
 const gpu = @import("gpu.zig");
 const OitCompositor = @import("OitCompositor.zig").OitCompositor;
 const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
+const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
 
 const FrameDebugStats = struct {
     frame_number: u64 = 0,
@@ -63,6 +64,7 @@ uploader: gpu.MeshUploader = undefined,
 scene: gpu.IndirectScene = undefined,
 oit: OitCompositor = undefined,
 chunk: ChunkRenderer = undefined,
+sky: SkyRenderer = undefined,
 
 render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
@@ -116,6 +118,9 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.oit = try OitCompositor.init(allocator, vk_ctx);
     errdefer self.oit.deinit();
 
+    self.sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
+    errdefer self.sky.deinit();
+
     try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, render_options, render_options_lock);
     errdefer self.chunk.deinit(io);
 
@@ -160,6 +165,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     }
 
     self.chunk.deinit(io);
+    self.sky.deinit();
     self.scene.deinit();
     self.uploader.deinit();
     self.destroyRendererSwapchainResources();
@@ -191,6 +197,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     try self.createRenderTargets(actual_extent);
 
     try self.chunk.createPipelines(self.depth_format);
+    try self.sky.createPipelines(self.depth_format);
 }
 
 fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
@@ -278,6 +285,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     const inside_transparent = self.render_options.inside_transparent;
+    const sky_config = self.render_options.sky;
 
     const vp = self.camera.computeViewProjection(aspect, fov);
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
@@ -292,8 +300,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
     const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
 
+    const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
     const pass_ctx: ChunkRenderer.PassContext = .{
-        .io = io,
         .cmd_buffer = cmd_buffer,
         .frame_idx = current_frame,
         .extent = extent,
@@ -302,7 +310,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .frustum = vp.frustum,
         .total_candidates = total_candidates,
         .elapsed_sec = elapsed_sec,
-        .day_length_sec = day_length_sec,
+        .sun_dir = frame_sky.sun_dir,
         .inside_transparent = inside_transparent,
         .swapchain_old_layout = swapchain_old_layout,
         .swapchain_layout_ptr = swapchain_layout_ptr,
@@ -316,6 +324,19 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
     };
+    self.sky.uploadParams(current_frame, &frame_sky.params);
+    self.sky.record(&.{
+        .cmd_buffer = cmd_buffer,
+        .frame_idx = current_frame,
+        .extent = extent,
+        .color_image = self.render_color.image,
+        .color_view = self.render_color.view,
+        .depth_image = self.render_depth.image,
+        .depth_view = self.render_depth.view,
+        .depth_aspect_mask = depth_aspect_mask,
+        .frame_sequence = self.frame_sequence,
+    });
+
     self.chunk.recordPasses(&pass_ctx);
 
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;

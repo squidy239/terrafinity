@@ -19,6 +19,7 @@ layout(location = 2) out vec3 frag_pos;
 layout(location = 3) flat out vec3 sun_dir_norm;
 layout(location = 4) flat out uint side;
 layout(location = 5) flat out uint block_array_layer;
+layout(location = 6) flat out float sun_day;
 
 struct MeshData {
     vec4 absolute_position;
@@ -96,6 +97,8 @@ void main() {
     frag_pos = local_frag_coords + relative_position;
     vec3 absolute_frag_pos = local_frag_coords + absolute_position;
     sun_dir_norm  = normalize(push_consts.pc.sun_dir);
+    // Matches the sky's day factor so terrain darkens with the sun like the sky does.
+    sun_day = smoothstep(-0.1, 0.25, sun_dir_norm.y);
 
     // TODO: Replace hardcoded surface animation with the block material system and a better block surface system
     const uint water_block_type = 2u;

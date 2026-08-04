@@ -9,6 +9,7 @@ layout(location = 1) in vec3 in_coords;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
+layout(location = 6) flat in float sun_day;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 const vec3 face_normals[6] = vec3[](
@@ -35,5 +36,6 @@ void main()
     vec2 tex_coords = vec2(in_coords[tex_coord_axes[side][0]], in_coords[tex_coord_axes[side][1]]) * 2.0;
 
     frag_color = texture(textures[nonuniformEXT(block_array_layer)], (tex_coords + 1.0) / 2.0);
-    frag_color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * frag_color.rgb, frag_color.a);
+    float light = mix(0.3, 0.5, sun_day) + max(dot(normal, -sun_dir_norm), 0.0) * sun_day;
+    frag_color = vec4(light * frag_color.rgb, frag_color.a);
 }
