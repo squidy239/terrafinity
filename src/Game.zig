@@ -18,6 +18,8 @@ const Chunk = @import("world/Chunk.zig");
 const Cone = @import("world/structures/Cone.zig").Cone;
 const Sphere = @import("world/structures/Sphere.zig").Sphere;
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
+const generator_api = @import("world/generators/generator_api.zig");
+const generator_loader = @import("world/generator_loader.zig");
 const World = @import("world/World.zig");
 
 const Game = @This();
@@ -27,7 +29,7 @@ world: World,
 player: *EntityTypes.Player,
 vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
-generator: World.DefaultGenerator,
+generator: ?generator_loader.GeneratorInstance,
 world_storage: World.WorldStorage,
 game_arena: std.heap.ArenaAllocator,
 loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 128),
@@ -149,9 +151,7 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     var parent = chunk_pos;
     _, const highest_level = self.getLevels(io);
     if (parent.level > highest_level) return true;
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
+    const player_pos = self.getPlayerPos(io);
     const render_distance = self.getRenderDistance(io);
     while (parent.level < highest_level) {
         parent = parent.parent();
@@ -280,8 +280,9 @@ pub const Options = struct {
 };
 
 pub const WorldOptions = struct {
-    pub const default: @This() = .{ .generator_config = .default, .world_config = .{} };
-    generator_config: World.DefaultGenerator.Params,
+    pub const default: @This() = .{ .generator_name = "Terrain", .world_config = .{} };
+    /// Name of the generator shared library this world uses.
+    generator_name: []const u8,
     world_config: World.WorldConfig,
 
     pub fn fromWorldFolder(folder: []const u8, io: std.Io, allocator: std.mem.Allocator) !WorldOptions {
@@ -293,13 +294,19 @@ pub const WorldOptions = struct {
         const world_config_file = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
         defer world_config_file.close(io);
 
-        const generator_config_file = try world_folder.openFile(io, "config/DefaultGenerator.zon", .{ .lock = .shared });
-        defer generator_config_file.close(io);
+        var generator_name: []const u8 = "Terrain";
+        const generator_config_file = world_folder.openFile(io, "config/generator.zon", .{ .lock = .shared }) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (generator_config_file) |file| {
+            defer file.close(io);
+            const selection = try utils.loadZon(GeneratorSelection, io, file, allocator, allocator);
+            generator_name = selection.generator;
+        }
 
-        var generator_config = try utils.loadZon(World.DefaultGenerator.Params, io, generator_config_file, allocator, allocator);
-        generator_config.setSeeds(io);
         return .{
-            .generator_config = generator_config,
+            .generator_name = generator_name,
             .world_config = try utils.loadZon(World.WorldConfig, io, world_config_file, allocator, allocator),
         };
     }
@@ -322,22 +329,21 @@ pub const WorldOptions = struct {
 
         var world_config_writer = world_config_file.writer(io, &wbuffer);
 
-        const generator_config_file = try world_folder.createFile(io, "config/DefaultGenerator.zon", .{ .lock = .exclusive });
+        const generator_config_file = try world_folder.createFile(io, "config/generator.zon", .{ .lock = .exclusive });
         defer generator_config_file.close(io);
 
         var generator_config_writer = generator_config_file.writer(io, &gbuffer);
 
         try std.zon.stringify.serialize(self.world_config, .{}, &world_config_writer.interface);
-        try std.zon.stringify.serialize(self.generator_config, .{}, &generator_config_writer.interface);
+        try std.zon.stringify.serialize(GeneratorSelection{ .generator = self.generator_name }, .{}, &generator_config_writer.interface);
 
         try world_config_writer.end();
         try generator_config_writer.end();
     }
+};
 
-    pub fn deinit(self: WorldOptions, allocator: std.mem.Allocator) void {
-        std.zon.parse.free(allocator, self.world_config);
-        std.zon.parse.free(allocator, self.generator_config);
-    }
+const GeneratorSelection = struct {
+    generator: []const u8 = "Terrain",
 };
 
 pub fn init(
@@ -348,6 +354,7 @@ pub fn init(
     game_options_lock: *std.Io.RwLock,
     folder: []const u8,
     vk_ctx: *VulkanContext,
+    generators: *generator_loader.Registry,
 ) !void {
     game.* = .{
         .last_frametime = .now(io, .awake),
@@ -358,7 +365,7 @@ pub fn init(
         .allocator = undefined,
         .vulkan_renderer = undefined,
         .renderer = undefined,
-        .generator = undefined,
+        .generator = null,
         .loaded_or_meshed = .init,
         .world_storage = undefined,
         .world = undefined,
@@ -379,11 +386,39 @@ pub fn init(
         error.FileNotFound => WorldOptions.default,
         else => return err,
     };
-    world_options.generator_config.setSeeds(io);
     try world_options.save(io, folder);
 
-    game.generator = try .init(allocator, game.options.terrain_height_cache_bytes, world_options.generator_config);
-    errdefer World.DefaultGenerator.deinit(game.generator.getSource(), io, allocator, undefined);
+    const generator_plugin = generators.findByName(world_options.generator_name) orelse
+        return error.GeneratorNotFound;
+
+    const config_dir = try std.fs.path.join(allocator, &.{ folder, "config" });
+    errdefer allocator.free(config_dir);
+
+    const generator_config = try generator_plugin.loadConfig(allocator, io, config_dir);
+    errdefer generator_api.free(allocator, generator_config);
+
+    generator_plugin.api.config_set_seeds(&io, generator_config);
+
+    const create_opts: generator_api.CreateOptions = .{
+        .allocator = allocator,
+        .io = io,
+        .max_cache_bytes = game.options.terrain_height_cache_bytes,
+    };
+    const generator_instance = generator_plugin.api.create(&create_opts, generator_config) orelse return error.OutOfMemory;
+    const generator_source = generator_plugin.api.get_source(generator_instance).*;
+
+    var source_deinited = false;
+    errdefer if (!source_deinited) if (generator_source.deinit) |de| de(generator_source, io, allocator, undefined);
+
+    game.generator = .{
+        .generator = generator_plugin,
+        .instance = generator_instance,
+        .config = generator_config,
+        .allocator = allocator,
+        .source = generator_source,
+        .config_dir = config_dir,
+    };
+    try game.generator.?.saveConfig(io);
 
     const storage_path = try std.fs.path.joinZ(game.allocator, &.{ folder, "storage" });
     {
@@ -402,7 +437,7 @@ pub fn init(
         .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
         .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
-        .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.getSource() },
+        .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.?.source },
         .edit_callback = .{
             .function = editorCallback,
             .context = @ptrCast(game),
@@ -410,6 +445,7 @@ pub fn init(
         },
     };
     errdefer game.world.deinit(io, allocator);
+    source_deinited = true;
 
     try game.spawnPlayer(io, allocator);
 }
@@ -417,28 +453,27 @@ pub fn init(
 pub fn deinit(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
-    if (self.mesh_unload_future) |*future| {
-        future.cancel(io) catch {};
-        _ = future.await(io) catch {};
-    }
-    if (self.save_future) |*future| {
-        future.cancel(io) catch {};
-        _ = future.await(io) catch {};
-    }
-    if (self.load_future) |*future| {
-        future.cancel(io) catch {};
-        _ = future.await(io) catch {};
-    }
+    cancelFuture(io, &self.mesh_unload_future);
+    cancelFuture(io, &self.save_future);
+    cancelFuture(io, &self.load_future);
     self.group.cancel(io);
     self.group.await(io) catch {};
 
     self.vulkan_renderer.deinit(io);
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
+    if (self.generator) |*generator| generator.deinit();
     self.loaded_or_meshed.deinit(io, self.allocator);
 
     self.game_arena.deinit();
     self.* = undefined;
+}
+
+fn cancelFuture(io: std.Io, future: anytype) void {
+    if (future.*) |*f| {
+        f.cancel(io) catch {};
+        _ = f.await(io) catch {};
+    }
 }
 
 pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx: Renderer.FrameDrawContext, viewport: @Vector(2, u32)) !void {
@@ -472,33 +507,28 @@ fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
     defer z.end();
     self.options_lock.lockSharedUncancelable(io);
-    const loader_frequency_ms = self.options.loader_frequency_ms;
-    const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
-    const save_frequency_ms = self.options.save_frequency_ms;
-    self.options_lock.unlockShared(io);
+    defer self.options_lock.unlockShared(io);
 
-    if (!self.chunk_load_is_running.load(.seq_cst) and self.last_chunk_load.durationTo(.now(io, .awake)).toMilliseconds() > loader_frequency_ms) {
-        if (self.load_future) |*f| try f.await(io);
+    try restartFuture(io, &self.chunk_load_is_running, &self.last_chunk_load, &self.load_future, self.options.loader_frequency_ms, loadChunks, .{ self, io, allocator });
+    try restartFuture(io, &self.mesh_unload_is_running, &self.last_mesh_unload, &self.mesh_unload_future, self.options.mesh_unload_frequency_ms, unloadChunkMeshes, .{ self, io });
+    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, self.options.save_frequency_ms, saveFuture, .{ self, io });
+}
 
-        self.chunk_load_is_running.store(true, .seq_cst);
-        self.last_chunk_load = .now(io, .awake);
-        self.load_future = io.concurrent(loadChunks, .{ self, io, allocator }) catch io.async(loadChunks, .{ self, io, allocator });
-    }
+fn restartFuture(
+    io: std.Io,
+    running: *std.atomic.Value(bool),
+    last: *std.Io.Timestamp,
+    future: anytype,
+    frequency_ms: u64,
+    comptime function: anytype,
+    args: anytype,
+) !void {
+    if (!running.load(.seq_cst) and last.durationTo(.now(io, .awake)).toMilliseconds() > frequency_ms) {
+        if (future.*) |*f| try f.await(io);
 
-    if (!self.mesh_unload_is_running.load(.seq_cst) and self.last_mesh_unload.durationTo(.now(io, .awake)).toMilliseconds() > mesh_unload_frequency_ms) {
-        if (self.mesh_unload_future) |*f| try f.await(io);
-
-        self.mesh_unload_is_running.store(true, .seq_cst);
-        self.last_mesh_unload = .now(io, .awake);
-        self.mesh_unload_future = io.concurrent(unloadChunkMeshes, .{ self, io }) catch io.async(unloadChunkMeshes, .{ self, io });
-    }
-
-    if (!self.save_is_running.load(.seq_cst) and self.last_save.durationTo(.now(io, .awake)).toMilliseconds() > save_frequency_ms) {
-        if (self.save_future) |*f| try f.await(io);
-
-        self.save_is_running.store(true, .seq_cst);
-        self.last_save = .now(io, .awake);
-        self.save_future = io.concurrent(saveFuture, .{ self, io }) catch io.async(saveFuture, .{ self, io });
+        running.store(true, .seq_cst);
+        last.* = .now(io, .awake);
+        future.* = io.concurrent(function, args) catch io.async(function, args);
     }
 }
 
@@ -509,11 +539,8 @@ fn saveFuture(self: *@This(), io: std.Io) !void {
 
 fn handleErrors(self: *@This()) !void {
     const err = @errorFromInt(self.deferred_error.swap(@intFromError(error.NoError), .seq_cst));
-    switch (err) {
-        error.Canceled => unreachable, // This should not be here
-        error.NoError => {},
-        else => |e| return e,
-    }
+    if (err == error.Canceled) unreachable; // This should not be here
+    if (err != error.NoError) return err;
 }
 
 pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
@@ -536,9 +563,7 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativeP
     defer z.end();
     const sensitivity = self.getMouseSensitivity(io);
 
-    var view_dir_diff: @Vector(2, f32) = @splat(0);
-    view_dir_diff += @Vector(2, f32){ mouse_motion.y, mouse_motion.x };
-    view_dir_diff *= @splat(sensitivity);
+    const view_dir_diff: @Vector(2, f32) = @Vector(2, f32){ mouse_motion.y, mouse_motion.x } * @as(@Vector(2, f32), @splat(sensitivity));
 
     const small_f32 = 0.00001;
 
@@ -581,16 +606,10 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
 }
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
-    if (actions.contains(.hotbar_key_0)) self.selected_inventory_col.store(0, .seq_cst);
-    if (actions.contains(.hotbar_key_1)) self.selected_inventory_col.store(1, .seq_cst);
-    if (actions.contains(.hotbar_key_2)) self.selected_inventory_col.store(2, .seq_cst);
-    if (actions.contains(.hotbar_key_3)) self.selected_inventory_col.store(3, .seq_cst);
-    if (actions.contains(.hotbar_key_4)) self.selected_inventory_col.store(4, .seq_cst);
-    if (actions.contains(.hotbar_key_5)) self.selected_inventory_col.store(5, .seq_cst);
-    if (actions.contains(.hotbar_key_6)) self.selected_inventory_col.store(6, .seq_cst);
-    if (actions.contains(.hotbar_key_7)) self.selected_inventory_col.store(7, .seq_cst);
-    if (actions.contains(.hotbar_key_8)) self.selected_inventory_col.store(8, .seq_cst);
-    if (actions.contains(.hotbar_key_9)) self.selected_inventory_col.store(9, .seq_cst);
+    const first_hotbar = @intFromEnum(Key.Action.hotbar_key_0);
+    inline for (0..10) |i| {
+        if (actions.contains(@enumFromInt(first_hotbar + i))) self.selected_inventory_col.store(i, .seq_cst);
+    }
     if (actions.contains(.hotbar_scroll_up)) _ = self.selected_inventory_row.fetchAdd(1, .seq_cst);
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
 }
@@ -598,12 +617,8 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
 fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "itemAction" });
     defer z.end();
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
-    self.player.view_direction_mutex.lockUncancelable(io);
-    const looking = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
-    self.player.view_direction_mutex.unlock(io);
+    const player_pos = self.getPlayerPos(io);
+    const looking = self.getCameraFront(io);
 
     try self.options_lock.lockShared(io);
     const sphere_size = self.options.sphere_size;
@@ -612,14 +627,9 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
-    if (actions.contains(.use_item_primary)) {
-        const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
-        try editor.placeSamplerShape(.air, cone, 0);
-    }
-    if (actions.contains(.use_item_secondary)) {
-        const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
-        try editor.placeSamplerShape(.stone, cone, 0);
-    }
+    const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
+    if (actions.contains(.use_item_primary)) try editor.placeSamplerShape(.air, cone, 0);
+    if (actions.contains(.use_item_secondary)) try editor.placeSamplerShape(.stone, cone, 0);
     if (actions.contains(.use_item_tertiary)) {
         try editor.placeSamplerShape(sphere_block, Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
     }
@@ -629,9 +639,7 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "flyMove" });
     defer z.end();
-    self.player.view_direction_mutex.lockUncancelable(io);
-    const camera_front = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
-    self.player.view_direction_mutex.unlock(io);
+    const camera_front = self.getCameraFront(io);
     const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
@@ -658,18 +666,14 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const now = std.Io.Timestamp.now(io, .awake);
     const dt_ns = now.nanoseconds -| self.last_frametime.nanoseconds;
     const delta_time_seconds = @as(f32, @floatFromInt(dt_ns)) / std.time.ns_per_s;
-    self.player.view_direction_mutex.lockUncancelable(io);
-    const camera_front = Renderer.cameraFrontFromViewDirection(self.player.view_direction);
-    self.player.view_direction_mutex.unlock(io);
+    const camera_front = self.getCameraFront(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
     const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
     const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
 
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
+    const player_pos = self.getPlayerPos(io);
 
     const ground_dist = try self.player.physics.elements.mover.getShortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
     const on_ground = ground_dist <= 0;
@@ -694,7 +698,19 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     }
 }
 
-pub fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
+pub fn getPlayerPos(self: *@This(), io: std.Io) @Vector(3, f64) {
+    self.player.physics.mutex.lockUncancelable(io);
+    defer self.player.physics.mutex.unlock(io);
+    return self.player.physics.pos;
+}
+
+fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
+    self.player.view_direction_mutex.lockUncancelable(io);
+    defer self.player.view_direction_mutex.unlock(io);
+    return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
+}
+
+fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.lowest_level, self.options.highest_level };
@@ -788,9 +804,7 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
 
 fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
     const lowest_level, const highest_level = self.getLevels(io);
-    self.player.physics.mutex.lockUncancelable(io);
-    const player_pos = self.player.physics.pos;
-    self.player.physics.mutex.unlock(io);
+    const player_pos = self.getPlayerPos(io);
     const gen_distance = self.getRenderDistance(io);
     const inner_gen_radius = self.getInnerGenRadius(io, gen_distance, chunk_pos.level);
     const inside_range = keepLoaded(lowest_level, highest_level, player_pos, chunk_pos, inner_gen_radius, gen_distance);
@@ -798,12 +812,8 @@ fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
 }
 
 fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
-    if (lowest_level) |l| {
-        if (chunk_pos.level < l) return false;
-    }
-    if (highest_level) |h| {
-        if (chunk_pos.level > h) return false;
-    }
+    if (lowest_level) |l| if (chunk_pos.level < l) return false;
+    if (highest_level) |h| if (chunk_pos.level > h) return false;
 
     const player_chunk_pos = @trunc(player_pos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(chunk_pos.level))));
     const chunk_center: @Vector(3, f64) = chunk_pos.position;

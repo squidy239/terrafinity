@@ -712,3 +712,26 @@ const FuzzMultiThreadedAllocator = struct {
 ```
 
 **Write single-threaded first.** A single-threaded fuzz test for the same code is simpler, faster, and deterministic. Get it working and passing before adding the multi-threaded variant. The single-threaded test catches most bugs; the multi-threaded test catches the remainder.
+
+## Generator shared libraries (DLL plugins)
+
+Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen on this libc-linked Linux build). The exe embeds the built `.so` (via `addAnonymousImport` + `@embedFile`, same as the shaders) and writes it into the `generators/` directory at startup.
+
+### C-ABI export rules (Zig 0.16)
+
+- `pub export fn` (and `@export`) require a machine calling convention, and such functions cannot take auto-layout structs by value (`std.mem.Allocator`, `std.Io`, slices, error-union returns). Everything crossing the boundary must be a pointer, a nullable pointer, or a primitive.
+- The pattern that works: export a single `extern struct` vtable of function pointers (`@export(&vtable, .{ .name = "..." })`). Function pointers cross as data with Zig's native calling convention, which is identical on both sides because host and generators are built by the same compiler.
+- Error unions cannot be exported; use nullable-pointer returns (`?*T`, null = failure).
+
+### Zig 0.16 gotchas hit while building this
+
+- `@typeInfo` has no `.slice` variant — slices are `.pointer` with `Pointer.size == .slice`.
+- `std.meta.eql` compares slices by pointer identity (`a.ptr == b.ptr`), NOT content. Any deep comparison over slices must be hand-written.
+- A module's import scope is the directory of its `root_source_file`; a generator file under `src/world/generators/` cannot import `../World.zig`. The `.so` root is a tiny shim at `src/` level that force-references the exports.
+- `std.Io.Writer` has a field named `end` (usize), so `writer.end()` only exists on file writers, not on a bare `std.Io.Writer`.
+- `dvui` widget ids collide when the same `@src()` line runs for multiple params — pass `.id_extra` per param.
+
+- `std.zon.parse.free` crashes on values holding comptime-backed defaults (e.g. slices pointing at `@embedFile` data). Parse into a throwaway `std.heap.ArenaAllocator` and discard the arena instead of freeing field-by-field.
+### Filtered tests
+
+`zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.

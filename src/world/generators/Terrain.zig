@@ -8,6 +8,7 @@ const Block = @import("../Block.zig").Block;
 const BFA = @import("../BufferFirstAllocator.zig");
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
+const generator_api = @import("generator_api.zig");
 const Interpolation = @import("../Interpolation.zig");
 const JitteredGrid = @import("../structures/JitteredGrid.zig").JitteredGrid;
 const Sphere = @import("../structures/Sphere.zig").Sphere;
@@ -110,10 +111,10 @@ pub const DefaultGenerator = struct {
                 io.random(@ptrCast(&random_seed));
                 self.seed = random_seed;
             }
-            self.cave_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 1));
-            self.terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
-            self.large_terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
-            self.large_terrain_noise_warp.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 4));
+            const seed = self.seed.?;
+            inline for (.{ &self.cave_noise, &self.terrain_noise, &self.large_terrain_noise, &self.large_terrain_noise_warp }, .{ 1, 3, 4, 4 }) |noise, salt| {
+                noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% salt));
+            }
         }
 
         pub const default = Params{
@@ -206,10 +207,11 @@ pub const DefaultGenerator = struct {
     };
 
     pub const TreeConfig = struct {
-        placer: JitteredGrid = .{},
+        placer: JitteredGrid(2, i32) = .{},
         enabled: bool = true,
-        size_variation: f32,
-        tree: Tree.Config,
+        size_variation: f32 = 0.5,
+        /// Hidden from the config tree (unreflectable); stays at the defaults.
+        tree: Tree.Config = .small,
     };
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -302,20 +304,13 @@ pub const DefaultGenerator = struct {
         defer caves.end();
         const cave_grid_size: usize = 4;
         const CaveInterp = Interpolation.TrilinearInterpolator3D(f32, cave_grid_size, cave_grid_size, cave_grid_size, ChunkSize, ChunkSize, ChunkSize);
-        var grid: [cave_grid_size][cave_grid_size][cave_grid_size]f32 = undefined;
         const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const one_d_terrain_scale_vec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunk_scale));
         const cave_noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });
         var grid_flat: [cave_grid_size * cave_grid_size * cave_grid_size]f32 = undefined;
         const grid_origin = float_pos * one_d_terrain_scale_vec;
         gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], (1.0 / @as(f32, cave_grid_size - 1)) * one_d_terrain_scale_vec[0]);
-        for (0..cave_grid_size) |z| {
-            for (0..cave_grid_size) |y| {
-                for (0..cave_grid_size) |x| {
-                    grid[z][y][x] = grid_flat[(z * cave_grid_size + y) * cave_grid_size + x];
-                }
-            }
-        }
+        const grid: [cave_grid_size][cave_grid_size][cave_grid_size]f32 = @bitCast(grid_flat);
         cave_noise_zone.end();
 
         const inter = tracy.Zone.begin(.{ .src = @src() });
@@ -404,14 +399,11 @@ pub const DefaultGenerator = struct {
         const two_v: FloatV = @splat(2);
         const half_v: FloatV = @splat(0.5);
         for (0..ChunkSize) |x| {
-            var noise_row: [ChunkSize]f32 = undefined;
-            @memcpy(&noise_row, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize]);
-            const raw: FloatV = @max(@as(FloatV, noise_row), zero_v);
+            const raw: FloatV = @as(FloatV, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize].*);
             const inv = one_v - raw;
             const pow_a = (raw * two_v) * (raw * two_v) * half_v;
             const pow_b = one_v - (inv * two_v) * (inv * two_v) * half_v;
-            @memcpy(&noise_row, large_terrain_noise[x * ChunkSize ..][0..ChunkSize]);
-            const warped = @as(FloatV, noise_row) * @select(f32, raw < half_v, pow_a, pow_b);
+            const warped = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*) * @select(f32, raw < half_v, pow_a, pow_b);
             const bounds = @select(f32, warped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
             const height_row: @Vector(ChunkSize, i32) = @floor(warped * @abs(bounds) * @as(FloatV, @splat(scale)));
             height[x] = @as([ChunkSize]i32, height_row);
@@ -496,6 +488,138 @@ pub const DefaultGenerator = struct {
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 };
+
+pub const generator_api_vtable: generator_api.GeneratorApi = .{
+    .info = &generator_info,
+    .create = &generator_create,
+    .get_source = &generator_get_source,
+    .config_default = &generator_config_default,
+    .config_from_zon = &generator_config_from_zon,
+    .config_set_seeds = &generator_config_set_seeds,
+};
+
+comptime {
+    @export(&generator_api_vtable, .{ .name = generator_api.api_export_name });
+}
+
+const field_specs = .{
+    .seed = .{ .is_seed = true },
+    .terrain_block_randomness = .{ .min = 0, .max = 1 },
+    .terrain_min = .{ .min = -100000, .max = 0 },
+    .terrain_max = .{ .min = 0, .max = 100000 },
+    .sea_level = .{ .min = -1000, .max = 1000 },
+    .cave_threshold = .{ .min = -100, .max = 100 },
+    .cave_expansion_max = .{ .min = 0, .max = 20000 },
+    .cave_expansion_start = .{ .min = 0, .max = 20000 },
+    .terrain_scale = .{ .min = 0.1, .max = 4 },
+    .terrain_noise_balance = .{ .min = 0, .max = 1 },
+    .frequency = .{ .min = 0, .max = 0.5 },
+    .octaves = .{ .min = 1, .max = 16 },
+    .lacunarity = .{ .min = 1, .max = 4 },
+    .gain = .{ .min = 0, .max = 1 },
+    .weighted_strength = .{ .min = 0, .max = 1 },
+    .ping_pong_strength = .{ .min = 0, .max = 8 },
+    .cellular_jitter_mod = .{ .min = 0, .max = 1 },
+    .domain_warp_amp = .{ .min = 0, .max = 2000 },
+    .size_variation = .{ .min = 0, .max = 2 },
+    .box_size = .{ .min = 16, .max = 4096 },
+    .inner_box_size = .{ .min = 16, .max = 4096 },
+    .tree = .{ .skip = true },
+};
+
+const TerrainInstance = struct {
+    generator: DefaultGenerator,
+    arena: std.heap.ArenaAllocator,
+    source: World.ChunkSource,
+};
+
+const generator_info_data: generator_api.GeneratorInfo = .{
+    .name = "Terrain",
+    .description = "Fractal terrain with caves and trees",
+    .version = 1,
+    .api_version = generator_api.ApiVersion,
+};
+
+pub fn generator_info() callconv(.c) *const generator_api.GeneratorInfo {
+    return &generator_info_data;
+}
+
+pub fn generator_config_default(allocator: *const std.mem.Allocator) callconv(.c) ?*generator_api.ConfigTree {
+    return generator_api.fromStruct(DefaultGenerator.Params, allocator.*, &DefaultGenerator.Params.default, field_specs) catch null;
+}
+
+pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {
+    @setEvalBranchQuota(100000000);
+    // The parsed params may hold comptime-backed defaults (e.g. tree presets),
+    // so free them as a whole arena instead of walking the struct.
+    var arena = std.heap.ArenaAllocator.init(allocator.*);
+    defer arena.deinit();
+    const params = std.zon.parse.fromSliceAlloc(DefaultGenerator.Params, arena.allocator(), bytes[0..bytes_len :0], null, .{}) catch return null;
+    return generator_api.fromStruct(DefaultGenerator.Params, allocator.*, &params, field_specs) catch null;
+}
+
+pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.ConfigTree) callconv(.c) void {
+    var random_seed: u64 = undefined;
+    io.*.random(@ptrCast(&random_seed));
+    for (config.params) |*param| {
+        if (param.spec.is_seed and param.value == .u64 and param.value.u64 == 0) {
+            param.value.u64 = random_seed;
+        }
+    }
+}
+
+pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
+    var arena = std.heap.ArenaAllocator.init(opts.allocator);
+    errdefer arena.deinit();
+    var params: DefaultGenerator.Params = .default;
+    generator_api.fromTree(DefaultGenerator.Params, arena.allocator(), config, &params, field_specs) catch return null;
+    if (params.seed == null) params.setSeeds(opts.io);
+    const instance = opts.allocator.create(TerrainInstance) catch return null;
+    errdefer opts.allocator.destroy(instance);
+    instance.* = .{
+        .arena = arena,
+        .generator = DefaultGenerator.init(opts.allocator, opts.max_cache_bytes, params) catch return null,
+        .source = undefined,
+    };
+    instance.source = .{
+        .data = instance,
+        .getTerrainHeight = null,
+        .getBlocks = &instanceGenBlocks,
+        .placeStructures = instanceGenStructures,
+        .deinit = &instanceDeinit,
+        .save = null,
+    };
+    return instance;
+}
+
+pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
+    const self: *TerrainInstance = @ptrCast(@alignCast(instance));
+    return &self.source;
+}
+
+fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+    const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
+    try self.generator.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
+    return .{ .from_disk = false, .structures = false };
+}
+
+fn instanceGenStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void {
+    const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
+    self.generator.generateStructures(io, allocator, world, chunk, chunk_pos) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => return error.Unrecoverable,
+    };
+}
+
+fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
+    _ = io;
+    _ = world;
+    const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
+    self.generator.terrain_height_cache.deinit(allocator);
+    self.arena.deinit();
+    allocator.destroy(self);
+}
 
 test "benchmark generateTerrain" {
     const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;

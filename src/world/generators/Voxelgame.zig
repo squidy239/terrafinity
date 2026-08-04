@@ -5,6 +5,7 @@ const Cache = @import("../../libs/Cache.zig").Cache;
 const Block = @import("../Block.zig").Block;
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
+const generator_api = @import("generator_api.zig");
 const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
 
@@ -77,11 +78,6 @@ pub const Generator = struct {
             .trees = true,
             .scale = 1.0,
         };
-
-        pub fn setSeeds(self: *@This(), io: std.Io) void {
-            _ = io;
-            _ = self;
-        }
     };
 
     pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !Generator {
@@ -98,37 +94,13 @@ pub const Generator = struct {
         };
     }
 
-    pub fn deinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = io;
-        _ = world;
-        const self: *Generator = @ptrCast(@alignCast(source.data));
-        self.terrain_height_cache.deinit(allocator);
-    }
-
-    pub fn getSource(self: *Generator) World.ChunkSource {
-        return .{
-            .data = self,
-            .getTerrainHeight = null,
-            .getBlocks = &genChunkBlocks,
-            .placeStructures = null, // trees are generated inline during block gen
-            .deinit = &deinit,
-            .save = null,
-        };
-    }
-
-    fn genChunkBlocks(
-        source: World.ChunkSource,
+    pub fn genChunk(
+        self: *Generator,
         io: std.Io,
-        allocator: std.mem.Allocator,
-        world: *World,
         blocks: *Chunk.Encoding,
         chunk_pos: ChunkPos,
         grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
-    ) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-        const self: *Generator = @ptrCast(@alignCast(source.data));
-        _ = allocator;
-        _ = world;
-
+    ) error{ Unrecoverable, OutOfMemory, Canceled }!void {
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
         const gen_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "gen" });
         defer gen_zone.end();
@@ -146,10 +118,9 @@ pub const Generator = struct {
             @floatFromInt(Pos[2] * @as(i32, ChunkSize)),
         };
 
-        // If the entire chunk rests below the absolute absolute world zero, it starts as water.
+        // If the entire chunk rests below world zero, it starts as water.
         const fill_block: Block = if (chunk_offset[1] < 0.0) .water else .air;
         @memset(&block_grid, @splat(@splat(fill_block)));
-
         var has_terrain = chunk_offset[1] < 0.0;
 
         const terrain_heights = self.getTerrainHeight(io, .{ Pos[0], Pos[2] }, chunk_pos.level) catch return error.Unrecoverable;
@@ -160,7 +131,6 @@ pub const Generator = struct {
         const tree_chance: f32 = 0.01 * self.params.scale;
 
         for (0..ChunkSize) |xx| {
-            // Absolute global X coordinate for noise evaluation
             const global_x = (chunk_offset[0] + @as(f32, @floatFromInt(xx))) * level_scale;
 
             for (0..ChunkSize) |zz| {
@@ -179,38 +149,18 @@ pub const Generator = struct {
 
                 var yy: usize = 0;
                 while (yy <= @as(usize, @intCast(height))) : (yy += 1) {
-                    // Absolute global Y coordinate
                     const global_y = (chunk_offset[1] + @as(f32, @floatFromInt(yy))) * level_scale;
 
-                    const cave_density: f32 = if (self.params.caves)
-                        self.params.cave_noise.genNoise3D(global_x * self.params.scale, global_y * self.params.scale, global_z * self.params.scale)
-                    else
-                        0.0;
-
-                    if (cave_density < self.params.caveness) {
-                        const yy_i: i32 = @intCast(yy);
-                        block_grid[xx][yy][zz] = if (!is_top_chunk) blk: {
-                            // Scale density logic natively matching world absolute depth
-                            var gm: i32 = @intFromFloat(global_y * self.params.scale);
-                            if (gm <= 0) gm = 1;
-
-                            const rand = rand_impl.random();
-                            if (yy_i == height and
-                                rand.intRangeLessThan(i32, 0, 256) > gm and
-                                Pos[1] >= 0)
-                            {
-                                break :blk .grass;
-                            } else if (yy_i >= dirt_threshold and
-                                rand.intRangeLessThan(i32, 0, 512) > gm)
-                            {
-                                break :blk .dirt;
-                            }
-                            break :blk .stone;
-                        } else .stone;
-                        has_terrain = true;
-                    } else {
-                        block_grid[xx][yy][zz] = .air;
-                    }
+                    block_grid[xx][yy][zz] = self.genBlock(
+                        &rand_impl,
+                        .{ global_x, global_y, global_z },
+                        @intCast(yy),
+                        height,
+                        dirt_threshold,
+                        is_top_chunk,
+                        Pos[1],
+                    );
+                    if (block_grid[xx][yy][zz] != .air) has_terrain = true;
                 }
 
                 if (self.params.trees and
@@ -219,22 +169,14 @@ pub const Generator = struct {
                     block_grid[xx][@intCast(height)][zz] == .grass and
                     rand_impl.random().float(f32) < tree_chance)
                 {
-                    generateTree(
-                        &block_grid,
-                        xx,
-                        zz,
-                        height,
-                        self.params.scale,
-                        level_scale,
-                        &rand_impl,
-                    );
+                    generateTree(&block_grid, xx, zz, height, self.params.scale, level_scale, &rand_impl);
                 }
             }
         }
 
         if (!has_terrain) {
             blocks.merge(.{ .uniform = .air }, grid_buffer);
-            return .{ .from_disk = false, .structures = false };
+            return;
         }
 
         if (Chunk.getUniform(&block_grid)) |uniform_block| {
@@ -242,8 +184,32 @@ pub const Generator = struct {
         } else {
             blocks.mergeGrid(&block_grid, grid_buffer);
         }
+    }
 
-        return .{ .from_disk = false, .structures = false };
+    fn genBlock(
+        self: *const Generator,
+        prng: *std.Random.DefaultPrng,
+        global: [3]f32,
+        yy: i32,
+        height: i32,
+        dirt_threshold: i32,
+        is_top_chunk: bool,
+        pos_y: i32,
+    ) Block {
+        const cave_density: f32 = if (self.params.caves)
+            self.params.cave_noise.genNoise3D(global[0] * self.params.scale, global[1] * self.params.scale, global[2] * self.params.scale)
+        else
+            0.0;
+        if (cave_density >= self.params.caveness) return .air;
+        if (is_top_chunk) return .stone;
+
+        // Scale density logic natively matching world absolute depth
+        const gm = @max(1, @as(i32, @intFromFloat(global[1] * self.params.scale)));
+
+        const rand = prng.random();
+        if (yy == height and rand.intRangeLessThan(i32, 0, 256) > gm and pos_y >= 0) return .grass;
+        if (yy >= dirt_threshold and rand.intRangeLessThan(i32, 0, 512) > gm) return .dirt;
+        return .stone;
     }
 
     fn generateTree(
@@ -277,51 +243,47 @@ pub const Generator = struct {
             }
         }
 
+        const trunk_top = surface_y + @as(i32, @intCast(trunk_height));
         switch (tree_type) {
             0 => { // Spherical canopy
                 var layer_width: i8 = @intCast(canopy_width);
                 while (layer_width >= 0) : (layer_width -= 1) {
-                    const layer_y_i: i32 = surface_y + @as(i32, @intCast(trunk_height)) + @as(i32, layer_width);
-                    if (layer_y_i < 0 or layer_y_i >= ChunkSize) continue;
-                    const layer_y: usize = @intCast(layer_y_i);
-
-                    var dx: i8 = -layer_width;
-                    while (dx <= layer_width) : (dx += 1) {
-                        var dz: i8 = -layer_width;
-                        while (dz <= layer_width) : (dz += 1) {
-                            if (dx *| dx +| dz * dz <= layer_width * layer_width) {
-                                const leaf_x = @as(i32, @intCast(x)) + dx;
-                                const leaf_z = @as(i32, @intCast(z)) + dz;
-                                if (leaf_x >= 0 and leaf_x < ChunkSize and leaf_z >= 0 and leaf_z < ChunkSize) {
-                                    chunk_blocks[@intCast(leaf_x)][layer_y][@intCast(leaf_z)] = .leaves;
-                                }
-                            }
-                        }
-                    }
+                    setLeafLayer(chunk_blocks, x, z, trunk_top + layer_width, layer_width, true);
                 }
             },
             1 => { // Conical canopy
                 var layer: u8 = 0;
                 while (layer < canopy_width) : (layer += 1) {
-                    const layer_y_i: i32 = surface_y + @as(i32, @intCast(trunk_height)) + @as(i32, @intCast(layer));
-                    if (layer_y_i < 0 or layer_y_i >= ChunkSize) continue;
-                    const layer_y: usize = @intCast(layer_y_i);
-                    const current_width = canopy_width - layer;
-
-                    var dx: i8 = -@as(i8, @intCast(current_width));
-                    while (dx <= @as(i8, @intCast(current_width))) : (dx += 1) {
-                        var dz: i8 = -@as(i8, @intCast(current_width));
-                        while (dz <= @as(i8, @intCast(current_width))) : (dz += 1) {
-                            const leaf_x = @as(i32, @intCast(x)) + dx;
-                            const leaf_z = @as(i32, @intCast(z)) + dz;
-                            if (leaf_x >= 0 and leaf_x < ChunkSize and leaf_z >= 0 and leaf_z < ChunkSize) {
-                                chunk_blocks[@intCast(leaf_x)][layer_y][@intCast(leaf_z)] = .leaves;
-                            }
-                        }
-                    }
+                    setLeafLayer(chunk_blocks, x, z, trunk_top + @as(i32, layer), @intCast(canopy_width - layer), false);
                 }
             },
             else => {},
+        }
+    }
+
+    /// Fills a square layer of leaves around the trunk, optionally rounded.
+    fn setLeafLayer(
+        chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
+        x: usize,
+        z: usize,
+        layer_y_i: i32,
+        width: i8,
+        round: bool,
+    ) void {
+        if (layer_y_i < 0 or layer_y_i >= ChunkSize) return;
+        const layer_y: usize = @intCast(layer_y_i);
+
+        var dx: i8 = -width;
+        while (dx <= width) : (dx += 1) {
+            var dz: i8 = -width;
+            while (dz <= width) : (dz += 1) {
+                if (round and dx *| dx +| dz * dz > width * width) continue;
+                const leaf_x = @as(i32, @intCast(x)) + dx;
+                const leaf_z = @as(i32, @intCast(z)) + dz;
+                if (leaf_x >= 0 and leaf_x < ChunkSize and leaf_z >= 0 and leaf_z < ChunkSize) {
+                    chunk_blocks[@intCast(leaf_x)][layer_y][@intCast(leaf_z)] = .leaves;
+                }
+            }
         }
     }
 
@@ -369,3 +331,101 @@ pub const Generator = struct {
         return terrain_heights;
     }
 };
+
+const field_specs = .{
+    .frequency = .{ .min = 0, .max = 0.5 },
+    .octaves = .{ .min = 1, .max = 16 },
+    .lacunarity = .{ .min = 1, .max = 4 },
+    .gain = .{ .min = 0, .max = 1 },
+    .terrain_min = .{ .min = -100000, .max = 0 },
+    .terrain_max = .{ .min = 0, .max = 100000 },
+    .caveness = .{ .min = -1, .max = 1 },
+    .scale = .{ .min = 0.1, .max = 4 },
+};
+
+const generator_info_data: generator_api.GeneratorInfo = .{
+    .name = "Voxelgame",
+    .description = "Voxel-style terrain with noise caves and trees",
+    .version = 1,
+    .api_version = generator_api.ApiVersion,
+};
+
+pub fn generator_info() callconv(.c) *const generator_api.GeneratorInfo {
+    return &generator_info_data;
+}
+
+pub fn generator_config_default(allocator: *const std.mem.Allocator) callconv(.c) ?*generator_api.ConfigTree {
+    return generator_api.fromStruct(Generator.Params, allocator.*, &Generator.Params.default, field_specs) catch null;
+}
+
+pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {
+    @setEvalBranchQuota(100000000);
+    var arena = std.heap.ArenaAllocator.init(allocator.*);
+    defer arena.deinit();
+    const params = std.zon.parse.fromSliceAlloc(Generator.Params, arena.allocator(), bytes[0..bytes_len :0], null, .{}) catch return null;
+    return generator_api.fromStruct(Generator.Params, allocator.*, &params, field_specs) catch null;
+}
+
+pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.ConfigTree) callconv(.c) void {
+    _ = io;
+    _ = config;
+}
+
+const VoxelgameInstance = struct {
+    generator: Generator,
+    source: World.ChunkSource,
+};
+
+pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
+    var params: Generator.Params = .default;
+    generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs) catch return null;
+    const instance = opts.allocator.create(VoxelgameInstance) catch return null;
+    errdefer opts.allocator.destroy(instance);
+    instance.* = .{
+        .generator = Generator.init(opts.allocator, opts.max_cache_bytes, params) catch return null,
+        .source = undefined,
+    };
+    instance.source = .{
+        .data = instance,
+        .getTerrainHeight = null,
+        .getBlocks = &instanceGenBlocks,
+        .placeStructures = null, // trees are generated inline during block gen
+        .deinit = &instanceDeinit,
+        .save = null,
+    };
+    return instance;
+}
+
+pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
+    const self: *VoxelgameInstance = @ptrCast(@alignCast(instance));
+    return &self.source;
+}
+
+pub const generator_api_vtable: generator_api.GeneratorApi = .{
+    .info = &generator_info,
+    .create = &generator_create,
+    .get_source = &generator_get_source,
+    .config_default = &generator_config_default,
+    .config_from_zon = &generator_config_from_zon,
+    .config_set_seeds = &generator_config_set_seeds,
+};
+
+comptime {
+    @export(&generator_api_vtable, .{ .name = generator_api.api_export_name });
+}
+
+fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+    _ = allocator;
+    _ = world;
+    const self: *VoxelgameInstance = @ptrCast(@alignCast(source.data));
+    try self.generator.genChunk(io, blocks, chunk_pos, grid_buffer);
+    return .{ .from_disk = false, .structures = false };
+}
+
+fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
+    _ = io;
+    _ = world;
+    const self: *VoxelgameInstance = @ptrCast(@alignCast(source.data));
+    self.generator.terrain_height_cache.deinit(allocator);
+    allocator.destroy(self);
+}

@@ -10,6 +10,8 @@ const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const Config = @import("main.zig").Config;
 const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
+const generator_api = @import("world/generators/generator_api.zig");
+const generator_loader = @import("world/generator_loader.zig");
 const utils = @import("libs/utils.zig");
 const World = @import("world/World.zig");
 
@@ -23,6 +25,7 @@ vk_ctx: *VulkanContext,
 config: *Config,
 config_lock: *std.Io.RwLock,
 game: *Game,
+generators: *generator_loader.Registry,
 config_path: []const u8,
 worlds_path: []const u8,
 menu_background: dvui.Texture,
@@ -62,8 +65,12 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
     });
 }
 
-pub fn deinit(self: *@This()) void {
+pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
+    if (new_game_config) |config| generator_api.free(allocator, config);
+    if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
+    new_game_config = null;
+    new_game_generator = null;
 }
 
 fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
@@ -224,9 +231,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     defer text.deinit();
 
     const chunk_count = self.game.world.chunks.count();
-
     const grid_count = self.game.world.grids.count();
-
     const chunk_hits = self.game.world.chunks.hits();
     const chunk_misses = self.game.world.chunks.misses();
 
@@ -317,7 +322,23 @@ pub fn crossHair(self: *@This()) void {
     _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
 }
 
-var new_world_options: Game.WorldOptions = .default;
+var new_game_world_config: World.WorldConfig = .{};
+var new_game_generator_name: []const u8 = "Terrain";
+var new_game_generator_name_allocated = false;
+var new_game_generator: ?*generator_loader.Generator = null;
+var new_game_config: ?*generator_api.ConfigTree = null;
+
+fn selectNewGameGenerator(allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {
+    if (new_game_generator == generator) return;
+    if (new_game_config) |config| generator_api.free(allocator, config);
+    if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
+    new_game_config = generator.api.config_default(&allocator) orelse return error.OutOfMemory;
+    new_game_generator = generator;
+    new_game_generator_name = try allocator.dupe(u8, generator.info.name);
+    new_game_generator_name_allocated = true;
+}
+
+const max_generator_dropdown_entries: usize = 16;
 
 pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
@@ -327,36 +348,87 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
 
     const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer options.deinit();
+
+    try self.ensureNewGameGenerator(allocator);
+
     const create = dvui.button(@src(), "Create World", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } });
 
     {
         const world_name_widget = dvui.textEntry(@src(), .{ .placeholder = "World Name" }, .{ .gravity_x = 0.5 });
         defer world_name_widget.deinit();
-        if (create) {
-            const world_name = world_name_widget.textGet();
-            if (world_name.len == 0) return error.WorldNameMissing;
-            if (!std.unicode.utf8ValidateSlice(world_name)) return error.InvalidName;
-            if (std.mem.findScalar(u8, world_name, '/') != null) return error.InvalidName;
-
-            std.log.info("Creating world: {any}\n", .{world_name});
-            var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
-            defer worlds_dir.close(io);
-            var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
-            defer world_folder.close(io);
-            const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
-            defer allocator.free(game_path);
-            try new_world_options.save(io, game_path);
-            try self.openGame(io, allocator, game_path);
-            self.menu_state.ingame = true;
-            self.menu_state.newgame = false;
-            return true;
-        }
+        if (create) return try self.createWorld(io, allocator, world_name_widget.textGet());
     }
+
+    dvui.structUI(@src(), "World", &new_game_world_config, 32, .{}, .{ .background = false, .color_fill = .transparent });
+
+    try self.generatorDropdown(allocator);
+
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
-    dvui.structUI(@src(), "World Options", &new_world_options, 32, .{}, .{ .background = false, .color_fill = .transparent });
+    if (new_game_config) |config| _ = drawConfigTree(allocator, config);
 
     return menu_changed;
+}
+
+fn ensureNewGameGenerator(self: *@This(), allocator: std.mem.Allocator) !void {
+    if (new_game_generator != null) return;
+    const initial = self.generators.findByName(new_game_generator_name) orelse
+        (if (self.generators.generators.items.len > 0) &self.generators.generators.items[0] else null);
+    if (initial) |generator| try selectNewGameGenerator(allocator, generator);
+}
+
+fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_name: []const u8) !bool {
+    if (world_name.len == 0) return error.WorldNameMissing;
+    if (!std.unicode.utf8ValidateSlice(world_name)) return error.InvalidName;
+    if (std.mem.findScalar(u8, world_name, '/') != null) return error.InvalidName;
+
+    std.log.info("Creating world: {any}\n", .{world_name});
+    var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
+    defer worlds_dir.close(io);
+    var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
+    defer world_folder.close(io);
+    const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
+    defer allocator.free(game_path);
+    const world_options: Game.WorldOptions = .{
+        .generator_name = new_game_generator_name,
+        .world_config = new_game_world_config,
+    };
+    try world_options.save(io, game_path);
+    try saveGeneratorConfig(allocator, io, game_path);
+    try self.openGame(io, allocator, game_path);
+    self.menu_state.ingame = true;
+    self.menu_state.newgame = false;
+    return true;
+}
+
+fn saveGeneratorConfig(allocator: std.mem.Allocator, io: std.Io, game_path: []const u8) !void {
+    const generator = new_game_generator orelse return;
+    const config = new_game_config orelse return;
+    generator.api.config_set_seeds(&io, config);
+    const config_dir = try std.fs.path.join(allocator, &.{ game_path, "config" });
+    defer allocator.free(config_dir);
+    try generator.saveConfig(allocator, io, config_dir, config);
+}
+
+fn generatorDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
+    if (self.generators.generators.items.len == 0) return;
+    const count = @min(self.generators.generators.items.len, max_generator_dropdown_entries);
+    var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
+    for (self.generators.generators.items[0..count], 0..) |*generator, i| names_buffer[i] = generator.info.name;
+    const previous = self.selectedGeneratorIndex(count);
+    var choice: usize = previous;
+    dvui.labelNoFmt(@src(), "Generator", .{}, .{ .font = .{ .size = 24 } });
+    _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
+    if (choice != previous) try selectNewGameGenerator(allocator, &self.generators.generators.items[choice]);
+}
+
+fn selectedGeneratorIndex(self: *@This(), count: usize) usize {
+    if (new_game_generator) |selected| {
+        for (self.generators.generators.items[0..count], 0..) |*generator, i| {
+            if (generator == selected) return i;
+        }
+    }
+    return 0;
 }
 
 pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
@@ -426,7 +498,6 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         defer new_game.deinit();
         if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = comptime sliceToBounded("Vera Sans", 50) } })) {
             self.menu_state = .{ .newgame = true };
-            new_world_options = Game.WorldOptions.default;
             return true;
         }
     }
@@ -480,7 +551,7 @@ fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {
 
 fn openGame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
     self.vk_ctx.swapchain_gamma.store(self.config.game_config.render_options.gamma_correction, .monotonic);
-    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx);
+    try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx, self.generators);
     std.log.info("opening game\n", .{});
 }
 
@@ -519,6 +590,111 @@ fn hovered(wd: *const dvui.WidgetData, opts: HoverOptions) bool {
         return true;
     }
     return false;
+}
+
+fn drawConfigTree(allocator: std.mem.Allocator, tree: *generator_api.ConfigTree) bool {
+    const before = tree.*;
+    var id_counter: usize = 0;
+    const box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
+    defer box.deinit();
+    drawParams(allocator, &tree.params, &id_counter);
+    return !generator_api.eql(&before, tree);
+}
+
+fn drawParams(allocator: std.mem.Allocator, params: *[]generator_api.Param, id_counter: *usize) void {
+    for (params.*) |*param| drawParam(allocator, param, id_counter);
+}
+
+fn drawParam(allocator: std.mem.Allocator, param: *generator_api.Param, id_counter: *usize) void {
+    const id = id_counter.*;
+    id_counter.* += 1;
+    switch (param.value) {
+        .group => |*group| {
+            const box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = id });
+            defer box.deinit();
+            configHeading(param.name, id);
+            drawParams(allocator, &group.params, id_counter);
+        },
+        .array => |*array| drawArray(allocator, param.name, array, id),
+        .f32 => configSliderF32(param.name, &param.value.f32, param.spec, id),
+        .i32 => configSliderInt(param.name, &param.value.i32, param.spec, id),
+        .u32 => configSliderUInt(param.name, &param.value.u32, param.spec, id),
+        .u64 => configTextU64(param.name, &param.value.u64, id),
+        .bool => _ = dvui.checkbox(@src(), &param.value.bool, param.name, .{ .id_extra = id }),
+        .string => configTextString(allocator, param.name, &param.value.string, id),
+        .choice => configChoiceDropdown(param.name, param.spec, &param.value.choice, id),
+    }
+}
+
+fn drawArray(allocator: std.mem.Allocator, name: []const u8, array: *generator_api.Array, id: usize) void {
+    configHeading(name, id);
+    for (array.items, 0..) |*item, i| {
+        const item_id = id + i * 2 + 1;
+        const box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .id_extra = item_id });
+        defer box.deinit();
+        if (item.value == .group) {
+            var inner_id: usize = item_id;
+            drawParams(allocator, &item.value.group.params, &inner_id);
+        }
+        if (dvui.button(@src(), "remove", .{}, .{ .id_extra = item_id + 1 })) generator_api.arrayRemove(allocator, array, i);
+    }
+    if (dvui.button(@src(), "add", .{}, .{ .id_extra = id + 100000 })) generator_api.arrayAdd(allocator, array) catch {};
+}
+
+fn configHeading(text: []const u8, id: usize) void {
+    dvui.labelNoFmt(@src(), text, .{}, .{ .font = .{ .size = 24 }, .id_extra = id });
+}
+
+fn configSlider(name: []const u8, value: *f32, spec: generator_api.Spec, default_min: f64, default_max: f64, id: usize) bool {
+    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = id });
+    const min: f32 = @floatCast(spec.min orelse default_min);
+    const max: f32 = @floatCast(spec.max orelse default_max);
+    const step: ?f32 = if (spec.step) |s| @floatCast(s) else null;
+    return dvui.sliderEntry(@src(), null, .{ .value = value, .min = min, .max = max, .interval = step }, .{ .id_extra = id });
+}
+
+fn configSliderF32(name: []const u8, value: *f32, spec: generator_api.Spec, id: usize) void {
+    _ = configSlider(name, value, spec, 0, 1, id);
+}
+
+fn configSliderInt(name: []const u8, value: *i32, spec: generator_api.Spec, id: usize) void {
+    var float_value: f32 = @floatFromInt(value.*);
+    if (configSlider(name, &float_value, spec, -100, 100, id)) value.* = @intFromFloat(float_value);
+}
+
+fn configSliderUInt(name: []const u8, value: *u32, spec: generator_api.Spec, id: usize) void {
+    var float_value: f32 = @floatFromInt(value.*);
+    if (configSlider(name, &float_value, spec, 0, 100, id) and float_value >= 0) value.* = @intFromFloat(float_value);
+}
+
+fn configTextU64(name: []const u8, value: *u64, id: usize) void {
+    var buffer: [24]u8 = undefined;
+    _ = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
+    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = id });
+    defer widget.deinit();
+    const parsed = std.fmt.parseUnsigned(u64, widget.textGet(), 10) catch return;
+    value.* = parsed;
+}
+
+fn configTextString(allocator: std.mem.Allocator, name: []const u8, value: *[]const u8, id: usize) void {
+    var buffer: [256]u8 = undefined;
+    const cur_len = @min(value.len, buffer.len - 1);
+    @memcpy(buffer[0..cur_len], value.*[0..cur_len]);
+    buffer[cur_len] = 0;
+    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = id });
+    defer widget.deinit();
+    const text = widget.textGet();
+    if (std.mem.eql(u8, value.*, text)) return;
+    if (allocator.dupe(u8, text)) |new_value| {
+        if (value.len > 0) allocator.free(value.*);
+        value.* = new_value;
+    } else |_| {}
+}
+
+fn configChoiceDropdown(name: []const u8, spec: generator_api.Spec, choice: *usize, id: usize) void {
+    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = id });
+    if (choice.* >= spec.entries.len and spec.entries.len > 0) choice.* = 0;
+    _ = dvui.dropdown(@src(), spec.entries, .{ .choice = choice }, .{}, .{ .id_extra = id });
 }
 
 pub fn loadFonts(window: *dvui.Window) !void {

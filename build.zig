@@ -55,7 +55,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize != .None,
     });
 
-    setupDependencies(b, root_module, target, optimize, sanitize);
+    const deps = createDependencies(b, target, optimize, sanitize);
+    configureModule(&deps, root_module);
 
     const exe = b.addExecutable(.{
         .name = "terrafinity",
@@ -75,6 +76,31 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
     exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
+
+    for (generator_sources) |generator_source| {
+        const generator = b.addLibrary(.{
+            .name = generator_source.name,
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(generator_source.path),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = sanitize != .None,
+                .link_libc = true,
+            }),
+        });
+        configureModule(&deps, generator.root_module);
+        exe.step.dependOn(&b.addInstallFileWithDir(
+            generator.getEmittedBin(),
+            .{ .custom = "generators" },
+            generator_source.file_name,
+        ).step);
+        // Embed the built library so the executable can write it into the
+        // generators directory at startup, like the config and textures.
+        exe.root_module.addAnonymousImport(generator_source.embed_name, .{
+            .root_source_file = generator.getEmittedBin(),
+        });
+    }
 
     const visible_count = comptime blk: {
         var count: usize = 0;
@@ -115,6 +141,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = root_module,
+        .filters = b.option([]const []const u8, "test_filter", "Only run tests whose name contains the given substrings") orelse &.{},
     });
 
     tests.root_module.addCSourceFile(.{
@@ -127,13 +154,30 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-fn setupDependencies(
+const generator_sources = [_]struct { name: []const u8, path: []const u8, file_name: []const u8, embed_name: []const u8 }{
+    .{ .name = "terrain_generator", .path = "src/terrain_generator.zig", .file_name = "terrain.generator", .embed_name = "terrain_generator_bin" },
+    .{ .name = "voxelgame_generator", .path = "src/voxelgame_generator.zig", .file_name = "voxelgame.generator", .embed_name = "voxelgame_generator_bin" },
+};
+
+const Deps = struct {
+    rocksdb: *std.Build.Module,
+    obj: *std.Build.Module,
+    tracy: *std.Build.Module,
+    tracy_impl: *std.Build.Module,
+    wio: *std.Build.Module,
+    dvui: *std.Build.Module,
+    dvui_vk_renderer: *std.Build.Module,
+    vk: *std.Build.Module,
+    zignal: *std.Build.Module,
+    zm: *std.Build.Module,
+};
+
+fn createDependencies(
     b: *std.Build,
-    root_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     sanitize: ThreadSanitizeMode,
-) void {
+) Deps {
     const dep_rocksdb = b.dependency("rocksdb", .{
         .enable_zstd = true,
         .enable_lz4 = true,
@@ -148,13 +192,10 @@ fn setupDependencies(
     const rocksdb_mod = dep_rocksdb.module("bindings");
     rocksdb_mod.single_threaded = false;
 
-    root_module.addImport("rocksdb", rocksdb_mod);
-
     const obj_mod = b.dependency("obj", .{
         .target = target,
         .optimize = optimize,
     }).module("obj");
-    root_module.addImport("obj", obj_mod);
 
     const tracy_enabled = b.option(
         bool,
@@ -166,22 +207,16 @@ fn setupDependencies(
         .target = target,
         .optimize = optimize,
     });
+    const tracy_mod = tracy.module("tracy");
+    const tracy_impl_mod = if (tracy_enabled) tracy.module("tracy_impl_enabled") else tracy.module("tracy_impl_disabled");
 
-    root_module.addImport("tracy", tracy.module("tracy"));
-    if (tracy_enabled) {
-        root_module.addImport("tracy_impl", tracy.module("tracy_impl_enabled"));
-    } else {
-        root_module.addImport("tracy_impl", tracy.module("tracy_impl_disabled"));
-    }
-
-    const wio = b.dependency("wio", .{
+    const wio_mod = b.dependency("wio", .{
         .target = target,
         .optimize = optimize,
         .enable_opengl = false,
         .enable_vulkan = true,
         .win32_manifest = false,
-    });
-    root_module.addImport("wio", wio.module("wio"));
+    }).module("wio");
 
     // dvui
     const dvui_dep = b.dependency("dvui", .{
@@ -226,29 +261,50 @@ fn setupDependencies(
         .target = target,
         .optimize = optimize,
     });
-    our_backend_mod.addImport("wio", wio.module("wio"));
+    our_backend_mod.addImport("wio", wio_mod);
     our_backend_mod.addImport("dvui", dvui_mod);
     our_backend_mod.addImport("vk", vulkan_zig_mod);
     our_backend_mod.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
 
     // Link custom backend with dvui
     dvui.linkBackend(dvui_mod, our_backend_mod);
-    root_module.addImport("dvui", dvui_mod);
 
-    root_module.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
-
-    const zignal_dependency = b.dependency("zignal", .{
+    const zignal_mod = b.dependency("zignal", .{
         .target = target,
         .optimize = optimize,
-    });
-    root_module.addImport("zignal", zignal_dependency.module("zignal"));
+    }).module("zignal");
 
-    const zm = b.dependency("zm", .{
+    const zm_mod = b.dependency("zm", .{
         .target = target,
         .optimize = optimize,
-    });
-    root_module.addImport("zm", zm.module("zm"));
+    }).module("zm");
+
+    return .{
+        .rocksdb = rocksdb_mod,
+        .obj = obj_mod,
+        .tracy = tracy_mod,
+        .tracy_impl = tracy_impl_mod,
+        .wio = wio_mod,
+        .dvui = dvui_mod,
+        .dvui_vk_renderer = dvui_vk_renderer_mod,
+        .vk = vulkan_zig_mod,
+        .zignal = zignal_mod,
+        .zm = zm_mod,
+    };
+}
+
+fn configureModule(deps: *const Deps, mod: *std.Build.Module) void {
+    mod.addImport("rocksdb", deps.rocksdb);
+    mod.addImport("obj", deps.obj);
+    mod.addImport("tracy", deps.tracy);
+    mod.addImport("tracy_impl", deps.tracy_impl);
+    mod.addImport("wio", deps.wio);
+    mod.addImport("dvui", deps.dvui);
+    mod.addImport("dvui_vk_renderer", deps.dvui_vk_renderer);
+    mod.addImport("vk", deps.vk);
+    mod.addImport("zignal", deps.zignal);
+    mod.addImport("zm", deps.zm);
 
     // Vulkan bindings (for our game renderer - imported as "vulkan")
-    root_module.addImport("vulkan", vulkan_zig_mod);
+    mod.addImport("vulkan", deps.vk);
 }

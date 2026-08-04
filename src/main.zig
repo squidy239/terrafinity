@@ -20,6 +20,7 @@ const Ui = @import("Ui.zig");
 pub const Block = @import("world/Block.zig").Block;
 pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
+pub const generator_loader = @import("world/generator_loader.zig");
 pub const World = @import("world/World.zig");
 
 pub const tracy_options: tracy.Options = .{
@@ -39,6 +40,10 @@ pub fn main(init: std.process.Init) !void {
     var config: Config = try .load(gpa, io, config_path);
     defer config.deinit(gpa);
     try config.save(io, config_path, &config_lock);
+
+    try writeEmbeddedGenerators(io);
+    var generators = try generator_loader.Registry.init(gpa, io, "generators");
+    defer generators.deinit(io);
 
     try wio.init(.{ .allocator = gpa, .io = io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
@@ -98,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     var game: Game = undefined;
     if (options.test_play != null) {
         vk_ctx.swapchain_gamma.store(config.game_config.render_options.gamma_correction, .monotonic);
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, vk_ctx);
+        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, vk_ctx, &generators);
     }
     var ui: Ui = .{
         .window = &window,
@@ -106,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
         .config = &config,
         .config_lock = &config_lock,
         .game = &game,
+        .generators = &generators,
         .menu_state = if (options.test_play != null) .{ .ingame = true } else .{ .main = true },
         .config_path = config_path,
         .worlds_path = worlds_path,
@@ -114,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         .menu_background = undefined,
     };
     try ui.initAssets(gpa);
-    defer ui.deinit();
+    defer ui.deinit(gpa);
     defer if (ui.menu_state.ingame) game.deinit(io);
 
     const start_time: std.Io.Timestamp = .now(io, .awake);
@@ -279,6 +285,36 @@ pub const Config = struct {
 };
 
 var window_size: wio.Size = .{ .height = 480, .width = 640 };
+
+const embedded_generators = [_]struct { file_name: []const u8, bytes: []const u8 }{
+    .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
+    .{ .file_name = "voxelgame.generator", .bytes = @embedFile("voxelgame_generator_bin") },
+};
+
+/// Writes the embedded generator libraries into the `generators` directory so
+/// the registry can load them, mirroring how the config file is created.
+fn writeEmbeddedGenerators(io: std.Io) !void {
+    var generators_dir = std.Io.Dir.cwd().createDirPathOpen(io, "generators", .{}) catch |err| switch (err) {
+        error.PathAlreadyExists => try std.Io.Dir.cwd().openDir(io, "generators", .{}),
+        else => return err,
+    };
+    defer generators_dir.close(io);
+
+    for (embedded_generators) |embedded| {
+        const existing = generators_dir.openFile(io, embedded.file_name, .{ .mode = .read_only }) catch null;
+        if (existing) |file| {
+            defer file.close(io);
+            const stat = try file.stat(io);
+            if (stat.size == embedded.bytes.len) continue;
+        }
+        const file = try generators_dir.createFile(io, embedded.file_name, .{ .lock = .exclusive });
+        defer file.close(io);
+        var buffer: [512]u8 = undefined;
+        var writer = file.writer(io, &buffer);
+        try writer.interface.writeAll(embedded.bytes);
+        try writer.end();
+    }
+}
 
 fn pollInitialSize(io: std.Io, events: *wio.EventQueue, size: *wio.Size) void {
     _ = io;
