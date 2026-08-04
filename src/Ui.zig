@@ -272,9 +272,9 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
-    const settings = dvui.box(
+    const settings = dvui.scrollArea(
         @src(),
-        .{ .dir = .vertical },
+        .{ .vertical_bar = .auto },
         .{
             .expand = .both,
             .background = true,

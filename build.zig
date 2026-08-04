@@ -48,6 +48,14 @@ pub fn build(b: *std.Build) void {
     const cull_spv = cull_cmd.addOutputFileArg("cull.spv");
     cull_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/cull.comp"));
 
+    const sky_vert_cmd = b.addSystemCommand(&shader_cmd);
+    const sky_vert_spv = sky_vert_cmd.addOutputFileArg("sky_vert.spv");
+    sky_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.vert"));
+
+    const sky_frag_cmd = b.addSystemCommand(&shader_cmd);
+    const sky_frag_spv = sky_frag_cmd.addOutputFileArg("sky_frag.spv");
+    sky_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.frag"));
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -69,6 +77,8 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&comp_vert_cmd.step);
     exe.step.dependOn(&comp_frag_cmd.step);
     exe.step.dependOn(&cull_cmd.step);
+    exe.step.dependOn(&sky_vert_cmd.step);
+    exe.step.dependOn(&sky_frag_cmd.step);
 
     exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
     exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
@@ -76,6 +86,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
     exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
+    exe.root_module.addAnonymousImport("sky_vert_spv", .{ .root_source_file = sky_vert_spv });
+    exe.root_module.addAnonymousImport("sky_frag_spv", .{ .root_source_file = sky_frag_spv });
 
     for (generator_sources) |generator_source| {
         const generator = b.addLibrary(.{
@@ -86,7 +98,6 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .sanitize_thread = sanitize != .None,
-                .link_libc = true,
             }),
         });
         configureModule(&deps, generator.root_module);

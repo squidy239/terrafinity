@@ -5,6 +5,7 @@ const Chunk = @import("world/Chunk.zig");
 pub const Vulkan = @import("Renderer/vulkan/VulkanRenderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const ChunkPos = @import("world/World.zig").ChunkPos;
+const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
@@ -83,4 +84,5 @@ pub const RenderOptions = struct {
     present_mode: VulkanContext.PresentMode = .mailbox,
     selected_pack: []const u8 = "default",
     inside_transparent: bool = false,
+    sky: SkyConfig = .default(),
 };

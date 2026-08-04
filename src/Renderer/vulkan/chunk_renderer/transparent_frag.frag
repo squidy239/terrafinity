@@ -10,6 +10,7 @@ layout(location = 2) in vec3 frag_pos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
+layout(location = 6) flat in float sun_day;
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 2, binding = 0) uniform sampler2D opaque_depth_texture;
 
@@ -59,7 +60,8 @@ void main() {
     vec2 tex_coords = vec2(in_coords[tex_coord_axes[side][0]], in_coords[tex_coord_axes[side][1]]) * 2.0;
 
     vec4 unlit_color = texture(textures[nonuniformEXT(block_array_layer)], (tex_coords + 1.0) / 2.0);
-    vec4 color = vec4((0.5 + max(dot(normal, sun_dir_norm), 0.0)) * unlit_color.rgb, unlit_color.a);
+    float light = mix(0.3, 0.5, sun_day) + max(dot(normal, sun_dir_norm), 0.0) * sun_day;
+    vec4 color = vec4(light * unlit_color.rgb, unlit_color.a);
 
     float fragment_depth = 1.0 / gl_FragCoord.w;
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
@@ -69,7 +71,7 @@ void main() {
     float sign = gl_FrontFacing ? 1.0 : -1.0;
 
     MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
-    vec3 absorption = max(vec3(1.0) - mat.volume_color, vec3(0.01));
+    vec3 absorption = max(vec3(1.0) - mat.volume_color * light, vec3(0.01));
     float td = clamp(dist_to_bg * mat.density * sign, -max_optical_depth, max_optical_depth);
     vec3 optical_depth = td * absorption;
 
