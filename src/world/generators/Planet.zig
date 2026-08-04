@@ -24,8 +24,14 @@ const Planet = struct {
     center: @Vector(3, f32),
     /// Mean sphere radius in blocks; the surface sits at radius + bump.
     radius: f32,
-    /// Radius at which water starts, in blocks.
-    sea: f32,
+    /// Upper bound of the surface bump in blocks (radius * 0.05).
+    bump_amp: f32,
+    /// d2 <= stone_floor_sq guarantees deep stone for any bump.
+    stone_floor_sq: f32,
+    /// d2 > solid_ceiling_sq guarantees outside the solid surface for any bump.
+    solid_ceiling_sq: f32,
+    /// d2 <= sea_sq places water.
+    sea_sq: f32,
 };
 
 pub const Generator = struct {
@@ -135,16 +141,95 @@ pub const Generator = struct {
         const block_step: f32 = ratio / @as(f32, ChunkSize);
         const step_v: @Vector(3, f32) = @splat(block_step);
         const half_step: @Vector(3, f32) = @splat(block_step * 0.5);
+        const span = step_v * @as(@Vector(3, f32), @splat(ChunkSize));
 
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
+
+        // Fast paths need every chunk corner in the same grid cell, so the
+        // planet is fixed for the whole chunk.
+        var corner_cells: [8]@Vector(3, i32) = undefined;
+        var one_cell = true;
+        inline for (0..8) |i| {
+            const corner = chunk_start + cornerOffset(i) * span;
+            const cell = self.cellOf(corner) orelse {
+                one_cell = false;
+                break;
+            };
+            corner_cells[i] = cell;
+            if (i > 0 and !@reduce(.And, cell == corner_cells[0])) one_cell = false;
+        }
+
+        if (one_cell) {
+            const cell = corner_cells[0];
+            if (self.planetAt(cell)) |planet| {
+                if (cornersDeepStone(chunk_start, span, planet)) {
+                    blocks.merge(.{ .uniform = .stone }, grid_buffer);
+                    return;
+                }
+                self.fillPlanetChunk(&block_grid, chunk_start, step_v, half_step, planet);
+            } else {
+                self.fillSpaceChunk(&block_grid, chunk_start, step_v, half_step);
+            }
+        } else {
+            self.fillGenericChunk(&block_grid, chunk_start, step_v, half_step);
+        }
+        mergeGrid(blocks, &block_grid, grid_buffer);
+    }
+
+    /// Fills the chunk where every block is tested against the same planet.
+    fn fillPlanetChunk(self: *const Generator, block_grid: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_start: @Vector(3, f32), step_v: @Vector(3, f32), half_step: @Vector(3, f32), planet: Planet) void {
+        const span = step_v * @as(@Vector(3, f32), @splat(ChunkSize));
+        if (chunkDistanceSq(chunk_start, span, planet.center).min > planet.solid_ceiling_sq) {
+            // No block can be solid; only the water shell can cover the chunk.
+            for (0..ChunkSize) |y| {
+                for (0..ChunkSize) |z| {
+                    for (0..ChunkSize) |x| {
+                        const diff = blockCenter(chunk_start, step_v, half_step, x, y, z) - planet.center;
+                        const d2 = @reduce(.Add, diff * diff);
+                        block_grid[x][y][z] = if (d2 <= planet.sea_sq) .water else .air;
+                    }
+                }
+            }
+            return;
+        }
+        // The chunk intersects the surface band; sample the bump noise in one
+        // vectorized pass over the whole chunk.
+        var noise_grid: [ChunkSize * ChunkSize * ChunkSize]f32 = undefined;
+        self.fillNoiseGrid(&noise_grid, chunk_start, half_step, step_v);
+        for (0..ChunkSize) |y| {
+            for (0..ChunkSize) |z| {
+                const noise_base = ChunkSize * (y + ChunkSize * z);
+                for (0..ChunkSize) |x| {
+                    const center = blockCenter(chunk_start, step_v, half_step, x, y, z);
+                    block_grid[x][y][z] = planetBlock(center, planet, noise_grid[noise_base + x]);
+                }
+            }
+        }
+    }
+
+    /// Fills the chunk where no planet can reach any block.
+    fn fillSpaceChunk(self: *const Generator, block_grid: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_start: @Vector(3, f32), step_v: @Vector(3, f32), half_step: @Vector(3, f32)) void {
+        for (0..ChunkSize) |y| {
+            for (0..ChunkSize) |z| {
+                for (0..ChunkSize) |x| {
+                    block_grid[x][y][z] = self.spaceBlock(blockCenter(chunk_start, step_v, half_step, x, y, z));
+                }
+            }
+        }
+    }
+
+    /// Fills the chunk with per-block cell lookups (chunk spans multiple cells).
+    fn fillGenericChunk(self: *const Generator, block_grid: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_start: @Vector(3, f32), step_v: @Vector(3, f32), half_step: @Vector(3, f32)) void {
+        var noise_grid: [ChunkSize * ChunkSize * ChunkSize]f32 = undefined;
+        self.fillNoiseGrid(&noise_grid, chunk_start, half_step, step_v);
         var current_planet: ?Planet = null;
         var current_cell: @Vector(3, i32) = undefined;
         var has_cell = false;
         for (0..ChunkSize) |y| {
             for (0..ChunkSize) |z| {
+                const noise_base = ChunkSize * (y + ChunkSize * z);
                 for (0..ChunkSize) |x| {
-                    const center: @Vector(3, f32) = chunk_start +
-                        @as(@Vector(3, f32), .{ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) }) * step_v + half_step;
+                    const center = blockCenter(chunk_start, step_v, half_step, x, y, z);
                     const cell = self.cellOf(center) orelse {
                         block_grid[x][y][z] = self.spaceBlock(center);
                         continue;
@@ -154,15 +239,29 @@ pub const Generator = struct {
                         has_cell = true;
                         current_planet = self.planetAt(cell);
                     }
-                    block_grid[x][y][z] = if (current_planet) |planet| self.planetBlock(center, planet) else self.spaceBlock(center);
+                    block_grid[x][y][z] = if (current_planet) |planet| planetBlock(center, planet, noise_grid[noise_base + x]) else self.spaceBlock(center);
                 }
             }
         }
-        if (Chunk.getUniform(&block_grid)) |uniform| {
-            blocks.merge(.{ .uniform = uniform }, grid_buffer);
-        } else {
-            blocks.merge(.{ .grid = &block_grid }, grid_buffer);
+    }
+
+    /// Samples the surface bump noise at the chunk's block centers.
+    fn fillNoiseGrid(self: *const Generator, noise_grid: *[ChunkSize * ChunkSize * ChunkSize]f32, chunk_start: @Vector(3, f32), half_step: @Vector(3, f32), step_v: @Vector(3, f32)) void {
+        self.params.surface_noise.fillGrid3D(noise_grid, ChunkSize, ChunkSize, chunk_start[0] + half_step[0], chunk_start[1] + half_step[1], chunk_start[2] + half_step[2], step_v[0]);
+    }
+
+    /// True when the whole chunk box sits inside the planet's guaranteed stone
+    /// region, so every block is deep stone without per-block work. Valid for
+    /// single-cell chunks: the stone region is a ball, and a box whose eight
+    /// corners lie inside a ball lies entirely inside it.
+    fn cornersDeepStone(chunk_start: @Vector(3, f32), span: @Vector(3, f32), planet: Planet) bool {
+        inline for (0..8) |i| {
+            const corner = chunk_start + cornerOffset(i) * span;
+            const diff = corner - planet.center;
+            const d2 = @reduce(.Add, diff * diff);
+            if (d2 > planet.stone_floor_sq) return false;
         }
+        return true;
     }
 
     /// Grid cell containing `center`, or null when the cell lies outside the
@@ -206,18 +305,26 @@ pub const Generator = struct {
             0.03 + 0.07 * (@as(f32, @floatFromInt(h & 0xFF)) / 255.0)
         else
             0;
+        const radius: f32 = @as(f32, @floatFromInt(radius_units)) * @as(f32, ChunkSize);
+        const bump_amp: f32 = radius * 0.05;
         return .{
             .center = @as(@Vector(3, f32), @floatFromInt(center_units)) * @as(@Vector(3, f32), @splat(@as(f32, ChunkSize))) -
                 @as(@Vector(3, f32), @splat(@as(f32, ChunkSize * grid_shift))),
-            .radius = @as(f32, @floatFromInt(radius_units)) * @as(f32, ChunkSize),
-            .sea = @as(f32, @floatFromInt(radius_units)) * @as(f32, ChunkSize) * (1 + ocean_frac),
+            .radius = radius,
+            .bump_amp = bump_amp,
+            .stone_floor_sq = (radius - bump_amp - 5.0) * (radius - bump_amp - 5.0),
+            .solid_ceiling_sq = (radius + bump_amp) * (radius + bump_amp),
+            .sea_sq = (radius * (1 + ocean_frac)) * (radius * (1 + ocean_frac)),
         };
     }
 
-    fn planetBlock(self: *const Generator, center: @Vector(3, f32), planet: Planet) Block {
+    fn planetBlock(center: @Vector(3, f32), planet: Planet, surface_noise: f32) Block {
         const diff = center - planet.center;
         const d2 = @reduce(.Add, diff * diff);
-        const bump = self.params.surface_noise.genNoise3D(center[0], center[1], center[2]) * planet.radius * 0.05;
+        if (d2 <= planet.stone_floor_sq) return .stone;
+        // Outside the bump range no block can be solid; only water or space.
+        if (d2 > planet.solid_ceiling_sq) return if (d2 <= planet.sea_sq) .water else .air;
+        const bump = surface_noise * planet.radius * 0.05;
         const terrain_radius = planet.radius + bump;
         if (d2 <= terrain_radius * terrain_radius) {
             const stone_r = terrain_radius - 5.0;
@@ -227,8 +334,7 @@ pub const Generator = struct {
             if (@abs(diff[1]) > terrain_radius * 0.8) return .snow;
             return .grass;
         }
-        if (d2 <= planet.sea * planet.sea) return .water;
-        return .air;
+        return if (d2 <= planet.sea_sq) .water else .air;
     }
 
     fn spaceBlock(self: *const Generator, center: @Vector(3, f32)) Block {
@@ -243,6 +349,41 @@ fn clampVector(v: @Vector(3, i32), lo: i32, hi: i32) @Vector(3, i32) {
     const lo_v: @Vector(3, i32) = @splat(lo);
     const hi_v: @Vector(3, i32) = @splat(hi);
     return @min(@max(v, lo_v), hi_v);
+}
+
+fn blockCenter(chunk_start: @Vector(3, f32), step_v: @Vector(3, f32), half_step: @Vector(3, f32), x: usize, y: usize, z: usize) @Vector(3, f32) {
+    return chunk_start + @as(@Vector(3, f32), .{ @floatFromInt(x), @floatFromInt(y), @floatFromInt(z) }) * step_v + half_step;
+}
+
+/// Squared distance range from the chunk box to a point. The closest box point
+/// is the clamped center; the farthest is a corner.
+fn chunkDistanceSq(chunk_start: @Vector(3, f32), span: @Vector(3, f32), center: @Vector(3, f32)) struct { min: f32, max: f32 } {
+    const lo = chunk_start;
+    const hi = chunk_start + span;
+    var closest: @Vector(3, f32) = undefined;
+    var farthest: @Vector(3, f32) = undefined;
+    inline for (0..3) |i| {
+        closest[i] = std.math.clamp(center[i], lo[i], hi[i]);
+        farthest[i] = if (@abs(lo[i] - center[i]) > @abs(hi[i] - center[i])) lo[i] else hi[i];
+    }
+    const d_min = closest - center;
+    const d_max = farthest - center;
+    return .{
+        .min = @reduce(.Add, d_min * d_min),
+        .max = @reduce(.Add, d_max * d_max),
+    };
+}
+
+fn cornerOffset(comptime i: usize) @Vector(3, f32) {
+    return .{ @floatFromInt(i & 1), @floatFromInt((i >> 1) & 1), @floatFromInt((i >> 2) & 1) };
+}
+
+fn mergeGrid(blocks: *Chunk.Encoding, block_grid: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
+    if (Chunk.getUniform(block_grid)) |uniform| {
+        blocks.merge(.{ .uniform = uniform }, grid_buffer);
+    } else {
+        blocks.merge(.{ .grid = block_grid }, grid_buffer);
+    }
 }
 
 fn nextPowerOfTwo(comptime T: type, value: T) T {
