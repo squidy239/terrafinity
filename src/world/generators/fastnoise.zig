@@ -308,11 +308,11 @@ pub fn Noise(comptime Float: type) type {
             };
         }
         pub inline fn domainWarp2D(state: *const State, x: *Float, y: *Float) void {
-            switch (state.fractal_type) {
-                .progressive => state.domainWarpFractalProgressive2D(x, y),
-                .independent => state.domainWarpFractalIndependent2D(x, y),
-                else => state.domainWarpSingle2D(x, y),
-            }
+            var xs: @Vector(1, Float) = .{x.*};
+            var ys: @Vector(1, Float) = .{y.*};
+            state.warpVector2D(1, &xs, &ys);
+            x.* = xs[0];
+            y.* = ys[0];
         }
         pub inline fn domainWarp3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
             switch (state.fractal_type) {
@@ -321,14 +321,23 @@ pub fn Noise(comptime Float: type) type {
                 else => state.domainWarpSingle3D(x, y, z),
             }
         }
+
+        /// Fills `out_xs`/`out_ys` with the 2D domain warp of the given coordinates.
+        ///
+        /// `out_xs[i]`/`out_ys[i]` is `xs[i]`/`ys[i]` warped by the configured domain
+        /// warp; the slices must have equal lengths.
+        pub fn fillWarp2DGrid(state: *const State, out_xs: []Float, out_ys: []Float, xs: []const Float, ys: []const Float) void {
+            std.debug.assert(out_xs.len == out_ys.len and out_xs.len == xs.len and out_xs.len == ys.len);
+            warpGrid2DImpl(GridLanes, state, out_xs, out_ys, xs, ys);
+        }
         // End of public API
 
-        inline fn doSingleDomainWarp2D(state: *const State, seed: i32, amp: Float, freq: Float, x: Float, y: Float, xp: *Float, yp: *Float) void {
+        inline fn doSingleDomainWarp2DVec(state: *const State, comptime N: usize, seed: i32, amp: Float, freq: Float, x: @Vector(N, Float), y: @Vector(N, Float), xp: *@Vector(N, Float), yp: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
             switch (state.domain_warp_type) {
-                .simplex => singleDomainWarpSimplexGradient(seed, amp * 38.283687591552734375, freq, x, y, xp, yp, false),
-                .simplex_reduced => singleDomainWarpSimplexGradient(seed, amp * 16.0, freq, x, y, xp, yp, true),
-                .basic_grid => singleDomainWarpBasicGrid2D(seed, amp, freq, x, y, xp, yp),
+                .simplex => singleDomainWarpSimplexGradientVec(N, seed, amp * 38.283687591552734375, freq, x, y, xp, yp),
+                .simplex_reduced => singleDomainWarpSimplexGradientVec(N, seed, amp * 16.0, freq, x, y, xp, yp),
+                .basic_grid => singleDomainWarpBasicGrid2DVec(N, seed, amp, freq, x, y, xp, yp),
             }
         }
         inline fn doSingleDomainWarp3D(state: *const State, seed: i32, amp: Float, freq: Float, x: Float, y: Float, z: Float, xp: *Float, yp: *Float, zp: *Float) void {
@@ -345,7 +354,7 @@ pub fn Noise(comptime Float: type) type {
             @setFloatMode(.optimized);
             const n = 0.5 * (1.0 + @max(-1.0, @min(1.0, noise)));
             return switch (@typeInfo(T)) {
-                .int => @intFromFloat(@as(Float, @floatFromInt(min)) + n * (@as(Float, @floatFromInt(max)) - @as(Float, @floatFromInt(min)))),
+                .int => @trunc(@as(Float, @floatFromInt(min)) + n * (@as(Float, @floatFromInt(max)) - @as(Float, @floatFromInt(min)))),
                 .float => min + @as(T, @floatCast(n * @as(Float, @floatCast(max - min)))),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
@@ -670,31 +679,87 @@ pub fn Noise(comptime Float: type) type {
             return @select(Float, pos_u, u, -u) + @select(Float, pos_v, v, -v);
         }
 
-        inline fn gradCoordOut2D(seed: i32, x_primed: i32, y_primed: i32, xo: *Float, yo: *Float) void {
-            const hash: usize = @intCast(hash2D(seed, x_primed, y_primed) & (255 << 1));
-            xo.* = rand_2d[hash];
-            yo.* = rand_2d[hash | 1];
-        }
         inline fn gradCoordOut3D(seed: i32, x_primed: i32, y_primed: i32, z_primed: i32, xo: *Float, yo: *Float, zo: *Float) void {
             const hash: usize = @intCast(hash3D(seed, x_primed, y_primed, z_primed) & (255 << 2));
             xo.* = rand_3d[hash];
             yo.* = rand_3d[hash | 1];
             zo.* = rand_3d[hash | 2];
         }
-        inline fn gradCoordDual2D(seed: i32, x_primed: i32, y_primed: i32, xd: Float, yd: Float, xo: *Float, yo: *Float) void {
-            const hash = hash2D(seed, x_primed, y_primed);
-            const index1: usize = @intCast(hash & (127 << 1));
-            const index2: usize = @intCast((hash >> 7) & (255 << 1));
+        // The 2D warp gradient table is 16 direction pairs (22.5-degree steps)
+        // repeated eight times, so the four low hash bits pick the unique pair.
+        const warp_gradient_pairs: [16][2]Float = .{
+            .{ 0.130526192220052, 0.99144486137381 },
+            .{ 0.38268343236509, 0.923879532511287 },
+            .{ 0.608761429008721, 0.793353340291235 },
+            .{ 0.793353340291235, 0.608761429008721 },
+            .{ 0.923879532511287, 0.38268343236509 },
+            .{ 0.99144486137381, 0.130526192220051 },
+            .{ 0.99144486137381, -0.130526192220051 },
+            .{ 0.923879532511287, -0.38268343236509 },
+            .{ 0.793353340291235, -0.60876142900872 },
+            .{ 0.608761429008721, -0.793353340291235 },
+            .{ 0.38268343236509, -0.923879532511287 },
+            .{ 0.130526192220052, -0.99144486137381 },
+            .{ -0.130526192220052, -0.99144486137381 },
+            .{ -0.38268343236509, -0.923879532511287 },
+            .{ -0.608761429008721, -0.793353340291235 },
+            .{ -0.793353340291235, -0.608761429008721 },
+        };
 
-            const xg: Float = gradients_2d[index1];
-            const yg: Float = gradients_2d[index1 | 1];
-            const value = xd * xg + yd * yg;
+        fn GradPair(comptime N: usize) type {
+            return struct { xg: @Vector(N, Float), yg: @Vector(N, Float) };
+        }
 
-            const xgo: Float = rand_2d[index2];
-            const ygo: Float = rand_2d[index2 | 1];
+        inline fn gradient2DTableVec(comptime N: usize, hash: @Vector(N, i32)) GradPair(N) {
+            @setFloatMode(.optimized);
+            const IntV = @Vector(N, i32);
+            const idx = (hash >> splat(IntV, 1)) & splat(IntV, 0xF);
+            return gradientPairSelect(N, 0, 16, idx);
+        }
 
-            xo.* = value * xgo;
-            yo.* = value * ygo;
+        inline fn gradientPairSelect(comptime N: usize, comptime lo: usize, comptime hi: usize, idx: @Vector(N, i32)) GradPair(N) {
+            @setFloatMode(.optimized);
+            const IntV = @Vector(N, i32);
+            const FloatV = @Vector(N, Float);
+            if (hi - lo == 1) {
+                return .{ .xg = splat(FloatV, warp_gradient_pairs[lo][0]), .yg = splat(FloatV, warp_gradient_pairs[lo][1]) };
+            }
+            const mid = (lo + hi) / 2;
+            const bit = comptime std.math.log2_int(usize, hi - lo - 1);
+            const take_hi = (idx & splat(IntV, @as(i32, 1) << bit)) != splat(IntV, 0);
+            const lo_pair = gradientPairSelect(N, lo, mid, idx);
+            const hi_pair = gradientPairSelect(N, mid, hi, idx);
+            return .{
+                .xg = @select(Float, take_hi, hi_pair.xg, lo_pair.xg),
+                .yg = @select(Float, take_hi, hi_pair.yg, lo_pair.yg),
+            };
+        }
+
+        // Zig has no vector gather, so the 256-entry rand_2d table is replaced by
+        // a unit vector derived from two independent hash values. The result is
+        // statistically equivalent but differs from FastNoise's table output.
+        inline fn randomUnit2DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32)) struct { xo: @Vector(N, Float), yo: @Vector(N, Float) } {
+            @setFloatMode(.optimized);
+            const FloatV = @Vector(N, Float);
+            const h1 = hash2DVec(N, seed, x_primed, y_primed);
+            const h2 = hash2DVec(N, seed +% 1293373, x_primed, y_primed);
+            const vx = floatFromInt(FloatV, h1) * splat(FloatV, 1.0 / 2147483648.0);
+            const vy = floatFromInt(FloatV, h2) * splat(FloatV, 1.0 / 2147483648.0);
+            const len = @sqrt(vx * vx + vy * vy);
+            const ok = len > splat(FloatV, 1e-30);
+            return .{
+                .xo = @select(Float, ok, vx / len, splat(FloatV, 1.0)),
+                .yo = @select(Float, ok, vy / len, splat(FloatV, 0.0)),
+            };
+        }
+
+        inline fn gradCoordDual2DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32), xd: @Vector(N, Float), yd: @Vector(N, Float)) struct { xo: @Vector(N, Float), yo: @Vector(N, Float) } {
+            @setFloatMode(.optimized);
+            const hash = hash2DVec(N, seed, x_primed, y_primed);
+            const grad = gradient2DTableVec(N, hash);
+            const value = xd * grad.xg + yd * grad.yg;
+            const offset = randomUnit2DVec(N, seed, x_primed, y_primed);
+            return .{ .xo = value * offset.xo, .yo = value * offset.yo };
         }
         inline fn gradCoordDual3D(seed: i32, x_primed: i32, y_primed: i32, z_primed: i32, xd: Float, yd: Float, zd: Float, xo: *Float, yo: *Float, zo: *Float) void {
             const hash = hash3D(seed, x_primed, y_primed, z_primed);
@@ -745,8 +810,8 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x0: IntV = @intFromFloat(@floor(x));
-            const y0: IntV = @intFromFloat(@floor(y));
+            const x0: IntV = @floor(x);
+            const y0: IntV = @floor(y);
             const xd0: FloatV = x - floatFromInt(FloatV, x0);
             const yd0: FloatV = y - floatFromInt(FloatV, y0);
             const xd1: FloatV = xd0 - splat(FloatV, 1);
@@ -771,9 +836,9 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x0: IntV = @intFromFloat(@floor(x));
-            const y0: IntV = @intFromFloat(@floor(y));
-            const z0: IntV = @intFromFloat(@floor(z));
+            const x0: IntV = @floor(x);
+            const y0: IntV = @floor(y);
+            const z0: IntV = @floor(z);
             const xd0: FloatV = x - floatFromInt(FloatV, x0);
             const yd0: FloatV = y - floatFromInt(FloatV, y0);
             const zd0: FloatV = z - floatFromInt(FloatV, z0);
@@ -807,8 +872,8 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x0: IntV = @intFromFloat(@floor(x));
-            const y0: IntV = @intFromFloat(@floor(y));
+            const x0: IntV = @floor(x);
+            const y0: IntV = @floor(y);
             const xs = interpHermiteVec(N, x - floatFromInt(FloatV, x0));
             const ys = interpHermiteVec(N, y - floatFromInt(FloatV, y0));
 
@@ -828,9 +893,9 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x0: IntV = @intFromFloat(@floor(x));
-            const y0: IntV = @intFromFloat(@floor(y));
-            const z0: IntV = @intFromFloat(@floor(z));
+            const x0: IntV = @floor(x);
+            const y0: IntV = @floor(y);
+            const z0: IntV = @floor(z);
             const xs = interpHermiteVec(N, x - floatFromInt(FloatV, x0));
             const ys = interpHermiteVec(N, y - floatFromInt(FloatV, y0));
             const zs = interpHermiteVec(N, z - floatFromInt(FloatV, z0));
@@ -857,8 +922,8 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x1: IntV = @intFromFloat(@floor(x));
-            const y1: IntV = @intFromFloat(@floor(y));
+            const x1: IntV = @floor(x);
+            const y1: IntV = @floor(y);
             const xs: FloatV = x - floatFromInt(FloatV, x1);
             const ys: FloatV = y - floatFromInt(FloatV, y1);
 
@@ -884,9 +949,9 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const x1: IntV = @intFromFloat(@floor(x));
-            const y1: IntV = @intFromFloat(@floor(y));
-            const z1: IntV = @intFromFloat(@floor(z));
+            const x1: IntV = @floor(x);
+            const y1: IntV = @floor(y);
+            const z1: IntV = @floor(z);
             const xs: FloatV = x - floatFromInt(FloatV, x1);
             const ys: FloatV = y - floatFromInt(FloatV, y1);
             const zs: FloatV = z - floatFromInt(FloatV, z1);
@@ -932,8 +997,8 @@ pub fn Noise(comptime Float: type) type {
             const skew_delta = k_skew2 * (x + y);
             const x_skewed = x + skew_delta;
             const y_skewed = y + skew_delta;
-            const x_skewed_base: IntV = @intFromFloat(@floor(x_skewed));
-            const y_skewed_base: IntV = @intFromFloat(@floor(y_skewed));
+            const x_skewed_base: IntV = @floor(x_skewed);
+            const y_skewed_base: IntV = @floor(y_skewed);
             const dx_skewed = x_skewed - floatFromInt(FloatV, x_skewed_base);
             const dy_skewed = y_skewed - floatFromInt(FloatV, y_skewed_base);
             const x_primed_base: IntV = x_skewed_base *% splat(IntV, prime_x);
@@ -975,9 +1040,9 @@ pub fn Noise(comptime Float: type) type {
             const x_skewed = x + skew_delta;
             const y_skewed = y + skew_delta;
             const z_skewed = z + skew_delta;
-            const x_skewed_base: IntV = @intFromFloat(@floor(x_skewed));
-            const y_skewed_base: IntV = @intFromFloat(@floor(y_skewed));
-            const z_skewed_base: IntV = @intFromFloat(@floor(z_skewed));
+            const x_skewed_base: IntV = @floor(x_skewed);
+            const y_skewed_base: IntV = @floor(y_skewed);
+            const z_skewed_base: IntV = @floor(z_skewed);
             const dx_skewed = x_skewed - floatFromInt(FloatV, x_skewed_base);
             const dy_skewed = y_skewed - floatFromInt(FloatV, y_skewed_base);
             const dz_skewed = z_skewed - floatFromInt(FloatV, z_skewed_base);
@@ -1044,8 +1109,8 @@ pub fn Noise(comptime Float: type) type {
             const skew_delta = k_skew2 * (x + y);
             const x_skewed = x + skew_delta;
             const y_skewed = y + skew_delta;
-            const x_skewed_base: IntV = @intFromFloat(@floor(x_skewed));
-            const y_skewed_base: IntV = @intFromFloat(@floor(y_skewed));
+            const x_skewed_base: IntV = @floor(x_skewed);
+            const y_skewed_base: IntV = @floor(y_skewed);
             const dx_skewed = x_skewed - floatFromInt(FloatV, x_skewed_base);
             const dy_skewed = y_skewed - floatFromInt(FloatV, y_skewed_base);
             const x_primed_base: IntV = x_skewed_base *% splat(IntV, prime_x);
@@ -1116,9 +1181,9 @@ pub fn Noise(comptime Float: type) type {
             const x_skewed = x + skew_delta;
             const y_skewed = y + skew_delta;
             const z_skewed = z + skew_delta;
-            var x_skewed_base: IntV = @intFromFloat(@floor(x_skewed));
-            var y_skewed_base: IntV = @intFromFloat(@floor(y_skewed));
-            var z_skewed_base: IntV = @intFromFloat(@floor(z_skewed));
+            var x_skewed_base: IntV = @floor(x_skewed);
+            var y_skewed_base: IntV = @floor(y_skewed);
+            var z_skewed_base: IntV = @floor(z_skewed);
             var dx_skewed = x_skewed - floatFromInt(FloatV, x_skewed_base);
             var dy_skewed = y_skewed - floatFromInt(FloatV, y_skewed_base);
             var dz_skewed = z_skewed - floatFromInt(FloatV, z_skewed_base);
@@ -1327,8 +1392,8 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const xr: IntV = @intFromFloat(@round(x));
-            const yr: IntV = @intFromFloat(@round(y));
+            const xr: IntV = @round(x);
+            const yr: IntV = @round(y);
             var dist0: FloatV = @splat(std.math.floatMax(Float));
             var dist1: FloatV = @splat(std.math.floatMax(Float));
             var closest_hash: IntV = @splat(0);
@@ -1374,9 +1439,9 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
 
-            const xr: IntV = @intFromFloat(@round(x));
-            const yr: IntV = @intFromFloat(@round(y));
-            const zr: IntV = @intFromFloat(@round(z));
+            const xr: IntV = @round(x);
+            const yr: IntV = @round(y);
+            const zr: IntV = @round(z);
             var dist0: FloatV = @splat(std.math.floatMax(Float));
             var dist1: FloatV = @splat(std.math.floatMax(Float));
             var closest_hash: IntV = @splat(0);
@@ -1555,11 +1620,12 @@ pub fn Noise(comptime Float: type) type {
 
         // Domain Warp Coordinate Transforms
 
-        fn transformDomainWarpCoordinate2D(state: *const State, x: *Float, y: *Float) void {
+        inline fn transformDomainWarpCoordinate2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
+            const FloatV = @Vector(N, Float);
             switch (state.domain_warp_type) {
                 .simplex, .simplex_reduced => {
-                    const t: Float = (x.* + y.*) * f2;
+                    const t = (x.* + y.*) * splat(FloatV, f2);
                     x.* += t;
                     y.* += t;
                 },
@@ -1598,13 +1664,13 @@ pub fn Noise(comptime Float: type) type {
         }
         // Domain Warp Single Wrapper
 
-        fn domainWarpSingle2D(state: *const State, x: *Float, y: *Float) void {
+        fn domainWarpSingle2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
             const amp = state.domain_warp_amp;
-            var xs: Float = x.*;
-            var ys: Float = y.*;
-            state.transformDomainWarpCoordinate2D(&xs, &ys);
-            state.doSingleDomainWarp2D(state.seed, amp, state.frequency, xs, ys, x, y);
+            var xs: @Vector(N, Float) = x.*;
+            var ys: @Vector(N, Float) = y.*;
+            state.transformDomainWarpCoordinate2DVec(N, &xs, &ys);
+            state.doSingleDomainWarp2DVec(N, state.seed, amp, state.frequency, xs, ys, x, y);
         }
         fn domainWarpSingle3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
             @setFloatMode(.optimized);
@@ -1617,15 +1683,15 @@ pub fn Noise(comptime Float: type) type {
         }
         // Domain Warp Fractal Progressive
 
-        fn domainWarpFractalProgressive2D(state: *const State, x: *Float, y: *Float) void {
+        fn domainWarpFractalProgressive2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
             var amp = state.domain_warp_amp * state.calculateFractalBounding();
             var freq = state.frequency;
             for (0..state.octaves) |i| {
-                var xs: Float = x.*;
-                var ys: Float = y.*;
-                state.transformDomainWarpCoordinate2D(&xs, &ys);
-                state.doSingleDomainWarp2D(state.seed +% @as(i32, @intCast(i)), amp, freq, xs, ys, x, y);
+                var xs: @Vector(N, Float) = x.*;
+                var ys: @Vector(N, Float) = y.*;
+                state.transformDomainWarpCoordinate2DVec(N, &xs, &ys);
+                state.doSingleDomainWarp2DVec(N, state.seed +% @as(i32, @intCast(i)), amp, freq, xs, ys, x, y);
                 amp *= state.gain;
                 freq *= state.lacunarity;
             }
@@ -1646,15 +1712,15 @@ pub fn Noise(comptime Float: type) type {
         }
         // Domain Warp Fractal Independent
 
-        fn domainWarpFractalIndependent2D(state: *const State, x: *Float, y: *Float) void {
+        fn domainWarpFractalIndependent2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
-            var xs: Float = x.*;
-            var ys: Float = y.*;
-            state.transformDomainWarpCoordinate2D(&xs, &ys);
+            var xs: @Vector(N, Float) = x.*;
+            var ys: @Vector(N, Float) = y.*;
+            state.transformDomainWarpCoordinate2DVec(N, &xs, &ys);
             var amp = state.domain_warp_amp * state.calculateFractalBounding();
             var freq = state.frequency;
             for (0..state.octaves) |i| {
-                state.doSingleDomainWarp2D(state.seed +% @as(i32, @intCast(i)), amp, freq, xs, ys, x, y);
+                state.doSingleDomainWarp2DVec(N, state.seed +% @as(i32, @intCast(i)), amp, freq, xs, ys, x, y);
                 amp *= state.gain;
                 freq *= state.lacunarity;
             }
@@ -1675,36 +1741,35 @@ pub fn Noise(comptime Float: type) type {
         }
         // Domain Warp Basic Grid
 
-        fn singleDomainWarpBasicGrid2D(seed: i32, warp_amp: Float, frequency: Float, x: Float, y: Float, xp: *Float, yp: *Float) void {
+        fn singleDomainWarpBasicGrid2DVec(comptime N: usize, seed: i32, warp_amp: Float, frequency: Float, x: @Vector(N, Float), y: @Vector(N, Float), xp: *@Vector(N, Float), yp: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
-            const xf = x * frequency;
-            const yf = y * frequency;
+            const FloatV = @Vector(N, Float);
+            const IntV = @Vector(N, i32);
+            const xf = x * splat(FloatV, frequency);
+            const yf = y * splat(FloatV, frequency);
 
-            var x0: i32 = @floor(xf);
-            var y0: i32 = @floor(yf);
+            const x0: IntV = @floor(xf);
+            const y0: IntV = @floor(yf);
+            const xs = interpHermiteVec(N, xf - floatFromInt(FloatV, x0));
+            const ys = interpHermiteVec(N, yf - floatFromInt(FloatV, y0));
 
-            const xs = interpHermite(xf - @as(Float, @floatFromInt(x0)));
-            const ys = interpHermite(yf - @as(Float, @floatFromInt(y0)));
+            const x0p = x0 *% splat(IntV, prime_x);
+            const y0p = y0 *% splat(IntV, prime_y);
+            const x1p = x0p +% splat(IntV, prime_x);
+            const y1p = y0p +% splat(IntV, prime_y);
 
-            x0 *%= prime_x;
-            y0 *%= prime_y;
-            const x1 = x0 +% prime_x;
-            const y1 = y0 +% prime_y;
+            const o00 = randomUnit2DVec(N, seed, x0p, y0p);
+            const o10 = randomUnit2DVec(N, seed, x1p, y0p);
+            const lx0x = lerp(o00.xo, o10.xo, xs);
+            const ly0x = lerp(o00.yo, o10.yo, xs);
 
-            var idx0: usize = @intCast(hash2D(seed, x0, y0) & (255 << 1));
-            var idx1: usize = @intCast(hash2D(seed, x1, y0) & (255 << 1));
+            const o01 = randomUnit2DVec(N, seed, x0p, y1p);
+            const o11 = randomUnit2DVec(N, seed, x1p, y1p);
+            const lx1x = lerp(o01.xo, o11.xo, xs);
+            const ly1x = lerp(o01.yo, o11.yo, xs);
 
-            const lx0x = lerp(rand_2d[idx0], rand_2d[idx1], xs);
-            const ly0x = lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
-
-            idx0 = @intCast(hash2D(seed, x0, y1) & (255 << 1));
-            idx1 = @intCast(hash2D(seed, x1, y1) & (255 << 1));
-
-            const lx1x = lerp(rand_2d[idx0], rand_2d[idx1], xs);
-            const ly1x = lerp(rand_2d[idx0 | 1], rand_2d[idx1 | 1], xs);
-
-            xp.* += lerp(lx0x, lx1x, ys) * warp_amp;
-            yp.* += lerp(ly0x, ly1x, ys) * warp_amp;
+            xp.* += lerp(lx0x, lx1x, ys) * splat(FloatV, warp_amp);
+            yp.* += lerp(ly0x, ly1x, ys) * splat(FloatV, warp_amp);
         }
         fn singleDomainWarpBasicGrid3D(seed: i32, warp_amp: Float, frequency: Float, x: Float, y: Float, z: Float, xp: *Float, yp: *Float, zp: *Float) void {
             @setFloatMode(.optimized);
@@ -1765,86 +1830,59 @@ pub fn Noise(comptime Float: type) type {
         }
         // Domain Warp Simplex/OpenSimplex2
 
-        fn singleDomainWarpSimplexGradient(seed: i32, warp_amp: Float, frequency: Float, x: Float, y: Float, xr: *Float, yr: *Float, out_grad: bool) void {
+        fn singleDomainWarpSimplexGradientVec(comptime N: usize, seed: i32, warp_amp: Float, frequency: Float, x: @Vector(N, Float), y: @Vector(N, Float), xr: *@Vector(N, Float), yr: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
-            const xx = x * frequency;
-            const yy = y * frequency;
+            const FloatV = @Vector(N, Float);
+            const IntV = @Vector(N, i32);
+            const zero: FloatV = splat(FloatV, 0);
+            const xx = x * splat(FloatV, frequency);
+            const yy = y * splat(FloatV, frequency);
 
-            var i: i32 = @floor(xx);
-            var j: i32 = @floor(yy);
-            const xi = xx - @as(Float, @floatFromInt(i));
-            const yi = yy - @as(Float, @floatFromInt(j));
+            const i: IntV = @floor(xx);
+            const j: IntV = @floor(yy);
+            const xi = xx - floatFromInt(FloatV, i);
+            const yi = yy - floatFromInt(FloatV, j);
 
-            const t = (xi + yi) * g2;
-            const x0: Float = xi - t;
-            const y0: Float = yi - t;
+            const t = (xi + yi) * splat(FloatV, g2);
+            const x0 = xi - t;
+            const y0 = yi - t;
 
-            i *%= prime_x;
-            j *%= prime_y;
+            const ip = i *% splat(IntV, prime_x);
+            const jp = j *% splat(IntV, prime_y);
 
-            var vx: Float = 0;
-            var vy: Float = 0;
-            var xo: Float = undefined;
-            var yo: Float = undefined;
+            var vx: FloatV = zero;
+            var vy: FloatV = zero;
 
-            const a = 0.5 - x0 * x0 - y0 * y0;
-            if (a > 0) {
-                const aaaa = (a * a) * (a * a);
-                if (out_grad) {
-                    gradCoordOut2D(seed, i, j, &xo, &yo);
-                } else {
-                    gradCoordDual2D(seed, i, j, x0, y0, &xo, &yo);
-                }
-                vx += aaaa * xo;
-                vy += aaaa * yo;
-            }
+            const a = splat(FloatV, 0.5) - x0 * x0 - y0 * y0;
+            const a_ok = a > splat(FloatV, 0);
+            const aaaa = (a * a) * (a * a);
+            const ga = gradCoordDual2DVec(N, seed, ip, jp, x0, y0);
+            vx += @select(Float, a_ok, aaaa * ga.xo, zero);
+            vy += @select(Float, a_ok, aaaa * ga.yo, zero);
 
-            const c = (2.0 * (1.0 - 2.0 * g2) * (1.0 / g2 - 2.0)) * t + ((-2.0 * (1.0 - 2.0 * g2) * (1.0 - 2.0 * g2)) + a);
-            if (c > 0) {
-                const x2 = x0 + (2 * g2 - 1.0);
-                const y2 = y0 + (2 * g2 - 1.0);
-                const cccc = (c * c) * (c * c);
-                if (out_grad) {
-                    gradCoordOut2D(seed, i +% prime_x, j +% prime_y, &xo, &yo);
-                } else {
-                    gradCoordDual2D(seed, i +% prime_x, j +% prime_y, x2, y2, &xo, &yo);
-                }
-                vx += cccc * xo;
-                vy += cccc * yo;
-            }
+            const c = splat(FloatV, 2.0 * (1.0 - 2.0 * g2) * (1.0 / g2 - 2.0)) * t + (splat(FloatV, -2.0 * (1.0 - 2.0 * g2) * (1.0 - 2.0 * g2)) + a);
+            const c_ok = c > splat(FloatV, 0);
+            const x2 = x0 + splat(FloatV, 2 * g2 - 1.0);
+            const y2 = y0 + splat(FloatV, 2 * g2 - 1.0);
+            const cccc = (c * c) * (c * c);
+            const gc = gradCoordDual2DVec(N, seed, ip +% splat(IntV, prime_x), jp +% splat(IntV, prime_y), x2, y2);
+            vx += @select(Float, c_ok, cccc * gc.xo, zero);
+            vy += @select(Float, c_ok, cccc * gc.yo, zero);
 
-            if (y0 > x0) {
-                const x1 = x0 + g2;
-                const y1 = y0 + (g2 - 1.0);
-                const b = 0.5 - x1 * x1 - y1 * y1;
-                if (b > 0) {
-                    const bbbb = (b * b) * (b * b);
-                    if (out_grad) {
-                        gradCoordOut2D(seed, i, j +% prime_y, &xo, &yo);
-                    } else {
-                        gradCoordDual2D(seed, i, j +% prime_y, x1, y1, &xo, &yo);
-                    }
-                    vx += bbbb * xo;
-                    vy += bbbb * yo;
-                }
-            } else {
-                const x1 = x0 + (g2 - 1.0);
-                const y1 = y0 + g2;
-                const b = 0.5 - x1 * x1 - y1 * y1;
-                if (b > 0) {
-                    const bbbb = (b * b) * (b * b);
-                    if (out_grad) {
-                        gradCoordOut2D(seed, i +% prime_x, j, &xo, &yo);
-                    } else {
-                        gradCoordDual2D(seed, i +% prime_x, j, x1, y1, &xo, &yo);
-                    }
-                    vx += bbbb * xo;
-                    vy += bbbb * yo;
-                }
-            }
+            const y_gt_x = y0 > x0;
+            const x1 = @select(Float, y_gt_x, x0 + splat(FloatV, g2), x0 + splat(FloatV, g2 - 1.0));
+            const y1 = @select(Float, y_gt_x, y0 + splat(FloatV, g2 - 1.0), y0 + splat(FloatV, g2));
+            const b = splat(FloatV, 0.5) - x1 * x1 - y1 * y1;
+            const b_ok = b > splat(FloatV, 0);
+            const bbbb = (b * b) * (b * b);
+            const ib = @select(i32, y_gt_x, ip, ip +% splat(IntV, prime_x));
+            const jb = @select(i32, y_gt_x, jp +% splat(IntV, prime_y), jp);
+            const gb = gradCoordDual2DVec(N, seed, ib, jb, x1, y1);
+            vx += @select(Float, b_ok, bbbb * gb.xo, zero);
+            vy += @select(Float, b_ok, bbbb * gb.yo, zero);
 
-            xr.* += vx * warp_amp;
-            yr.* += vy * warp_amp;
+            xr.* += vx * splat(FloatV, warp_amp);
+            yr.* += vy * splat(FloatV, warp_amp);
         }
         fn singleDomainWarpOpenSimplex2Gradient(seed: i32, warp_amp: Float, frequency: Float, x: Float, y: Float, z: Float, xr: *Float, yr: *Float, zr: *Float, out_grad: bool) void {
             @setFloatMode(.optimized);
@@ -1956,75 +1994,42 @@ pub fn Noise(comptime Float: type) type {
             yr.* += vy * warp_amp;
             zr.* += vz * warp_amp;
         }
-        const gradients_2d = [256]Float{
-            0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
-            0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
-            0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
-            -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
-            -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
-            -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
-            0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
-            0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
-            0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
-            -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
-            -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
-            -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
-            0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
-            0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
-            0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
-            -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
-            -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
-            -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
-            0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
-            0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
-            0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
-            -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
-            -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
-            -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
-            0.130526192220052,  0.99144486137381,   0.38268343236509,   0.923879532511287,  0.608761429008721,  0.793353340291235,  0.793353340291235,  0.608761429008721,
-            0.923879532511287,  0.38268343236509,   0.99144486137381,   0.130526192220051,  0.99144486137381,   -0.130526192220051, 0.923879532511287,  -0.38268343236509,
-            0.793353340291235,  -0.60876142900872,  0.608761429008721,  -0.793353340291235, 0.38268343236509,   -0.923879532511287, 0.130526192220052,  -0.99144486137381,
-            -0.130526192220052, -0.99144486137381,  -0.38268343236509,  -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
-            -0.923879532511287, -0.38268343236509,  -0.99144486137381,  -0.130526192220052, -0.99144486137381,  0.130526192220051,  -0.923879532511287, 0.38268343236509,
-            -0.793353340291235, 0.608761429008721,  -0.608761429008721, 0.793353340291235,  -0.38268343236509,  0.923879532511287,  -0.130526192220052, 0.99144486137381,
-            0.38268343236509,   0.923879532511287,  0.923879532511287,  0.38268343236509,   0.923879532511287,  -0.38268343236509,  0.38268343236509,   -0.923879532511287,
-            -0.38268343236509,  -0.923879532511287, -0.923879532511287, -0.38268343236509,  -0.923879532511287, 0.38268343236509,   -0.38268343236509,  0.923879532511287,
-        };
+        // Domain Warp Batching
 
-        const rand_2d = [512]Float{
-            -0.2700222198,   -0.9628540911, 0.3863092627,  -0.9223693152, 0.04444859006,  -0.999011673,  -0.5992523158, -0.8005602176, -0.7819280288,  0.6233687174,   0.9464672271,   0.3227999196,   -0.6514146797,  -0.7587218957,  0.9378472289,  0.347048376,
-            -0.8497875957,   -0.5271252623, -0.879042592,  0.4767432447,  -0.892300288,   -0.4514423508, -0.379844434,  -0.9250503802, -0.9951650832,  0.0982163789,   0.7724397808,   -0.6350880136,  0.7573283322,   -0.6530343002,  -0.9928004525, -0.119780055,
-            -0.0532665713,   0.9985803285,  0.9754253726,  -0.2203300762, -0.7665018163,  0.6422421394,  0.991636706,   0.1290606184,  -0.994696838,   0.1028503788,   -0.5379205513,  -0.84299554,    0.5022815471,   -0.8647041387,  0.4559821461,  -0.8899889226,
-            -0.8659131224,   -0.5001944266, 0.0879458407,  -0.9961252577, -0.5051684983,  0.8630207346,  0.7753185226,  -0.6315704146, -0.6921944612,  0.7217110418,   -0.5191659449,  -0.8546734591,  0.8978622882,   -0.4402764035,  -0.1706774107, 0.9853269617,
-            -0.9353430106,   -0.3537420705, -0.9992404798, 0.03896746794, -0.2882064021,  -0.9575683108, -0.9663811329, 0.2571137995,  -0.8759714238,  -0.4823630009,  -0.8303123018,  -0.5572983775,  0.05110133755,  -0.9986934731,  -0.8558373281, -0.5172450752,
-            0.09887025282,   0.9951003332,  0.9189016087,  0.3944867976,  -0.2439375892,  -0.9697909324, -0.8121409387, -0.5834613061, -0.9910431363,  0.1335421355,   0.8492423985,   -0.5280031709,  -0.9717838994,  -0.2358729591,  0.9949457207,  0.1004142068,
-            0.6241065508,    -0.7813392434, 0.662910307,   0.7486988212,  -0.7197418176,  0.6942418282,  -0.8143370775, -0.5803922158, 0.104521054,    -0.9945226741,  -0.1065926113,  -0.9943027784,  0.445799684,    -0.8951327509,  0.105547406,   0.9944142724,
-            -0.992790267,    0.1198644477,  -0.8334366408, 0.552615025,   0.9115561563,   -0.4111755999, 0.8285544909,  -0.5599084351, 0.7217097654,   -0.6921957921,  0.4940492677,   -0.8694339084,  -0.3652321272,  -0.9309164803,  -0.9696606758, 0.2444548501,
-            0.08925509731,   -0.996008799,  0.5354071276,  -0.8445941083, -0.1053576186,  0.9944343981,  -0.9890284586, 0.1477251101,  0.004856104961, 0.9999882091,   0.9885598478,   0.1508291331,   0.9286129562,   -0.3710498316,  -0.5832393863, -0.8123003252,
-            0.3015207509,    0.9534596146,  -0.9575110528, 0.2883965738,  0.9715802154,   -0.2367105511, 0.229981792,   0.9731949318,  0.955763816,    -0.2941352207,  0.740956116,    0.6715534485,   -0.9971513787,  -0.07542630764, 0.6905710663,  -0.7232645452,
-            -0.290713703,    -0.9568100872, 0.5912777791,  -0.8064679708, -0.9454592212,  -0.325740481,  0.6664455681,  0.74555369,    0.6236134912,   0.7817328275,   0.9126993851,   -0.4086316587,  -0.8191762011,  0.5735419353,   -0.8812745759, -0.4726046147,
-            0.9953313627,    0.09651672651, 0.9855650846,  -0.1692969699, -0.8495980887,  0.5274306472,  0.6174853946,  -0.7865823463, 0.8508156371,   0.52546432,     0.9985032451,   -0.05469249926, 0.1971371563,   -0.9803759185,  0.6607855748,  -0.7505747292,
-            -0.03097494063,  0.9995201614,  -0.6731660801, 0.739491331,   -0.7195018362,  -0.6944905383, 0.9727511689,  0.2318515979,  0.9997059088,   -0.0242506907,  0.4421787429,   -0.8969269532,  0.9981350961,   -0.061043673,   -0.9173660799, -0.3980445648,
-            -0.8150056635,   -0.5794529907, -0.8789331304, 0.4769450202,  0.0158605829,   0.999874213,   -0.8095464474, 0.5870558317,  -0.9165898907,  -0.3998286786,  -0.8023542565,  0.5968480938,   -0.5176737917,  0.8555780767,   -0.8154407307, -0.5788405779,
-            0.4022010347,    -0.9155513791, -0.9052556868, -0.4248672045, 0.7317445619,   0.6815789728,  -0.5647632201, -0.8252529947, -0.8403276335,  -0.5420788397,  -0.9314281527,  0.363925262,    0.5238198472,   0.8518290719,   0.7432803869,  -0.6689800195,
-            -0.985371561,    -0.1704197369, 0.4601468731,  0.88784281,    0.825855404,    0.5638819483,  0.6182366099,  0.7859920446,  0.8331502863,   -0.553046653,   0.1500307506,   0.9886813308,   -0.662330369,   -0.7492119075,  -0.668598664,  0.743623444,
-            0.7025606278,    0.7116238924,  -0.5419389763, -0.8404178401, -0.3388616456,  0.9408362159,  0.8331530315,  0.5530425174,  -0.2989720662,  -0.9542618632,  0.2638522993,   0.9645630949,   0.124108739,    -0.9922686234,  -0.7282649308, -0.6852956957,
-            0.6962500149,    0.7177993569,  -0.9183535368, 0.3957610156,  -0.6326102274,  -0.7744703352, -0.9331891859, -0.359385508,  -0.1153779357,  -0.9933216659,  0.9514974788,   -0.3076565421,  -0.08987977445, -0.9959526224,  0.6678496916,  0.7442961705,
-            0.7952400393,    -0.6062947138, -0.6462007402, -0.7631674805, -0.2733598753,  0.9619118351,  0.9669590226,  -0.254931851,  -0.9792894595,  0.2024651934,   -0.5369502995,  -0.8436138784,  -0.270036471,   -0.9628500944,  -0.6400277131, 0.7683518247,
-            -0.7854537493,   -0.6189203566, 0.06005905383, -0.9981948257, -0.02455770378, 0.9996984141,  -0.65983623,   0.751409442,   -0.6253894466,  -0.7803127835,  -0.6210408851,  -0.7837781695,  0.8348888491,   0.5504185768,   -0.1592275245, 0.9872419133,
-            0.8367622488,    0.5475663786,  -0.8675753916, -0.4973056806, -0.2022662628,  -0.9793305667, 0.9399189937,  0.3413975472,  0.9877404807,   -0.1561049093,  -0.9034455656,  0.4287028224,   0.1269804218,   -0.9919052235,  -0.3819600854, 0.924178821,
-            0.9754625894,    0.2201652486,  -0.3204015856, -0.9472818081, -0.9874760884,  0.1577687387,  0.02535348474, -0.9996785487, 0.4835130794,   -0.8753371362,  -0.2850799925,  -0.9585037287,  -0.06805516006, -0.99768156,    -0.7885244045, -0.6150034663,
-            0.3185392127,    -0.9479096845, 0.8880043089,  0.4598351306,  0.6476921488,   -0.7619021462, 0.9820241299,  0.1887554194,  0.9357275128,   -0.3527237187,  -0.8894895414,  0.4569555293,   0.7922791302,   0.6101588153,   0.7483818261,  0.6632681526,
-            -0.7288929755,   -0.6846276581, 0.8729032783,  -0.4878932944, 0.8288345784,   0.5594937369,  0.08074567077, 0.9967347374,  0.9799148216,   -0.1994165048,  -0.580730673,   -0.8140957471,  -0.4700049791,  -0.8826637636,  0.2409492979,  0.9705377045,
-            0.9437816757,    -0.3305694308, -0.8927998638, -0.4504535528, -0.8069622304,  0.5906030467,  0.06258973166, 0.9980393407,  -0.9312597469,  0.3643559849,   0.5777449785,   0.8162173362,   -0.3360095855,  -0.941858566,   0.697932075,   -0.7161639607,
-            -0.002008157227, -0.9999979837, -0.1827294312, -0.9831632392, -0.6523911722,  0.7578824173,  -0.4302626911, -0.9027037258, -0.9985126289,  -0.05452091251, -0.01028102172, -0.9999471489,  -0.4946071129,  0.8691166802,   -0.2999350194, 0.9539596344,
-            0.8165471961,    0.5772786819,  0.2697460475,  0.962931498,   -0.7306287391,  -0.6827749597, -0.7590952064, -0.6509796216, -0.907053853,   0.4210146171,   -0.5104861064,  -0.8598860013,  0.8613350597,   0.5080373165,   0.5007881595,  -0.8655698812,
-            -0.654158152,    0.7563577938,  -0.8382755311, -0.545246856,  0.6940070834,   0.7199681717,  0.06950936031, 0.9975812994,  0.1702942185,   -0.9853932612,  0.2695973274,   0.9629731466,   0.5519612192,   -0.8338697815,  0.225657487,   -0.9742067022,
-            0.4215262855,    -0.9068161835, 0.4881873305,  -0.8727388672, -0.3683854996,  -0.9296731273, -0.9825390578, 0.1860564427,  0.81256471,     0.5828709909,   0.3196460933,   -0.9475370046,  0.9570913859,   0.2897862643,   -0.6876655497, -0.7260276109,
-            -0.9988770922,   -0.047376731,  -0.1250179027, 0.992154486,   -0.8280133617,  0.560708367,   0.9324863769,  -0.3612051451, 0.6394653183,   0.7688199442,   -0.01623847064, -0.9998681473,  -0.9955014666,  -0.09474613458, -0.81453315,   0.580117012,
-            0.4037327978,    -0.9148769469, 0.9944263371,  0.1054336766,  -0.1624711654,  0.9867132919,  -0.9949487814, -0.100383875,  -0.6995302564,  0.7146029809,   0.5263414922,   -0.85027327,    -0.5395221479,  0.841971408,    0.6579370318,  0.7530729462,
-            0.01426758847,   -0.9998982128, -0.6734383991, 0.7392433447,  0.639412098,    -0.7688642071, 0.9211571421,  0.3891908523,  -0.146637214,   -0.9891903394,  -0.782318098,   0.6228791163,   -0.5039610839,  -0.8637263605,  -0.7743120191, -0.6328039957,
-        };
+        inline fn warpVector2D(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
+            switch (state.fractal_type) {
+                .progressive => state.domainWarpFractalProgressive2DVec(N, x, y),
+                .independent => state.domainWarpFractalIndependent2DVec(N, x, y),
+                else => state.domainWarpSingle2DVec(N, x, y),
+            }
+        }
+
+        fn warpGrid2DImpl(comptime N: usize, state: *const State, out_xs: []Float, out_ys: []Float, xs: []const Float, ys: []const Float) void {
+            @setFloatMode(.optimized);
+            @setEvalBranchQuota(200_000);
+            const FloatV = @Vector(N, Float);
+
+            var start: usize = 0;
+            while (start < out_xs.len) : (start += N) {
+                var x: FloatV = undefined;
+                var y: FloatV = undefined;
+                if (start + N <= out_xs.len) {
+                    inline for (0..N) |i| {
+                        x[i] = xs[start + i];
+                        y[i] = ys[start + i];
+                    }
+                } else {
+                    const remaining = out_xs.len - start;
+                    inline for (0..N) |i| {
+                        x[i] = xs[start + @min(i, remaining - 1)];
+                        y[i] = ys[start + @min(i, remaining - 1)];
+                    }
+                }
+                state.warpVector2D(N, &x, &y);
+                storeChunk(N, start, out_xs, x);
+                storeChunk(N, start, out_ys, y);
+            }
+        }
 
         const gradients_3d = [256]Float{
             0, 1, 1, 0, 0,  -1, 1, 0, 0,  1,  -1, 0, 0,  -1, -1, 0,
@@ -2194,7 +2199,7 @@ test "fillGrid2D matches scalar genNoise2D" {
             noise.fillGrid2D(&grid, size, 3.0, -7.0, 0.25);
             for (0..size) |y| for (0..size) |x| {
                 const expected = noise.genNoise2D(3.0 + @as(f32, @floatFromInt(x)) * 0.25, -7.0 + @as(f32, @floatFromInt(y)) * 0.25);
-                try std.testing.expectEqual(expected, grid[y * size + x]);
+                try std.testing.expectApproxEqAbs(expected, grid[y * size + x], 1e-5);
             };
         }
     }
@@ -2220,7 +2225,7 @@ test "fillGrid3D matches scalar genNoise3D" {
                         -2.0 + @as(f32, @floatFromInt(y)) * 0.5,
                         4.0 + @as(f32, @floatFromInt(z)) * 0.5,
                     );
-                    try std.testing.expectEqual(expected, grid[(z * height + y) * width + x]);
+                    try std.testing.expectApproxEqAbs(expected, grid[(z * height + y) * width + x], 1e-5);
                 };
             }
         }
@@ -2242,7 +2247,7 @@ test "benchmark fillGrid2D on a 32x32 grid" {
     const size = 32;
     const x0 = -16.0;
     const y0 = -16.0;
-    const spacing = 1.0 / @as(f32, @floatFromInt(size));
+    const spacing = 1.0 / @as(f32, size);
     var noise = Noise(f32){ .noise_type = .perlin, .fractal_type = .ridged, .octaves = 12 };
     noise.seed = 1337;
 
@@ -2250,7 +2255,7 @@ test "benchmark fillGrid2D on a 32x32 grid" {
     noise.fillGrid2D(&grid, size, x0, y0, spacing);
     for (0..size) |y| for (0..size) |x| {
         const expected = noise.genNoise2D(x0 + @as(f32, @floatFromInt(x)) * spacing, y0 + @as(f32, @floatFromInt(y)) * spacing);
-        try std.testing.expectEqual(expected, grid[y * size + x]);
+        try std.testing.expectApproxEqAbs(expected, grid[y * size + x], 1e-5);
     };
 
     const io = std.testing.io;
@@ -2309,7 +2314,7 @@ test "fillNoise2DGrid matches scalar genNoise2D at explicit coordinates" {
             noise.fillNoise2DGrid(&out, &xs, &ys);
             for (0..count) |i| {
                 const expected = noise.genNoise2D(xs[i], ys[i]);
-                try std.testing.expectEqual(expected, out[i]);
+                try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
             }
         }
     }
@@ -2337,7 +2342,7 @@ test "fillNoise3DGrid matches scalar genNoise3D at explicit coordinates" {
                 noise.fillNoise3DGrid(&out, &xs, &ys, &zs);
                 for (0..count) |i| {
                     const expected = noise.genNoise3D(xs[i], ys[i], zs[i]);
-                    try std.testing.expectEqual(expected, out[i]);
+                    try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
                 }
             }
         }
@@ -2363,4 +2368,109 @@ test "simplex noise is continuous across cell boundaries" {
             prev3 = v3;
         }
     }
+}
+
+test "fillWarp2DGrid matches scalar domainWarp2D" {
+    @setEvalBranchQuota(500_000);
+    const count = 40;
+    var xs: [count]f32 = undefined;
+    var ys: [count]f32 = undefined;
+    for (0..count) |i| {
+        xs[i] = @as(f32, @floatFromInt(i)) * 0.37 + @as(f32, @floatFromInt(i % 3)) * 0.11;
+        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.53 - @as(f32, @floatFromInt(i / 5)) * 0.07;
+    }
+    var noise = Noise(f32){};
+    inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp| {
+        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp.name).?;
+        inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
+            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+            var out_xs: [count]f32 = undefined;
+            var out_ys: [count]f32 = undefined;
+            noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
+            for (0..count) |i| {
+                var gx = xs[i];
+                var gy = ys[i];
+                noise.domainWarp2D(&gx, &gy);
+                try std.testing.expectApproxEqAbs(gx, out_xs[i], 1e-5);
+                try std.testing.expectApproxEqAbs(gy, out_ys[i], 1e-5);
+            }
+        }
+    }
+}
+
+test "fillWarp2DGrid keeps coordinates finite for all warp/fractal types" {
+    @setEvalBranchQuota(100_000);
+    var noise = Noise(f32){ .seed = -1234567890 };
+    var xs: [64]f32 = undefined;
+    var ys: [64]f32 = undefined;
+    for (0..64) |i| {
+        xs[i] = @floatFromInt(i % 8);
+        ys[i] = @floatFromInt(i / 8);
+    }
+    inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp| {
+        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp.name).?;
+        inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
+            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+            var out_xs: [64]f32 = undefined;
+            var out_ys: [64]f32 = undefined;
+            noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
+            for (0..64) |i| {
+                try std.testing.expect(std.math.isFinite(out_xs[i]) and std.math.isFinite(out_ys[i]));
+            }
+        }
+    }
+}
+
+test "warp gradient select tree matches the pair table" {
+    // The table holds 16 direction pairs repeated eight times; the low four
+    // hash bits select the pair, and every higher bit combination must hit it.
+    for (0..128) |index1| {
+        const hash: i32 = @as(i32, @intCast(index1)) << 1;
+        const grad = Noise(f32).gradient2DTableVec(1, @as(@Vector(1, i32), @splat(hash)));
+        const pair = index1 & 15;
+        try std.testing.expectEqual(Noise(f32).warp_gradient_pairs[pair][0], grad.xg[0]);
+        try std.testing.expectEqual(Noise(f32).warp_gradient_pairs[pair][1], grad.yg[0]);
+    }
+}
+
+test "benchmark fillWarp2DGrid on a 32x32 grid" {
+    const size = 32;
+    var noise = Noise(f32){ .domain_warp_type = .simplex, .fractal_type = .fbm, .octaves = 3 };
+    noise.seed = 1337;
+
+    var xs: [size * size]f32 = undefined;
+    var ys: [size * size]f32 = undefined;
+    for (0..size * size) |i| {
+        xs[i] = @as(f32, @floatFromInt(i % size)) * 0.53 - @as(f32, @floatFromInt(i / size)) * 0.11;
+        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.37 + @as(f32, @floatFromInt(i / 7)) * 0.29;
+    }
+    var out_xs: [size * size]f32 = undefined;
+    var out_ys: [size * size]f32 = undefined;
+    noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
+    for (0..size * size) |i| {
+        var gx = xs[i];
+        var gy = ys[i];
+        noise.domainWarp2D(&gx, &gy);
+        try std.testing.expectEqual(gx, out_xs[i]);
+        try std.testing.expectEqual(gy, out_ys[i]);
+    }
+
+    const io = std.testing.io;
+    const iterations = 100;
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |_| noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
+    const fill_done = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |_| for (0..size * size) |i| {
+        var gx = xs[i];
+        var gy = ys[i];
+        noise.domainWarp2D(&gx, &gy);
+        out_xs[i] = gx;
+        out_ys[i] = gy;
+    };
+    const end = std.Io.Clock.Timestamp.now(io, .awake);
+
+    const samples: f64 = @floatFromInt(iterations * size * size);
+    const scalar_ns = @as(f64, @floatFromInt(fill_done.durationTo(end).raw.toNanoseconds())) / samples;
+    const fill_ns = @as(f64, @floatFromInt(start.durationTo(fill_done).raw.toNanoseconds())) / samples;
+    std.debug.print("32x32 warp: scalar {d:.1} ns/sample, fillWarp2DGrid {d:.1} ns/sample, {d:.2}x faster\n", .{ scalar_ns, fill_ns, scalar_ns / fill_ns });
 }

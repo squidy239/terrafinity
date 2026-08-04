@@ -222,16 +222,15 @@ pub const DefaultGenerator = struct {
             blocks.merge(.{ .uniform = .air }, grid_buffer);
             return;
         }
-        var heights: ?[ChunkSize][ChunkSize]i32 = null;
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrain_min, 0 }, chunk_pos.level).position[1]) {
             blocks.merge(.{ .uniform = .stone }, grid_buffer);
         } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
-            heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
+            const heights = try self.getTerrainHeight(io, allocator, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const gen_terrain_zone = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
-            generateTerrain(&block_grid, chunk_pos, heights.?, &self.params, &rand, @floatCast(chunk_scale_factor));
+            generateTerrain(&block_grid, chunk_pos, heights, &self.params, &rand, chunk_scale_factor);
             gen_terrain_zone.end();
             const one_block = Chunk.getUniform(&block_grid);
             if (one_block != null and one_block.? == .air) {
@@ -239,7 +238,7 @@ pub const DefaultGenerator = struct {
                 return;
             }
         }
-        generateCavesInterpolate(&block_grid, chunk_pos, @floatCast(chunk_scale_factor), self.params);
+        generateCavesInterpolate(&block_grid, chunk_pos, chunk_scale_factor, self.params);
         const one_block = Chunk.getUniform(&block_grid);
         if (one_block) |block| {
             blocks.merge(.{ .uniform = block }, grid_buffer);
@@ -247,18 +246,52 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateTerrain(chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]i32, gen_params: *const Params, rand: *std.Random, chunk_scale: f32) void {
-        const terrain_scale_up: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrain_max)));
-        const terrain_scale_down: f32 = 1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrain_min)));
-        const terrain_scales: [2]f32 = .{ terrain_scale_up, terrain_scale_down };
+        const terrain_scales: [2]f32 = .{
+            1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrain_max))),
+            1.0 / @as(f32, @floatFromInt(@abs(gen_params.terrain_min))),
+        };
         const scale = gen_params.terrain_scale * chunk_scale;
         const one_d_terrain_scale: f32 = 1.0 / scale;
-        var block_height_vec: [ChunkSize]i64 = undefined;
-        const chunk_block_pos = chunk_pos.position * @as(@Vector(3, i64), @splat(ChunkSize));
-        for (0..ChunkSize) |i| block_height_vec[i] = chunk_block_pos[1] + @as(i64, @intCast(i));
+        const sea_level: i32 = gen_params.sea_level;
+        const IntV = @Vector(ChunkSize, i32);
+        const BoolV = @Vector(ChunkSize, bool);
+        const TagV = @Vector(ChunkSize, Block.Tag);
+        const zero_v: IntV = @splat(0);
+
+        const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(IntV, @splat(chunk_pos.position[1] * ChunkSize));
         for (heights, 0..) |heights_row, x| {
+            const th: IntV = heights_row;
+            const th_arr: [ChunkSize]i32 = th;
             for (0..ChunkSize) |y| {
-                for (heights_row, 0..) |terrain_height, z| {
-                    chunk_blocks[x][y][z] = getSurfaceBlock(block_height_vec[y], terrain_height, terrain_scales, gen_params.sea_level, rand, gen_params.terrain_block_randomness, one_d_terrain_scale, scale);
+                const bh: i32 = block_height_vec[y];
+                const diff: IntV = th - @as(IntV, @splat(bh));
+                const below_depth: BoolV = diff > @as(IntV, @splat(@ceil(5.0 * scale)));
+                const below_or: BoolV = diff >= zero_v;
+                const below_depth_bits: u32 = @bitCast(below_depth);
+                const below_or_bits: u32 = @bitCast(below_or);
+                if (below_depth_bits == @as(u32, @bitCast(@as(BoolV, @splat(true))))) {
+                    chunk_blocks[x][y] = @splat(Block.stone);
+                    continue;
+                }
+                if (below_or_bits == 0) {
+                    chunk_blocks[x][y] = @splat(if (bh <= sea_level) Block.water else Block.air);
+                    continue;
+                }
+
+                var tags: TagV = @splat(@intFromEnum(Block.air));
+                tags = @select(Block.Tag, below_or, @select(Block.Tag, below_depth, @as(TagV, @splat(@intFromEnum(Block.stone))), @as(TagV, @splat(@intFromEnum(Block.dirt)))), tags);
+                if (bh <= sea_level) {
+                    tags = @select(Block.Tag, @as(BoolV, @bitCast(~below_or_bits)), @as(TagV, @splat(@intFromEnum(Block.water))), tags);
+                }
+                chunk_blocks[x][y] = @bitCast(tags);
+
+                var surface_bits: u32 = @bitCast(diff == zero_v);
+                const surface_zone = tracy.Zone.begin(.{ .src = @src(), .name = "surfaceBlocks" });
+                defer surface_zone.end();
+                while (surface_bits != 0) {
+                    const z: usize = @ctz(surface_bits);
+                    surface_bits &= surface_bits - 1;
+                    chunk_blocks[x][y][z] = randGround(rand, @as(f32, @floatFromInt(th_arr[z])) * terrain_scales[@intFromBool(th_arr[z] <= sea_level)], bh, sea_level, gen_params.terrain_block_randomness, one_d_terrain_scale);
                 }
             }
         }
@@ -270,13 +303,12 @@ pub const DefaultGenerator = struct {
         const cave_grid_size: usize = 4;
         const CaveInterp = Interpolation.TrilinearInterpolator3D(f32, cave_grid_size, cave_grid_size, cave_grid_size, ChunkSize, ChunkSize, ChunkSize);
         var grid: [cave_grid_size][cave_grid_size][cave_grid_size]f32 = undefined;
-        const float_pos: @Vector(3, f32) = @Vector(3, f32){ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
+        const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const one_d_terrain_scale_vec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunk_scale));
         const cave_noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });
         var grid_flat: [cave_grid_size * cave_grid_size * cave_grid_size]f32 = undefined;
         const grid_origin = float_pos * one_d_terrain_scale_vec;
-        const grid_spacing = (1.0 / @as(f32, @floatFromInt(cave_grid_size - 1))) * one_d_terrain_scale_vec[0];
-        gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], grid_spacing);
+        gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], (1.0 / @as(f32, cave_grid_size - 1)) * one_d_terrain_scale_vec[0]);
         for (0..cave_grid_size) |z| {
             for (0..cave_grid_size) |y| {
                 for (0..cave_grid_size) |x| {
@@ -293,10 +325,11 @@ pub const DefaultGenerator = struct {
         init_interp.end();
         const cave_values = interpolator.sampleGrid();
 
+        const apply_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveApply" });
+        defer apply_zone.end();
         for (0..ChunkSize) |y| {
             const real_y = ((float_pos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * one_d_terrain_scale_vec[0];
-            const expansion_factor: f32 = 1 - (1 / -@min(-1, (real_y / gen_params.cave_expansion_max) - 1));
-            const cave_threshold: f32 = gen_params.cave_threshold + (expansion_factor * 2);
+            const cave_threshold: f32 = gen_params.cave_threshold + ((1 - (1 / -@min(-1, (real_y / gen_params.cave_expansion_max) - 1))) * 2);
             for (0..ChunkSize) |z| {
                 const is_cave = cave_values[y][z] < @as(@Vector(ChunkSize, f32), @splat(cave_threshold));
                 if (std.simd.firstTrue(is_cave)) |_| {
@@ -305,20 +338,6 @@ pub const DefaultGenerator = struct {
                     }
                 }
             }
-        }
-    }
-
-    fn getSurfaceBlock(block_height: i64, terrain_height: i64, terrain_height_scales: [2]f32, sea_level: i32, rand: *std.Random, block_randomness: f32, one_d_terrain_scale: f32, terrain_scale: f32) Block {
-        if (block_height < terrain_height - @as(i64, @ceil(5.0 * terrain_scale))) {
-            return Block.stone;
-        } else if (block_height < terrain_height) {
-            return Block.dirt;
-        } else if (block_height == terrain_height) {
-            return randGround(rand, @as(f32, @floatFromInt(terrain_height)) * terrain_height_scales[@intFromBool(terrain_height <= sea_level)], block_height, sea_level, block_randomness, one_d_terrain_scale);
-        } else if (block_height > terrain_height and block_height <= sea_level) {
-            return Block.water;
-        } else {
-            return Block.air;
         }
     }
 
@@ -340,56 +359,64 @@ pub const DefaultGenerator = struct {
     fn genTerrainHeight(params: Params, level: i32, chunk_pos: [2]i32) [ChunkSize][ChunkSize]i32 {
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        const chunk_size_gen_scale = 32.0 / World.ChunkPos.levelToBlockRatioFloat(level);
-        const scale = params.terrain_scale * chunk_size_gen_scale;
-        const float_pos = @Vector(2, f32){ @floatFromInt(chunk_pos[0]), @floatFromInt(chunk_pos[1]) };
+        const scale = params.terrain_scale * (32.0 / World.ChunkPos.levelToBlockRatioFloat(level));
+        const float_pos: @Vector(2, f32) = .{ @floatFromInt(chunk_pos[0]), @floatFromInt(chunk_pos[1]) };
         const d32: f32 = comptime 1.0 / @as(comptime_float, ChunkSize);
         var height: [ChunkSize][ChunkSize]i32 = undefined;
-        const float_min: f32 = @floatFromInt(params.terrain_min);
-        const float_max: f32 = @floatFromInt(params.terrain_max);
-        const float_bounds = [2]f32{ float_min, float_max };
+        const float_bounds = [2]f32{ @floatFromInt(params.terrain_min), @floatFromInt(params.terrain_max) };
         const one_d_terrain_scale: f32 = 1.0 / scale;
         const sample_count = ChunkSize * ChunkSize;
+        const FloatV = @Vector(ChunkSize, f32);
 
         // Domain warp is inherently per-point, so warp the base coordinate grid
         // into two irregular coordinate sets, then sample both in one batched pass.
+        const base_coords_zone = tracy.Zone.begin(.{ .src = @src(), .name = "baseCoords" });
+        var base_x: [sample_count]f32 = undefined;
+        var base_z: [sample_count]f32 = undefined;
+        const z_iota: FloatV = std.simd.iota(f32, ChunkSize);
+        for (0..ChunkSize) |x| {
+            const row_x_arr: [ChunkSize]f32 = @splat(((@as(f32, @floatFromInt(x)) * d32) + float_pos[0]) * one_d_terrain_scale);
+            const row_z_arr: [ChunkSize]f32 = z_iota * @as(FloatV, @splat(d32 * one_d_terrain_scale)) + @as(FloatV, @splat(float_pos[1] * one_d_terrain_scale));
+            @memcpy(base_x[x * ChunkSize ..][0..ChunkSize], &row_x_arr);
+            @memcpy(base_z[x * ChunkSize ..][0..ChunkSize], &row_z_arr);
+        }
+        base_coords_zone.end();
+
+        const warp_zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainWarp" });
         var terrain_warped_x: [sample_count]f32 = undefined;
         var terrain_warped_z: [sample_count]f32 = undefined;
         var large_warped_x: [sample_count]f32 = undefined;
         var large_warped_z: [sample_count]f32 = undefined;
-        for (0..sample_count) |i| {
-            const sx = i % ChunkSize;
-            const sz = i / ChunkSize;
-            const x: f32 = ((@as(f32, @floatFromInt(sx)) * d32) + float_pos[0]) * one_d_terrain_scale;
-            const z: f32 = ((@as(f32, @floatFromInt(sz)) * d32) + float_pos[1]) * one_d_terrain_scale;
-            var gen_x = x;
-            var gen_z = z;
-            params.terrain_noise.domainWarp2D(&gen_x, &gen_z);
-            terrain_warped_x[i] = gen_x;
-            terrain_warped_z[i] = gen_z;
-            var large_gen_x = x;
-            var large_gen_z = z;
-            params.large_terrain_noise_warp.domainWarp2D(&large_gen_x, &large_gen_z);
-            large_warped_x[i] = large_gen_x;
-            large_warped_z[i] = large_gen_z;
-        }
+        params.terrain_noise.fillWarp2DGrid(&terrain_warped_x, &terrain_warped_z, &base_x, &base_z);
+        params.large_terrain_noise_warp.fillWarp2DGrid(&large_warped_x, &large_warped_z, &base_x, &base_z);
+        warp_zone.end();
 
+        const noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainNoise" });
         var terrain_noise_raw: [sample_count]f32 = undefined;
         var large_terrain_noise: [sample_count]f32 = undefined;
         params.terrain_noise.fillNoise2DGrid(&terrain_noise_raw, &terrain_warped_x, &terrain_warped_z);
         params.large_terrain_noise.fillNoise2DGrid(&large_terrain_noise, &large_warped_x, &large_warped_z);
+        noise_zone.end();
 
-        const P = 2.0;
-        for (0..sample_count) |i| {
-            var raw = terrain_noise_raw[i];
-            if (raw < 0.0) raw = 0.0;
-            const warped_terrain = large_terrain_noise[i] * (if (raw < 0.5)
-                (std.math.pow(f32, raw * 2, P) * 0.5)
-            else
-                (1 - (std.math.pow(f32, (1 - raw) * 2, P) * 0.5)));
-            const block_height: i32 = @floor(warped_terrain * @abs(float_bounds[@intFromBool(warped_terrain > 0)]) * scale);
-            height[i % ChunkSize][i / ChunkSize] = block_height;
+        const heights_zone = tracy.Zone.begin(.{ .src = @src(), .name = "blockHeights" });
+        const zero_v: FloatV = @splat(0);
+        const one_v: FloatV = @splat(1);
+        const two_v: FloatV = @splat(2);
+        const half_v: FloatV = @splat(0.5);
+        for (0..ChunkSize) |x| {
+            var noise_row: [ChunkSize]f32 = undefined;
+            @memcpy(&noise_row, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize]);
+            const raw: FloatV = @max(@as(FloatV, noise_row), zero_v);
+            const inv = one_v - raw;
+            const pow_a = (raw * two_v) * (raw * two_v) * half_v;
+            const pow_b = one_v - (inv * two_v) * (inv * two_v) * half_v;
+            @memcpy(&noise_row, large_terrain_noise[x * ChunkSize ..][0..ChunkSize]);
+            const warped = @as(FloatV, noise_row) * @select(f32, raw < half_v, pow_a, pow_b);
+            const bounds = @select(f32, warped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
+            const height_row: @Vector(ChunkSize, i32) = @floor(warped * @abs(bounds) * @as(FloatV, @splat(scale)));
+            height[x] = @as([ChunkSize]i32, height_row);
         }
+        heights_zone.end();
         return height;
     }
 
@@ -421,12 +448,12 @@ pub const DefaultGenerator = struct {
                     };
                     if (!block.plantsCanGrow()) continue;
 
-                    const lvl_x: f32 = @as(f32, @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(@mod(x, ChunkSize)))));
-                    const lvl_z: f32 = @as(f32, @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(@mod(z, ChunkSize)))));
+                    const lvl_x: f32 = @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(x)));
+                    const lvl_z: f32 = @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(z)));
 
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
-                        const is_tree = tree_conf.placer.getStructure(.{ @intFromFloat(lvl_x), @intFromFloat(lvl_z) }, @intCast(chunk_pos.level));
+                        const is_tree = tree_conf.placer.getStructure(.{ @trunc(lvl_x), @trunc(lvl_z) }, @intCast(chunk_pos.level));
                         if (is_tree) |seed| {
                             const center_pos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                             const tree_seed = self.params.seed.? ^ @as(u64, @bitCast(seed));
@@ -469,3 +496,58 @@ pub const DefaultGenerator = struct {
         _ = try editor.placeSamplerShape(.leaves, sphere, level);
     }
 };
+
+test "benchmark generateTerrain" {
+    const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;
+    const io = std.testing.io;
+    var seed_rng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const seed_rand = seed_rng.random();
+    var heights: [ChunkSize][ChunkSize]i32 = undefined;
+    for (&heights) |*row| {
+        for (row) |*height| {
+            height.* = seed_rand.intRangeAtMost(i32, -256, 256);
+        }
+    }
+    const flat_stone: [ChunkSize][ChunkSize]i32 = @splat(@splat(200));
+
+    benchHeights(io, "random", heights, iterations);
+    benchHeights(io, "uniform", flat_stone, iterations);
+}
+
+fn benchHeights(io: std.Io, label: []const u8, heights: [ChunkSize][ChunkSize]i32, iterations: usize) void {
+    const params = DefaultGenerator.Params.default;
+    const chunk_scale: f32 = 1.0;
+    var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
+    var sink: u64 = 0;
+
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |i| {
+        const pos = ChunkPos{ .level = 0, .position = .{ @intCast(@mod(i, 7)), @intCast(@mod(i, 3)), @intCast(@mod(i, 11)) } };
+        var rng = std.Random.DefaultPrng.init(i +% 1);
+        var rand = rng.random();
+        DefaultGenerator.generateTerrain(&grid, pos, heights, &params, &rand, chunk_scale);
+        sink += @intFromEnum(grid[@mod(i, ChunkSize)][0][0]);
+    }
+    const end = std.Io.Clock.Timestamp.now(io, .awake);
+    const vec_ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
+
+    std.debug.print("generateTerrain {s} ({s}): vector {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), label, vec_ns, sink });
+}
+
+test "benchmark genTerrainHeight" {
+    const iterations = if (@import("builtin").mode == .Debug) 50 else 500;
+    const io = std.testing.io;
+    const params = DefaultGenerator.Params.default;
+    var sink: i32 = 0;
+    var height: [ChunkSize][ChunkSize]i32 = undefined;
+
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |i| {
+        height = DefaultGenerator.genTerrainHeight(params, @as(i32, @intCast(@mod(i, 3))) - 1, .{ 3, 5 });
+        sink += height[0][0];
+    }
+    const end = std.Io.Clock.Timestamp.now(io, .awake);
+    const ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
+
+    std.debug.print("genTerrainHeight {s}: {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), ns, sink });
+}

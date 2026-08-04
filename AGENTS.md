@@ -428,10 +428,30 @@ When using `mangohud` combined with Vulkan Synchronization Validation (`VK_VALID
 
 Mixing `vkDeviceWaitIdle` with timeline semaphore synchronization (e.g. during buffer capacity reallocations) can confuse the synchronization validation layer, resulting in false positive `SYNC-HAZARD-WRITE-RACING-WRITE` errors on `vkQueueSubmit2`. The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait stage and the device idle state. You can safely ignore validation messages containing `0x743c6069` when a timeline semaphore and `deviceWaitIdle` are involved.
 
+## Avoid `@splat` of Runtime Bools into Bool Vectors
+
+On this toolchain, `@splat` of a runtime-computed `bool` into `@Vector(N, bool)` can miscompile (observed on `@Vector(32, bool)` in Debug): some lanes receive garbage, producing lane-dependent values from a uniform splat. The result is silently wrong — this was caught only by comparing vectorized output against a scalar reference.
+
+**Rule:** never splat a runtime bool into a bool vector. Either splat a comptime bool, or build the mask from a vector comparison:
+
+```zig
+// ✗ WRONG — runtime bool splat, may miscompile
+const sea_ok = @as(@Vector(N, bool), @splat(bh <= sea_level));
+
+// ✓ CORRECT — comparison with splatted scalar operand
+const sea_ok = bh_v <= @as(@Vector(N, i32), @splat(sea_level));
+```
+
+Runtime `@splat` of integers (`i32`, etc.) is fine. Comptime bool splats (`@splat(false)`) are fine. When combining masks, `@select` chains are the safest form; verify with a scalar-reference test when output must be bit-identical.
+
 ## Testing
 
 Due to a zig issue `zig test` always seems to output exit code 1, you can ignore it unless it says which test failed.
 After writing a test, check it over to follow AGENTS.md principles.
+
+### Noise Vector-vs-Scalar Tests and ReleaseFast ULP Differences
+
+Tests comparing a vectorized noise/warp path against its scalar counterpart (`fillGrid2D`/`fillNoise2DGrid`/`fillWarp2DGrid` vs `genNoise2D`/`domainWarp2D`) pass bit-exact in Debug but differ by ~1 ULP in ReleaseFast, because the wider vector ops reassociate/FMA-contract differently than the N=1 path. Use `std.testing.expectApproxEqAbs(expected, actual, 1e-5)` for these, not `expectEqual`. Do not use relative tolerance: noise values can sit near zero, where the relative error of a 1e-8 absolute difference explodes past any sane epsilon.
 
 ### Allocation Failure Testing
 
