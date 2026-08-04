@@ -727,11 +727,17 @@ Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen
 
 - `@typeInfo` has no `.slice` variant — slices are `.pointer` with `Pointer.size == .slice`.
 - `std.meta.eql` compares slices by pointer identity (`a.ptr == b.ptr`), NOT content. Any deep comparison over slices must be hand-written.
-- A module's import scope is the directory of its `root_source_file`; a generator file under `src/world/generators/` cannot import `../World.zig`. The `.so` root is a tiny shim at `src/` level that force-references the exports.
+- A module's import scope is the directory of its `root_source_file`; a generator file under `src/world/generators/` cannot be the `.so` root because its `../` imports would escape the module path. Instead a single shared root `src/generator_root.zig` sits at `src/` level, where all `..`/`../..` imports stay in scope. `build.zig` compiles that one file once per generator, selecting the generator via a `generator_select` options module and a comptime switch; each generator's own `comptime { @export(...) }` block then emits its `generator_api` vtable. There are no per-generator `_generator.zig` shims — add a new generator by adding a `.kind` enum arm to `GeneratorKind` in `build.zig` and a `@import` arm in `generator_root.zig`.
 - `std.Io.Writer` has a field named `end` (usize), so `writer.end()` only exists on file writers, not on a bare `std.Io.Writer`.
 - `dvui` widget ids collide when the same `@src()` line runs for multiple params — pass `.id_extra` per param.
 
 - `std.zon.parse.free` crashes on values holding comptime-backed defaults (e.g. slices pointing at `@embedFile` data). Parse into a throwaway `std.heap.ArenaAllocator` and discard the arena instead of freeing field-by-field.
+
+### JitteredGrid placement gotchas (Planet generator)
+
+- `JitteredGrid.getStructure` only finds a structure from positions **at or below** it (`structure_pos >= pos_in_box`), and for negative cells the structure position itself goes negative, so the in-range check always fails. Querying cells at negative coordinates silently returns null. If a structure grid must cover the whole world (e.g. planets near spawn on all sides), shift the grid by a large positive constant so every used cell index is positive.
+- The `level` parameter scales the query position by `2^level` internally (`real_position = scale * position`). Querying at position = `cell` with `scale == box_size` lands exactly on the cell origin, where `pos_in_box == 0` and the in-range check reduces to `jitter < scale` — always true when `inner_box_size < box_size`. This is the trick for O(1) "which structure owns this cell" lookups.
+- A sphere placed with a one-sided found region can never be found from all sides. To keep placement O(1) AND correct, clamp the structure position inside its cell (`clamp(jitter, radius, box_size - radius)`) so the whole sphere stays inside the owning cell; every block then finds the sphere through its own cell.
 ### Filtered tests
 
 `zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.

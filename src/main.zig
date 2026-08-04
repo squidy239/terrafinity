@@ -289,6 +289,7 @@ var window_size: wio.Size = .{ .height = 480, .width = 640 };
 const embedded_generators = [_]struct { file_name: []const u8, bytes: []const u8 }{
     .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
     .{ .file_name = "voxelgame.generator", .bytes = @embedFile("voxelgame_generator_bin") },
+    .{ .file_name = "planet.generator", .bytes = @embedFile("planet_generator_bin") },
 };
 
 /// Writes the embedded generator libraries into the `generators` directory so

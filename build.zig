@@ -82,13 +82,16 @@ pub fn build(b: *std.Build) void {
             .name = generator_source.name,
             .linkage = .dynamic,
             .root_module = b.createModule(.{
-                .root_source_file = b.path(generator_source.path),
+                .root_source_file = b.path("src/generator_root.zig"),
                 .target = target,
                 .optimize = optimize,
                 .sanitize_thread = sanitize != .None,
                 .link_libc = true,
             }),
         });
+        const generator_options = b.addOptions();
+        generator_options.addOption(GeneratorKind, "generator", generator_source.kind);
+        generator.root_module.addOptions("generator_select", generator_options);
         configureModule(&deps, generator.root_module);
         exe.step.dependOn(&b.addInstallFileWithDir(
             generator.getEmittedBin(),
@@ -154,9 +157,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-const generator_sources = [_]struct { name: []const u8, path: []const u8, file_name: []const u8, embed_name: []const u8 }{
-    .{ .name = "terrain_generator", .path = "src/terrain_generator.zig", .file_name = "terrain.generator", .embed_name = "terrain_generator_bin" },
-    .{ .name = "voxelgame_generator", .path = "src/voxelgame_generator.zig", .file_name = "voxelgame.generator", .embed_name = "voxelgame_generator_bin" },
+const GeneratorKind = enum { terrain, planet, voxelgame };
+
+const generator_sources = [_]struct { kind: GeneratorKind, name: []const u8, file_name: []const u8, embed_name: []const u8 }{
+    .{ .kind = .terrain, .name = "terrain_generator", .file_name = "terrain.generator", .embed_name = "terrain_generator_bin" },
+    .{ .kind = .voxelgame, .name = "voxelgame_generator", .file_name = "voxelgame.generator", .embed_name = "voxelgame_generator_bin" },
+    .{ .kind = .planet, .name = "planet_generator", .file_name = "planet.generator", .embed_name = "planet_generator_bin" },
 };
 
 const Deps = struct {
