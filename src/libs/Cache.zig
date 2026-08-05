@@ -14,6 +14,7 @@ pub fn Cache(
     return struct {
         const Self = @This();
         pub const Shard = SetAssociativeCache.SetAssociativeCacheType(Key, Value, key_from_value, hash, layout);
+        pub const value_count_min = Shard.value_count_min * fragments;
         shards: [fragments]Shard,
         shard_locks: [fragments]std.Io.Mutex,
 

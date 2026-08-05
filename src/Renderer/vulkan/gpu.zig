@@ -488,6 +488,10 @@ pub const MeshUploader = struct {
     pool_reservoir: CommandPoolReservoir = .{},
     retired_face_buffers: std.ArrayList(RetiredFaceBuffer) = undefined,
     transfer: TransferState = .{},
+    /// True when transfer and graphics queues share a physical queue family; their
+    /// submits then share the graphics queue mutex. On a distinct transfer family the
+    /// transfer pipeline locks only against itself.
+    shared_queue: bool,
 
     flush_ctx: *anyopaque = undefined,
     flush_fn: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
@@ -506,6 +510,7 @@ pub const MeshUploader = struct {
             .dev = vk_ctx.dev,
             .memory = memory,
             .single_time = single_time,
+            .shared_queue = vk_ctx.transfer_queue_family_index == vk_ctx.queue_family_index,
             .staging_ring = undefined,
             .region_allocator = undefined,
             .retired_face_buffers = .empty,
@@ -582,11 +587,25 @@ pub const MeshUploader = struct {
         self.staging_ring.bind(io, slice, timeline_value);
     }
 
+    /// The mutex guarding transfer-queue submits. On a distinct transfer family it is
+    /// the dedicated transfer mutex so submits do not queue behind graphics/present;
+    /// on a shared family the queue mutex must serialize both queues' vkQueueSubmit.
+    fn transferLock(self: *MeshUploader) *std.Io.Mutex {
+        return if (self.shared_queue) &self.vk_ctx.queue_mutex else &self.vk_ctx.transfer_queue_mutex;
+    }
+
     pub fn allocRegion(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) !GpuRegionAllocator.AllocResult {
         while (true) {
             if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
 
             try self.flush(io);
+
+            // Exclude concurrent transfer submits across the buffer swap and copy: a
+            // submit referencing the old buffer must not race the graphics-side copy.
+            // Lock order is always transfer then graphics, so no path can deadlock.
+            const exclusive_transfer = !self.shared_queue;
+            if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.lockUncancelable(io);
+            defer if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.unlock(io);
 
             self.vk_ctx.queue_mutex.lockUncancelable(io);
             defer self.vk_ctx.queue_mutex.unlock(io);
@@ -656,9 +675,10 @@ pub const MeshUploader = struct {
         std.debug.assert(count <= max_batch);
 
         const zone_queue = tracy.Zone.begin(.{ .src = @src(), .name = "submitToTransferQueue_lock" });
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
+        const lock = self.transferLock();
+        lock.lockUncancelable(io);
         zone_queue.end();
-        defer self.vk_ctx.queue_mutex.unlock(io);
+        defer lock.unlock(io);
 
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitToTransferQueue" });
         defer zone.end();

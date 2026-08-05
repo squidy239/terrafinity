@@ -21,7 +21,6 @@ const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const generator_api = @import("world/generators/generator_api.zig");
 const generator_loader = @import("world/generator_loader.zig");
 const World = @import("world/World.zig");
-
 const Game = @This();
 
 allocator: std.mem.Allocator,
@@ -429,8 +428,8 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue)), game.world.chunks.shards.len * 256);
-    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue)), game.world.grids.shards.len * 256);
+    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue)), @TypeOf(game.world.chunks).value_count_min);
+    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue)), @TypeOf(game.world.grids).value_count_min);
     game.options_lock.unlockShared(io);
     std.log.info("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
     std.log.info("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });

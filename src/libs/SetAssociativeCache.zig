@@ -84,12 +84,11 @@ pub fn SetAssociativeCacheType(
         const Clock = @Int(.unsigned, clock_hand_bits);
 
         /// We don't require `value_count_max` in `init` to be a power of 2, but we do require
-        /// it to be a multiple of `value_count_max_multiple`. The calculation below
-        /// follows from a multiple which will satisfy all asserts.
-        pub const value_count_max_multiple: u64 = @max(
-            layout.ways,
-            @divExact(layout.cache_line_size * 8, layout.clock_bits), // `counts`
-        );
+        /// it to be a multiple of `value_count_max_multiple` (the set size).
+        pub const value_count_max_multiple: u64 = layout.ways;
+
+        /// The smallest `value_count_max` that satisfies every assertion in `init`.
+        pub const value_count_min: u64 = layout.ways;
 
         name: []const u8,
         sets: u64,
@@ -137,17 +136,10 @@ pub fn SetAssociativeCacheType(
         ) !SetAssociativeCache {
             const sets = @divExact(value_count_max, layout.ways);
 
-            assert(value_count_max > 0);
-            assert(value_count_max >= layout.ways);
+            assert(value_count_max >= value_count_min);
             assert(value_count_max % layout.ways == 0);
 
-            const values_size_max = value_count_max * @sizeOf(Value);
-            assert(values_size_max >= layout.cache_line_size);
-            assert(values_size_max % layout.cache_line_size == 0);
-
             const counts_size = @divExact(value_count_max * layout.clock_bits, 8);
-            assert(counts_size >= layout.cache_line_size);
-            assert(counts_size % layout.cache_line_size == 0);
 
             // Each clock hand is guaranteed (by comptime asserts) to not span multiple cache lines.
             // But in order to shrink the lower-bound cache size, we do not require that `clocks`
@@ -549,8 +541,7 @@ fn set_associative_cache_test(
         fn run() !void {
             if (log) SAC.inspect();
 
-            // TODO Add a nice calculator method to help solve the minimum value_count_max required:
-            var sac = try SAC.init(testing.allocator, 16 * 16 * 8, .{ .name = "test" });
+            var sac = try SAC.init(testing.allocator, SAC.value_count_min, .{ .name = "test" });
             defer sac.deinit(testing.allocator);
 
             for (sac.tags) |tag| try testing.expectEqual(@as(SAC.Tag, 0), tag);

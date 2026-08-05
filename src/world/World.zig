@@ -206,11 +206,11 @@ const ChunkMapType = Cache(
     ChunkValue.keyFromValue,
     chunkPosHash,
     .{},
-    if (builtin.is_test) 1 else 32,
+    if (builtin.is_test) 1 else 256,
 );
 
 chunks: ChunkMapType,
-grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, if (builtin.is_test) 1 else 32),
+grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, if (builtin.is_test) 1 else 256),
 config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,

@@ -86,6 +86,9 @@ graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 // advanced with .release by submitFrameWithExtra; the pair orders the two submit paths.
 frame_number: std.atomic.Value(u64) = .init(0),
 queue_mutex: std.Io.Mutex = .init,
+/// Serializes transfer-queue submissions against the face-buffer grow, so a transfer
+/// submit does not queue behind graphics submits, present, or scene growth stalls.
+transfer_queue_mutex: std.Io.Mutex = .init,
 
 vulkan_host_allocator: VulkanHostAllocator = undefined,
 vkalloc: vk.AllocationCallbacks = undefined,
