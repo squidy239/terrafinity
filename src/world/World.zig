@@ -179,7 +179,7 @@ pub const ChunkValue = struct {
     chunk: Chunk,
     pos: ChunkPos,
 
-    pub inline fn key_from_value(value: *const ChunkValue) ChunkPos {
+    pub inline fn keyFromValue(value: *const ChunkValue) ChunkPos {
         return value.pos;
     }
 };
@@ -189,7 +189,7 @@ pub const GridValue = struct {
     chunk: *Chunk,
     pos: ChunkPos,
 
-    pub inline fn key_from_value(value: *const GridValue) ChunkPos {
+    pub inline fn keyFromValue(value: *const GridValue) ChunkPos {
         return value.pos;
     }
 };
@@ -203,14 +203,14 @@ inline fn chunkPosHash(item: anytype) u64 {
 const ChunkMapType = Cache(
     ChunkPos,
     ChunkValue,
-    ChunkValue.key_from_value,
+    ChunkValue.keyFromValue,
     chunkPosHash,
     .{},
     if (builtin.is_test) 1 else 32,
 );
 
 chunks: ChunkMapType,
-grids: Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, if (builtin.is_test) 1 else 32),
+grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, if (builtin.is_test) 1 else 32),
 config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
@@ -283,7 +283,7 @@ fn saveAll(self: *World, io: std.Io) void {
     defer _ = io.swapCancelProtection(prev);
 
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-        group.async(io, saveShard, .{ self, shard, lock, io });
+        group.async(io, saveShard, .{ self, shard, lock, io, true });
     }
     group.await(io) catch unreachable;
 }
@@ -301,19 +301,64 @@ pub fn trySaveAll(self: *World, io: std.Io) !void {
     try group.await(io);
 }
 
-pub fn saveShard(self: *World, shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
+const save_window_size = 64;
+const SaveWindowItem = struct {
+    chunk: *Chunk,
+    pos: ChunkPos,
+};
+
+
+fn saveShard(
+    self: *World,
+    shard: *ChunkMapType.Shard,
+    lock: *std.Io.Mutex,
+    io: std.Io,
+    blocking: bool,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    lock.lockUncancelable(io);
-    defer lock.unlock(io);
+    while (true) {
+        if (blocking) {
+            lock.lockUncancelable(io);
+        } else if (!lock.tryLock()) {
+            return;
+        }
 
-    var it = shard.iterator();
-    while (it.next()) |c| {
-        c.chunk.encoding_lock.lockSharedUncancelable(io);
-        defer c.chunk.encoding_lock.unlockShared(io);
-        self.save(io, &c.chunk, c.key_from_value()) catch |err|
-            std.log.err("error saving chunk: {any}, {any}\n", .{ c.key_from_value(), err });
+        var window_buf: [save_window_size]SaveWindowItem = undefined;
+        var window = std.ArrayList(SaveWindowItem).initBuffer(&window_buf);
+        var it = shard.iterator();
+        while (window.items.len < window.capacity) {
+            const c = it.next() orelse break;
+            if (!c.chunk.modified.load(.seq_cst)) continue;
+
+            c.chunk.addRef();
+            window.appendAssumeCapacity(.{ .chunk = &c.chunk, .pos = c.keyFromValue() });
+        }
+        lock.unlock(io);
+
+        if (window.items.len == 0) return;
+
+        var save_failed = false;
+        var chunk_contended = false;
+        for (window.items) |item| {
+            if (blocking) {
+                item.chunk.encoding_lock.lockSharedUncancelable(io);
+            } else if (!item.chunk.encoding_lock.tryLockShared(io)) {
+                chunk_contended = true;
+                item.chunk.release();
+                continue;
+            }
+
+            self.save(io, item.chunk, item.pos) catch |err| {
+                save_failed = true;
+                std.log.err("error saving chunk: {any}, {any}\n", .{ item.pos, err });
+            };
+            item.chunk.encoding_lock.unlockShared(io);
+            item.chunk.release();
+        }
+
+        if (save_failed or chunk_contended) return;
     }
 }
 
@@ -819,19 +864,7 @@ fn save(self: *World, io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
 }
 
 fn trySaveShard(self: *World, shard: *ChunkMapType.Shard, lock: *std.Io.Mutex, io: std.Io) void {
-    const zone = tracy.Zone.begin(.{ .src = @src() });
-    defer zone.end();
-
-    if (!lock.tryLock()) return;
-    defer lock.unlock(io);
-
-    var it = shard.iterator();
-    while (it.next()) |c| {
-        if (!c.chunk.encoding_lock.tryLockShared(io)) continue;
-        defer c.chunk.encoding_lock.unlockShared(io);
-        self.save(io, &c.chunk, c.key_from_value()) catch |err|
-            std.log.err("error saving chunk: {any}, {any}\n", .{ c.key_from_value(), err });
-    }
+    self.saveShard(shard, lock, io, false);
 }
 
 inline fn readBlockFromEncoding(encoding: Chunk.Encoding, local_pos: @Vector(3, usize)) Block {
@@ -868,7 +901,7 @@ test "cube benchmark" {
     errdefer generator.terrain_height_cache.deinit(allocator);
     generator.params.setSeeds(io);
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         131072,
         .{ .name = "benchmark chunk cache" },
@@ -878,7 +911,7 @@ test "cube benchmark" {
         c.deinit(allocator);
     }
 
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         8192,
         .{ .name = "benchmark grid cache" },
@@ -960,7 +993,7 @@ fn makeTestingWorld(
     const chunk_count = @max(std.mem.alignForward(usize, chunks, 256), 256);
     const grid_count = @max(std.mem.alignForward(usize, grids, 256), 256);
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         chunk_count,
         .{ .name = "test chunk cache" },
@@ -970,7 +1003,7 @@ fn makeTestingWorld(
         c.deinit(allocator);
     }
 
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         grid_count,
         .{ .name = "test grid cache" },
@@ -1029,7 +1062,7 @@ test "fuzz world" {
     const chunk_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
     const grid_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         chunk_count,
         .{ .name = "test chunk cache" },
@@ -1039,7 +1072,7 @@ test "fuzz world" {
         c.deinit(allocator);
     }
 
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.key_from_value, chunkPosHash, .{}, 1).init(
+    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
         grid_count,
         .{ .name = "test grid cache" },
