@@ -8,11 +8,22 @@ const Chunk = @import("Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
 
+pub const SaveMode = enum {
+    /// Save every chunk in full, whether or not it was modified
+    everything,
+    /// Save modified grids and all uniform chunks
+    modified_grids_all_uniforms,
+    /// Save only modified chunks
+    only_modified,
+};
+
 is_init: bool,
 database: rocksdb.database.DB,
 options: rocksdb.DBOptions,
 chunkdata_column: rocksdb.ColumnFamily,
 chunk_grid_column: rocksdb.ColumnFamily,
+save_mode: *SaveMode,
+options_lock: *std.Io.RwLock,
 
 pub fn getSource(self: *@This()) World.ChunkSource {
     return .{
@@ -26,9 +37,11 @@ pub fn getSource(self: *@This()) World.ChunkSource {
 }
 
 ////opens the database, creates it if it doesnt exist
-pub fn init(path: []const u8, allocator: std.mem.Allocator) !@This() {
+pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode, options_lock: *std.Io.RwLock) !@This() {
     var storage: @This() = undefined;
     storage.is_init = true;
+    storage.save_mode = save_mode;
+    storage.options_lock = options_lock;
     storage.options = .{
         .create_if_missing = true,
         .create_missing_column_families = true,
@@ -79,15 +92,23 @@ fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chu
 
 const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 
-///saves a chunk to the database if it has been modified
+///saves a chunk to the database according to the configured save mode
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
-    _ = io;
-    if (chunk.modified.load(.seq_cst) == false) switch (chunk.encoding) {
-        .grid => return,
-        .uniform => if (chunk.saved.load(.unordered)) return, //save chunk if it is just one block and has not been saved yet
-    };
+
+    const modified = chunk.modified.load(.seq_cst);
+    try self.options_lock.lock(io);
+    const save_mode = self.save_mode.*;
+    self.options_lock.unlock(io);
+    switch (save_mode) {
+        .everything => {},
+        .modified_grids_all_uniforms => switch (chunk.encoding) {
+            .uniform => {},
+            .grid => if (!modified) return,
+        },
+        .only_modified => if (!modified) return,
+    }
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     const data: ChunkData = .{

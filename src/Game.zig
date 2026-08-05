@@ -249,6 +249,8 @@ pub const Options = struct {
     sphere_size: u32 = 100,
     sphere_block: World.Block = .air,
 
+    save_mode: World.WorldStorage.SaveMode = .only_modified,
+
     render_options: Renderer.RenderOptions = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
@@ -423,7 +425,7 @@ pub fn init(
     const storage_path = try std.fs.path.joinZ(game.allocator, &.{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
-        game.world_storage = try .init(storage_path, game.allocator);
+        game.world_storage = try .init(storage_path, game.allocator, &game.options.save_mode, game_options_lock);
     }
 
     game.options_lock.lockSharedUncancelable(io);

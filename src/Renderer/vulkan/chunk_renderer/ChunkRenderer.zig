@@ -405,7 +405,7 @@ fn submitBatch(self: *ChunkRenderer, io: std.Io) !void {
     const count, const wait_graphics = blk: {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock" });
         defer zone_lock.end();
-        
+
         self.submission_batch.mutex.lockUncancelable(io);
         defer self.submission_batch.mutex.unlock(io);
         if (self.submission_batch.count == 0) return;
