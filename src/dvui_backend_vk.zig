@@ -122,7 +122,8 @@ pub fn contentScale(_: *@This()) f32 {
 }
 
 pub fn clipboardText(self: *@This()) ![]const u8 {
-    return self.window.getClipboardText(self.arena) orelse "";
+    _ = self;
+    return undefined;
 }
 
 pub fn clipboardTextSet(self: *@This(), text: []const u8) !void {
@@ -163,7 +164,7 @@ pub fn waitEventTimeout(_: *@This(), timeout_us: u32) void {
 
 pub fn setTextInputRect(self: *@This(), maybe_rect: ?dvui.Rect.Natural) void {
     if (maybe_rect) |rect| {
-        self.window.enableTextInput(.{ .cursor = .{ .x = std.math.lossyCast(u16, rect.x), .y = std.math.lossyCast(u16, rect.y) } });
+        self.window.enableTextInput(.{ .cursor = .{ .x = @trunc(rect.x), .y = @trunc(rect.y) } });
     } else {
         self.window.disableTextInput();
     }
@@ -289,7 +290,7 @@ pub fn addEvent(self: *@This(), win: *dvui.Window, event: wio.Event) !bool {
 
 pub fn textInputRect(self: *@This(), rect: ?dvui.Rect.Natural) void {
     if (rect) |r| {
-        self.window.enableTextInput(.{ .cursor = .{ .x = std.math.lossyCast(u16, r.x), .y = std.math.lossyCast(u16, r.y) } });
+        self.window.enableTextInput(.{ .cursor = .{ .x = @trunc(r.x), .y = @trunc(r.y) } });
     } else {
         self.window.disableTextInput();
     }

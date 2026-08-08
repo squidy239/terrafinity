@@ -49,8 +49,8 @@
             .hash = "zignal-0.11.0-dev-OrZ3s58cKADge6xp3X_XwEFOC07xk_WyoxaMf3Su5a5w",
         },
         .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#c7a0b1ec889c8c17841ffb04ae3d31810328cc64",
-            .hash = "wio-0.0.0-8xHrr_kECABNBaGmnTW2ymwtaa-Oqg3CWN_tXK6KGFkZ",
+            .url = "git+https://github.com/ypsvlq/wio#4a0b09b4125081a3b71d0dc5b2e943caa908f226",
+            .hash = "wio-0.0.0-8xHrr79VCABN3bQ1Q9XrQScWkAXvL8HCXjJ3iXU4jHtL",
         },
     },
 

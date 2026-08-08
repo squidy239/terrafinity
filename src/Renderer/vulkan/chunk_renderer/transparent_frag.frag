@@ -1,6 +1,8 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
 
+#include "shadow.glsl"
+
 layout(location = 0) out vec4 out_accum;
 layout(location = 1) out vec4 out_reveal;
 layout(location = 2) out float out_volume;
@@ -60,7 +62,19 @@ void main() {
     vec2 tex_coords = vec2(in_coords[tex_coord_axes[side][0]], in_coords[tex_coord_axes[side][1]]) * 2.0;
 
     vec4 unlit_color = texture(textures[nonuniformEXT(block_array_layer)], (tex_coords + 1.0) / 2.0);
-    float light = mix(0.3, 0.5, sun_day) + max(dot(normal, sun_dir_norm), 0.0) * sun_day;
+    // face_normals are inward (see fragshader.frag), so Lambert uses -sun_dir.
+    float ndl = max(dot(normal, -sun_dir_norm), 0.0);
+    float light = mix(0.3, 0.5, sun_day) + ndl * sun_day;
+    if (shadow_params.cascade_count != 0u) {
+        // Volume term inherits via `light`, using the face normal from `side`; a surface
+        // approximation for the interior of the volume.
+        if (shadow_params.debug_colors != 0u) {
+            unlit_color.rgb *= cascadeDebugColor(shadowCascadeIndex(frag_pos));
+        } else {
+            float shadow = sampleShadow(frag_pos, normal, ndl);
+            light = mix(0.3, 0.5, sun_day) + ndl * sun_day * shadow;
+        }
+    }
     vec4 color = vec4(light * unlit_color.rgb, unlit_color.a);
 
     float fragment_depth = 1.0 / gl_FragCoord.w;

@@ -46,6 +46,8 @@ props: vk.PhysicalDeviceProperties,
 mem_props: vk.PhysicalDeviceMemoryProperties,
 sampler_anisotropy: bool = false,
 pipeline_creation_feedback: bool = false,
+depth_clamp: bool = false,
+depth_bias_clamp: bool = false,
 
 dev_handle: vk.Device,
 dev_wrapper: ?*DeviceWrapper,
@@ -199,6 +201,8 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
             best_score = score;
             selected_pdev = pdev;
             self.sampler_anisotropy = anisotropy_supported;
+            self.depth_clamp = features2.features.depth_clamp == .true;
+            self.depth_bias_clamp = features2.features.depth_bias_clamp == .true;
         }
     }
     if (selected_pdev == .null_handle) return error.NoSuitablePhysicalDevice;
@@ -462,6 +466,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
             .shader_int_64 = .true,
             .independent_blend = .true,
             .sampler_anisotropy = if (self.sampler_anisotropy) .true else .false,
+            .depth_clamp = if (self.depth_clamp) .true else .false,
+            .depth_bias_clamp = if (self.depth_bias_clamp) .true else .false,
         },
         .p_next = @ptrCast(&features11),
     };

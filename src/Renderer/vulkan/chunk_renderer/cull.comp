@@ -41,6 +41,8 @@ layout(std430, binding = 3) buffer CountBuffer {
     uint transparent_count;
     uint opaque_face_count;
     uint transparent_face_count;
+    uint shadow_count;
+    uint shadow_face_count;
 };
 
 layout(push_constant) uniform PushConsts {
@@ -48,6 +50,8 @@ layout(push_constant) uniform PushConsts {
     vec4 player_pos;
     uint total_candidates;
     uint draw_capacity;
+    uint mode;
+    float min_chunk_size;
 } pc;
 
 bool boxInFrustum(vec3 b_min, vec3 b_max) {
@@ -68,6 +72,31 @@ void main() {
     vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
     float size = candidate.scale * 32.0;
     if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
+
+    if (pc.mode == 1u) {
+        // Shadow cull: opaque only, writes slot 2 (mesh_base = 2 * draw_capacity).
+        if (candidate.is_transparent != 0u) return;
+        if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
+        uint idx = atomicAdd(shadow_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(shadow_count, pc.draw_capacity);
+            return;
+        }
+        atomicAdd(shadow_face_count, candidate.face_count);
+        uint out_idx = idx + 2u * pc.draw_capacity;
+        out_indirect[out_idx] = DrawIndirectCommand(
+            6u,
+            candidate.face_count,
+            0u,
+            candidate.face_offset
+        );
+        out_meshes[out_idx] = MeshData(
+            candidate.absolute_position,
+            vec4(relative_pos, 1.0),
+            candidate.scale
+        );
+        return;
+    }
 
     uint idx;
     if (candidate.is_transparent == 0u) {

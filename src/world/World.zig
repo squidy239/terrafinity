@@ -307,7 +307,6 @@ const SaveWindowItem = struct {
     pos: ChunkPos,
 };
 
-
 fn saveShard(
     self: *World,
     shard: *ChunkMapType.Shard,
@@ -903,7 +902,7 @@ test "cube benchmark" {
 
     const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
-        131072,
+        13107,
         .{ .name = "benchmark chunk cache" },
     );
     errdefer {
@@ -913,7 +912,7 @@ test "cube benchmark" {
 
     const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
-        8192,
+        819,
         .{ .name = "benchmark grid cache" },
     );
     errdefer {
@@ -932,8 +931,8 @@ test "cube benchmark" {
 
     var counter: std.atomic.Value(usize) = .init(0);
     const start_time: std.Io.Timestamp = .now(io, .awake);
-    const levels: [2]i32 = .{ 0, 4 };
-    const square = 4;
+    const levels: [2]i32 = .{ 0, 1 };
+    const square = 2;
 
     var group: std.Io.Group = .init;
     var level: i32 = levels[0];

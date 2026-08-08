@@ -550,6 +550,22 @@ pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load
     };
 }
 
+/// Depth attachment cleared to an explicit depth; used by the shadow pass (standard
+/// depth clears to far = 1.0, unlike the main reversed-Z targets).
+pub fn renderingAttachmentDepthClear(view: vk.ImageView, layout: vk.ImageLayout, clear_depth: f32) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = view,
+        .image_layout = layout,
+        .resolve_mode = .{},
+        .resolve_image_view = .null_handle,
+        .resolve_image_layout = .undefined,
+        .load_op = .clear,
+        .store_op = .store,
+        .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
+    };
+}
+
 pub fn renderingInfo(
     extent: vk.Extent2D,
     color_attachments: []const vk.RenderingAttachmentInfo,
@@ -674,35 +690,31 @@ pub fn createShaderModule(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbac
     }, vkalloc);
 }
 
-pub fn buildGraphicsPipeline(
+const ShaderStage = struct {
+    flags: vk.ShaderStageFlags,
+    module: vk.ShaderModule,
+};
+
+/// Shared graphics-pipeline builder. The stage list and rasterization state are chosen
+/// by the caller; empty `color_formats`/`blend_attachments` yields a depth-only pipeline.
+fn createGraphicsPipeline(
     dev: DeviceProxy,
     vkalloc: *const vk.AllocationCallbacks,
     pipeline_creation_feedback: bool,
-    vert_module: vk.ShaderModule,
-    frag_module: vk.ShaderModule,
+    comptime num_stages: usize,
+    stages: []const ShaderStage,
     color_formats: []const vk.Format,
     depth_format: vk.Format,
     depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
     blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    prsci: vk.PipelineRasterizationStateCreateInfo,
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "buildGraphicsPipeline" });
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipeline" });
     defer zone.end();
     const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = .triangle_list, .primitive_restart_enable = .false };
     const pvsci: vk.PipelineViewportStateCreateInfo = .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
-    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
     const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
         .rasterization_samples = .{ .@"1_bit" = true },
         .sample_shading_enable = .false,
@@ -710,13 +722,16 @@ pub fn buildGraphicsPipeline(
         .alpha_to_coverage_enable = .false,
         .alpha_to_one_enable = .false,
     };
-    const pcbsci: vk.PipelineColorBlendStateCreateInfo = .{
-        .logic_op_enable = .false,
-        .logic_op = .copy,
-        .attachment_count = @intCast(blend_attachments.len),
-        .p_attachments = blend_attachments.ptr,
-        .blend_constants = .{ 0, 0, 0, 0 },
-    };
+    var pcbsci: vk.PipelineColorBlendStateCreateInfo = undefined;
+    if (blend_attachments.len > 0) {
+        pcbsci = .{
+            .logic_op_enable = .false,
+            .logic_op = .copy,
+            .attachment_count = @intCast(blend_attachments.len),
+            .p_attachments = blend_attachments.ptr,
+            .blend_constants = .{ 0, 0, 0, 0 },
+        };
+    }
 
     var dyn_states_buf: [5]vk.DynamicState = undefined;
     var dyn_states = std.ArrayList(vk.DynamicState).initBuffer(&dyn_states_buf);
@@ -729,21 +744,20 @@ pub fn buildGraphicsPipeline(
     }
     const dyn: vk.PipelineDynamicStateCreateInfo = .{ .flags = .{}, .dynamic_state_count = @intCast(dyn_states.items.len), .p_dynamic_states = dyn_states.items.ptr };
 
-    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
-        shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
-        shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
-    };
+    var pssci: [num_stages]vk.PipelineShaderStageCreateInfo = undefined;
+    for (stages, 0..) |stage, i| pssci[i] = shaderStageCreateInfo(stage.flags, stage.module);
 
     var pipeline_feedback: vk.PipelineCreationFeedback = .{ .flags = .{}, .duration = 0 };
-    var stage_feedbacks: [2]vk.PipelineCreationFeedback = .{ .{ .flags = .{}, .duration = 0 }, .{ .flags = .{}, .duration = 0 } };
-    var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{ .p_pipeline_creation_feedback = &pipeline_feedback, .pipeline_stage_creation_feedback_count = 2, .p_pipeline_stage_creation_feedbacks = &stage_feedbacks };
+    var stage_feedbacks: [num_stages]vk.PipelineCreationFeedback = undefined;
+    for (0..num_stages) |i| stage_feedbacks[i] = .{ .flags = .{}, .duration = 0 };
+    var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{ .p_pipeline_creation_feedback = &pipeline_feedback, .pipeline_stage_creation_feedback_count = num_stages, .p_pipeline_stage_creation_feedbacks = &stage_feedbacks };
 
     const stencil_format: vk.Format = if (depth_format == .d32_sfloat_s8_uint or depth_format == .d24_unorm_s8_uint) depth_format else .undefined;
     var rendering_info: vk.PipelineRenderingCreateInfo = .{
         .p_next = null,
         .view_mask = 0,
         .color_attachment_count = @intCast(color_formats.len),
-        .p_color_attachment_formats = color_formats.ptr,
+        .p_color_attachment_formats = if (color_formats.len > 0) color_formats.ptr else null,
         .depth_attachment_format = depth_format,
         .stencil_attachment_format = stencil_format,
     };
@@ -754,7 +768,7 @@ pub fn buildGraphicsPipeline(
     const gpci: vk.GraphicsPipelineCreateInfo = .{
         .flags = .{},
         .p_next = @ptrCast(&rendering_info),
-        .stage_count = 2,
+        .stage_count = num_stages,
         .p_stages = &pssci,
         .p_vertex_input_state = &vertex_input_info,
         .p_input_assembly_state = &piasci,
@@ -763,7 +777,7 @@ pub fn buildGraphicsPipeline(
         .p_rasterization_state = &prsci,
         .p_multisample_state = &pmsci,
         .p_depth_stencil_state = ds_ptr,
-        .p_color_blend_state = &pcbsci,
+        .p_color_blend_state = if (blend_attachments.len > 0) &pcbsci else null,
         .p_dynamic_state = &dyn,
         .layout = layout,
         .render_pass = .null_handle,
@@ -784,6 +798,84 @@ pub fn buildGraphicsPipeline(
     }
 
     return pipeline;
+}
+
+/// Colour pipeline: vertex+fragment stages, an optional depth stencil state, and a
+/// colour blend attachment per `blend_attachments` entry.
+pub fn buildGraphicsPipeline(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    frag_module: vk.ShaderModule,
+    color_formats: []const vk.Format,
+    depth_format: vk.Format,
+    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
+    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+) !vk.Pipeline {
+    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
+        .front_face = .clockwise,
+        .depth_bias_enable = .false,
+        .depth_bias_constant_factor = 0,
+        .depth_bias_clamp = 0,
+        .depth_bias_slope_factor = 0,
+        .line_width = 1,
+    };
+    return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 2, &.{
+        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
+        .{ .flags = .{ .fragment_bit = true }, .module = frag_module },
+    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info);
+}
+
+/// Depth-only pipeline: a single vertex stage, no colour attachments, standard (not
+/// reversed-Z) depth with LESS_OR_EQUAL, optional depth clamp and slope bias. Used by
+/// the shadow pass; cull mode is set dynamically via cmdSetCullMode.
+pub fn buildDepthOnlyPipeline(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    depth_format: vk.Format,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    depth_bias_constant: f32,
+    depth_bias_slope: f32,
+    depth_bias_clamp: f32,
+    depth_clamp: bool,
+) !vk.Pipeline {
+    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
+        .depth_clamp_enable = if (depth_clamp) .true else .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
+        .front_face = .clockwise,
+        .depth_bias_enable = .true,
+        .depth_bias_constant_factor = depth_bias_constant,
+        .depth_bias_clamp = depth_bias_clamp,
+        .depth_bias_slope_factor = depth_bias_slope,
+        .line_width = 1,
+    };
+    const depth_stencil: vk.PipelineDepthStencilStateCreateInfo = .{
+        .flags = .{},
+        .depth_test_enable = .true,
+        .depth_write_enable = .true,
+        .depth_compare_op = .less_or_equal,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = undefined,
+        .back = undefined,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
+    return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
+        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info);
 }
 
 pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator, vkalloc: *const vk.AllocationCallbacks, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {

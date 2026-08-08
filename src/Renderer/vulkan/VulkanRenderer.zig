@@ -18,6 +18,7 @@ const gpu = @import("gpu.zig");
 const OitCompositor = @import("OitCompositor.zig").OitCompositor;
 const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
 const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
+const ShadowRenderer = @import("shadow/ShadowRenderer.zig").ShadowRenderer;
 
 const FrameDebugStats = struct {
     frame_number: u64 = 0,
@@ -26,6 +27,8 @@ const FrameDebugStats = struct {
     transparent_drawn: u32 = 0,
     opaque_faces: u32 = 0,
     transparent_faces: u32 = 0,
+    shadow_faces: u32 = 0,
+    shadow_cascade: ?u32 = null,
     player_pos: @Vector(3, f64) = .{ 0, 0, 0 },
     camera_front: @Vector(3, f32) = .{ 0, 0, 1 },
     elapsed_ns: u64 = 0,
@@ -41,6 +44,9 @@ const FrameDebugStats = struct {
         });
         std.log.info("Meshes in map: {d}  drawn opaque: {d}  transparent: {d}", .{ self.total_meshes, self.opaque_drawn, self.transparent_drawn });
         std.log.info("Faces drawn - opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
+        if (self.shadow_cascade) |c| {
+            std.log.info("Shadow - cascade {d}: {d} faces", .{ c, self.shadow_faces });
+        }
         std.log.info("Time: {d:.2} ms", .{ms});
         std.log.info("========================", .{});
     }
@@ -65,6 +71,7 @@ scene: gpu.IndirectScene = undefined,
 oit: OitCompositor = undefined,
 chunk: ChunkRenderer = undefined,
 sky: SkyRenderer = undefined,
+shadow: ShadowRenderer = undefined,
 
 render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
@@ -115,13 +122,21 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     try self.scene.init(allocator, vk_ctx, &self.memory, 4096, 4096);
     errdefer self.scene.deinit();
 
+    self.shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
+    errdefer self.shadow.deinit();
+
+    self.render_options_lock.lockSharedUncancelable(io);
+    const initial_shadow_config = self.render_options.shadow;
+    self.render_options_lock.unlockShared(io);
+    try self.shadow.recreate(io, initial_shadow_config);
+
     self.oit = try OitCompositor.init(allocator, vk_ctx);
     errdefer self.oit.deinit();
 
     self.sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
     errdefer self.sky.deinit();
 
-    try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, render_options, render_options_lock);
+    try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, &self.shadow, render_options, render_options_lock);
     errdefer self.chunk.deinit(io);
 
     try self.recreateSwapchainResourcesLocked(io);
@@ -166,6 +181,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
     self.chunk.deinit(io);
     self.sky.deinit();
+    self.shadow.deinit();
     self.scene.deinit();
     self.uploader.deinit();
     self.destroyRendererSwapchainResources();
@@ -277,6 +293,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         self.frame_stats.transparent_drawn = counts[0].transparent_count;
         self.frame_stats.opaque_faces = counts[0].opaque_face_count;
         self.frame_stats.transparent_faces = counts[0].transparent_face_count;
+        self.frame_stats.shadow_faces = counts[0].shadow_face_count;
+        self.frame_stats.shadow_cascade = self.shadow.frame_cascade;
     }
 
     self.render_options_lock.lockSharedUncancelable(io);
@@ -291,6 +309,12 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const elapsed_sec = @as(f32, @floatFromInt(now_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
+    // Shadow config changes recreate the depth array before any command buffer records;
+    // recreate is a no-op when nothing changed.
+    self.shadow.recreate(io, self.render_options.shadow) catch |err| {
+        std.log.err("VulkanRenderer: shadow recreate failed: {any}", .{err});
+    };
+
     const total_candidates = self.scene.max_allocated_index.load(.monotonic);
     try self.scene.ensureCapacity(io, total_candidates);
 
@@ -301,6 +325,22 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
 
     const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
+
+    const scene_aabb = self.scene.getSceneAABB();
+    self.shadow.prepareFrame(
+        io,
+        current_frame,
+        view_pos,
+        aspect,
+        fov,
+        self.camera.front(),
+        frame_sky.sun_dir,
+        scene_aabb.min,
+        scene_aabb.max,
+    ) catch |err| {
+        std.log.err("VulkanRenderer: shadow prepare failed: {any}", .{err});
+    };
+
     const pass_ctx: ChunkRenderer.PassContext = .{
         .cmd_buffer = cmd_buffer,
         .frame_idx = current_frame,
@@ -323,6 +363,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_sampled_view = self.render_depth_sampled_view,
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
+        .shadow = &self.shadow,
     };
     self.sky.uploadParams(current_frame, &frame_sky.params);
     self.sky.record(&.{

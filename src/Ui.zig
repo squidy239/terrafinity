@@ -236,12 +236,19 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const chunk_misses = self.game.world.chunks.misses();
 
     const chunk_hit_ratio = @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(chunk_hits + chunk_misses));
+    var shadow_buf: [128]u8 = undefined;
+    const shadow_cascade = self.game.debug_menu.shadow_cascade.load(.unordered);
+    const shadow_line = if (shadow_cascade == std.math.maxInt(u32))
+        "shadows: off"
+    else
+        try std.fmt.bufPrint(&shadow_buf, "shadow cascade {d}: {d} faces", .{ shadow_cascade, self.game.debug_menu.shadow_faces.load(.unordered) });
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
         \\opaque faces: {d}
         \\transparent faces: {d}
+        \\{s}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\chunk hit ratio: {d:.2}
@@ -251,6 +258,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
             self.game.debug_menu.meshes.load(.unordered),
             self.game.debug_menu.opaque_faces.load(.unordered),
             self.game.debug_menu.transparent_faces.load(.unordered),
+            shadow_line,
             chunk_count,
             grid_count,
             chunk_hit_ratio,

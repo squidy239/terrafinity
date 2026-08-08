@@ -1,11 +1,14 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
 
+#include "shadow.glsl"
+
 layout(early_fragment_tests) in;
 
 layout(location = 0) out vec4 frag_color;
 
 layout(location = 1) in vec3 in_coords;
+layout(location = 2) in vec3 frag_pos;
 layout(location = 3) flat in vec3 sun_dir_norm;
 layout(location = 4) flat in uint side;
 layout(location = 5) flat in uint block_array_layer;
@@ -40,8 +43,26 @@ void main()
     vec2 tex_coords = vec2(in_coords[tex_coord_axes[side][0]], in_coords[tex_coord_axes[side][1]]) * 2.0;
 
     frag_color = texture(textures[nonuniformEXT(block_array_layer)], (tex_coords + 1.0) / 2.0);
+    // face_normals are the GEOMETRIC (inward) normals of the cube-face winding, so the
+    // lit side of a surface has its inward normal pointing AWAY from the sun. Lambert is
+    // therefore dot(normal, -sun_dir): a top face's inward normal (-Y) dotted with the
+    // away-from-sun direction (-sun_dir, down at noon) gives +1, i.e. lit. sun_dir points
+    // TOWARD the sun (the sky disc is drawn along it); light travels in -sun_dir, which
+    // is the direction the shadow map is built along.
     float ndl = max(dot(normal, -sun_dir_norm), 0.0);
     float directional = mix(1.0, ndl, normal_effect);
     float light = mix(0.2, 0.5, sun_day) + directional * sun_day;
+
+    if (shadow_params.cascade_count != 0u) {
+        if (shadow_params.debug_colors != 0u) {
+            // Debug view: tint the final color by cascade so the split boundaries show.
+            frag_color.rgb *= cascadeDebugColor(shadowCascadeIndex(frag_pos));
+        } else {
+            float shadow = sampleShadow(frag_pos, normal, ndl);
+            // The ambient (sky) term stays unshadowed so shadowed areas keep a natural
+            // floor instead of crushing to black; only the direct sun term darkens.
+            light = mix(0.2, 0.5, sun_day) + directional * sun_day * shadow;
+        }
+    }
     frag_color = vec4(light * frag_color.rgb, frag_color.a);
 }

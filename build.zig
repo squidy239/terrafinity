@@ -15,12 +15,15 @@ pub fn build(b: *std.Build) void {
     const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
+    const shader_include = b.path("src/Renderer/vulkan/shadow").getPath(b);
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
         if (optimize == .Debug) "-g" else "-Werror",
         "-Werror",
+        "-I",
+        shader_include,
         "-o",
     };
 
@@ -56,6 +59,10 @@ pub fn build(b: *std.Build) void {
     const sky_frag_spv = sky_frag_cmd.addOutputFileArg("sky_frag.spv");
     sky_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.frag"));
 
+    const shadow_vert_cmd = b.addSystemCommand(&shader_cmd);
+    const shadow_vert_spv = shadow_vert_cmd.addOutputFileArg("shadow_vert.spv");
+    shadow_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/shadow/shadow.vert"));
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -79,6 +86,7 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&cull_cmd.step);
     exe.step.dependOn(&sky_vert_cmd.step);
     exe.step.dependOn(&sky_frag_cmd.step);
+    exe.step.dependOn(&shadow_vert_cmd.step);
 
     exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
     exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
@@ -88,6 +96,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
     exe.root_module.addAnonymousImport("sky_vert_spv", .{ .root_source_file = sky_vert_spv });
     exe.root_module.addAnonymousImport("sky_frag_spv", .{ .root_source_file = sky_frag_spv });
+    exe.root_module.addAnonymousImport("shadow_vert_spv", .{ .root_source_file = shadow_vert_spv });
 
     for (generator_sources) |generator_source| {
         const generator = b.addLibrary(.{
