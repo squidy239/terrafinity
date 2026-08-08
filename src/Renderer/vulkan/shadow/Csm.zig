@@ -4,10 +4,10 @@ const std = @import("std");
 /// basis, scene-AABB depth range, absolute-space texel snapping, camera-relative
 /// matrix emission, origin compensation, and the update schedule. Pure math — no
 /// Vulkan types, fully unit-tested.
-pub const MAX_CASCADES = 4;
-/// Capacity of the schedule table; longer than MAX_CASCADES so the near cascade can
-/// refresh more often than the far ones within one period.
-pub const schedule_capacity = 8;
+pub const MAX_CASCADES = 32;
+/// Capacity of the schedule table. The default schedule covers four cascades; larger
+/// counts fall back to a plain rotation (see `defaultSchedule`).
+pub const schedule_capacity = 32;
 
 pub const Vec3f = @Vector(3, f32);
 pub const Vec3d = @Vector(3, f64);
@@ -29,11 +29,16 @@ pub const ShadowConfig = struct {
     max_shadow_distance: f32 = 4096,
     pssm_lambda: f32 = 0.35,
     use_cascade_override: bool = false,
-    cascade_split_override: [MAX_CASCADES]f32 = .{ 64, 256, 1024, 4096 },
+    cascade_split_override: [MAX_CASCADES]f32 = .{ 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736 },
     /// Index into the schedule table for each frame: frame_number % period. Cascade 0
     /// (near) refreshes every 2 frames; the rest on a longer rotation.
-    schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0 },
+    schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     schedule_period: u8 = 6,
+    /// When true, every cascade is re-computed and re-rasterized each frame instead of
+    /// refreshing one cascade per frame on the schedule. Eliminates the shadow swimming
+    /// that the staggered schedule causes when the camera moves, at the cost of rastering
+    /// all cascades every frame.
+    refresh_all_each_frame: bool = false,
     // A depression's far wall casts a very long shadow at a near-horizontal sun (length
     // ~ depth / tan(elevation)); clamping the elevation up keeps those shadows sane.
     min_sun_elevation_deg: f32 = 15,
@@ -471,7 +476,7 @@ test "splitRadii honours override and forces monotonic" {
     cfg.max_shadow_distance = 256;
     cfg.cascade_count = 3;
     cfg.use_cascade_override = true;
-    cfg.cascade_split_override = .{ 32, 96, 256, 512 };
+    cfg.cascade_split_override = .{ 32, 96, 256, 512, 1024, 2048, 4096, 8192, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const splits = splitRadii(cfg);
     try testing.expect(splits[0] == 32.0);
     try testing.expect(splits[1] == 96.0);
@@ -479,10 +484,36 @@ test "splitRadii honours override and forces monotonic" {
     try testing.expect(splits[2] == cfg.max_shadow_distance);
 
     // Non-monotonic override is repaired; last is forced to max_shadow_distance.
-    cfg.cascade_split_override = .{ 96, 32, 10, 0 };
+    cfg.cascade_split_override = .{ 96, 32, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const repaired = splitRadii(cfg);
     try testing.expect(repaired[0] < repaired[1] and repaired[1] < repaired[2]);
     try testing.expect(repaired[2] == cfg.max_shadow_distance);
+}
+
+test "eight cascades are supported beyond the original four" {
+    var cfg = ShadowConfig{};
+    cfg.max_shadow_distance = 4096;
+    cfg.cascade_count = 8;
+    cfg.use_cascade_override = true;
+    cfg.cascade_split_override = .{ 32, 64, 128, 256, 512, 1024, 2048, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const splits = splitRadii(cfg);
+    for (0..8) |i| {
+        try testing.expect(splits[i] > 0.0);
+        if (i > 0) try testing.expect(splits[i] > splits[i - 1]);
+    }
+    try testing.expect(splits[7] == cfg.max_shadow_distance);
+
+    // The PSSM path fills all eight entries too.
+    cfg.use_cascade_override = false;
+    const pssm = splitRadii(cfg);
+    for (0..8) |i| {
+        if (i > 0) try testing.expect(pssm[i] > pssm[i - 1]);
+    }
+    try testing.expect(pssm[7] == cfg.max_shadow_distance);
+
+    // A plain rotation schedule validates for eight cascades.
+    try testing.expect(validateSchedule(defaultSchedule(8), 8, 8));
+    try testing.expectEqual(@as(u32, 8), scheduleStaleness(defaultSchedule(8), 8, 7));
 }
 
 test "fitSliceSphere contains all 8 corners" {
@@ -741,19 +772,19 @@ test "splitRadii handles degenerate live-edited config without panicking" {
     cfg.cascade_count = 3;
     cfg.use_cascade_override = true;
     cfg.max_shadow_distance = 0.5;
-    cfg.cascade_split_override = .{ 0.1, 0.2, 0.3, 0.4 };
+    cfg.cascade_split_override = .{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 };
     const splits_ov = splitRadii(cfg);
     try testing.expect(splits_ov[2] > clamped_split_near);
 }
 
 test "schedule validator and staleness" {
-    const schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0 };
+    const schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     try testing.expect(validateSchedule(schedule, 6, 4));
     try testing.expect(validateSchedule(schedule, 6, 3));
     try testing.expect(!validateSchedule(schedule, 6, 5)); // cascade 4 never refreshed
     try testing.expect(!validateSchedule(schedule, 0, 3));
-    try testing.expect(validateSchedule(.{ 0, 1, 2, 3, 0, 0, 0, 0 }, 4, 4));
-    try testing.expect(validateSchedule(.{ 0, 0, 0, 0, 0, 0, 0, 0 }, 1, 1)); // period-1 all-cascades
+    try testing.expect(validateSchedule(.{ 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 4, 4));
+    try testing.expect(validateSchedule(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 1, 1)); // period-1 all-cascades
 
     try testing.expectEqual(@as(u32, 2), scheduleStaleness(schedule, 6, 0));
     try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 1));

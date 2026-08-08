@@ -760,3 +760,16 @@ where `s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = vie
 ### Filtered tests (cont.)
 
 `-Dtest_filter` only sees tests from files reachable in the module import graph. A new `.zig` file with tests is invisible until something reachable from `main.zig` references it (e.g. `pub const Csm = @import(...)` in Renderer.zig, or a field type like `shadow: Csm.ShadowConfig` in RenderOptions forces its analysis).
+
+### Shader `#include` dependencies must be registered as build inputs
+
+glslc resolves `#include "shadow.glsl"` internally, but the Zig build graph only knows the inputs you declare with `addFileArg`/`addFileInput`. If an included file is not registered, editing it does NOT invalidate the glslc cache and the compiled SPIR-V goes stale while Zig source (e.g. `ShadowParams` layout) recompiles — a silent layout mismatch that breaks rendering (no shadows). Symptom: the `.spv` mtime predates your edit and `spirv-dis` shows the old member offsets.
+
+Fix: register every `#include` with `addFileInput` on the same `addSystemCommand`:
+
+```zig
+frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
+frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
+```
+
+`addFileInput` tracks the dependency without appending it to the glslc argv (unlike `addFileArg`). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` and cross-check against the Zig `@offsetOf` asserts.

@@ -30,14 +30,17 @@ pub fn build(b: *std.Build) void {
     const vert_cmd = b.addSystemCommand(&shader_cmd);
     const vert_spv = vert_cmd.addOutputFileArg("vertexshader.spv");
     vert_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/vertexshader.vert"));
+    vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
 
     const frag_cmd = b.addSystemCommand(&shader_cmd);
     const frag_spv = frag_cmd.addOutputFileArg("fragshader.spv");
     frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
+    frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 
     const trans_frag_cmd = b.addSystemCommand(&shader_cmd);
     const trans_frag_spv = trans_frag_cmd.addOutputFileArg("transparent_frag.spv");
     trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/transparent_frag.frag"));
+    trans_frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 
     const comp_vert_cmd = b.addSystemCommand(&shader_cmd);
     const comp_vert_spv = comp_vert_cmd.addOutputFileArg("composite_vert.spv");
@@ -62,6 +65,7 @@ pub fn build(b: *std.Build) void {
     const shadow_vert_cmd = b.addSystemCommand(&shader_cmd);
     const shadow_vert_spv = shadow_vert_cmd.addOutputFileArg("shadow_vert.spv");
     shadow_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/shadow/shadow.vert"));
+    shadow_vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

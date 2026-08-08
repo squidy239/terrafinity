@@ -13,9 +13,9 @@ const Frustum = @import("../Frustum.zig").Frustum;
 
 const shadow_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("shadow_vert_spv")));
 
-/// std430 storage-block layout mirrored by shadow.glsl. Vector members are vec4s so
-/// Zig and GLSL agree on 16-byte slots. Fixed MAX_CASCADES arrays keep the layout
-/// stable across a runtime cascade_count change.
+/// std430 storage-block layout mirrored by shadow.glsl. Fixed MAX_CASCADES arrays
+/// (matching the GLSL `float [MAX_CASCADES]` members) keep the layout stable across
+/// a runtime cascade_count change.
 pub const ShadowParams = extern struct {
     light_viewproj: [Csm.MAX_CASCADES][16]f32,
     split_radius: [Csm.MAX_CASCADES]f32 align(16),
@@ -35,12 +35,12 @@ pub const ShadowParams = extern struct {
     pub fn default() ShadowParams {
         return .{
             .light_viewproj = @splat(@splat(0.0)),
-            .split_radius = .{ 0, 0, 0, 0 },
-            .texel_world_size = .{ 0, 0, 0, 0 },
-            .box_radius = .{ 0, 0, 0, 0 },
-            .depth_bias_constant = .{ 0, 0, 0, 0 },
-            .normal_bias_scale = .{ 0, 0, 0, 0 },
-            .pcf_radius_texels = .{ 0, 0, 0, 0 },
+            .split_radius = @splat(0.0),
+            .texel_world_size = @splat(0.0),
+            .box_radius = @splat(0.0),
+            .depth_bias_constant = @splat(0.0),
+            .normal_bias_scale = @splat(0.0),
+            .pcf_radius_texels = @splat(0.0),
             .blend_fraction = 0.0,
             .fade_start = 0.0,
             .fade_end = 0.0,
@@ -53,19 +53,19 @@ pub const ShadowParams = extern struct {
 };
 
 comptime {
-    if (@offsetOf(ShadowParams, "split_radius") != 256) @compileError("ShadowParams.split_radius offset mismatch (expected 256)");
-    if (@offsetOf(ShadowParams, "texel_world_size") != 272) @compileError("ShadowParams.texel_world_size offset mismatch (expected 272)");
-    if (@offsetOf(ShadowParams, "box_radius") != 288) @compileError("ShadowParams.box_radius offset mismatch (expected 288)");
-    if (@offsetOf(ShadowParams, "depth_bias_constant") != 304) @compileError("ShadowParams.depth_bias_constant offset mismatch (expected 304)");
-    if (@offsetOf(ShadowParams, "normal_bias_scale") != 320) @compileError("ShadowParams.normal_bias_scale offset mismatch (expected 320)");
-    if (@offsetOf(ShadowParams, "pcf_radius_texels") != 336) @compileError("ShadowParams.pcf_radius_texels offset mismatch (expected 336)");
-    if (@offsetOf(ShadowParams, "blend_fraction") != 352) @compileError("ShadowParams.blend_fraction offset mismatch (expected 352)");
-    if (@offsetOf(ShadowParams, "fade_start") != 356) @compileError("ShadowParams.fade_start offset mismatch (expected 356)");
-    if (@offsetOf(ShadowParams, "fade_end") != 360) @compileError("ShadowParams.fade_end offset mismatch (expected 360)");
-    if (@offsetOf(ShadowParams, "cascade_count") != 364) @compileError("ShadowParams.cascade_count offset mismatch (expected 364)");
-    if (@offsetOf(ShadowParams, "shadow_strength") != 368) @compileError("ShadowParams.shadow_strength offset mismatch (expected 368)");
-    if (@offsetOf(ShadowParams, "debug_colors") != 372) @compileError("ShadowParams.debug_colors offset mismatch (expected 372)");
-    if (@sizeOf(ShadowParams) != 384) @compileError("ShadowParams size mismatch (expected 384)");
+    if (@offsetOf(ShadowParams, "split_radius") != 2048) @compileError("ShadowParams.split_radius offset mismatch (expected 2048)");
+    if (@offsetOf(ShadowParams, "texel_world_size") != 2176) @compileError("ShadowParams.texel_world_size offset mismatch (expected 2176)");
+    if (@offsetOf(ShadowParams, "box_radius") != 2304) @compileError("ShadowParams.box_radius offset mismatch (expected 2304)");
+    if (@offsetOf(ShadowParams, "depth_bias_constant") != 2432) @compileError("ShadowParams.depth_bias_constant offset mismatch (expected 2432)");
+    if (@offsetOf(ShadowParams, "normal_bias_scale") != 2560) @compileError("ShadowParams.normal_bias_scale offset mismatch (expected 2560)");
+    if (@offsetOf(ShadowParams, "pcf_radius_texels") != 2688) @compileError("ShadowParams.pcf_radius_texels offset mismatch (expected 2688)");
+    if (@offsetOf(ShadowParams, "blend_fraction") != 2816) @compileError("ShadowParams.blend_fraction offset mismatch (expected 2816)");
+    if (@offsetOf(ShadowParams, "fade_start") != 2820) @compileError("ShadowParams.fade_start offset mismatch (expected 2820)");
+    if (@offsetOf(ShadowParams, "fade_end") != 2824) @compileError("ShadowParams.fade_end offset mismatch (expected 2824)");
+    if (@offsetOf(ShadowParams, "cascade_count") != 2828) @compileError("ShadowParams.cascade_count offset mismatch (expected 2828)");
+    if (@offsetOf(ShadowParams, "shadow_strength") != 2832) @compileError("ShadowParams.shadow_strength offset mismatch (expected 2832)");
+    if (@offsetOf(ShadowParams, "debug_colors") != 2836) @compileError("ShadowParams.debug_colors offset mismatch (expected 2836)");
+    if (@sizeOf(ShadowParams) != 2848) @compileError("ShadowParams size mismatch (expected 2848)");
 }
 
 const ShadowPushConstants = extern struct {
@@ -121,7 +121,7 @@ light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// Per-cascade commit validity. The params cascade_count is the largest contiguous
 /// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
 /// is never classified into — the shader's cascade_count early-outs before it.
-valid: [Csm.MAX_CASCADES]bool = .{ false, false, false, false },
+valid: [Csm.MAX_CASCADES]bool = @splat(false),
 /// Whether shadows were active last frame; a false->true transition means the sun just
 /// rose and the committed state belongs to the pre-night light direction.
 was_active: bool = false,
@@ -136,6 +136,11 @@ last_prepare_ns: i128 = 0,
 schedule_index: u32 = 0,
 /// Cascade being refreshed this frame, if any.
 frame_cascade: ?u32 = null,
+/// When refresh-all-each-frame is enabled, every cascade is committed and rastered this
+/// frame; frame_cascade is null and the cull runs against the outermost cascade's box.
+refresh_all: bool = false,
+/// Number of cascades to raster this frame (count when refresh_all, else 1).
+frame_cascade_count: u32 = 1,
 /// Camera origin the frame's matrix was committed at (for the end-of-frame raster).
 frame_origin: @Vector(3, f64) = .{ 0, 0, 0 },
 /// Cull planes for the frame's cascade, camera-relative.
@@ -303,7 +308,7 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
         self.config_applied = applied;
         self.cascade_count = count;
         self.map_size = size;
-        self.valid = .{ false, false, false, false };
+        self.valid = @splat(false);
     }
 
     if (!applied.enabled or count == 0 or size == 0) return;
@@ -387,7 +392,7 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
     // in SHADER_READ_ONLY_OPTIMAL so the first frame has no undefined-layout reads.
     try self.clearDepthArray(io);
     try self.createPipeline();
-    self.valid = .{ false, false, false, false };
+    self.valid = @splat(false);
 }
 
 fn destroyShadowImage(self: *ShadowRenderer) void {
@@ -518,6 +523,8 @@ pub fn prepareFrame(
         config.schedule_period = @intCast(count);
     }
     self.frame_cascade = null;
+    self.refresh_all = false;
+    self.frame_cascade_count = 1;
 
     const period: u32 = @max(@as(u32, config.schedule_period), 1);
     var light_dir_changed = false;
@@ -538,32 +545,62 @@ pub fn prepareFrame(
     // for the old sun. Reset the ramp so uncommitted cascades sample as fully lit rather
     // than projecting shadows from the previous light direction.
     if ((active and !self.was_active) or light_dir_changed) {
-        self.valid = .{ false, false, false, false };
+        self.valid = @splat(false);
     }
     self.was_active = active;
 
     if (active) {
-        const cascade_index = config.schedule[self.schedule_index % period];
-        if (cascade_index < count) {
-            const ctx = Csm.CascadeContext{
-                .cfg = config,
-                .fov_y = fov_y,
-                .aspect = aspect,
-                .camera_front = camera_front,
-                .view_pos = view_pos,
-                .light_dir = self.light_dir,
-                .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
-                .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
-                .per_frame_dist = self.per_frame_dist,
-            };
-            const cascade = Csm.computeCascade(ctx, cascade_index);
-            self.committed[cascade_index] = Csm.committedOf(cascade);
-            self.valid[cascade_index] = true;
-            self.frame_cascade = cascade_index;
-            self.frame_origin = view_pos;
+        self.frame_origin = view_pos;
+        if (config.refresh_all_each_frame) {
+            // Recompute and re-raster every cascade this frame. Cull once against the
+            // outermost cascade's box with the finest (cascade 0) min chunk size so the
+            // superset geometry feeds every cascade's raster; each layer projects through
+            // its own matrix, clipping to its own box.
+            for (0..count) |c| {
+                const ctx = Csm.CascadeContext{
+                    .cfg = config,
+                    .fov_y = fov_y,
+                    .aspect = aspect,
+                    .camera_front = camera_front,
+                    .view_pos = view_pos,
+                    .light_dir = self.light_dir,
+                    .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
+                    .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
+                    .per_frame_dist = self.per_frame_dist,
+                };
+                const cascade = Csm.computeCascade(ctx, @intCast(c));
+                self.committed[c] = Csm.committedOf(cascade);
+                self.valid[c] = true;
+                if (c == count - 1) {
+                    self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
+                }
+                if (c == 0) self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
+            }
+            self.refresh_all = true;
+            self.frame_cascade_count = count;
+            self.frame_cascade = @intCast(count);
+        } else {
+            const cascade_index = config.schedule[self.schedule_index % period];
+            if (cascade_index < count) {
+                const ctx = Csm.CascadeContext{
+                    .cfg = config,
+                    .fov_y = fov_y,
+                    .aspect = aspect,
+                    .camera_front = camera_front,
+                    .view_pos = view_pos,
+                    .light_dir = self.light_dir,
+                    .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
+                    .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
+                    .per_frame_dist = self.per_frame_dist,
+                };
+                const cascade = Csm.computeCascade(ctx, cascade_index);
+                self.committed[cascade_index] = Csm.committedOf(cascade);
+                self.valid[cascade_index] = true;
+                self.frame_cascade = cascade_index;
 
-            self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
-            self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
+                self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
+                self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
+            }
         }
     }
 
@@ -627,7 +664,7 @@ fn cullPlanes(center: Csm.Vec3d, light_dir: Csm.Vec3f, radius: f32, near: f32, f
 }
 
 pub fn frameHasCascade(self: *const ShadowRenderer) bool {
-    return self.frame_cascade != null;
+    return if (self.refresh_all) self.frame_cascade_count > 0 else self.frame_cascade != null;
 }
 
 pub fn frameCascadePlanes(self: *const ShadowRenderer) [6]@Vector(4, f32) {
@@ -676,13 +713,37 @@ pub fn recordShadowPass(
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordShadowPass" });
     defer zone.end();
-    const cascade = self.frame_cascade orelse return;
-    if (self.image == .null_handle or self.views.len <= cascade) return;
     // Match the main passes: while allocRegion grows the face buffer it is momentarily
     // null, and the draw would be skipped. Running the layout transitions and the clear
-    // anyway would wipe this cascade's layer to fully lit for a frame — skip the whole
+    // anyway would wipe a cascade's layer to fully lit for a frame — skip the whole
     // pass instead so the previous depth survives and the next refresh writes it.
     if (face_buffer == .null_handle) return;
+    if (self.image == .null_handle) return;
+
+    if (self.refresh_all) {
+        for (0..self.frame_cascade_count) |c| {
+            if (self.views.len <= c) continue;
+            self.recordCascadePass(cmd_buffer, frame_idx, @intCast(c), face_buffer, face_buffer_offset);
+        }
+    } else {
+        const cascade = self.frame_cascade orelse return;
+        if (self.views.len <= cascade) return;
+        self.recordCascadePass(cmd_buffer, frame_idx, cascade, face_buffer, face_buffer_offset);
+    }
+}
+
+/// Records the depth raster for a single cascade layer: layout transitions, clear, and
+/// the indirect draw of the frame's culled geometry through the cascade's light matrix.
+fn recordCascadePass(
+    self: *ShadowRenderer,
+    cmd_buffer: vk.CommandBuffer,
+    frame_idx: u32,
+    cascade: u32,
+    face_buffer: vk.Buffer,
+    face_buffer_offset: vk.DeviceSize,
+) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCascadePass" });
+    defer zone.end();
 
     const extent: vk.Extent2D = .{ .width = self.map_size, .height = self.map_size };
     const depth_aspect: vk.ImageAspectFlags = .{ .depth_bit = true };
@@ -770,5 +831,5 @@ pub fn recordShadowPass(
 }
 
 test "ShadowParams layout" {
-    try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShadowParams));
+    try std.testing.expectEqual(@as(usize, 736), @sizeOf(ShadowParams));
 }

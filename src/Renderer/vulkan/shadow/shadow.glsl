@@ -1,7 +1,7 @@
 #ifndef SHADOW_GLSL
 #define SHADOW_GLSL
 
-const int MAX_CASCADES = 4;
+const int MAX_CASCADES = 32;
 
 // Set 2 is the shared push-descriptor set, present in both the opaque and transparent
 // pipelines. Binding 0 is the opaque depth sampler (transparent only; NULL for opaque),
@@ -9,12 +9,12 @@ const int MAX_CASCADES = 4;
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow shadow_map;
 layout(set = 2, binding = 2, std430) readonly buffer ShadowParamsBuffer {
     mat4 light_viewproj[MAX_CASCADES];
-    vec4 split_radius;
-    vec4 texel_world_size;
-    vec4 box_radius;
-    vec4 depth_bias_constant;
-    vec4 normal_bias_scale;
-    vec4 pcf_radius_texels;
+    float split_radius[MAX_CASCADES];
+    float texel_world_size[MAX_CASCADES];
+    float box_radius[MAX_CASCADES];
+    float depth_bias_constant[MAX_CASCADES];
+    float normal_bias_scale[MAX_CASCADES];
+    float pcf_radius_texels[MAX_CASCADES];
     float blend_fraction;
     float fade_start;
     float fade_end;
@@ -35,20 +35,57 @@ int shadowCascadeIndex(vec3 pos_rel) {
 }
 
 vec3 cascadeDebugColor(int cascade) {
-    vec3 colors[4] = vec3[4](
+    vec3 colors[MAX_CASCADES] = vec3[MAX_CASCADES](
         vec3(1.0, 0.3, 0.3),
         vec3(0.3, 1.0, 0.3),
         vec3(0.3, 0.3, 1.0),
-        vec3(1.0, 1.0, 0.3)
+        vec3(1.0, 1.0, 0.3),
+        vec3(1.0, 0.7, 0.3),
+        vec3(0.3, 1.0, 1.0),
+        vec3(1.0, 0.3, 1.0),
+        vec3(0.8, 0.8, 0.8),
+        vec3(0.8, 0.2, 0.2),
+        vec3(0.2, 0.8, 0.2),
+        vec3(0.2, 0.2, 0.8),
+        vec3(0.8, 0.8, 0.2),
+        vec3(0.8, 0.5, 0.2),
+        vec3(0.2, 0.8, 0.8),
+        vec3(0.8, 0.2, 0.8),
+        vec3(0.6, 0.6, 0.6),
+        vec3(0.6, 0.1, 0.1),
+        vec3(0.1, 0.6, 0.1),
+        vec3(0.1, 0.1, 0.6),
+        vec3(0.6, 0.6, 0.1),
+        vec3(0.6, 0.4, 0.1),
+        vec3(0.1, 0.6, 0.6),
+        vec3(0.6, 0.1, 0.6),
+        vec3(0.5, 0.5, 0.5),
+        vec3(0.5, 0.0, 0.0),
+        vec3(0.0, 0.5, 0.0),
+        vec3(0.0, 0.0, 0.5),
+        vec3(0.5, 0.5, 0.0),
+        vec3(0.5, 0.3, 0.0),
+        vec3(0.0, 0.5, 0.5),
+        vec3(0.5, 0.0, 0.5),
+        vec3(0.4, 0.4, 0.4)
     );
     return colors[cascade];
 }
 
-// Projects p and averages the comparison result over a 3x3 PCF kernel. Linear compare
-// filtering turns each tap into a 2x2 box, so the effective kernel is a 4x4 blur.
-// Returns 1.0 (fully lit) when p projects outside the cascade's volume: a receiver
-// outside the cascade has no shadow information, and forcing it into a comparison
-// against the map's edge would manufacture false shadowed regions.
+// Cheap per-fragment hash; decorrelates neighbouring pixels' tap patterns so the PCF
+// kernel averages into a smooth gradient instead of banding into parallel lines.
+float shadowHash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Projects p and averages the comparison result over a 16-sample golden-spiral PCF
+// kernel. The non-uniform spiral spacing blurs edges without the banded intensity
+// contours of a regular grid, and linear compare filtering turns each tap into a 2x2
+// box. The kernel is rotated per fragment (by a hash of the screen position and
+// cascade) so neighbouring pixels sample different offsets. Returns 1.0 (fully lit)
+// when p projects outside the cascade's volume: a receiver outside the cascade has no
+// shadow information, and forcing it into a comparison against the map's edge would
+// manufacture false shadowed regions.
 float sampleShadowCascade(int cascade, vec3 p) {
     float texel_uv = shadow_params.texel_world_size[cascade] / (2.0 * shadow_params.box_radius[cascade]);
     float pcf_uv = shadow_params.pcf_radius_texels[cascade] * texel_uv;
@@ -64,14 +101,18 @@ float sampleShadowCascade(int cascade, vec3 p) {
 
     vec3 uv = vec3(ndc.xy * 0.5 + 0.5, ndc.z);
 
+    const float golden_angle = 2.399963229728653;
+    const int tap_count = 16;
+    float rot = shadowHash(gl_FragCoord.xy + float(cascade) * 31.0) * 6.283185307179586;
+
     float shadow = 0.0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            vec2 offset = vec2(float(dx) * pcf_uv, float(dy) * pcf_uv);
-            shadow += texture(shadow_map, vec4(uv.xy + offset, float(cascade), uv.z));
-        }
+    for (int i = 0; i < tap_count; i++) {
+        float angle = rot + golden_angle * float(i);
+        float radius = sqrt((float(i) + 0.5) / float(tap_count));
+        vec2 offset = vec2(cos(angle), sin(angle)) * radius * pcf_uv;
+        shadow += texture(shadow_map, vec4(uv.xy + offset, float(cascade), uv.z));
     }
-    return shadow / 9.0;
+    return shadow / float(tap_count);
 }
 
 // Returns the shadow factor in [0,1]: 1.0 fully lit, 0.0 fully shadowed.
