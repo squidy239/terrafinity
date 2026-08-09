@@ -2,12 +2,9 @@ const std = @import("std");
 
 /// Cascaded shadow map CPU math: split radii, per-slice bounding-sphere fit, light
 /// basis, scene-AABB depth range, absolute-space texel snapping, camera-relative
-/// matrix emission, origin compensation, and the update schedule. Pure math — no
+/// matrix emission, origin compensation, and the refresh scheduler. Pure math — no
 /// Vulkan types, fully unit-tested.
 pub const MAX_CASCADES = 32;
-/// Capacity of the schedule table. The default schedule covers four cascades; larger
-/// counts fall back to a plain rotation (see `defaultSchedule`).
-pub const schedule_capacity = 32;
 
 pub const Vec3f = @Vector(3, f32);
 pub const Vec3d = @Vector(3, f64);
@@ -28,13 +25,21 @@ pub const ShadowConfig = struct {
     // keep shadows; the far fade hides the map's edge.
     max_shadow_distance: f32 = 4096,
     pssm_lambda: f32 = 0.35,
-    /// Index into the schedule table for each frame: frame_number % period. Cascade 0
-    /// (near) refreshes every 2 frames; the rest on a longer rotation.
-    schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    /// Frames per schedule rotation. May exceed the table capacity: the table is then
-    /// treated as a repeating pattern, and only the light-basis recompute cadence
-    /// (which uses the raw period) stretches; cascade staleness is bounded by the table.
-    schedule_period: u32 = 6,
+    /// How many cascade layers may be rasterized per frame. A budget of 1 is the classic
+    /// one-cascade-per-frame rotation; more lets near cascades refresh every frame while
+    /// farther ones rotate across the budget. Never exceeded (see `nextRefreshSet`).
+    cascades_per_frame: u32 = 2,
+    /// Blends the refresh-interval distribution between a uniform ramp (0) and a
+    /// logarithmic ramp (1), mirroring `pssm_lambda`. A log-heavy distribution refreshes
+    /// near cascades far more often than far ones, keeping the per-frame raster cost low.
+    refresh_lambda: f32 = 1.0,
+    /// Refresh interval (frames) of the near cascade (cascade 0). Farther cascades ramp
+    /// toward `max_refresh_frames` (see `refreshIntervals`).
+    min_refresh_frames: u32 = 1,
+    /// Refresh interval (frames) of the far cascade. Near cascades ramp from
+    /// `min_refresh_frames` toward this value, so far shadows stay fresh enough to follow
+    /// slow light or scene changes without re-rasterizing them every frame.
+    max_refresh_frames: u32 = 128,
     // A depression's far wall casts a very long shadow at a near-horizontal sun (length
     // ~ depth / tan(elevation)); clamping the elevation up keeps those shadows sane.
     min_sun_elevation_deg: f32 = 15,
@@ -278,49 +283,77 @@ pub fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: 
     return .{ .near = @floatCast(near), .far = @floatCast(far) };
 }
 
-/// The schedule table is a fixed-length repeating pattern. The rotation period used to
-/// index it is clamped to its capacity, so a huge configured `schedule_period` (which
-/// only stretches the light-basis recompute cadence) never runs past the table.
-pub fn effectivePeriod(period: u32) u32 {
-    return @min(period, schedule_capacity);
-}
-
-/// How many frames a cascade can go without a refresh: `len / occurrences`, rounded up,
-/// where `len` is the effective pattern length. Unknown cascades fall back to the period.
-pub fn scheduleStaleness(schedule: [schedule_capacity]u8, period: u32, cascade: u32) u32 {
-    const period_u = @max(period, 1);
-    const len = effectivePeriod(period_u);
-    var occurrences: u32 = 0;
-    for (schedule[0..len]) |c| {
-        if (c == cascade) occurrences += 1;
+/// Per-cascade refresh interval (frames between refreshes), derived from the config the
+/// same way split radii are: a lambda-weighted blend between a uniform and a logarithmic
+/// ramp, pinned to `min_refresh_frames` at cascade 0 (nearest) and `max_refresh_frames`
+/// at the outer cascade. Near cascades always get the shortest intervals, so near
+/// shadows stay crisp while far ones refresh rarely.
+pub fn refreshIntervals(cfg: ShadowConfig) [MAX_CASCADES]u32 {
+    const count = @max(@min(cfg.cascade_count, MAX_CASCADES), 1);
+    const min_f: f64 = @floatFromInt(@max(cfg.min_refresh_frames, 1));
+    const max_f: f64 = @floatFromInt(@max(cfg.max_refresh_frames, cfg.min_refresh_frames));
+    const lambda = std.math.clamp(cfg.refresh_lambda, 0.0, 1.0);
+    var intervals: [MAX_CASCADES]u32 = @splat(@max(cfg.min_refresh_frames, 1));
+    if (count == 1) return intervals;
+    const denom: f64 = @floatFromInt(count - 1);
+    for (0..count) |i| {
+        const t: f64 = @as(f64, @floatFromInt(i)) / denom;
+        const uniform_i = min_f + (max_f - min_f) * t;
+        const log_i = min_f * std.math.pow(f64, max_f / min_f, t);
+        const blend = @min(@round(lambda * log_i + (1.0 - lambda) * uniform_i), @as(f64, @floatFromInt(std.math.maxInt(u32))));
+        intervals[i] = @intFromFloat(blend);
     }
-    if (occurrences == 0) return period_u;
-    return (len + occurrences - 1) / occurrences;
+    return intervals;
 }
 
-/// Every cascade < `count` must be refreshed by the table, or its map is never written.
-pub fn validateSchedule(schedule: [schedule_capacity]u8, period: u32, count: u32) bool {
-    if (period == 0) return false;
-    if (count == 0 or count > MAX_CASCADES) return false;
-    const len = effectivePeriod(period);
-    for (0..count) |c| {
-        var found = false;
-        for (schedule[0..len]) |entry| {
-            if (entry == c) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
+/// Sentinel for `last_refresh`: the cascade has never been refreshed, so it is maximally
+/// overdue and is rasterized before any previously-refreshed cascade.
+pub const never_refreshed = std.math.maxInt(u32);
+
+const RefreshPriority = struct {
+    intervals: [MAX_CASCADES]u32,
+    last_refresh: [MAX_CASCADES]u32,
+    frame_number: u32,
+
+    fn lateness(self: *const RefreshPriority, cascade: u32) i64 {
+        const last = self.last_refresh[cascade];
+        if (last == never_refreshed) return std.math.maxInt(i64);
+        const interval: i64 = @intCast(self.intervals[cascade]);
+        const now: i64 = @intCast(self.frame_number);
+        const last_i: i64 = @intCast(last);
+        const frames_since: i64 = if (now >= last_i) now - last_i else 0;
+        return frames_since - interval;
     }
-    return true;
-}
 
-/// A valid table that refreshes every cascade once per period.
-pub fn defaultSchedule(count: u32) [schedule_capacity]u8 {
-    var schedule: [schedule_capacity]u8 = @splat(0);
-    for (0..@intCast(count)) |i| schedule[i] = @intCast(i);
-    return schedule;
+    fn lessThan(self: *const RefreshPriority, a: u32, b: u32) bool {
+        const la = self.lateness(a);
+        const lb = self.lateness(b);
+        if (la != lb) return la > lb;
+        return a < b;
+    }
+};
+
+/// Selects which cascades to refresh this frame. A cascade is due once
+/// `frame_number - last_refresh[c]` reaches its derived interval, but at most
+/// `cascades_per_frame` are rasterized per frame: the most overdue first, ties broken
+/// toward the near cascades. Under budget pressure the remaining cascades simply wait,
+/// so the budget is a hard cap that is never exceeded.
+pub fn nextRefreshSet(
+    cascade_count: u32,
+    cascades_per_frame: u32,
+    intervals: [MAX_CASCADES]u32,
+    last_refresh: [MAX_CASCADES]u32,
+    frame_number: u32,
+) [MAX_CASCADES]bool {
+    const count = @max(@min(cascade_count, MAX_CASCADES), 1);
+    const budget = @max(@min(cascades_per_frame, MAX_CASCADES), 1);
+    var order: [MAX_CASCADES]u32 = undefined;
+    for (0..count) |i| order[i] = @intCast(i);
+    const priority = RefreshPriority{ .intervals = intervals, .last_refresh = last_refresh, .frame_number = frame_number };
+    std.sort.insertion(u32, order[0..count], &priority, RefreshPriority.lessThan);
+    var selected: [MAX_CASCADES]bool = @splat(false);
+    for (0..@intCast(@min(budget, count))) |i| selected[order[i]] = true;
+    return selected;
 }
 
 /// Staleness padding: a cascade's footprint can grow by up to `staleness_frames` frames
@@ -393,7 +426,7 @@ pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
     const splits = splitRadii(ctx.cfg);
 
     const radius = splits[cascade_index] + stalenessPadding(
-        scheduleStaleness(ctx.cfg.schedule, ctx.cfg.schedule_period, cascade_index),
+        refreshIntervals(ctx.cfg)[cascade_index],
         ctx.per_frame_dist,
     );
 
@@ -483,9 +516,11 @@ test "eight cascades are supported beyond the original four" {
     }
     try testing.expect(splits[7] == cfg.max_shadow_distance);
 
-    // A plain rotation schedule validates for eight cascades.
-    try testing.expect(validateSchedule(defaultSchedule(8), 8, 8));
-    try testing.expectEqual(@as(u32, 8), scheduleStaleness(defaultSchedule(8), 8, 7));
+    // Refresh intervals derive for eight cascades too: pinned near/far, monotonic.
+    const intervals = refreshIntervals(cfg);
+    try testing.expectEqual(@as(u32, cfg.min_refresh_frames), intervals[0]);
+    try testing.expectEqual(@as(u32, cfg.max_refresh_frames), intervals[7]);
+    for (1..8) |i| try testing.expect(intervals[i] >= intervals[i - 1]);
 }
 
 test "fitSliceSphere contains all 8 corners" {
@@ -755,28 +790,90 @@ test "splitRadii handles degenerate live-edited config without panicking" {
     try testing.expect(splits_zero_one[0] == cfg.max_shadow_distance);
 }
 
-test "schedule validator and staleness" {
-    const schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    try testing.expect(validateSchedule(schedule, 6, 4));
-    try testing.expect(validateSchedule(schedule, 6, 3));
-    try testing.expect(!validateSchedule(schedule, 6, 5)); // cascade 4 never refreshed
-    try testing.expect(!validateSchedule(schedule, 0, 3));
-    try testing.expect(validateSchedule(.{ 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 4, 4));
-    try testing.expect(validateSchedule(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 1, 1)); // period-1 all-cascades
+test "refreshIntervals pinned endpoints, monotonic, lambda extremes" {
+    var cfg = ShadowConfig{ .cascade_count = 4, .min_refresh_frames = 2, .max_refresh_frames = 16 };
 
-    try testing.expectEqual(@as(u32, 2), scheduleStaleness(schedule, 6, 0));
-    try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 1));
-    try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 2));
-    try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 3));
-    try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 4));
+    // Lambda extremes hit the pure uniform and pure log ramps, both monotonic.
+    cfg.refresh_lambda = 0.0;
+    const uniform = refreshIntervals(cfg);
+    try testing.expectEqual(@as(u32, 2), uniform[0]);
+    try testing.expectEqual(@as(u32, 16), uniform[3]);
+    for (1..4) |i| try testing.expect(uniform[i] >= uniform[i - 1]);
 
-    // A very large period is allowed and never overruns the table: the pattern repeats
-    // at capacity and staleness stays bounded by the effective length.
-    try testing.expect(validateSchedule(schedule, 1_000_000, 4));
-    try testing.expectEqual(@as(u32, 2), scheduleStaleness(schedule, 1_000_000, 0));
-    try testing.expectEqual(@as(u32, 32), scheduleStaleness(schedule, 1_000_000, 1));
-    try testing.expectEqual(@as(u32, 1_000_000), scheduleStaleness(schedule, 1_000_000, 9));
-    try testing.expect(!validateSchedule(schedule, 1_000_000, 5)); // cascade 4 never refreshed
+    cfg.refresh_lambda = 1.0;
+    const log = refreshIntervals(cfg);
+    try testing.expectEqual(@as(u32, 2), log[0]);
+    try testing.expectEqual(@as(u32, 16), log[3]);
+    for (1..4) |i| try testing.expect(log[i] >= log[i - 1]);
+
+    // Log distributes most of the interval budget to the far cascades: the near cascade
+    // stays on the min while the uniform ramp already reaches mid-way.
+    cfg.refresh_lambda = 1.0;
+    cfg.min_refresh_frames = 1;
+    cfg.max_refresh_frames = 64;
+    const log_64 = refreshIntervals(cfg);
+    try testing.expect(log_64[0] < log_64[2]);
+    try testing.expect(log_64[2] <= log_64[3]);
+
+    // A single cascade returns just the near interval.
+    cfg.cascade_count = 1;
+    const single = refreshIntervals(cfg);
+    try testing.expectEqual(@as(u32, 1), single[0]);
+
+    // Degenerate config clamps rather than asserting: max below min, zero cascade count.
+    cfg.cascade_count = 0;
+    cfg.min_refresh_frames = 5;
+    cfg.max_refresh_frames = 2;
+    const degenerate = refreshIntervals(cfg);
+    try testing.expect(degenerate[0] >= 1);
+}
+
+test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvation" {
+    const intervals = [_]u32{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ [_]u32{0} ** 20;
+    var last_refresh: [MAX_CASCADES]u32 = @splat(never_refreshed);
+    var frame: u32 = 0;
+
+    // Initial ramp: the never-refreshed cascades fill the budget first (tie-break near).
+    const ramp = nextRefreshSet(4, 2, intervals, last_refresh, frame);
+    var ramp_count: u32 = 0;
+    for (0..4) |c| {
+        if (ramp[c]) {
+            last_refresh[c] = frame;
+            ramp_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 2), ramp_count); // budget not exceeded
+    try testing.expect(ramp[0] and ramp[1]);
+
+    frame += 1;
+    const second = nextRefreshSet(4, 2, intervals, last_refresh, frame);
+    var second_count: u32 = 0;
+    for (0..4) |c| {
+        if (second[c]) {
+            last_refresh[c] = frame;
+            second_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 2), second_count);
+    try testing.expect(second[2] and second[3]); // the remaining never-refreshed cascades
+
+    // Steady state with a full budget: the near cascade refreshes every frame, the
+    // second slot rotates so every cascade eventually refreshes (no starvation).
+    var refreshed: [MAX_CASCADES]bool = @splat(false);
+    var near_refreshes: u32 = 0;
+    for (0..64) |i| {
+        frame = @intCast(i);
+        const set = nextRefreshSet(4, 2, intervals, last_refresh, frame);
+        for (0..4) |c| {
+            if (set[c]) {
+                refreshed[c] = true;
+                last_refresh[c] = frame;
+                if (c == 0) near_refreshes += 1;
+            }
+        }
+    }
+    for (0..4) |c| try testing.expect(refreshed[c]);
+    try testing.expect(near_refreshes > 48); // near (interval 1) roughly every frame
 }
 
 test "staleness padding monotonic in movement, zero at zero" {

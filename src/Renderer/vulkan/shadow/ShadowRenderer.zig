@@ -84,9 +84,10 @@ const ParamBuffer = struct {
 
 /// Owns the shadow depth texture array (1 layer per cascade), the depth-only pipeline,
 /// the per-frame ShadowParams storage buffer, the comparison sampler, the shared
-/// push-descriptor set layout, committed-matrix state, and the update schedule cursor.
-/// Shadows are rasterised at the end of the frame and sampled on the next one; at most
-/// one cascade is refreshed per frame (see Csm.schedule), keeping frame time flat.
+/// push-descriptor set layout, committed-matrix state, and the refresh scheduler cursor.
+/// Shadows are rasterised at the end of the frame and sampled on the next one; each
+/// frame up to `cascades_per_frame` cascades are refreshed (near ones most often, see
+/// Csm.refreshIntervals/nextRefreshSet), keeping frame time flat.
 pub const ShadowRenderer = @This();
 
 vk_ctx: *VulkanContext,
@@ -116,7 +117,7 @@ param_buffers: []ParamBuffer = &.{},
 /// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
 /// per-frame matrix by `viewProjAtOrigin`.
 committed: [Csm.MAX_CASCADES]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
-/// Latched light direction for the current schedule period (direction light travels).
+/// Latched light direction (direction light travels), re-read from the live sun each frame.
 light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// Per-cascade commit validity. The params cascade_count is the largest contiguous
 /// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
@@ -139,11 +140,15 @@ per_frame_dist: f32 = 0.0,
 last_view_pos: @Vector(3, f64) = .{ 0, 0, 0 },
 last_prepare_ns: i128 = 0,
 
-/// Frame counter advanced each prepareFrame; picks the cascade via the schedule table.
-schedule_index: u32 = 0,
-/// Cascade being refreshed this frame, if any.
-frame_cascade: ?u32 = null,
-/// Camera origin the frame's cascade was computed at (for the end-of-frame raster).
+/// Frame counter advanced each prepareFrame; drives the refresh scheduler.
+frame_number: u32 = 0,
+/// Frame each cascade was last refreshed; `Csm.never_refreshed` until first raster.
+last_refresh: [Csm.MAX_CASCADES]u32 = @splat(Csm.never_refreshed),
+/// Cascades to rasterize at the end of this frame, innermost first (from `nextRefreshSet`).
+frame_cascades: [Csm.MAX_CASCADES]u32 = undefined,
+/// Number of cascades to rasterize this frame (at most `cascades_per_frame`).
+frame_cascade_count: u32 = 0,
+/// Camera origin the frame's cascades were computed at (for the end-of-frame raster).
 frame_origin: @Vector(3, f64) = .{ 0, 0, 0 },
 /// Cull planes for the frame's cascade, camera-relative.
 frame_planes: [6]@Vector(4, f32) = undefined,
@@ -520,28 +525,19 @@ pub fn prepareFrame(
     self.last_view_pos = view_pos;
 
     // The caller (VulkanRenderer.draw) holds the options lock; read the live config so
-    // non-resource changes (blend, fade, strength, schedule, splits) apply immediately.
-    var config = self.render_options.shadow;
+    // non-resource changes (blend, fade, strength, refresh intervals, splits) apply immediately.
+    const config = self.render_options.shadow;
     const count = @min(config.cascade_count, Csm.MAX_CASCADES);
-    // The schedule table must cover every cascade or far maps are never written, so rebuild
-    // a valid one when it does not. The period (light-basis recompute cadence) is a separate
-    // axis and is left untouched: a user-configured value, e.g. a huge one to freeze the sun,
-    // must survive validation instead of being clamped back down to `count`.
-    if (!Csm.validateSchedule(config.schedule, config.schedule_period, count)) {
-        config.schedule = Csm.defaultSchedule(count);
-    }
-    self.frame_cascade = null;
+    self.frame_cascade_count = 0;
 
-    const period: u32 = @max(config.schedule_period, 1);
+    // Re-latch the light direction from the live sun every frame. A ~25° or larger turn
+    // (horizon crossing, azimuth flip) invalidates the cached light basis; gradual
+    // day-cycle drift stays below it so it never re-ramps.
     var light_dir_changed = false;
-    if (self.schedule_index % period == 0) {
-        const clamped = Csm.clampSunElevation(sun_dir, config.min_sun_elevation_deg);
-        const new_light_dir = Csm.lightDirFromSunDir(clamped);
-        // A ~25° or larger turn (horizon crossing, azimuth flip) invalidates the cached
-        // light basis; gradual day-cycle drift stays below it so it never re-ramps.
-        if (Csm.dot3f(self.light_dir, new_light_dir) < 0.9) light_dir_changed = true;
-        self.light_dir = new_light_dir;
-    }
+    const clamped = Csm.clampSunElevation(sun_dir, config.min_sun_elevation_deg);
+    const new_light_dir = Csm.lightDirFromSunDir(clamped);
+    if (Csm.dot3f(self.light_dir, new_light_dir) < 0.9) light_dir_changed = true;
+    self.light_dir = new_light_dir;
 
     const sun_day = Csm.sunDayFromSunDir(sun_dir);
     const active = config.enabled and self.image != .null_handle and sun_day > 0.0 and count > 0;
@@ -557,10 +553,10 @@ pub fn prepareFrame(
     }
     self.was_active = active;
 
-    // Promote the cascade rasterized at the end of the previous frame into the sampled
+    // Promote the cascade(s) rasterized at the end of the previous frame into the sampled
     // state. The refresh frame itself samples the previous commit, so a layer is only
     // ever sampled with the matrix and box radius it was actually rasterized with; the
-    // freshly computed cascade stays in pending (used only by the raster) and is
+    // freshly computed cascades stay in pending (used only by the raster) and are
     // promoted here on the next frame.
     if (active) {
         for (0..Csm.MAX_CASCADES) |c| {
@@ -571,12 +567,20 @@ pub fn prepareFrame(
         }
         self.pending_valid = @splat(false);
 
-        // Compute the frame's cascade into pending: one cascade per frame on the schedule
-        // rotation. It is rasterized at the end of this frame and only enters the sampled
-        // params next frame (see the promotion above).
+        // Select the cascades to refresh this frame: derived per-cascade intervals (near
+        // cascades much more often) capped by the per-frame budget. Each selected layer
+        // is computed into pending and rasterized at the end of this frame; it only
+        // enters the sampled params next frame (see the promotion above).
         self.frame_origin = view_pos;
-        const cascade_index = config.schedule[self.schedule_index % Csm.effectivePeriod(period)];
-        if (cascade_index < count) {
+        const intervals = Csm.refreshIntervals(config);
+        const refresh_set = Csm.nextRefreshSet(count, config.cascades_per_frame, intervals, self.last_refresh, self.frame_number);
+
+        // The cull is the superset for every selected layer: outermost selected box for
+        // the planes, innermost selected texel for the minimum chunk size.
+        var outermost: ?Csm.Cascade = null;
+        var finest_texel: f32 = std.math.inf(f32);
+        for (0..count) |c| {
+            if (!refresh_set[c]) continue;
             const ctx = Csm.CascadeContext{
                 .cfg = config,
                 .fov_y = fov_y,
@@ -588,13 +592,20 @@ pub fn prepareFrame(
                 .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
                 .per_frame_dist = self.per_frame_dist,
             };
-            const cascade = Csm.computeCascade(ctx, cascade_index);
-            self.pending[cascade_index] = Csm.committedOf(cascade);
-            self.pending_valid[cascade_index] = true;
-            self.frame_cascade = cascade_index;
-
-            self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
-            self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
+            const cascade = Csm.computeCascade(ctx, @intCast(c));
+            self.pending[c] = Csm.committedOf(cascade);
+            self.pending_valid[c] = true;
+            self.last_refresh[c] = self.frame_number;
+            self.frame_cascades[self.frame_cascade_count] = @intCast(c);
+            self.frame_cascade_count += 1;
+            if (cascade.texel < finest_texel) finest_texel = cascade.texel;
+            if (outermost == null or cascade.radius > outermost.?.radius) outermost = cascade;
+        }
+        if (outermost) |outer| {
+            self.frame_planes = cullPlanes(outer.center_abs, outer.light_dir, outer.radius, outer.near_plane, outer.far_plane, view_pos);
+        }
+        if (std.math.isFinite(finest_texel)) {
+            self.frame_min_chunk_size = config.min_chunk_texels * finest_texel;
         }
     }
 
@@ -632,7 +643,7 @@ pub fn prepareFrame(
 
     @memcpy(self.param_buffers[frame_idx].mapping[0..@sizeOf(ShadowParams)], std.mem.asBytes(&params));
 
-    self.schedule_index +%= 1;
+    self.frame_number +%= 1;
 }
 
 /// Frustum planes for the frame's cascade, camera-relative, matching Frustum's
@@ -660,7 +671,13 @@ fn cullPlanes(center: Csm.Vec3d, light_dir: Csm.Vec3f, radius: f32, near: f32, f
 }
 
 pub fn frameHasCascade(self: *const ShadowRenderer) bool {
-    return self.frame_cascade != null;
+    return self.frame_cascade_count > 0;
+}
+
+/// The innermost (nearest) cascade being refreshed this frame, for stats and debug.
+pub fn frameInnermostCascade(self: *const ShadowRenderer) ?u32 {
+    if (self.frame_cascade_count == 0) return null;
+    return self.frame_cascades[0];
 }
 
 pub fn frameCascadePlanes(self: *const ShadowRenderer) [6]@Vector(4, f32) {
@@ -716,9 +733,10 @@ pub fn recordShadowPass(
     if (face_buffer == .null_handle) return;
     if (self.image == .null_handle) return;
 
-    const cascade = self.frame_cascade orelse return;
-    if (self.views.len <= cascade) return;
-    self.recordCascadePass(cmd_buffer, frame_idx, cascade, face_buffer, face_buffer_offset);
+    for (self.frame_cascades[0..self.frame_cascade_count]) |cascade| {
+        if (self.views.len <= cascade) continue;
+        self.recordCascadePass(cmd_buffer, frame_idx, cascade, face_buffer, face_buffer_offset);
+    }
 }
 
 /// Records the depth raster for a single cascade layer: layout transitions, clear, and

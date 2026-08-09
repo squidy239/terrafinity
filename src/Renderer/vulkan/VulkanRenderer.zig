@@ -294,7 +294,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         self.frame_stats.opaque_faces = counts[0].opaque_face_count;
         self.frame_stats.transparent_faces = counts[0].transparent_face_count;
         self.frame_stats.shadow_faces = counts[0].shadow_face_count;
-        self.frame_stats.shadow_cascade = self.shadow.frame_cascade;
+        self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
     }
 
     self.render_options_lock.lockSharedUncancelable(io);
