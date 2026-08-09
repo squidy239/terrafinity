@@ -28,17 +28,13 @@ pub const ShadowConfig = struct {
     // keep shadows; the far fade hides the map's edge.
     max_shadow_distance: f32 = 4096,
     pssm_lambda: f32 = 0.35,
-    use_cascade_override: bool = false,
-    cascade_split_override: [MAX_CASCADES]f32 = .{ 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736 },
     /// Index into the schedule table for each frame: frame_number % period. Cascade 0
     /// (near) refreshes every 2 frames; the rest on a longer rotation.
     schedule: [schedule_capacity]u8 = .{ 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    schedule_period: u8 = 6,
-    /// When true, every cascade is re-computed and re-rasterized each frame instead of
-    /// refreshing one cascade per frame on the schedule. Eliminates the shadow swimming
-    /// that the staggered schedule causes when the camera moves, at the cost of rastering
-    /// all cascades every frame.
-    refresh_all_each_frame: bool = false,
+    /// Frames per schedule rotation. May exceed the table capacity: the table is then
+    /// treated as a repeating pattern, and only the light-basis recompute cadence
+    /// (which uses the raw period) stretches; cascade staleness is bounded by the table.
+    schedule_period: u32 = 6,
     // A depression's far wall casts a very long shadow at a near-horizontal sun (length
     // ~ depth / tan(elevation)); clamping the elevation up keeps those shadows sane.
     min_sun_elevation_deg: f32 = 15,
@@ -195,26 +191,11 @@ pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f3
     return splits;
 }
 
-/// Effective per-cascade outer split radii honoring the config override.
+/// Effective per-cascade outer split radii from PSSM. Like the PSSM path, a zero or
+/// oversized `cascade_count` is sanitized rather than asserted so a live edit degrades to
+/// a minimal usable set instead of indexing out of bounds.
 pub fn splitRadii(cfg: ShadowConfig) [MAX_CASCADES]f32 {
-    const count = @min(cfg.cascade_count, MAX_CASCADES);
-    if (cfg.use_cascade_override) {
-        var splits = cfg.cascade_split_override;
-        var last: f32 = -1.0;
-        for (0..count) |i| {
-            if (splits[i] <= last) splits[i] = last + 1.0;
-            last = splits[i];
-        }
-        if (splits[count - 1] != cfg.max_shadow_distance) {
-            splits[count - 1] = cfg.max_shadow_distance;
-        }
-        // Live edits can leave the last split at or below the clamped near; force it up
-        // so every cascade has a usable (positive) radius.
-        if (splits[count - 1] <= clamped_split_near) {
-            splits[count - 1] = clamped_split_near + 1.0;
-        }
-        return splits;
-    }
+    const count = @max(@min(cfg.cascade_count, MAX_CASCADES), 1);
     return pssmSplits(engine_near, cfg.max_shadow_distance, count, cfg.pssm_lambda);
 }
 
@@ -297,25 +278,34 @@ pub fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: 
     return .{ .near = @floatCast(near), .far = @floatCast(far) };
 }
 
-/// How many frames a cascade can go without a refresh: `period / occurrences`, rounded
-/// up. Unknown cascades fall back to the full period.
-pub fn scheduleStaleness(schedule: [schedule_capacity]u8, period: u8, cascade: u32) u32 {
-    const period_u = @max(@as(u32, period), 1);
+/// The schedule table is a fixed-length repeating pattern. The rotation period used to
+/// index it is clamped to its capacity, so a huge configured `schedule_period` (which
+/// only stretches the light-basis recompute cadence) never runs past the table.
+pub fn effectivePeriod(period: u32) u32 {
+    return @min(period, schedule_capacity);
+}
+
+/// How many frames a cascade can go without a refresh: `len / occurrences`, rounded up,
+/// where `len` is the effective pattern length. Unknown cascades fall back to the period.
+pub fn scheduleStaleness(schedule: [schedule_capacity]u8, period: u32, cascade: u32) u32 {
+    const period_u = @max(period, 1);
+    const len = effectivePeriod(period_u);
     var occurrences: u32 = 0;
-    for (schedule[0..@intCast(@min(@as(u32, period), schedule_capacity))]) |c| {
+    for (schedule[0..len]) |c| {
         if (c == cascade) occurrences += 1;
     }
     if (occurrences == 0) return period_u;
-    return (period_u + occurrences - 1) / occurrences;
+    return (len + occurrences - 1) / occurrences;
 }
 
 /// Every cascade < `count` must be refreshed by the table, or its map is never written.
-pub fn validateSchedule(schedule: [schedule_capacity]u8, period: u8, count: u32) bool {
-    if (period == 0 or period > schedule_capacity) return false;
+pub fn validateSchedule(schedule: [schedule_capacity]u8, period: u32, count: u32) bool {
+    if (period == 0) return false;
     if (count == 0 or count > MAX_CASCADES) return false;
+    const len = effectivePeriod(period);
     for (0..count) |c| {
         var found = false;
-        for (schedule[0..period]) |entry| {
+        for (schedule[0..len]) |entry| {
             if (entry == c) {
                 found = true;
                 break;
@@ -471,45 +461,27 @@ test "pssmSplits monotonic, endpoints, lambda extremes" {
     try testing.expect(log_heavy[0] < uniform[0]);
 }
 
-test "splitRadii honours override and forces monotonic" {
+test "splitRadii mirrors PSSM splits and sanitizes count" {
     var cfg = ShadowConfig{};
     cfg.max_shadow_distance = 256;
     cfg.cascade_count = 3;
-    cfg.use_cascade_override = true;
-    cfg.cascade_split_override = .{ 32, 96, 256, 512, 1024, 2048, 4096, 8192, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const splits = splitRadii(cfg);
-    try testing.expect(splits[0] == 32.0);
-    try testing.expect(splits[1] == 96.0);
-    try testing.expect(splits[2] == 256.0);
-    try testing.expect(splits[2] == cfg.max_shadow_distance);
-
-    // Non-monotonic override is repaired; last is forced to max_shadow_distance.
-    cfg.cascade_split_override = .{ 96, 32, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    const repaired = splitRadii(cfg);
-    try testing.expect(repaired[0] < repaired[1] and repaired[1] < repaired[2]);
-    try testing.expect(repaired[2] == cfg.max_shadow_distance);
+    const pssm = pssmSplits(engine_near, 256.0, 3, cfg.pssm_lambda);
+    try testing.expectEqual(splits[0], pssm[0]);
+    try testing.expectEqual(splits[2], 256.0);
+    try testing.expect(splits[0] < splits[1] and splits[1] < splits[2]);
 }
 
 test "eight cascades are supported beyond the original four" {
     var cfg = ShadowConfig{};
     cfg.max_shadow_distance = 4096;
     cfg.cascade_count = 8;
-    cfg.use_cascade_override = true;
-    cfg.cascade_split_override = .{ 32, 64, 128, 256, 512, 1024, 2048, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const splits = splitRadii(cfg);
     for (0..8) |i| {
         try testing.expect(splits[i] > 0.0);
         if (i > 0) try testing.expect(splits[i] > splits[i - 1]);
     }
     try testing.expect(splits[7] == cfg.max_shadow_distance);
-
-    // The PSSM path fills all eight entries too.
-    cfg.use_cascade_override = false;
-    const pssm = splitRadii(cfg);
-    for (0..8) |i| {
-        if (i > 0) try testing.expect(pssm[i] > pssm[i - 1]);
-    }
-    try testing.expect(pssm[7] == cfg.max_shadow_distance);
 
     // A plain rotation schedule validates for eight cascades.
     try testing.expect(validateSchedule(defaultSchedule(8), 8, 8));
@@ -764,17 +736,23 @@ test "splitRadii handles degenerate live-edited config without panicking" {
 
     // Zero cascade_count also degrades instead of indexing out of bounds.
     cfg.cascade_count = 0;
-    cfg.use_cascade_override = false;
     const splits_zero = splitRadii(cfg);
     try testing.expect(splits_zero[0] > 0.0);
 
-    // Override path forces the last split above the near even if the distance is tiny.
+    // max_shadow_distance tiny (below the clamped near) still degrades to a usable radius
+    // and keeps the split radii monotonic.
     cfg.cascade_count = 3;
-    cfg.use_cascade_override = true;
     cfg.max_shadow_distance = 0.5;
-    cfg.cascade_split_override = .{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 };
-    const splits_ov = splitRadii(cfg);
-    try testing.expect(splits_ov[2] > clamped_split_near);
+    const splits_tiny = splitRadii(cfg);
+    try testing.expect(splits_tiny[2] > clamped_split_near);
+    try testing.expect(splits_tiny[0] < splits_tiny[1] and splits_tiny[1] < splits_tiny[2]);
+
+    // Zero cascade_count must not underflow `splits[count - 1]` (was `splits[-1]` on u32):
+    // it degrades to a single usable cascade whose radius is the full max distance.
+    cfg.cascade_count = 0;
+    cfg.max_shadow_distance = 256.0;
+    const splits_zero_one = splitRadii(cfg);
+    try testing.expect(splits_zero_one[0] == cfg.max_shadow_distance);
 }
 
 test "schedule validator and staleness" {
@@ -791,6 +769,14 @@ test "schedule validator and staleness" {
     try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 2));
     try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 3));
     try testing.expectEqual(@as(u32, 6), scheduleStaleness(schedule, 6, 4));
+
+    // A very large period is allowed and never overruns the table: the pattern repeats
+    // at capacity and staleness stays bounded by the effective length.
+    try testing.expect(validateSchedule(schedule, 1_000_000, 4));
+    try testing.expectEqual(@as(u32, 2), scheduleStaleness(schedule, 1_000_000, 0));
+    try testing.expectEqual(@as(u32, 32), scheduleStaleness(schedule, 1_000_000, 1));
+    try testing.expectEqual(@as(u32, 1_000_000), scheduleStaleness(schedule, 1_000_000, 9));
+    try testing.expect(!validateSchedule(schedule, 1_000_000, 5)); // cascade 4 never refreshed
 }
 
 test "staleness padding monotonic in movement, zero at zero" {

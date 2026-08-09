@@ -122,6 +122,13 @@ light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
 /// is never classified into — the shader's cascade_count early-outs before it.
 valid: [Csm.MAX_CASCADES]bool = @splat(false),
+/// Cascades computed this frame, used only by the end-of-frame raster. Promoted into
+/// `committed` (the sampled state) at the start of the next prepareFrame, so a refreshed
+/// layer is only ever sampled with the matrix and box radius it was rasterized with.
+pending: [Csm.MAX_CASCADES]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+/// Per-cascade validity of `pending`; set when a cascade is computed this frame and
+/// cleared once it is promoted (or discarded on a light-direction reset).
+pending_valid: [Csm.MAX_CASCADES]bool = @splat(false),
 /// Whether shadows were active last frame; a false->true transition means the sun just
 /// rose and the committed state belongs to the pre-night light direction.
 was_active: bool = false,
@@ -136,12 +143,7 @@ last_prepare_ns: i128 = 0,
 schedule_index: u32 = 0,
 /// Cascade being refreshed this frame, if any.
 frame_cascade: ?u32 = null,
-/// When refresh-all-each-frame is enabled, every cascade is committed and rastered this
-/// frame; frame_cascade is null and the cull runs against the outermost cascade's box.
-refresh_all: bool = false,
-/// Number of cascades to raster this frame (count when refresh_all, else 1).
-frame_cascade_count: u32 = 1,
-/// Camera origin the frame's matrix was committed at (for the end-of-frame raster).
+/// Camera origin the frame's cascade was computed at (for the end-of-frame raster).
 frame_origin: @Vector(3, f64) = .{ 0, 0, 0 },
 /// Cull planes for the frame's cascade, camera-relative.
 frame_planes: [6]@Vector(4, f32) = undefined,
@@ -309,6 +311,7 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
         self.cascade_count = count;
         self.map_size = size;
         self.valid = @splat(false);
+        self.pending_valid = @splat(false);
     }
 
     if (!applied.enabled or count == 0 or size == 0) return;
@@ -393,6 +396,7 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
     try self.clearDepthArray(io);
     try self.createPipeline();
     self.valid = @splat(false);
+    self.pending_valid = @splat(false);
 }
 
 fn destroyShadowImage(self: *ShadowRenderer) void {
@@ -501,15 +505,16 @@ pub fn prepareFrame(
     defer zone.end();
 
     // Measure the actual camera movement in blocks per frame (smoothed) for staleness
-    // padding. Using the player's max fly speed here would grow the cascade boxes while
-    // standing still, making the shadow map coarser and causing texel-swimming flicker.
+    // padding. This must be per-frame distance, not per-second speed: the padding is
+    // `staleness_frames * per_frame_dist`, so it must stay in block units per frame to
+    // cover exactly the movement over the stale interval. Using the player's max fly
+    // speed here would grow the cascade boxes while standing still, making the shadow
+    // map coarser and causing texel-swimming flicker.
     const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     if (self.last_prepare_ns != 0) {
-        const dt_sec = @as(f32, @floatFromInt(now_ns - self.last_prepare_ns)) / std.time.ns_per_s;
         const delta = view_pos - self.last_view_pos;
         const dist: f32 = @floatCast(@sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]));
-        const speed = dist / @max(dt_sec, 1e-6);
-        self.per_frame_dist = std.math.lerp(self.per_frame_dist, speed, 0.3);
+        self.per_frame_dist = std.math.lerp(self.per_frame_dist, dist, 0.3);
     }
     self.last_prepare_ns = now_ns;
     self.last_view_pos = view_pos;
@@ -518,15 +523,16 @@ pub fn prepareFrame(
     // non-resource changes (blend, fade, strength, schedule, splits) apply immediately.
     var config = self.render_options.shadow;
     const count = @min(config.cascade_count, Csm.MAX_CASCADES);
+    // The schedule table must cover every cascade or far maps are never written, so rebuild
+    // a valid one when it does not. The period (light-basis recompute cadence) is a separate
+    // axis and is left untouched: a user-configured value, e.g. a huge one to freeze the sun,
+    // must survive validation instead of being clamped back down to `count`.
     if (!Csm.validateSchedule(config.schedule, config.schedule_period, count)) {
         config.schedule = Csm.defaultSchedule(count);
-        config.schedule_period = @intCast(count);
     }
     self.frame_cascade = null;
-    self.refresh_all = false;
-    self.frame_cascade_count = 1;
 
-    const period: u32 = @max(@as(u32, config.schedule_period), 1);
+    const period: u32 = @max(config.schedule_period, 1);
     var light_dir_changed = false;
     if (self.schedule_index % period == 0) {
         const clamped = Csm.clampSunElevation(sun_dir, config.min_sun_elevation_deg);
@@ -542,72 +548,62 @@ pub fn prepareFrame(
 
     // When the light direction changes meaningfully (sunrise, or the sun re-latched to a
     // new basis), every committed cascade still holds a matrix and depth content built
-    // for the old sun. Reset the ramp so uncommitted cascades sample as fully lit rather
-    // than projecting shadows from the previous light direction.
+    // for the old sun, and the pending slot holds a cascade rasterized under it too.
+    // Reset the ramp so uncommitted cascades sample as fully lit rather than projecting
+    // shadows from the previous light direction.
     if ((active and !self.was_active) or light_dir_changed) {
         self.valid = @splat(false);
+        self.pending_valid = @splat(false);
     }
     self.was_active = active;
 
+    // Promote the cascade rasterized at the end of the previous frame into the sampled
+    // state. The refresh frame itself samples the previous commit, so a layer is only
+    // ever sampled with the matrix and box radius it was actually rasterized with; the
+    // freshly computed cascade stays in pending (used only by the raster) and is
+    // promoted here on the next frame.
     if (active) {
-        self.frame_origin = view_pos;
-        if (config.refresh_all_each_frame) {
-            // Recompute and re-raster every cascade this frame. Cull once against the
-            // outermost cascade's box with the finest (cascade 0) min chunk size so the
-            // superset geometry feeds every cascade's raster; each layer projects through
-            // its own matrix, clipping to its own box.
-            for (0..count) |c| {
-                const ctx = Csm.CascadeContext{
-                    .cfg = config,
-                    .fov_y = fov_y,
-                    .aspect = aspect,
-                    .camera_front = camera_front,
-                    .view_pos = view_pos,
-                    .light_dir = self.light_dir,
-                    .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
-                    .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
-                    .per_frame_dist = self.per_frame_dist,
-                };
-                const cascade = Csm.computeCascade(ctx, @intCast(c));
-                self.committed[c] = Csm.committedOf(cascade);
+        for (0..Csm.MAX_CASCADES) |c| {
+            if (self.pending_valid[c]) {
+                self.committed[c] = self.pending[c];
                 self.valid[c] = true;
-                if (c == count - 1) {
-                    self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
-                }
-                if (c == 0) self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
             }
-            self.refresh_all = true;
-            self.frame_cascade_count = count;
-            self.frame_cascade = @intCast(count);
-        } else {
-            const cascade_index = config.schedule[self.schedule_index % period];
-            if (cascade_index < count) {
-                const ctx = Csm.CascadeContext{
-                    .cfg = config,
-                    .fov_y = fov_y,
-                    .aspect = aspect,
-                    .camera_front = camera_front,
-                    .view_pos = view_pos,
-                    .light_dir = self.light_dir,
-                    .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
-                    .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
-                    .per_frame_dist = self.per_frame_dist,
-                };
-                const cascade = Csm.computeCascade(ctx, cascade_index);
-                self.committed[cascade_index] = Csm.committedOf(cascade);
-                self.valid[cascade_index] = true;
-                self.frame_cascade = cascade_index;
+        }
+        self.pending_valid = @splat(false);
 
-                self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
-                self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
-            }
+        // Compute the frame's cascade into pending: one cascade per frame on the schedule
+        // rotation. It is rasterized at the end of this frame and only enters the sampled
+        // params next frame (see the promotion above).
+        self.frame_origin = view_pos;
+        const cascade_index = config.schedule[self.schedule_index % Csm.effectivePeriod(period)];
+        if (cascade_index < count) {
+            const ctx = Csm.CascadeContext{
+                .cfg = config,
+                .fov_y = fov_y,
+                .aspect = aspect,
+                .camera_front = camera_front,
+                .view_pos = view_pos,
+                .light_dir = self.light_dir,
+                .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
+                .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
+                .per_frame_dist = self.per_frame_dist,
+            };
+            const cascade = Csm.computeCascade(ctx, cascade_index);
+            self.pending[cascade_index] = Csm.committedOf(cascade);
+            self.pending_valid[cascade_index] = true;
+            self.frame_cascade = cascade_index;
+
+            self.frame_planes = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
+            self.frame_min_chunk_size = config.min_chunk_texels * cascade.texel;
         }
     }
 
     // Params are written every frame (origin compensation changes every frame), for all
-    // committed cascades. The shader's cascade_count is gated on how many cascades have
-    // been committed: classifying into an uncommitted cascade would project through a
-    // garbage matrix. Uncommitted cascades read cleared maps -> lit.
+    // committed cascades. The committed set is promoted from the pending raster slots, so
+    // the sampled matrix/box always match the layer content actually in the map. The
+    // shader's cascade_count is gated on how many cascades have been committed:
+    // classifying into an uncommitted cascade would project through a garbage matrix.
+    // Uncommitted cascades read cleared maps -> lit.
     var params = ShadowParams.default();
     // Largest contiguous valid prefix: cascades 0..active_count-1 are all committed.
     var active_count: u32 = 0;
@@ -664,7 +660,7 @@ fn cullPlanes(center: Csm.Vec3d, light_dir: Csm.Vec3f, radius: f32, near: f32, f
 }
 
 pub fn frameHasCascade(self: *const ShadowRenderer) bool {
-    return if (self.refresh_all) self.frame_cascade_count > 0 else self.frame_cascade != null;
+    return self.frame_cascade != null;
 }
 
 pub fn frameCascadePlanes(self: *const ShadowRenderer) [6]@Vector(4, f32) {
@@ -720,16 +716,9 @@ pub fn recordShadowPass(
     if (face_buffer == .null_handle) return;
     if (self.image == .null_handle) return;
 
-    if (self.refresh_all) {
-        for (0..self.frame_cascade_count) |c| {
-            if (self.views.len <= c) continue;
-            self.recordCascadePass(cmd_buffer, frame_idx, @intCast(c), face_buffer, face_buffer_offset);
-        }
-    } else {
-        const cascade = self.frame_cascade orelse return;
-        if (self.views.len <= cascade) return;
-        self.recordCascadePass(cmd_buffer, frame_idx, cascade, face_buffer, face_buffer_offset);
-    }
+    const cascade = self.frame_cascade orelse return;
+    if (self.views.len <= cascade) return;
+    self.recordCascadePass(cmd_buffer, frame_idx, cascade, face_buffer, face_buffer_offset);
 }
 
 /// Records the depth raster for a single cascade layer: layout transitions, clear, and
@@ -788,12 +777,13 @@ fn recordCascadePass(
     const mesh_desc_set = self.scene.mesh_data_descriptor_sets_per_frame[frame_idx];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, (&mesh_desc_set)[0..1], null);
 
-    // The matrix must match the params used when sampling next frame: rebuilt from
-    // committed state at the origin the raster uses (the same origin the params were
-    // written at this frame), so light-space coordinates are world-anchored.
-    const committed = self.committed[cascade];
+    // The matrix must match the params used when sampling next frame: rebuilt from the
+    // pending cascade at the origin the raster uses (the same origin the cascade was
+    // computed at), so light-space coordinates are world-anchored. The pending slot is
+    // promoted into committed (the sampled state) at the start of the next prepareFrame.
+    const pending_commit = self.pending[cascade];
     var shadow_pc = ShadowPushConstants{
-        .light_viewproj = Csm.viewProjAtOrigin(committed, self.frame_origin),
+        .light_viewproj = Csm.viewProjAtOrigin(pending_commit, self.frame_origin),
         .mesh_base = gpu.shadow_slot_base * self.scene.draw_capacity,
     };
     self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(ShadowPushConstants), &shadow_pc);
