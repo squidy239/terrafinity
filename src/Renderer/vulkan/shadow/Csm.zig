@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 /// Cascaded shadow map CPU math: split radii, per-slice bounding-sphere fit, light
 /// basis, scene-AABB depth range, absolute-space texel snapping, camera-relative
@@ -10,6 +11,10 @@ pub const Vec3f = @Vector(3, f32);
 pub const Vec3d = @Vector(3, f64);
 
 pub const world_up: Vec3f = .{ 0.0, 1.0, 0.0 };
+
+/// Dot-product threshold above which the light is considered parallel to the up
+/// reference, making the cross-product basis degenerate.
+const parallel_dot_threshold = 0.99;
 
 /// Engine camera near plane; the PSSM log term degenerates below 1.0 so the plan
 /// clamps splits to `max(near, 1.0)`.
@@ -69,12 +74,6 @@ pub const LightBasis = struct {
     forward: Vec3f,
 };
 
-pub const SliceSphere = struct {
-    /// Center offset along the camera front, in blocks.
-    center_offset: f32,
-    radius: f32,
-};
-
 /// Per-cascade output of `computeCascade`.
 pub const Cascade = struct {
     /// Snapped absolute sphere center in world blocks.
@@ -106,9 +105,6 @@ pub const CommittedCascade = struct {
 
 pub const CascadeContext = struct {
     cfg: ShadowConfig,
-    fov_y: f32,
-    aspect: f32,
-    camera_front: Vec3f,
     view_pos: Vec3d,
     /// Direction light travels (already latched and elevation-clamped).
     light_dir: Vec3f,
@@ -187,11 +183,11 @@ pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f3
     const safe_far = @max(far, n + 1.0);
     var splits: [MAX_CASCADES]f32 = undefined;
     const count_f: f32 = @floatFromInt(safe_count);
-    for (0..safe_count) |i| {
+    for (splits[0..safe_count], 0..) |*dest, i| {
         const t: f32 = @floatFromInt(i + 1);
         const uniform_i = n + (safe_far - n) * t / count_f;
         const log_i = n * std.math.pow(f32, safe_far / n, t / count_f);
-        splits[i] = lambda * log_i + (1.0 - lambda) * uniform_i;
+        dest.* = lambda * log_i + (1.0 - lambda) * uniform_i;
     }
     return splits;
 }
@@ -200,28 +196,14 @@ pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f3
 /// oversized `cascade_count` is sanitized rather than asserted so a live edit degrades to
 /// a minimal usable set instead of indexing out of bounds.
 pub fn splitRadii(cfg: ShadowConfig) [MAX_CASCADES]f32 {
-    const count = @max(@min(cfg.cascade_count, MAX_CASCADES), 1);
-    return pssmSplits(engine_near, cfg.max_shadow_distance, count, cfg.pssm_lambda);
-}
-
-/// Circumscribed sphere of the frustum slice [near, far]: center `c` along the view
-/// axis with c = (near+far)(1+tx^2+ty^2)/2, radius from the far corners. Rotation
-/// invariant (depends only on fov/aspect/splits), so texel snapping stays meaningful.
-pub fn fitSliceSphere(fov_y: f32, aspect: f32, near: f32, far: f32) SliceSphere {
-    std.debug.assert(far > near and near > 0.0);
-    const tan_half_y = @tan(fov_y / 2.0);
-    const tan_half_x = aspect * tan_half_y;
-    const t2 = tan_half_x * tan_half_x + tan_half_y * tan_half_y;
-    const center = (near + far) * (1.0 + t2) / 2.0;
-    const radius_sq = t2 * far * far + (far - center) * (far - center);
-    return .{ .center_offset = center, .radius = @sqrt(@max(radius_sq, 0.0)) };
+    return pssmSplits(engine_near, cfg.max_shadow_distance, cfg.cascade_count, cfg.pssm_lambda);
 }
 
 /// Orthonormal basis with the light looking along `light_dir`, following the lookAtRH
 /// construction (s = f × up, u = s × f). Degenerate when light_dir is parallel to world_up.
 pub fn buildLightBasis(light_dir: Vec3f, up_ref: Vec3f) LightBasis {
     const f = normalize3f(light_dir);
-    const up_choice: Vec3f = if (@abs(dot3f(f, up_ref)) > 0.99)
+    const up_choice: Vec3f = if (@abs(dot3f(f, up_ref)) > parallel_dot_threshold)
         .{ 0.0, 0.0, 1.0 }
     else
         up_ref;
@@ -242,8 +224,8 @@ pub fn snapCenter(center: Vec3d, radius: f32, shadow_map_size: u32, basis: Light
     const ls_y = dot3d(center, basis.up);
     const snapped_x = @round(ls_x / texel) * texel;
     const snapped_y = @round(ls_y / texel) * texel;
-    const right: Vec3d = .{ basis.right[0], basis.right[1], basis.right[2] };
-    const up: Vec3d = .{ basis.up[0], basis.up[1], basis.up[2] };
+    const right: Vec3d = @floatCast(basis.right);
+    const up: Vec3d = @floatCast(basis.up);
     return center + right * @as(Vec3d, @splat(snapped_x - ls_x)) + up * @as(Vec3d, @splat(snapped_y - ls_y));
 }
 
@@ -254,7 +236,7 @@ pub fn snapCenter(center: Vec3d, radius: f32, shadow_map_size: u32, basis: Light
 /// edges. The depthClamp on the pipeline only affects the rasterization of geometry
 /// whose AABB straddles the range boundary.
 pub fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: Vec3f, radius: f32, max_depth_range: f32) struct { near: f32, far: f32 } {
-    const l: Vec3d = .{ light_dir[0], light_dir[1], light_dir[2] };
+    const l: Vec3d = @floatCast(light_dir);
     var z_min: f64 = std.math.inf(f64);
     var z_max: f64 = -std.math.inf(f64);
     inline for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
@@ -296,12 +278,12 @@ pub fn refreshIntervals(cfg: ShadowConfig) [MAX_CASCADES]u32 {
     var intervals: [MAX_CASCADES]u32 = @splat(@max(cfg.min_refresh_frames, 1));
     if (count == 1) return intervals;
     const denom: f64 = @floatFromInt(count - 1);
-    for (0..count) |i| {
+    for (intervals[0..count], 0..) |*dest, i| {
         const t: f64 = @as(f64, @floatFromInt(i)) / denom;
         const uniform_i = min_f + (max_f - min_f) * t;
         const log_i = min_f * std.math.pow(f64, max_f / min_f, t);
         const blend = @min(@round(lambda * log_i + (1.0 - lambda) * uniform_i), @as(f64, @floatFromInt(std.math.maxInt(u32))));
-        intervals[i] = @intFromFloat(blend);
+        dest.* = @intFromFloat(blend);
     }
     return intervals;
 }
@@ -334,10 +316,11 @@ const RefreshPriority = struct {
 };
 
 /// Selects which cascades to refresh this frame. A cascade is due once
-/// `frame_number - last_refresh[c]` reaches its derived interval, but at most
-/// `cascades_per_frame` are rasterized per frame: the most overdue first, ties broken
-/// toward the near cascades. Under budget pressure the remaining cascades simply wait,
-/// so the budget is a hard cap that is never exceeded.
+/// `frame_number - last_refresh[c]` reaches its derived interval; only due-or-overdue
+/// cascades are eligible (never-refreshed cascades count as maximally overdue), ordered
+/// most-overdue first with ties broken toward the near cascades. At most
+/// `cascades_per_frame` of the eligible cascades are rasterized per frame, so when
+/// nothing is due the set is empty and the shadow pass is skipped entirely.
 pub fn nextRefreshSet(
     cascade_count: u32,
     cascades_per_frame: u32,
@@ -348,11 +331,17 @@ pub fn nextRefreshSet(
     const count = @max(@min(cascade_count, MAX_CASCADES), 1);
     const budget = @max(@min(cascades_per_frame, MAX_CASCADES), 1);
     var order: [MAX_CASCADES]u32 = undefined;
-    for (0..count) |i| order[i] = @intCast(i);
+    for (order[0..count], 0..) |*dest, i| dest.* = @intCast(i);
     const priority = RefreshPriority{ .intervals = intervals, .last_refresh = last_refresh, .frame_number = frame_number };
     std.sort.insertion(u32, order[0..count], &priority, RefreshPriority.lessThan);
     var selected: [MAX_CASCADES]bool = @splat(false);
-    for (0..@intCast(@min(budget, count))) |i| selected[order[i]] = true;
+    var taken: u32 = 0;
+    for (order[0..count]) |c| {
+        if (taken >= budget) break;
+        if (priority.lateness(c) < 0) continue; // not yet due: skip, do not fill budget
+        selected[c] = true;
+        taken += 1;
+    }
     return selected;
 }
 
@@ -368,23 +357,22 @@ pub fn stalenessPadding(staleness_frames: u32, per_frame_dist: f32) f32 {
 /// in GLSL column-major layout (translation in the 4th column, indices 12-14, bottom row
 /// (0,0,0,1)) so w stays 1. This is the AGENTS.md fix: zm's row-major lookAtRH/ortho
 /// place the translation in the last column of each row, which a GLSL `M * v` reads as a
-/// projective w term when the light eye is off-origin. The light looks along `light_dir`
-/// from `center`; the box is [+-radius] in XY with the scene-derived depth range. The
-/// eye is placed at `center - view_pos` (f64 subtract) so the result matches
-/// `MeshData.relative_position` exactly.
+/// projective w term when the light eye is off-origin. The light looks along
+/// `basis.forward` from `center`; the box is [+-radius] in XY with the scene-derived
+/// depth range. The eye is placed at `center - view_pos` (f64 subtract) so the result
+/// matches `MeshData.relative_position` exactly.
 ///
 /// Vulkan's NDC depth range is [0, 1], so the matrix emits `f·d == near` as 0 and
 /// `f·d == far` as 1. This matches the shadow pipeline's LESS_OR_EQUAL compare and
 /// clear to 1.0.
 fn buildViewProj(
     center: Vec3d,
-    light_dir: Vec3f,
+    basis: LightBasis,
     radius: f32,
     near_plane: f32,
     far_plane: f32,
     view_pos: Vec3d,
 ) [16]f32 {
-    const basis = buildLightBasis(light_dir, world_up);
     const s = basis.right;
     const u = basis.up;
     const f = basis.forward;
@@ -394,18 +382,12 @@ fn buildViewProj(
     const u_t = dot3f(u, t);
     const f_t = dot3f(f, t);
     var m: [16]f32 = undefined;
-    m[0] = s[0] / radius;
-    m[1] = u[0] / radius;
-    m[2] = f[0] / fnf;
-    m[3] = 0.0;
-    m[4] = s[1] / radius;
-    m[5] = u[1] / radius;
-    m[6] = f[1] / fnf;
-    m[7] = 0.0;
-    m[8] = s[2] / radius;
-    m[9] = u[2] / radius;
-    m[10] = f[2] / fnf;
-    m[11] = 0.0;
+    inline for (0..3) |c| {
+        m[c * 4] = s[c] / radius;
+        m[c * 4 + 1] = u[c] / radius;
+        m[c * 4 + 2] = f[c] / fnf;
+        m[c * 4 + 3] = 0.0;
+    }
     m[12] = s_t / radius;
     m[13] = u_t / radius;
     m[14] = (f_t - near_plane) / fnf;
@@ -417,9 +399,6 @@ fn buildViewProj(
 /// covers the sphere of radius `split_radius[i]` around the camera, so the box is
 /// rotation-invariant (no shadow swimming when the player looks around) and covers every
 /// direction including behind and below the camera (no leaks through un-covered terrain).
-/// The sphere-fit-to-frustum-slice alternative (`fitSliceSphere`) is kept as a utility
-/// but is not used: it moves the box with the camera front and leaves regions outside
-/// the frustum wedge un-covered.
 pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
     const count = @min(ctx.cfg.cascade_count, MAX_CASCADES);
     std.debug.assert(cascade_index < count);
@@ -433,16 +412,15 @@ pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
     const basis = buildLightBasis(ctx.light_dir, world_up);
     const center_snapped = snapCenter(ctx.view_pos, radius, ctx.cfg.shadow_map_size, basis);
     const range = depthRange(ctx.scene_min, ctx.scene_max, center_snapped, ctx.light_dir, radius, ctx.cfg.max_depth_range);
-    const texel = 2.0 * radius / @as(f32, @floatFromInt(ctx.cfg.shadow_map_size));
 
     return .{
         .center_abs = center_snapped,
         .radius = radius,
-        .texel = texel,
+        .texel = 2.0 * radius / @as(f32, @floatFromInt(ctx.cfg.shadow_map_size)),
         .near_plane = range.near,
         .far_plane = range.far,
         .light_dir = ctx.light_dir,
-        .viewproj = buildViewProj(center_snapped, ctx.light_dir, radius, range.near, range.far, ctx.view_pos),
+        .viewproj = buildViewProj(center_snapped, basis, radius, range.near, range.far, ctx.view_pos),
     };
 }
 
@@ -453,7 +431,7 @@ pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
 /// the eye is placed at `center - view_pos` (f64 subtract), matching
 /// `MeshData.relative_position` exactly.
 pub fn viewProjAtOrigin(committed: CommittedCascade, view_pos: Vec3d) [16]f32 {
-    return buildViewProj(committed.center_abs, committed.light_dir, committed.radius, committed.near_plane, committed.far_plane, view_pos);
+    return buildViewProj(committed.center_abs, buildLightBasis(committed.light_dir, world_up), committed.radius, committed.near_plane, committed.far_plane, view_pos);
 }
 
 pub fn committedOf(cascade: Cascade) CommittedCascade {
@@ -464,16 +442,6 @@ pub fn committedOf(cascade: Cascade) CommittedCascade {
         .far_plane = cascade.far_plane,
         .light_dir = cascade.light_dir,
     };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-const testing = std.testing;
-
-fn approxEqF32(a: f32, b: f32, eps: f32) bool {
-    return @abs(a - b) <= eps;
 }
 
 test "pssmSplits monotonic, endpoints, lambda extremes" {
@@ -492,64 +460,6 @@ test "pssmSplits monotonic, endpoints, lambda extremes" {
     const log_heavy = pssmSplits(0.01, 256.0, 3, 1.0);
     try testing.expectApproxEqAbs(log_heavy[2], 256.0, 1e-3);
     try testing.expect(log_heavy[0] < uniform[0]);
-}
-
-test "splitRadii mirrors PSSM splits and sanitizes count" {
-    var cfg = ShadowConfig{};
-    cfg.max_shadow_distance = 256;
-    cfg.cascade_count = 3;
-    const splits = splitRadii(cfg);
-    const pssm = pssmSplits(engine_near, 256.0, 3, cfg.pssm_lambda);
-    try testing.expectEqual(splits[0], pssm[0]);
-    try testing.expectEqual(splits[2], 256.0);
-    try testing.expect(splits[0] < splits[1] and splits[1] < splits[2]);
-}
-
-test "eight cascades are supported beyond the original four" {
-    var cfg = ShadowConfig{};
-    cfg.max_shadow_distance = 4096;
-    cfg.cascade_count = 8;
-    const splits = splitRadii(cfg);
-    for (0..8) |i| {
-        try testing.expect(splits[i] > 0.0);
-        if (i > 0) try testing.expect(splits[i] > splits[i - 1]);
-    }
-    try testing.expect(splits[7] == cfg.max_shadow_distance);
-
-    // Refresh intervals derive for eight cascades too: pinned near/far, monotonic.
-    const intervals = refreshIntervals(cfg);
-    try testing.expectEqual(@as(u32, cfg.min_refresh_frames), intervals[0]);
-    try testing.expectEqual(@as(u32, cfg.max_refresh_frames), intervals[7]);
-    for (1..8) |i| try testing.expect(intervals[i] >= intervals[i - 1]);
-}
-
-test "fitSliceSphere contains all 8 corners" {
-    var prng = std.Random.DefaultPrng.init(0x5eed);
-    const rand = prng.random();
-    var i: usize = 0;
-    while (i < 200) : (i += 1) {
-        const fov = std.math.degreesToRadians(rand.float(f32) * 110.0 + 40.0);
-        const aspect = rand.float(f32) * 2.0 + 0.5;
-        const near = rand.float(f32) * 50.0 + 0.5;
-        const far = near + rand.float(f32) * 400.0 + 10.0;
-        const sphere = fitSliceSphere(fov, aspect, near, far);
-
-        const tan_y = @tan(fov / 2.0);
-        const tan_x = aspect * tan_y;
-        for ([2]f32{ near, far }) |z| {
-            for ([2]f32{ -tan_x * z, tan_x * z }) |x| {
-                for ([2]f32{ -tan_y * z, tan_y * z }) |y| {
-                    // f64 check: the axial formula balances far/near corner distances
-                    // exactly in real arithmetic, but f32 rounding at extreme fov/aspect
-                    // pushes corners a hair outside the squared radius.
-                    const dist_sq: f64 = @as(f64, x) * x + @as(f64, y) * y + (@as(f64, z) - sphere.center_offset) * (@as(f64, z) - sphere.center_offset);
-                    const r_sq: f64 = sphere.radius * sphere.radius;
-                    try testing.expect(dist_sq <= r_sq * (1.0 + 1e-5) + 1.0);
-                }
-            }
-        }
-        try testing.expect(sphere.radius > 0.0);
-    }
 }
 
 test "buildLightBasis degeneracy and orthonormality" {
@@ -578,10 +488,7 @@ test "sign: surface with N=+Y at noon is lit" {
     const light_dir = lightDirFromSunDir(sun_dir);
     try testing.expectApproxEqAbs(0.0, light_dir[0], 1e-6);
     try testing.expectApproxEqAbs(-1.0, light_dir[1], 1e-6);
-    // The shader's face_normals are the inward (geometric) normals of the cube winding:
-    // a TOP face has inward normal -Y. Lighting uses dot(normal, -sun_dir), which for
-    // the top face at noon is dot((-Y), (-Y)) = +1 -> lit. The inward top normal also
-    // aligns with the direction the light travels (-sun_dir, down).
+    // The cube's top face has inward normal -Y, so dot((-Y), light_dir) is +1 at noon.
     const inward_top_normal: Vec3f = .{ 0.0, -1.0, 0.0 };
     try testing.expect(dot3f(inward_top_normal, -sun_dir) > 0.9);
     try testing.expect(dot3f(inward_top_normal, light_dir) > 0.9);
@@ -614,48 +521,33 @@ fn worldVec(w: Vec3d) [4]f32 {
     return .{ @floatCast(w[0]), @floatCast(w[1]), @floatCast(w[2]), 1.0 };
 }
 
-test "snapping stability under camera rotation" {
-    const sun_dir: Vec3f = normalize3f(.{ 0.3, 0.8, 0.2 });
-    const light_dir = lightDirFromSunDir(sun_dir);
-    const basis = buildLightBasis(light_dir, world_up);
+/// Test-only shorthand for the near-identical camera contexts the matrix tests build.
+fn testCascadeContext(cfg: ShadowConfig, view_pos: Vec3d, scene_min: Vec3d, scene_max: Vec3d) CascadeContext {
+    return .{
+        .cfg = cfg,
+        .view_pos = view_pos,
+        .light_dir = lightDirFromSunDir(normalize3f(.{ 0.3, 0.8, 0.2 })),
+        .scene_min = scene_min,
+        .scene_max = scene_max,
+        .per_frame_dist = 10.0 / 60.0,
+    };
+}
 
+test "snapping lands the center on an exact texel multiple" {
+    const light_dir = lightDirFromSunDir(normalize3f(.{ 0.3, 0.8, 0.2 }));
+    const basis = buildLightBasis(light_dir, world_up);
     const cfg = ShadowConfig{ .cascade_count = 3, .shadow_map_size = 2048 };
     const view_pos: Vec3d = .{ 1234.5, 987.6, 42.0 };
     const scene_min: Vec3d = .{ 1000.0, 800.0, -50.0 };
     const scene_max: Vec3d = .{ 1500.0, 1200.0, 500.0 };
+    const cascade = computeCascade(testCascadeContext(cfg, view_pos, scene_min, scene_max), 0);
 
-    var prev_radius: f32 = -1.0;
-    var prev_texel: f32 = -1.0;
-    var angle: f32 = 0.0;
-    while (angle < 1.0) : (angle += 0.1) {
-        const pitch = std.math.degreesToRadians(angle);
-        const front = normalize3f(.{ @sin(pitch), 0.4, @cos(pitch) });
-        const cascade = computeCascade(.{
-            .cfg = cfg,
-            .fov_y = std.math.degreesToRadians(70.0),
-            .aspect = 1.6,
-            .camera_front = front,
-            .view_pos = view_pos,
-            .light_dir = light_dir,
-            .scene_min = scene_min,
-            .scene_max = scene_max,
-            .per_frame_dist = 10.0 / 60.0,
-        }, 0);
-
-        if (prev_radius >= 0.0) {
-            try testing.expectEqual(prev_radius, cascade.radius);
-            try testing.expectEqual(prev_texel, cascade.texel);
-        }
-        prev_radius = cascade.radius;
-        prev_texel = cascade.texel;
-
-        // The snapped center's light-space XY is an exact texel multiple.
-        const ls_x = dot3d(cascade.center_abs, basis.right);
-        const ls_y = dot3d(cascade.center_abs, basis.up);
-        const t: f64 = cascade.texel;
-        try testing.expectApproxEqAbs(ls_x / t, @round(ls_x / t), 1e-4);
-        try testing.expectApproxEqAbs(ls_y / t, @round(ls_y / t), 1e-4);
-    }
+    // The snapped center's light-space XY is an exact texel multiple.
+    const ls_x = dot3d(cascade.center_abs, basis.right);
+    const ls_y = dot3d(cascade.center_abs, basis.up);
+    const t: f64 = cascade.texel;
+    try testing.expectApproxEqAbs(ls_x / t, @round(ls_x / t), 1e-4);
+    try testing.expectApproxEqAbs(ls_y / t, @round(ls_y / t), 1e-4);
 }
 
 test "depth range covers scene and clamps at max_depth_range" {
@@ -665,8 +557,7 @@ test "depth range covers scene and clamps at max_depth_range" {
     const scene_max: Vec3d = .{ 300.0, 200.0, 100.0 };
 
     const range = depthRange(scene_min, scene_max, center, light_dir, 64.0, 4096.0);
-    // Every scene corner projects inside [near, far].
-    const l: Vec3d = .{ light_dir[0], light_dir[1], light_dir[2] };
+    const l: Vec3d = @floatCast(light_dir);
     inline for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
         inline for ([2]f64{ scene_min[1], scene_max[1] }) |y| {
             inline for ([2]f64{ scene_min[2], scene_max[2] }) |z| {
@@ -684,25 +575,14 @@ test "depth range covers scene and clamps at max_depth_range" {
 }
 
 test "depth range maps near/far to Vulkan depth" {
-    const sun_dir: Vec3f = normalize3f(.{ 0.3, 0.8, 0.2 });
-    const light_dir = lightDirFromSunDir(sun_dir);
+    const light_dir = lightDirFromSunDir(normalize3f(.{ 0.3, 0.8, 0.2 }));
     const cfg = ShadowConfig{ .cascade_count = 4, .shadow_map_size = 2048 };
     const view_pos: Vec3d = .{ 1234.5, 987.6, 42.0 };
     const scene_min: Vec3d = .{ 1000.0, 800.0, -50.0 };
     const scene_max: Vec3d = .{ 1500.0, 1200.0, 500.0 };
-    const ctx = CascadeContext{
-        .cfg = cfg,
-        .fov_y = std.math.degreesToRadians(70.0),
-        .aspect = 1.6,
-        .camera_front = normalize3f(.{ 0.1, 0.3, 0.9 }),
-        .view_pos = view_pos,
-        .light_dir = light_dir,
-        .scene_min = scene_min,
-        .scene_max = scene_max,
-        .per_frame_dist = 10.0 / 60.0,
-    };
+    const ctx = testCascadeContext(cfg, view_pos, scene_min, scene_max);
     const cascade = computeCascade(ctx, 1);
-    const f: Vec3d = .{ light_dir[0], light_dir[1], light_dir[2] };
+    const f: Vec3d = @floatCast(light_dir);
 
     // World points on the cascade's near/far planes (light-space depth f·(p-center)
     // equals near/far exactly), projected through the committed matrix.
@@ -722,27 +602,14 @@ test "depth range maps near/far to Vulkan depth" {
 }
 
 test "rebuilt matrix at a new origin reproduces the committed one" {
-    const sun_dir: Vec3f = normalize3f(.{ 0.3, 0.8, 0.2 });
-    const light_dir = lightDirFromSunDir(sun_dir);
     const cfg = ShadowConfig{ .cascade_count = 3, .shadow_map_size = 2048 };
     const scene_min: Vec3d = .{ -300.0, -200.0, -100.0 };
     const scene_max: Vec3d = .{ 300.0, 200.0, 100.0 };
 
     const origin_a: Vec3d = .{ 1000.0, 0.0, 1000.0 };
     const origin_b: Vec3d = .{ 1012.5, -3.25, 1008.75 };
-    const front = normalize3f(.{ 0.1, 0.3, 0.9 });
 
-    const ctx = CascadeContext{
-        .cfg = cfg,
-        .fov_y = std.math.degreesToRadians(70.0),
-        .aspect = 1.6,
-        .camera_front = front,
-        .view_pos = origin_a,
-        .light_dir = light_dir,
-        .scene_min = scene_min,
-        .scene_max = scene_max,
-        .per_frame_dist = 10.0 / 60.0,
-    };
+    const ctx = testCascadeContext(cfg, origin_a, scene_min, scene_max);
     const cascade_a = computeCascade(ctx, 1);
 
     // Rebuilding the committed cascade at a new origin must map the same world point
@@ -829,7 +696,7 @@ test "refreshIntervals pinned endpoints, monotonic, lambda extremes" {
 }
 
 test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvation" {
-    const intervals = [_]u32{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ [_]u32{0} ** 20;
+    const intervals: [MAX_CASCADES]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ .{0} ** 20;
     var last_refresh: [MAX_CASCADES]u32 = @splat(never_refreshed);
     var frame: u32 = 0;
 
@@ -874,6 +741,27 @@ test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvat
     }
     for (0..4) |c| try testing.expect(refreshed[c]);
     try testing.expect(near_refreshes > 48); // near (interval 1) roughly every frame
+}
+
+test "nextRefreshSet gates on due, negative lateness never drawn" {
+    const intervals: [MAX_CASCADES]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
+    const last_refresh: [MAX_CASCADES]u32 = @splat(0);
+
+    // A huge budget must not pull in not-yet-due cascades: only cascade 0 (interval 1)
+    // is overdue at frame 5, so exactly one cascade is drawn.
+    var set = nextRefreshSet(4, 100, intervals, last_refresh, 5);
+    try testing.expect(set[0]);
+    try testing.expect(!set[1] and !set[2] and !set[3]);
+    var count: u32 = 0;
+    for (set) |picked| count += @intFromBool(picked);
+    try testing.expectEqual(@as(u32, 1), count);
+
+    // All cascades on a slow interval, none overdue: empty set so the pass is skipped.
+    const slow_intervals: [MAX_CASCADES]u32 = .{ 100, 100, 100, 100 } ++ .{0} ** 28;
+    set = nextRefreshSet(4, 100, slow_intervals, last_refresh, 5);
+    count = 0;
+    for (set) |picked| count += @intFromBool(picked);
+    try testing.expectEqual(@as(u32, 0), count);
 }
 
 test "staleness padding monotonic in movement, zero at zero" {

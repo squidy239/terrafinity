@@ -82,7 +82,7 @@ pub fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.Allo
     handle.* = .null_handle;
 }
 
-fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory, vkalloc: *const vk.AllocationCallbacks) void {
+pub fn destroyImageWithMemory(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory, vkalloc: *const vk.AllocationCallbacks) void {
     if (image.* != .null_handle) {
         dev.destroyImage(image.*, vkalloc);
         image.* = .null_handle;
@@ -95,7 +95,26 @@ fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMem
 
 pub fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget, vkalloc: *const vk.AllocationCallbacks) void {
     destroyIfValid(dev, &rt.view, vkalloc);
-    destroyIfValidImage(dev, &rt.image, &rt.memory, vkalloc);
+    destroyImageWithMemory(dev, &rt.image, &rt.memory, vkalloc);
+}
+
+/// Allocates device-local memory for `image_info`, creates the image, and binds them.
+/// Shared by single-target and layered (shadow array) image creation.
+pub fn allocateImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, image_info: *const vk.ImageCreateInfo) !struct { image: vk.Image, memory: vk.DeviceMemory } {
+    var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
+    dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = image_info, .plane_aspect = .{} }, &mem_reqs2);
+    const mem_reqs = mem_reqs2.memory_requirements;
+
+    const alloc_info: vk.MemoryAllocateInfo = .{
+        .allocation_size = mem_reqs.size,
+        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+    };
+    const memory = try dev.allocateMemory(&alloc_info, vkalloc);
+    errdefer dev.freeMemory(memory, vkalloc);
+    const image = try dev.createImage(image_info, vkalloc);
+    errdefer dev.destroyImage(image, vkalloc);
+    try dev.bindImageMemory(image, memory, 0);
+    return .{ .image = image, .memory = memory };
 }
 
 pub fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageAspectFlags) vk.ImageViewCreateInfo {
@@ -128,23 +147,12 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
         .sharing_mode = .exclusive,
         .samples = .{ .@"1_bit" = true },
     };
-    var mem_reqs2: vk.MemoryRequirements2 = .{
-        .memory_requirements = undefined,
-    };
-    dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
-    const mem_reqs = mem_reqs2.memory_requirements;
-
-    const alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = mem_reqs.size,
-        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-
     var target: RenderTarget = .{};
     errdefer destroyRenderTarget(dev, &target, vkalloc);
 
-    target.memory = try dev.allocateMemory(&alloc_info, vkalloc);
-    target.image = try dev.createImage(&image_info, vkalloc);
-    try dev.bindImageMemory(target.image, target.memory, 0);
+    const alloc = try allocateImageWithMemory(dev, mem_props, vkalloc, &image_info);
+    target.memory = alloc.memory;
+    target.image = alloc.image;
     target.view = try dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), vkalloc);
     return target;
 }
@@ -405,15 +413,17 @@ const cpu_to_gpu_vtable = std.mem.Allocator.VTable{
 // Barriers
 // ---------------------------------------------------------------------------
 
-pub fn makeImageBarrier2(
+/// Image barrier over an explicit subresource range (any layers/mips), shared by the
+/// single-layer `makeImageBarrier2` and the layered shadow-array barriers.
+pub fn imageBarrier2Range(
     image: vk.Image,
+    range: vk.ImageSubresourceRange,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
     src_stage: vk.PipelineStageFlags2,
     src_access: vk.AccessFlags2,
     dst_stage: vk.PipelineStageFlags2,
     dst_access: vk.AccessFlags2,
-    aspect: vk.ImageAspectFlags,
 ) vk.ImageMemoryBarrier2 {
     return .{
         .src_stage_mask = src_stage,
@@ -425,14 +435,36 @@ pub fn makeImageBarrier2(
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .image = image,
-        .subresource_range = .{
+        .subresource_range = range,
+    };
+}
+
+pub fn makeImageBarrier2(
+    image: vk.Image,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
+    aspect: vk.ImageAspectFlags,
+) vk.ImageMemoryBarrier2 {
+    return imageBarrier2Range(
+        image,
+        .{
             .aspect_mask = aspect,
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
             .layer_count = 1,
         },
-    };
+        old_layout,
+        new_layout,
+        src_stage,
+        src_access,
+        dst_stage,
+        dst_access,
+    );
 }
 
 pub fn makeBufferBarrier2(

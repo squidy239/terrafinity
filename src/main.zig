@@ -411,18 +411,18 @@ fn handleEvents(
             },
             .close => running.store(false, .unordered),
             .scroll_vertical => |scroll| {
-                if (ui.menu_state.ingame) try ui.game.handleScroll(io, scroll);
+                if (ui.menu_state.is_playing_game()) try ui.game.handleScroll(io, scroll);
             },
             .mouse_relative => |mouse| {
                 const mouse_moved = (mouse.x != 0 or mouse.y != 0);
-                if (ui.menu_state.ingame and mouse_moved) ui.game.handleMouseMotion(io, mouse);
+                if (ui.menu_state.is_playing_game() and mouse_moved) ui.game.handleMouseMotion(io, mouse);
             },
             .size_physical => |size| window_size = size,
             else => {},
         }
     }
 
-    if (ui.menu_state.ingame) {
+    if (ui.menu_state.is_playing_game()) {
         try ui.game.handleButtonActions(io, action_set);
     }
 }

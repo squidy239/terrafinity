@@ -121,9 +121,20 @@ pub fn contentScale(_: *@This()) f32 {
     return 1;
 }
 
+const ClipboardResult = struct {
+    allocator: std.mem.Allocator,
+    text: ?[]const u8 = null,
+};
+
+fn clipboardTextCallback(data: ?*anyopaque, text: []const u8) void {
+    const result: *ClipboardResult = @ptrCast(@alignCast(data.?));
+    result.text = result.allocator.dupe(u8, text) catch null;
+}
+
 pub fn clipboardText(self: *@This()) ![]const u8 {
-    _ = self;
-    return undefined;
+    var result = ClipboardResult{ .allocator = self.arena };
+    self.window.getClipboardText(clipboardTextCallback, &result);
+    return result.text orelse "";
 }
 
 pub fn clipboardTextSet(self: *@This(), text: []const u8) !void {
