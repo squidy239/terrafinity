@@ -30,6 +30,10 @@ pub const ShadowConfig = struct {
     // keep shadows; the far fade hides the map's edge.
     max_shadow_distance: f32 = 4096,
     pssm_lambda: f32 = 0.35,
+    /// Radius of the smallest (nearest) cascade in blocks. The PSSM split distribution
+    /// spans exactly from this radius to `max_shadow_distance`, so cascade 0 covers
+    /// `min_split_radius` and the last cascade reaches the far distance.
+    min_split_radius: f32 = 32.0,
     /// How many cascade layers may be rasterized per frame. A budget of 1 is the classic
     /// one-cascade-per-frame rotation; more lets near cascades refresh every frame while
     /// farther ones rotate across the budget. Never exceeded (see `nextRefreshSet`).
@@ -59,9 +63,16 @@ pub const ShadowConfig = struct {
     // their stored depth and punch holes/peter-pan the shadow at geometry edges.
     depth_bias_clamp: f32 = 4.0,
     normal_bias_scale: f32 = 1.5,
-    pcf_radius_texels: f32 = 2.0,
-    blend_fraction: f32 = 0.15,
-    fade_fraction: f32 = 0.85,
+    /// PCF blur radius in world blocks. The shader converts it to a UV offset per
+    /// cascade, so the same world radius gives the same penumbra in every cascade.
+    blur_radius: f32 = 0.5,
+    /// Fraction of each cascade's split radius over which it cross-fades into the next
+    /// cascade, so the texel-resolution change does not show a seam. The band runs from
+    /// split*(1 - cascade_blend) up to the split itself.
+    cascade_blend: f32 = 0.15,
+    /// Fraction of `max_shadow_distance` at which the outermost cascade begins fading to
+    /// fully lit (reaching lit at `max_shadow_distance`), hiding the shadow map's edge.
+    last_cascade_fade: f32 = 0.85,
     shadow_strength: f32 = 1.0,
     debug_cascade_colors: bool = false,
 };
@@ -173,10 +184,11 @@ pub fn clampSunElevation(sun_dir: Vec3f, min_elevation_deg: f32) Vec3f {
     return azimuth * @as(Vec3f, @splat(@cos(min_rad))) + Vec3f{ 0.0, @sin(min_rad), 0.0 };
 }
 
-/// Practical split radii from the plan's PSSM formula. The last split equals `far`;
-/// entries past `count` are undefined and must not be read. The config is live-editable,
-/// so `far`/`count` are sanitized rather than asserted: an absurdly small distance or
-/// zero count degrades to a minimal usable set instead of panicking.
+/// Practical split radii from the plan's PSSM formula. The first split equals `near` and
+/// the last split equals `far`; entries past `count` are undefined and must not be read.
+/// The config is live-editable, so `near`/`far`/`count` are sanitized rather than
+/// asserted: an absurdly small distance or zero count degrades to a minimal usable set
+/// instead of panicking.
 pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f32 {
     const safe_count = @max(@min(count, MAX_CASCADES), 1);
     const n = @max(near, clamped_split_near);
@@ -184,19 +196,21 @@ pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f3
     var splits: [MAX_CASCADES]f32 = undefined;
     const count_f: f32 = @floatFromInt(safe_count);
     for (splits[0..safe_count], 0..) |*dest, i| {
-        const t: f32 = @floatFromInt(i + 1);
-        const uniform_i = n + (safe_far - n) * t / count_f;
-        const log_i = n * std.math.pow(f32, safe_far / n, t / count_f);
+        // t ramps 0..1 across the cascades so split[0] == n and the last split == far.
+        const t: f32 = if (safe_count == 1) 1.0 else @as(f32, @floatFromInt(i)) / (count_f - 1.0);
+        const uniform_i = n + (safe_far - n) * t;
+        const log_i = n * std.math.pow(f32, safe_far / n, t);
         dest.* = lambda * log_i + (1.0 - lambda) * uniform_i;
     }
     return splits;
 }
 
-/// Effective per-cascade outer split radii from PSSM. Like the PSSM path, a zero or
+/// Effective per-cascade outer split radii from PSSM. The nearest cascade sits exactly on
+/// `min_split_radius` and the outer on `max_shadow_distance`. Like the PSSM path, a zero or
 /// oversized `cascade_count` is sanitized rather than asserted so a live edit degrades to
 /// a minimal usable set instead of indexing out of bounds.
 pub fn splitRadii(cfg: ShadowConfig) [MAX_CASCADES]f32 {
-    return pssmSplits(engine_near, cfg.max_shadow_distance, cfg.cascade_count, cfg.pssm_lambda);
+    return pssmSplits(cfg.min_split_radius, cfg.max_shadow_distance, cfg.cascade_count, cfg.pssm_lambda);
 }
 
 /// Orthonormal basis with the light looking along `light_dir`, following the lookAtRH
@@ -445,21 +459,19 @@ pub fn committedOf(cascade: Cascade) CommittedCascade {
 }
 
 test "pssmSplits monotonic, endpoints, lambda extremes" {
+    // split[0] lands exactly on the clamped near; the last split equals far.
     const splits = pssmSplits(0.01, 256.0, 3, 0.35);
     try testing.expect(splits[0] < splits[1] and splits[1] < splits[2]);
-    try testing.expect(splits[0] >= clamped_split_near);
+    try testing.expectApproxEqAbs(splits[0], clamped_split_near, 1e-4);
     try testing.expectApproxEqAbs(splits[2], 256.0, 1e-3);
-    // ~58/125/256 at lambda 0.35 per the plan.
-    try testing.expectApproxEqAbs(splits[0], 58.0, 2.0);
-    try testing.expectApproxEqAbs(splits[1], 125.0, 3.0);
 
     const uniform = pssmSplits(0.01, 256.0, 3, 0.0);
-    try testing.expectApproxEqAbs(uniform[0], 86.0, 1e-3);
-    try testing.expectApproxEqAbs(uniform[1], 171.0, 1e-3);
-
     const log_heavy = pssmSplits(0.01, 256.0, 3, 1.0);
+    try testing.expectApproxEqAbs(uniform[0], clamped_split_near, 1e-4);
+    try testing.expectApproxEqAbs(uniform[2], 256.0, 1e-3);
     try testing.expectApproxEqAbs(log_heavy[2], 256.0, 1e-3);
-    try testing.expect(log_heavy[0] < uniform[0]);
+    // Log packs the near cascades tighter than uniform.
+    try testing.expect(log_heavy[1] < uniform[1]);
 }
 
 test "buildLightBasis degeneracy and orthonormality" {

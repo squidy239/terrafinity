@@ -87,7 +87,8 @@ const CullPushConstants = extern struct {
     player_pos: [4]f32 align(16),
     total_candidates: u32,
     draw_capacity: u32,
-    /// 0 = main pass (slots 0-1 split by is_transparent), 1 = shadow (slot 2, opaque only).
+    /// 0 = main pass (slots 0-1 split by is_transparent); 1+k = shadow cull for cascade
+    /// slot k (opaque only), decoded to k = mode - 1 by cull.comp.
     mode: u32,
     /// Minimum chunk AABB size in world blocks to cast a shadow (0 = off).
     min_chunk_size: f32,
@@ -938,7 +939,14 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
         // inside the same total_candidates > 0 block. The shadow raster below is gated
         // on the identical conditions, so it never draws a count that was not reset.
         if (shadowActive(ctx)) |shadow| {
-            self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(), ctx.total_candidates, ctx.view_pos, 1, shadow.frameMinChunkSize(), false);
+            // One cull per refreshed cascade against its own box and depth range, into its
+            // own shadow slot. reset_count=false is safe only because the main cull just
+            // zeroed the WHOLE CullCount (including all shadow counts) and these dispatches
+            // run inside the same total_candidates > 0 block.
+            const cascade_count = shadow.frameCascadeCount();
+            for (0..cascade_count) |slot| {
+                self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, 1 + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);
+            }
         }
         self.cullBarrierAndCopyStats(ctx.cmd_buffer, ctx.frame_idx);
     }

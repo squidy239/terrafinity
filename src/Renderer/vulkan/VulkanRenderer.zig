@@ -293,7 +293,9 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         self.frame_stats.transparent_drawn = counts[0].transparent_count;
         self.frame_stats.opaque_faces = counts[0].opaque_face_count;
         self.frame_stats.transparent_faces = counts[0].transparent_face_count;
-        self.frame_stats.shadow_faces = counts[0].shadow_face_count;
+        var shadow_faces: u32 = 0;
+        for (counts[0].shadow_face_count) |faces| shadow_faces +%= faces;
+        self.frame_stats.shadow_faces = shadow_faces;
         self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
     }
 

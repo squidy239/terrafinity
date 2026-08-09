@@ -818,17 +818,23 @@ comptime {
     if (@sizeOf(MeshCandidate) != 32) @compileError("MeshCandidate size mismatch with GLSL layout (expected 32, got " ++ @typeName(@TypeOf(@sizeOf(MeshCandidate))) ++ ")");
 }
 
+/// Per-cascade shadow cull slots. The shadow raster draws up to `cascades_per_frame`
+/// cascades per frame, each culling and drawing its own box into a dedicated slot; this
+/// is the fixed upper bound on those slots so the buffers can size every frame's
+/// indirect/mesh regions at allocation time.
+pub const shadow_slot_count: u32 = 8;
+
 pub const CullCount = extern struct {
     opaque_count: u32,
     transparent_count: u32,
     opaque_face_count: u32,
     transparent_face_count: u32,
-    shadow_count: u32,
-    shadow_face_count: u32,
+    shadow_count: [shadow_slot_count]u32,
+    shadow_face_count: [shadow_slot_count]u32,
 };
 
 comptime {
-    if (@sizeOf(CullCount) != 24) @compileError("CullCount size mismatch");
+    if (@sizeOf(CullCount) != 80) @compileError("CullCount size mismatch");
 }
 
 pub const MeshData = extern struct {
@@ -851,11 +857,12 @@ pub const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 pub const chunk_size_blocks: f32 = 32.0;
 /// Main-pass draw slots (opaque + transparent).
 pub const draw_type_count = 2;
-/// Total indirect slots per frame; slot 2 is the shadow draw. Buffers and the cull
-/// dispatch must size everything by this, not by `draw_type_count`.
-pub const slot_count: u32 = 3;
-/// The shadow draw's slot offset, in draw units.
-pub const shadow_slot_base: u32 = 2;
+/// Total indirect slots per frame: the main passes plus one shadow slot per cascade
+/// that may be rasterized in a frame. Buffers and the cull dispatch must size everything
+/// by this, not by `draw_type_count`.
+pub const slot_count: u32 = draw_type_count + shadow_slot_count;
+/// The first shadow draw's slot offset, in draw units.
+pub const shadow_slot_base: u32 = draw_type_count;
 
 const PersistentCandidates = struct {
     buffer: vk.Buffer = .null_handle,
@@ -1080,7 +1087,7 @@ pub const IndirectScene = struct {
         count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
         stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     ) void {
-        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = 0, .shadow_face_count = 0 };
+        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
 
         const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
         const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
@@ -1167,7 +1174,7 @@ pub const IndirectScene = struct {
             errdefer self.memory.gpuOnly().free(count_slice);
             const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.cpuToGpu().free(stats_slice);
-            stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = 0, .shadow_face_count = 0 };
+            stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
 
             new_mesh_data[i] = mesh_data_slice.ptr;
             new_indirect[i] = indirect_draw_slice.ptr;

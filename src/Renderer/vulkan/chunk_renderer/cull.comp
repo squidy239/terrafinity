@@ -3,6 +3,10 @@
 
 layout(local_size_x = 64) in;
 
+// First shadow slot; cascade slots span [SHADOW_SLOT_BASE, SHADOW_SLOT_BASE + SHADOW_SLOT_COUNT).
+#define SHADOW_SLOT_BASE 2u
+#define SHADOW_SLOT_COUNT 8u
+
 struct MeshCandidate {
     vec4 absolute_position;
     uint face_offset;
@@ -41,8 +45,8 @@ layout(std430, binding = 3) buffer CountBuffer {
     uint transparent_count;
     uint opaque_face_count;
     uint transparent_face_count;
-    uint shadow_count;
-    uint shadow_face_count;
+    uint shadow_count[SHADOW_SLOT_COUNT];
+    uint shadow_face_count[SHADOW_SLOT_COUNT];
 };
 
 layout(push_constant) uniform PushConsts {
@@ -50,6 +54,8 @@ layout(push_constant) uniform PushConsts {
     vec4 player_pos;
     uint total_candidates;
     uint draw_capacity;
+    // 0 = main pass (slots 0-1 split by is_transparent); 1+k = shadow cull for cascade
+    // slot k (opaque only), decoded here as slot = mode - 1.
     uint mode;
     float min_chunk_size;
 } pc;
@@ -73,17 +79,20 @@ void main() {
     float size = candidate.scale * 32.0;
     if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
 
-    if (pc.mode == 1u) {
-        // Shadow cull: opaque only, writes slot 2 (mesh_base = 2 * draw_capacity).
+    if (pc.mode >= 1u) {
+        // Shadow cull for cascade slot (pc.mode - 1): opaque only, writes into slot
+        // SHADOW_SLOT_BASE + slot. Each cascade's planes are pushed so it culls to its
+        // own box and depth range.
         if (candidate.is_transparent != 0u) return;
         if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
-        uint idx = atomicAdd(shadow_count, 1u);
+        uint slot = pc.mode - 1u;
+        uint idx = atomicAdd(shadow_count[slot], 1u);
         if (idx >= pc.draw_capacity) {
-            atomicMin(shadow_count, pc.draw_capacity);
+            atomicMin(shadow_count[slot], pc.draw_capacity);
             return;
         }
-        atomicAdd(shadow_face_count, candidate.face_count);
-        uint out_idx = idx + 2u * pc.draw_capacity;
+        atomicAdd(shadow_face_count[slot], candidate.face_count);
+        uint out_idx = idx + (SHADOW_SLOT_BASE + slot) * pc.draw_capacity;
         out_indirect[out_idx] = DrawIndirectCommand(
             6u,
             candidate.face_count,

@@ -12,16 +12,14 @@ layout(set = 2, binding = 2, std430) readonly buffer ShadowParamsBuffer {
     float split_radius[MAX_CASCADES];
     float texel_world_size[MAX_CASCADES];
     float box_radius[MAX_CASCADES];
-    float depth_bias_constant[MAX_CASCADES];
-    float normal_bias_scale[MAX_CASCADES];
-    float pcf_radius_texels[MAX_CASCADES];
+    float normal_bias_scale;
+    float blur_radius;
     float blend_fraction;
     float fade_start;
     float fade_end;
     uint cascade_count;
     float shadow_strength;
     uint debug_colors;
-    float _pad[2];
 } shadow_params;
 
 int shadowCascadeIndex(vec3 pos_rel) {
@@ -87,8 +85,9 @@ float shadowHash(vec2 p) {
 // shadow information, and forcing it into a comparison against the map's edge would
 // manufacture false shadowed regions.
 float sampleShadowCascade(int cascade, vec3 p) {
-    float texel_uv = shadow_params.texel_world_size[cascade] / (2.0 * shadow_params.box_radius[cascade]);
-    float pcf_uv = shadow_params.pcf_radius_texels[cascade] * texel_uv;
+    // Blur radius is in world blocks; the cascade's box spans 2*box_radius across the
+    // [0,1] UV range, so the same world radius gives the same penumbra in every cascade.
+    float pcf_uv = shadow_params.blur_radius / (2.0 * shadow_params.box_radius[cascade]);
 
     vec4 proj = shadow_params.light_viewproj[cascade] * vec4(p, 1.0);
     vec3 ndc = proj.xyz / proj.w;
@@ -131,20 +130,20 @@ float sampleShadow(vec3 pos_rel, vec3 normal, float ndotl) {
     // is the outward-normal term; the /max(ndotl, 0.2) divisor gives grazing surfaces
     // more bias. The cap scales with the texel so far cascades (coarse texels) get
     // enough bias to suppress acne while near cascades stay sub-voxel.
-    float bias = shadow_params.normal_bias_scale[cascade] * shadow_params.texel_world_size[cascade] / max(ndotl, 0.2);
+    float bias = shadow_params.normal_bias_scale * shadow_params.texel_world_size[cascade] / max(ndotl, 0.2);
     bias = min(bias, shadow_params.texel_world_size[cascade] * 3.0);
     vec3 p = pos_rel - normal * bias;
 
     float factor = sampleShadowCascade(cascade, p);
 
     // Blend band: cross-fade with the next cascade around each split so the texel size
-    // change does not show a hard seam. The two cascades may contain the same region at
-    // different streaming LODs if a refinement boundary lands in the band — a brief,
-    // transient ghosted shadow that is the honest cost of this design.
+    // change does not show a hard seam. The cross-fade completes exactly at the split
+    // (t = 1), matching the point where shadowCascadeIndex flips over to the next
+    // cascade, so the factor is continuous across the boundary.
     if (cascade < int(count) - 1) {
         float split = shadow_params.split_radius[cascade];
         float band = split * shadow_params.blend_fraction;
-        float t = smoothstep(split - band, split + band, d);
+        float t = smoothstep(split - band, split, d);
         float next_factor = sampleShadowCascade(cascade + 1, p);
         factor = mix(factor, next_factor, t);
     }
