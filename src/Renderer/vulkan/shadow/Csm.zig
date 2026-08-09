@@ -158,6 +158,15 @@ pub fn normalize3d(v: Vec3d) Vec3d {
     return v / @as(Vec3d, @splat(@sqrt(dot3d(v, v))));
 }
 
+/// Returns true when the live light direction has rotated far enough from the latched
+/// `current` basis to step the shadow light axis. Holding the basis frozen below the step
+/// keeps every cascade re-snapping onto an identical texel grid as the sun drifts (no
+/// shadow swimming); stepping only on discrete changes re-orients the whole set in one
+/// clean increment. `step_cos` is the cosine of the minimum step angle.
+pub fn shouldStepLight(current: Vec3f, live: Vec3f, step_cos: f32) bool {
+    return dot3f(current, live) < step_cos;
+}
+
 /// Sun direction points from the scene toward the sun (matching the sky shader, which
 /// draws the disc along it). The shaders' face_normals are inward, so the lighting uses
 /// dot(normal, -sun_dir); the shadow view looks along -sun_dir (the direction light
@@ -786,4 +795,25 @@ test "sunDayFromSunDir mirrors the shader gate" {
     try testing.expect(sunDayFromSunDir(.{ 0.0, 1.0, 0.0 }) == 1.0);
     try testing.expect(sunDayFromSunDir(.{ 0.0, -1.0, 0.0 }) == 0.0);
     try testing.expect(sunDayFromSunDir(.{ 0.0, 0.0, 1.0 }) > 0.0 and sunDayFromSunDir(.{ 0.0, 0.0, 1.0 }) < 1.0);
+}
+
+test "shouldStepLight holds the basis under the step and steps past it" {
+    const base: Vec3f = .{ 0.0, 1.0, 0.0 };
+    // The default raster re-orientation is 1 near-texel at a 2048 map:
+    // texel = 2*radius/map_size, so texel/radius = 2/map_size radians per texel.
+    const quantum = 2.0 / 2048.0;
+    const step_cos = @cos(quantum);
+
+    // A sub-threshold drift keeps the frozen raster basis: shadows do not swim.
+    try testing.expect(!shouldStepLight(base, rotateY(base, 0.5 * quantum), step_cos));
+    // A drift past the threshold re-orients the basis once.
+    try testing.expect(shouldStepLight(base, rotateY(base, 1.5 * quantum), step_cos));
+    // An identical direction never steps.
+    try testing.expect(!shouldStepLight(base, base, step_cos));
+}
+
+fn rotateY(v: Vec3f, angle: f32) Vec3f {
+    const c = @cos(angle);
+    const s = @sin(angle);
+    return .{ v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c };
 }

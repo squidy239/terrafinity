@@ -16,6 +16,12 @@ const shadow_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embed
 const movement_smoothing: f32 = 0.3;
 /// Cosine threshold below which the light direction is treated as a new basis (~25°).
 const light_change_cos_threshold: f32 = 0.9;
+/// How many of the near cascade's texels the light axis advances per re-orientation. texel =
+/// 2*radius/map_size, so texel/radius = 2/map_size is constant across cascades; a step of
+/// `light_step_texels * 2/map_size` radians moves a shadow boundary by ~`light_step_texels`
+/// texels regardless of resolution. 1 texel is the smallest step a texel-quantized map can
+/// make; the remaining step scales with texel size (raise shadow_map_size to shrink it).
+const light_step_texels: f32 = 1.0;
 
 /// std430 storage-block layout mirrored by shadow.glsl. Per-cascade members are fixed
 /// MAX_CASCADES arrays (matching the GLSL `float [MAX_CASCADES]` members) so the layout
@@ -116,7 +122,9 @@ param_buffers: []ParamBuffer = &.{},
 /// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
 /// per-frame matrix by `viewProjAtOrigin`.
 committed: [Csm.MAX_CASCADES]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
-/// Latched light direction (direction light travels), re-read from the live sun each frame.
+/// Latched light direction (direction light travels) the shadow maps are rasterized with:
+/// held frozen and stepped in `light_step_texels` increments so re-rasterizations land on
+/// an identical texel grid (see `latchLight`).
 light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// Per-cascade commit validity. The params cascade_count is the largest contiguous
 /// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
@@ -493,15 +501,32 @@ fn measureMovement(self: *ShadowRenderer, io: std.Io, view_pos: @Vector(3, f64))
     self.last_view_pos = view_pos;
 }
 
-/// Re-latches the light direction from the live sun every frame. A ~25° or larger turn
-/// (horizon crossing, azimuth flip) invalidates the cached light basis; gradual
-/// day-cycle drift stays below it so it never re-ramps.
+/// Re-latches the light direction from the live sun. The sun drifts continuously, but
+/// re-deriving the basis (and re-snapping the texel grid) every frame makes the near
+/// cascade re-commit a rotating grid → shadow swimming. So the latched basis is held
+/// frozen and only re-oriented after `light_step_texels` near-texels of sun travel, so
+/// re-rasterizations land on an identical texel grid and the shadows stay stable between
+/// the minimal 1-texel re-orientations. A re-orientation large enough to move to a new sun
+/// (sunrise, azimuth flip) also invalidates the cached draw for a full re-ramp; a small
+/// one keeps the committed prefix valid so cascades refresh onto the new axis at their own
+/// cadence without turning shadows off for a frame.
 fn latchLight(self: *ShadowRenderer, config: Csm.ShadowConfig, sun_dir: Csm.Vec3f) bool {
     const clamped = Csm.clampSunElevation(sun_dir, config.min_sun_elevation_deg);
     const new_light_dir = Csm.lightDirFromSunDir(clamped);
-    const light_dir_changed = Csm.dot3f(self.light_dir, new_light_dir) < light_change_cos_threshold;
-    self.light_dir = new_light_dir;
-    return light_dir_changed;
+    const old_light_dir = self.light_dir;
+    // Scale the re-orientation threshold to the near cascade's texel (texel =
+    // 2*radius/map_size and texel/radius = 2/map_size), so it is resolution-independent:
+    // the axis re-orients after `light_step_texels` near-texels of sun travel. Before the
+    // shadow image exists (map_size 0) fall back to the coarse basis change so the axis
+    // still tracks a sunrise.
+    const step_cos = if (self.map_size > 0)
+        @cos(light_step_texels * (2.0 / @as(f32, @floatFromInt(self.map_size))))
+    else
+        light_change_cos_threshold;
+    if (Csm.shouldStepLight(old_light_dir, new_light_dir, step_cos)) {
+        self.light_dir = new_light_dir;
+    }
+    return Csm.dot3f(old_light_dir, new_light_dir) < light_change_cos_threshold;
 }
 
 /// Promotes last frame's rasterized cascades into the sampled state, so a layer is only

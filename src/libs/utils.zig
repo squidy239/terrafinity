@@ -9,6 +9,6 @@ pub fn loadZon(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: 
     try reader.interface.readSliceAll(slice[0..stat.size]);
     slice[stat.size] = 0;
     @setEvalBranchQuota(100000000);
-    const result = try std.zon.parse.fromSliceAlloc(T, allocator, slice[0..stat.size :0], null, .{});
+    const result = try std.zon.parse.fromSliceAlloc(T, allocator, slice[0..stat.size :0], null, .{ .ignore_unknown_fields = true });
     return result;
 }
