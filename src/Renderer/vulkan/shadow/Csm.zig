@@ -54,18 +54,18 @@ pub const ShadowConfig = struct {
     min_sun_elevation_deg: f32 = 15,
     max_depth_range: f32 = 4096,
     min_chunk_texels: f32 = 0,
-    // Back-face culling matches the main pass; the voxel shell's outward faces are the
-    // occluders, and faces away from the light are already in shadow.
-    shadow_cull_mode: enum { none, back } = .back,
-    depth_bias_constant: f32 = 2.0,
-    depth_bias_slope: f32 = 2.0,
+    // Negative depth bias fattens occluders in depth (stored depth moves toward the
+    // light), closing the light band at shadow bases that a positive bias causes
+    // (peter panning). The sample-side normal offset handles acne.
+    depth_bias_constant: f32 = -2.0,
+    depth_bias_slope: f32 = -2.0,
     // Caps the slope-scale bias so steep faces (cavity walls, cliffs) cannot saturate
     // their stored depth and punch holes/peter-pan the shadow at geometry edges.
     depth_bias_clamp: f32 = 4.0,
     normal_bias_scale: f32 = 1.5,
     /// PCF blur radius in world blocks. The shader converts it to a UV offset per
     /// cascade, so the same world radius gives the same penumbra in every cascade.
-    blur_radius: f32 = 0.5,
+    blur_radius: f32 = 1.0,
     /// Fraction of each cascade's split radius over which it cross-fades into the next
     /// cascade, so the texel-resolution change does not show a seam. The band runs from
     /// split*(1 - cascade_blend) up to the split itself.

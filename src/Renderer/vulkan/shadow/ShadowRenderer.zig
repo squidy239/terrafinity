@@ -305,11 +305,10 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
         self.cascade_count == count and
         self.map_size == size and
         self.format == want_format and
-        self.config_applied.enabled == config.enabled and
         self.config_applied.depth_bias_constant == config.depth_bias_constant and
         self.config_applied.depth_bias_slope == config.depth_bias_slope and
         self.config_applied.depth_bias_clamp == config.depth_bias_clamp and
-        self.config_applied.shadow_cull_mode == config.shadow_cull_mode;
+        self.config_applied.enabled == config.enabled;
     if (same) return;
 
     var applied = config;
@@ -757,10 +756,11 @@ fn recordCascadePass(
     self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(extent, &.{}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
-    switch (self.config_applied.shadow_cull_mode) {
-        .none => self.dev.cmdSetCullMode(cmd_buffer, .{}),
-        .back => self.dev.cmdSetCullMode(cmd_buffer, .{ .back_bit = true }),
-    }
+    // Cull front faces: the light view matrix (buildViewProj rows s,u,f) has opposite
+    // handedness to the camera, so the exterior/occluder faces (top faces, sun-facing
+    // sides) are the BACK faces there. Culling back faces would keep the cave
+    // interior's faces instead and the surface would never reach the map.
+    self.dev.cmdSetCullMode(cmd_buffer, .{ .front_bit = true });
     self.dev.cmdSetDepthCompareOp(cmd_buffer, .less_or_equal);
     self.dev.cmdSetDepthWriteEnable(cmd_buffer, .true);
     core.setViewportAndScissor(self.dev, cmd_buffer, extent);
