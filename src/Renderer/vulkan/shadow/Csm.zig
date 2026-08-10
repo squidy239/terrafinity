@@ -5,7 +5,7 @@ const testing = std.testing;
 /// basis, scene-AABB depth range, absolute-space texel snapping, camera-relative
 /// matrix emission, origin compensation, and the refresh scheduler. Pure math — no
 /// Vulkan types, fully unit-tested.
-pub const MAX_CASCADES = 32;
+pub const max_cascades = 32;
 
 pub const Vec3f = @Vector(3, f32);
 pub const Vec3d = @Vector(3, f64);
@@ -20,6 +20,13 @@ const parallel_dot_threshold = 0.99;
 /// clamps splits to `max(near, 1.0)`.
 pub const engine_near: f32 = 0.01;
 pub const clamped_split_near: f32 = 1.0;
+
+/// Elevation band over which `sunDayFromSunDir` ramps from night (0) to day (1).
+const day_dawn: f32 = -0.1;
+const day_dusk: f32 = 0.25;
+
+/// Sun elevation length below which the horizontal direction is degenerate.
+const degenerate_horizon_eps: f32 = 1e-6;
 
 pub const ShadowConfig = struct {
     enabled: bool = true,
@@ -131,7 +138,7 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
 }
 
 pub fn sunDayFromSunDir(sun_dir: Vec3f) f32 {
-    return smoothstep(-0.1, 0.25, sun_dir[1]);
+    return smoothstep(day_dawn, day_dusk, sun_dir[1]);
 }
 
 pub fn dot3f(a: Vec3f, b: Vec3f) f32 {
@@ -181,16 +188,10 @@ pub fn lightDirFromSunDir(sun_dir: Vec3f) Vec3f {
 pub fn clampSunElevation(sun_dir: Vec3f, min_elevation_deg: f32) Vec3f {
     const min_rad = std.math.degreesToRadians(min_elevation_deg);
     const elevation = std.math.asin(std.math.clamp(sun_dir[1], -1.0, 1.0));
-    if (elevation >= min_rad) return normalize3f(sun_dir);
-
-    const horiz = Vec3f{ sun_dir[0], 0.0, sun_dir[2] };
-    const horiz_len = @sqrt(dot3f(horiz, horiz));
-    if (horiz_len < 1e-6) {
-        // Sun straight overhead; any azimuth is degenerate, leave the direction alone.
-        return normalize3f(sun_dir);
-    }
-    const azimuth = horiz / @as(Vec3f, @splat(horiz_len));
-    return azimuth * @as(Vec3f, @splat(@cos(min_rad))) + Vec3f{ 0.0, @sin(min_rad), 0.0 };
+    const horiz_len = @sqrt(sun_dir[0] * sun_dir[0] + sun_dir[2] * sun_dir[2]);
+    // At/above the minimum elevation, or straight overhead (degenerate azimuth), leave alone.
+    if (elevation >= min_rad or horiz_len < degenerate_horizon_eps) return normalize3f(sun_dir);
+    return @as(Vec3f, @splat(@cos(min_rad))) * Vec3f{ sun_dir[0] / horiz_len, 0.0, sun_dir[2] / horiz_len } + Vec3f{ 0.0, @sin(min_rad), 0.0 };
 }
 
 /// Practical split radii from the plan's PSSM formula. The first split equals `near` and
@@ -198,18 +199,22 @@ pub fn clampSunElevation(sun_dir: Vec3f, min_elevation_deg: f32) Vec3f {
 /// The config is live-editable, so `near`/`far`/`count` are sanitized rather than
 /// asserted: an absurdly small distance or zero count degrades to a minimal usable set
 /// instead of panicking.
-pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f32 {
-    const safe_count = @max(@min(count, MAX_CASCADES), 1);
+/// Lambda-weighted blend between a uniform and a logarithmic ramp, shared by the PSSM
+/// split distribution and the per-cascade refresh intervals.
+fn rampBlend(comptime T: type, count: usize, i: usize, first: T, last: T, lambda: T) T {
+    const t = if (count == 1) 1.0 else @as(T, @floatFromInt(i)) / @as(T, @floatFromInt(count - 1));
+    const uniform_i = first + (last - first) * t;
+    const log_i = first * std.math.pow(T, last / first, t);
+    return lambda * log_i + (1.0 - lambda) * uniform_i;
+}
+
+pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [max_cascades]f32 {
+    const safe_count = @max(@min(count, max_cascades), 1);
     const n = @max(near, clamped_split_near);
     const safe_far = @max(far, n + 1.0);
-    var splits: [MAX_CASCADES]f32 = undefined;
-    const count_f: f32 = @floatFromInt(safe_count);
+    var splits: [max_cascades]f32 = @splat(0.0);
     for (splits[0..safe_count], 0..) |*dest, i| {
-        // t ramps 0..1 across the cascades so split[0] == n and the last split == far.
-        const t: f32 = if (safe_count == 1) 1.0 else @as(f32, @floatFromInt(i)) / (count_f - 1.0);
-        const uniform_i = n + (safe_far - n) * t;
-        const log_i = n * std.math.pow(f32, safe_far / n, t);
-        dest.* = lambda * log_i + (1.0 - lambda) * uniform_i;
+        dest.* = rampBlend(f32, safe_count, i, n, safe_far, lambda);
     }
     return splits;
 }
@@ -218,7 +223,7 @@ pub fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [MAX_CASCADES]f3
 /// `min_split_radius` and the outer on `max_shadow_distance`. Like the PSSM path, a zero or
 /// oversized `cascade_count` is sanitized rather than asserted so a live edit degrades to
 /// a minimal usable set instead of indexing out of bounds.
-pub fn splitRadii(cfg: ShadowConfig) [MAX_CASCADES]f32 {
+pub fn splitRadii(cfg: ShadowConfig) [max_cascades]f32 {
     return pssmSplits(cfg.min_split_radius, cfg.max_shadow_distance, cfg.cascade_count, cfg.pssm_lambda);
 }
 
@@ -293,20 +298,16 @@ pub fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: 
 /// ramp, pinned to `min_refresh_frames` at cascade 0 (nearest) and `max_refresh_frames`
 /// at the outer cascade. Near cascades always get the shortest intervals, so near
 /// shadows stay crisp while far ones refresh rarely.
-pub fn refreshIntervals(cfg: ShadowConfig) [MAX_CASCADES]u32 {
-    const count = @max(@min(cfg.cascade_count, MAX_CASCADES), 1);
+pub fn refreshIntervals(cfg: ShadowConfig) [max_cascades]u32 {
+    const count = @max(@min(cfg.cascade_count, max_cascades), 1);
     const min_f: f64 = @floatFromInt(@max(cfg.min_refresh_frames, 1));
     const max_f: f64 = @floatFromInt(@max(cfg.max_refresh_frames, cfg.min_refresh_frames));
     const lambda = std.math.clamp(cfg.refresh_lambda, 0.0, 1.0);
-    var intervals: [MAX_CASCADES]u32 = @splat(@max(cfg.min_refresh_frames, 1));
+    var intervals: [max_cascades]u32 = @splat(@max(cfg.min_refresh_frames, 1));
     if (count == 1) return intervals;
-    const denom: f64 = @floatFromInt(count - 1);
     for (intervals[0..count], 0..) |*dest, i| {
-        const t: f64 = @as(f64, @floatFromInt(i)) / denom;
-        const uniform_i = min_f + (max_f - min_f) * t;
-        const log_i = min_f * std.math.pow(f64, max_f / min_f, t);
-        const blend = @min(@round(lambda * log_i + (1.0 - lambda) * uniform_i), @as(f64, @floatFromInt(std.math.maxInt(u32))));
-        dest.* = @intFromFloat(blend);
+        const blend = rampBlend(f64, count, i, min_f, max_f, lambda);
+        dest.* = @intFromFloat(@min(@round(blend), @as(f64, @floatFromInt(std.math.maxInt(u32)))));
     }
     return intervals;
 }
@@ -316,8 +317,8 @@ pub fn refreshIntervals(cfg: ShadowConfig) [MAX_CASCADES]u32 {
 pub const never_refreshed = std.math.maxInt(u32);
 
 const RefreshPriority = struct {
-    intervals: [MAX_CASCADES]u32,
-    last_refresh: [MAX_CASCADES]u32,
+    intervals: [max_cascades]u32,
+    last_refresh: [max_cascades]u32,
     frame_number: u32,
 
     fn lateness(self: *const RefreshPriority, cascade: u32) i64 {
@@ -347,17 +348,17 @@ const RefreshPriority = struct {
 pub fn nextRefreshSet(
     cascade_count: u32,
     cascades_per_frame: u32,
-    intervals: [MAX_CASCADES]u32,
-    last_refresh: [MAX_CASCADES]u32,
+    intervals: [max_cascades]u32,
+    last_refresh: [max_cascades]u32,
     frame_number: u32,
-) [MAX_CASCADES]bool {
-    const count = @max(@min(cascade_count, MAX_CASCADES), 1);
-    const budget = @max(@min(cascades_per_frame, MAX_CASCADES), 1);
-    var order: [MAX_CASCADES]u32 = undefined;
+) [max_cascades]bool {
+    const count = @max(@min(cascade_count, max_cascades), 1);
+    const budget = @max(@min(cascades_per_frame, max_cascades), 1);
+    var order: [max_cascades]u32 = @splat(0);
     for (order[0..count], 0..) |*dest, i| dest.* = @intCast(i);
     const priority = RefreshPriority{ .intervals = intervals, .last_refresh = last_refresh, .frame_number = frame_number };
     std.sort.insertion(u32, order[0..count], &priority, RefreshPriority.lessThan);
-    var selected: [MAX_CASCADES]bool = @splat(false);
+    var selected: [max_cascades]bool = @splat(false);
     var taken: u32 = 0;
     for (order[0..count]) |c| {
         if (taken >= budget) break;
@@ -404,12 +405,11 @@ fn buildViewProj(
     const s_t = dot3f(s, t);
     const u_t = dot3f(u, t);
     const f_t = dot3f(f, t);
-    var m: [16]f32 = undefined;
+    var m: [16]f32 = @splat(0.0);
     inline for (0..3) |c| {
         m[c * 4] = s[c] / radius;
         m[c * 4 + 1] = u[c] / radius;
         m[c * 4 + 2] = f[c] / fnf;
-        m[c * 4 + 3] = 0.0;
     }
     m[12] = s_t / radius;
     m[13] = u_t / radius;
@@ -418,12 +418,12 @@ fn buildViewProj(
     return m;
 }
 
-/// Full per-cascade fit for one frame. Boxes are **concentric on the camera**: cascade i
+/// Full per-cascade fit for one frame. Boxes are concentric on the camera: cascade i
 /// covers the sphere of radius `split_radius[i]` around the camera, so the box is
 /// rotation-invariant (no shadow swimming when the player looks around) and covers every
 /// direction including behind and below the camera (no leaks through un-covered terrain).
 pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
-    const count = @min(ctx.cfg.cascade_count, MAX_CASCADES);
+    const count = @min(ctx.cfg.cascade_count, max_cascades);
     std.debug.assert(cascade_index < count);
     const splits = splitRadii(ctx.cfg);
 
@@ -717,8 +717,8 @@ test "refreshIntervals pinned endpoints, monotonic, lambda extremes" {
 }
 
 test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvation" {
-    const intervals: [MAX_CASCADES]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ .{0} ** 20;
-    var last_refresh: [MAX_CASCADES]u32 = @splat(never_refreshed);
+    const intervals: [max_cascades]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ .{0} ** 20;
+    var last_refresh: [max_cascades]u32 = @splat(never_refreshed);
     var frame: u32 = 0;
 
     // Initial ramp: the never-refreshed cascades fill the budget first (tie-break near).
@@ -747,7 +747,7 @@ test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvat
 
     // Steady state with a full budget: the near cascade refreshes every frame, the
     // second slot rotates so every cascade eventually refreshes (no starvation).
-    var refreshed: [MAX_CASCADES]bool = @splat(false);
+    var refreshed: [max_cascades]bool = @splat(false);
     var near_refreshes: u32 = 0;
     for (0..64) |i| {
         frame = @intCast(i);
@@ -765,8 +765,8 @@ test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvat
 }
 
 test "nextRefreshSet gates on due, negative lateness never drawn" {
-    const intervals: [MAX_CASCADES]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
-    const last_refresh: [MAX_CASCADES]u32 = @splat(0);
+    const intervals: [max_cascades]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
+    const last_refresh: [max_cascades]u32 = @splat(0);
 
     // A huge budget must not pull in not-yet-due cascades: only cascade 0 (interval 1)
     // is overdue at frame 5, so exactly one cascade is drawn.
@@ -778,7 +778,7 @@ test "nextRefreshSet gates on due, negative lateness never drawn" {
     try testing.expectEqual(@as(u32, 1), count);
 
     // All cascades on a slow interval, none overdue: empty set so the pass is skipped.
-    const slow_intervals: [MAX_CASCADES]u32 = .{ 100, 100, 100, 100 } ++ .{0} ** 28;
+    const slow_intervals: [max_cascades]u32 = .{ 100, 100, 100, 100 } ++ .{0} ** 28;
     set = nextRefreshSet(4, 100, slow_intervals, last_refresh, 5);
     count = 0;
     for (set) |picked| count += @intFromBool(picked);

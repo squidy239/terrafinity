@@ -32,7 +32,7 @@ void main() {
     uvec3 lengths = decodeLengths(val);
     uint side = decodeSide(val);
 
-    vec3 coords = CUBE_FACES[side][local_vertex];
+    vec3 coords = cube_faces[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
     vec3 view_pos = coords + vec3(local_pos) * scale + relative_position;

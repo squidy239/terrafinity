@@ -56,7 +56,7 @@ void main() {
     side          = decodeSide(val);
     block_array_layer = block_type_local;
 
-    vec3 coords = CUBE_FACES[side][local_vertex];
+    vec3 coords = cube_faces[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
     vec3 local_frag_coords = vec3(local_pos) * scale + coords;

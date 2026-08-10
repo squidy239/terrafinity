@@ -1,6 +1,6 @@
 ---
 name: simplify
-description: Simplify Zig code while maintaining all functionality. Covers structural hygiene, control flow simplification, and state and mutation minimization. Use when asked to simplify, refactor, or clean up code.
+description: Simplify code while maintaining all functionality. Covers structural hygiene, control flow simplification, and state and mutation minimization. Use when asked to simplify, refactor, or clean up code.
 ---
 
 # Simplify
@@ -54,7 +54,7 @@ This skill runs in a loop until no further simplifications remain:
 
 ### Step 1: Simplify Pass
 
-Spawn one sub-agent per file. Each sub-agent's prompt must include:
+Spawn one sub-agent per file. Do it to all code files provided, not just zig. Each sub-agent's prompt must include:
 
 - The file path
 - The complete Simplification Principles above (sections 1–3 verbatim)

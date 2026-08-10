@@ -24,13 +24,13 @@ const light_change_cos_threshold: f32 = 0.9;
 const light_step_texels: f32 = 1.0;
 
 /// std430 storage-block layout mirrored by shadow.glsl. Per-cascade members are fixed
-/// MAX_CASCADES arrays (matching the GLSL `float [MAX_CASCADES]` members) so the layout
+/// max_cascades arrays (matching the GLSL `float [max_cascades]` members) so the layout
 /// stays stable across a runtime cascade_count change; cascade-uniform values are scalars.
 pub const ShadowParams = extern struct {
-    light_viewproj: [Csm.MAX_CASCADES][16]f32,
-    split_radius: [Csm.MAX_CASCADES]f32 align(16),
-    texel_world_size: [Csm.MAX_CASCADES]f32 align(16),
-    box_radius: [Csm.MAX_CASCADES]f32 align(16),
+    light_viewproj: [Csm.max_cascades][16]f32,
+    split_radius: [Csm.max_cascades]f32 align(16),
+    texel_world_size: [Csm.max_cascades]f32 align(16),
+    box_radius: [Csm.max_cascades]f32 align(16),
     normal_bias_scale: f32,
     blur_radius: f32,
     blend_fraction: f32,
@@ -121,7 +121,7 @@ param_buffers: []ParamBuffer = &.{},
 
 /// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
 /// per-frame matrix by `viewProjAtOrigin`.
-committed: [Csm.MAX_CASCADES]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+committed: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
 /// Latched light direction (direction light travels) the shadow maps are rasterized with:
 /// held frozen and stepped in `light_step_texels` increments so re-rasterizations land on
 /// an identical texel grid (see `latchLight`).
@@ -129,14 +129,14 @@ light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// Per-cascade commit validity. The params cascade_count is the largest contiguous
 /// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
 /// is never classified into — the shader's cascade_count early-outs before it.
-valid: [Csm.MAX_CASCADES]bool = @splat(false),
+valid: [Csm.max_cascades]bool = @splat(false),
 /// Cascades computed this frame, used only by the end-of-frame raster. Promoted into
 /// `committed` (the sampled state) at the start of the next prepareFrame, so a refreshed
 /// layer is only ever sampled with the matrix and box radius it was rasterized with.
-pending: [Csm.MAX_CASCADES]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+pending: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
 /// Per-cascade validity of `pending`; set when a cascade is computed this frame and
 /// cleared once it is promoted (or discarded on a light-direction reset).
-pending_valid: [Csm.MAX_CASCADES]bool = @splat(false),
+pending_valid: [Csm.max_cascades]bool = @splat(false),
 /// Whether shadows were active last frame; a false->true transition means the sun just
 /// rose and the committed state belongs to the pre-night light direction.
 was_active: bool = false,
@@ -145,20 +145,20 @@ was_active: bool = false,
 /// fly speed would grow the box while standing still and cause texel-swimming flicker).
 per_frame_dist: f32 = 0.0,
 last_view_pos: @Vector(3, f64) = .{ 0, 0, 0 },
-last_prepare_ns: i128 = 0,
+have_movement_sample: bool = false,
 
 /// Frame counter advanced each prepareFrame; drives the refresh scheduler.
 frame_number: u32 = 0,
 /// Frame each cascade was last refreshed; `Csm.never_refreshed` until first raster.
-last_refresh: [Csm.MAX_CASCADES]u32 = @splat(Csm.never_refreshed),
+last_refresh: [Csm.max_cascades]u32 = @splat(Csm.never_refreshed),
 /// Cascades to rasterize at the end of this frame, innermost first (from `nextRefreshSet`).
-frame_cascades: [Csm.MAX_CASCADES]u32 = undefined,
+frame_cascades: [Csm.max_cascades]u32 = @splat(0),
 /// Number of cascades to rasterize this frame (at most `cascades_per_frame`).
 frame_cascade_count: u32 = 0,
 /// Camera origin the frame's cascades were computed at (for the end-of-frame raster).
 frame_origin: @Vector(3, f64) = .{ 0, 0, 0 },
 /// Cull planes for the frame's cascades, one entry per cascade slot, camera-relative.
-frame_planes: [gpu.shadow_slot_count][6]@Vector(4, f32) = undefined,
+frame_planes: [gpu.shadow_slot_count][6]@Vector(4, f32) = @splat(@splat(@as(@Vector(4, f32), @splat(0)))),
 frame_min_chunk_size: f32 = 0.0,
 
 config_applied: Csm.ShadowConfig = undefined,
@@ -286,7 +286,7 @@ fn createPipeline(self: *ShadowRenderer) !void {
 pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "shadow_recreate" });
     defer zone.end();
-    const count = @min(config.cascade_count, Csm.MAX_CASCADES);
+    const count = @min(config.cascade_count, Csm.max_cascades);
     const size = config.shadow_map_size;
     const want_format: vk.Format = switch (config.depth_format) {
         .d16 => .d16_unorm,
@@ -313,30 +313,38 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
 
     var applied = config;
 
-    if (applied.cascade_count > Csm.MAX_CASCADES) {
-        std.log.warn("ShadowRenderer: cascade_count {d} exceeds MAX_CASCADES {d}; clamping", .{ applied.cascade_count, Csm.MAX_CASCADES });
-        applied.cascade_count = Csm.MAX_CASCADES;
+    if (applied.cascade_count > Csm.max_cascades) {
+        std.log.warn("ShadowRenderer: cascade_count {d} exceeds MAX_CASCADES {d}; clamping", .{ applied.cascade_count, Csm.max_cascades });
+        applied.cascade_count = Csm.max_cascades;
     }
 
-    {
-        // Tear down under the queue mutex so no in-flight submission races the destroy.
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
-        self.destroyShadowImage();
-        core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
-        self.config_applied = applied;
-        self.cascade_count = count;
-        self.map_size = size;
-        self.valid = @splat(false);
-        self.pending_valid = @splat(false);
-    }
-
+    try self.teardownResources(io, applied, count, size);
     if (!applied.enabled or count == 0 or size == 0) return;
+    try self.buildResources(io, size, count);
+}
 
+/// Tears down the current shadow image and pipeline under the queue mutex so no
+/// in-flight submission races the destroy, and records the freshly-applied resource
+/// state. device-waits before releasing the resources.
+fn teardownResources(self: *ShadowRenderer, io: std.Io, applied: Csm.ShadowConfig, count: u32, size: u32) !void {
+    self.vk_ctx.queue_mutex.lockUncancelable(io);
+    defer self.vk_ctx.queue_mutex.unlock(io);
+    _ = try self.dev.deviceWaitIdle();
+    self.destroyShadowImage();
+    core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
+    self.config_applied = applied;
+    self.cascade_count = count;
+    self.map_size = size;
+    self.valid = @splat(false);
+    self.pending_valid = @splat(false);
+}
+
+/// Allocates the shadow image and views, clears every layer to far depth, and rebuilds
+/// the pipeline for the new image/pipeline-static state. On failure the image is torn
+/// down so the renderer is left in a consistent torn-down state.
+fn buildResources(self: *ShadowRenderer, io: std.Io, size: u32, count: u32) !void {
     errdefer self.destroyShadowImage();
     try self.createShadowImage(size, count);
-
     // Frame 0 samples "fully lit": clear every layer to far depth and leave the array
     // in SHADER_READ_ONLY_OPTIMAL so the first frame has no undefined-layout reads.
     try self.clearDepthArray(io);
@@ -446,7 +454,6 @@ fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
 /// latched here once per schedule period so refreshed cascades share a light basis.
 pub fn prepareFrame(
     self: *ShadowRenderer,
-    io: std.Io,
     frame_idx: u32,
     view_pos: @Vector(3, f64),
     sun_dir: Csm.Vec3f,
@@ -456,12 +463,12 @@ pub fn prepareFrame(
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "shadow_prepareFrame" });
     defer zone.end();
 
-    self.measureMovement(io, view_pos);
+    self.measureMovement(view_pos);
 
     // The caller (VulkanRenderer.draw) holds the options lock; read the live config so
     // non-resource changes (blend, fade, strength, refresh intervals, splits) apply immediately.
     const config = self.render_options.shadow;
-    const count = @min(config.cascade_count, Csm.MAX_CASCADES);
+    const count = @min(config.cascade_count, Csm.max_cascades);
     self.frame_cascade_count = 0;
 
     const light_dir_changed = self.latchLight(config, sun_dir);
@@ -489,14 +496,13 @@ pub fn prepareFrame(
 /// Measures smoothed camera movement in blocks per frame for staleness padding. Must
 /// stay per-frame (not per-second): the max fly speed would grow the boxes while
 /// standing still and cause texel-swimming flicker.
-fn measureMovement(self: *ShadowRenderer, io: std.Io, view_pos: @Vector(3, f64)) void {
-    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    if (self.last_prepare_ns != 0) {
+fn measureMovement(self: *ShadowRenderer, view_pos: @Vector(3, f64)) void {
+    if (self.have_movement_sample) {
         const delta = view_pos - self.last_view_pos;
         const dist: f32 = @floatCast(@sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]));
         self.per_frame_dist = std.math.lerp(self.per_frame_dist, dist, movement_smoothing);
     }
-    self.last_prepare_ns = now_ns;
+    self.have_movement_sample = true;
     self.last_view_pos = view_pos;
 }
 
@@ -563,8 +569,8 @@ fn refreshCascades(
     // planes from that cascade's center, radius, and depth range, and the innermost
     // selected texel drives the minimum chunk size for all of them.
     var finest_texel: f32 = std.math.inf(f32);
-    for (0..count) |c| {
-        if (!refresh_set[c]) continue;
+    for (self.pending[0..count], self.pending_valid[0..count], self.last_refresh[0..count], refresh_set[0..count], 0..) |*pending, *pending_valid, *last_refresh, refresh, c| {
+        if (!refresh) continue;
         const slot = self.frame_cascade_count;
         const ctx = Csm.CascadeContext{
             .cfg = config,
@@ -575,9 +581,9 @@ fn refreshCascades(
             .per_frame_dist = self.per_frame_dist,
         };
         const cascade = Csm.computeCascade(ctx, @intCast(c));
-        self.pending[c] = Csm.committedOf(cascade);
-        self.pending_valid[c] = true;
-        self.last_refresh[c] = self.frame_number;
+        pending.* = Csm.committedOf(cascade);
+        pending_valid.* = true;
+        last_refresh.* = self.frame_number;
         self.frame_cascades[slot] = @intCast(c);
         self.frame_planes[slot] = cullPlanes(cascade.center_abs, cascade.light_dir, cascade.radius, cascade.near_plane, cascade.far_plane, view_pos);
         self.frame_cascade_count += 1;
@@ -604,8 +610,7 @@ fn writeParams(
     if (active and active_count > 0) {
         params.cascade_count = active_count;
         const splits = Csm.splitRadii(config);
-        for (0..active_count) |c| {
-            const committed = self.committed[c];
+        for (self.committed[0..active_count], 0..) |committed, c| {
             const view_proj = Csm.viewProjAtOrigin(committed, view_pos);
             @memcpy(params.light_viewproj[c][0..], view_proj[0..]);
             params.split_radius[c] = splits[c];
@@ -631,19 +636,16 @@ fn writeParams(
 fn cullPlanes(center: Csm.Vec3d, light_dir: Csm.Vec3f, radius: f32, near: f32, far: f32, view_pos: @Vector(3, f64)) [6]@Vector(4, f32) {
     const basis = Csm.buildLightBasis(light_dir, Csm.world_up);
     const c: Csm.Vec3f = .{ @floatCast(center[0] - view_pos[0]), @floatCast(center[1] - view_pos[1]), @floatCast(center[2] - view_pos[2]) };
-    const s = basis.right;
-    const u = basis.up;
     const f = basis.forward;
-    const s_c = Csm.dot3f(s, c);
-    const u_c = Csm.dot3f(u, c);
     const f_c = Csm.dot3f(f, c);
     var planes: [6]@Vector(4, f32) = undefined;
-    planes[0] = .{ s[0], s[1], s[2], -s_c + radius }; // left:  s·(p-c) >= -r
-    planes[1] = .{ -s[0], -s[1], -s[2], s_c + radius }; // right: s·(p-c) <= r
-    planes[2] = .{ u[0], u[1], u[2], -u_c + radius }; // bottom
-    planes[3] = .{ -u[0], -u[1], -u[2], u_c + radius }; // top
-    planes[4] = .{ f[0], f[1], f[2], -f_c - near }; // near:  f·(p-c) >= near
-    planes[5] = .{ -f[0], -f[1], -f[2], f_c + far }; // far:   f·(p-c) <= far
+    for ([_]Csm.Vec3f{ basis.right, basis.up }, 0..) |axis, i| {
+        const a_c = Csm.dot3f(axis, c);
+        planes[i * 2] = .{ axis[0], axis[1], axis[2], -a_c + radius };
+        planes[i * 2 + 1] = .{ -axis[0], -axis[1], -axis[2], a_c + radius };
+    }
+    planes[4] = .{ f[0], f[1], f[2], -f_c - near };
+    planes[5] = .{ -f[0], -f[1], -f[2], f_c + far };
     return planes;
 }
 

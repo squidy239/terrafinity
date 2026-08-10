@@ -3,9 +3,10 @@
 
 layout(local_size_x = 64) in;
 
-// First shadow slot; cascade slots span [SHADOW_SLOT_BASE, SHADOW_SLOT_BASE + SHADOW_SLOT_COUNT).
-#define SHADOW_SLOT_BASE 2u
-#define SHADOW_SLOT_COUNT 8u
+#define chunk_size 32.0
+// First shadow slot; cascade slots span [shadow_slot_base, shadow_slot_base + shadow_slot_count).
+#define shadow_slot_base 2u
+#define shadow_slot_count 8u
 
 struct MeshCandidate {
     vec4 absolute_position;
@@ -45,8 +46,8 @@ layout(std430, binding = 3) buffer CountBuffer {
     uint transparent_count;
     uint opaque_face_count;
     uint transparent_face_count;
-    uint shadow_count[SHADOW_SLOT_COUNT];
-    uint shadow_face_count[SHADOW_SLOT_COUNT];
+    uint shadow_count[shadow_slot_count];
+    uint shadow_face_count[shadow_slot_count];
 };
 
 layout(push_constant) uniform PushConsts {
@@ -76,12 +77,12 @@ void main() {
     if (candidate.face_count == 0u) return;
 
     vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
-    float size = candidate.scale * 32.0;
+    float size = candidate.scale * chunk_size;
     if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
 
     if (pc.mode >= 1u) {
         // Shadow cull for cascade slot (pc.mode - 1): opaque only, writes into slot
-        // SHADOW_SLOT_BASE + slot. Each cascade's planes are pushed so it culls to its
+        // shadow_slot_base + slot. Each cascade's planes are pushed so it culls to its
         // own box and depth range.
         if (candidate.is_transparent != 0u) return;
         if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
@@ -92,7 +93,7 @@ void main() {
             return;
         }
         atomicAdd(shadow_face_count[slot], candidate.face_count);
-        uint out_idx = idx + (SHADOW_SLOT_BASE + slot) * pc.draw_capacity;
+        uint out_idx = idx + (shadow_slot_base + slot) * pc.draw_capacity;
         out_indirect[out_idx] = DrawIndirectCommand(
             6u,
             candidate.face_count,

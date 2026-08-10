@@ -159,11 +159,9 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     defer zone.end();
     std.log.info("VulkanRenderer.deinit: Flushing pending uploads and waiting for device idle...", .{});
 
-    {
-        self.chunk.flushPendingUploads(io) catch {
-            @panic("VulkanRenderer.deinit: failed to flush submission batch - GPU state may be inconsistent");
-        };
-    }
+    self.chunk.flushPendingUploads(io) catch {
+        @panic("VulkanRenderer.deinit: failed to flush submission batch - GPU state may be inconsistent");
+    };
     {
         self.vk_ctx.queue_mutex.lockUncancelable(io);
         defer self.vk_ctx.queue_mutex.unlock(io);
@@ -225,15 +223,8 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
 fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
     defer zone.end();
-    core.destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
-    core.destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
-    core.destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
-
-    errdefer {
-        core.destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
-        core.destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
-        core.destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
-    }
+    self.destroyRendererSwapchainResources();
+    errdefer self.destroyRendererSwapchainResources();
 
     self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });
 
@@ -330,7 +321,6 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     const scene_aabb = self.scene.getSceneAABB();
     self.shadow.prepareFrame(
-        io,
         current_frame,
         view_pos,
         frame_sky.sun_dir,
@@ -382,8 +372,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
     const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
 
-    const frame_num = self.vk_ctx.frame_number.load(.acquire) + 1;
-    self.frame_stats.frame_number = frame_num;
+    self.frame_stats.frame_number = self.vk_ctx.frame_number.load(.acquire) + 1;
     self.frame_stats.total_meshes = @intCast(self.chunk.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
     self.frame_stats.camera_front = self.camera.front();

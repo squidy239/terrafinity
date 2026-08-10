@@ -1,17 +1,17 @@
 #ifndef SHADOW_GLSL
 #define SHADOW_GLSL
 
-const int MAX_CASCADES = 32;
+const int max_cascades = 32;
 
 // Set 2 is the shared push-descriptor set, present in both the opaque and transparent
 // pipelines. Binding 0 is the opaque depth sampler (transparent only; NULL for opaque),
 // binding 1 is the shadow depth array with a comparison sampler, binding 2 the params.
 layout(set = 2, binding = 1) uniform sampler2DArrayShadow shadow_map;
 layout(set = 2, binding = 2, std430) readonly buffer ShadowParamsBuffer {
-    mat4 light_viewproj[MAX_CASCADES];
-    float split_radius[MAX_CASCADES];
-    float texel_world_size[MAX_CASCADES];
-    float box_radius[MAX_CASCADES];
+    mat4 light_viewproj[max_cascades];
+    float split_radius[max_cascades];
+    float texel_world_size[max_cascades];
+    float box_radius[max_cascades];
     float normal_bias_scale;
     float blur_radius;
     float blend_fraction;
@@ -33,7 +33,7 @@ int shadowCascadeIndex(vec3 pos_rel) {
 }
 
 vec3 cascadeDebugColor(int cascade) {
-    vec3 colors[MAX_CASCADES] = vec3[MAX_CASCADES](
+    vec3 colors[max_cascades] = vec3[max_cascades](
         vec3(1.0, 0.3, 0.3),
         vec3(0.3, 1.0, 0.3),
         vec3(0.3, 0.3, 1.0),
@@ -77,13 +77,8 @@ float shadowHash(vec2 p) {
 }
 
 // Projects p and averages the comparison result over a 16-sample golden-spiral PCF
-// kernel. The non-uniform spiral spacing blurs edges without the banded intensity
-// contours of a regular grid, and linear compare filtering turns each tap into a 2x2
-// box. The kernel is rotated per fragment (by a hash of the screen position and
-// cascade) so neighbouring pixels sample different offsets. Returns 1.0 (fully lit)
-// when p projects outside the cascade's volume: a receiver outside the cascade has no
-// shadow information, and forcing it into a comparison against the map's edge would
-// manufacture false shadowed regions.
+// kernel, rotated per fragment to decorrelate neighbouring pixels' tap patterns.
+// Returns 1.0 when p projects outside the cascade so the map's edge cannot fake shadows.
 float sampleShadowCascade(int cascade, vec3 p) {
     // Blur radius is in world blocks; the cascade's box spans 2*box_radius across the
     // [0,1] UV range, so the same world radius gives the same penumbra in every cascade.
@@ -123,15 +118,10 @@ float sampleShadow(vec3 pos_rel, vec3 normal, float ndotl) {
     int cascade = shadowCascadeIndex(pos_rel);
     float d = length(pos_rel);
 
-    // Normal-offset bias pushes the sample away from the surface along its OUTWARD
-    // normal so the shadow texel the surface itself occupies does not self-shadow.
-    // The shader's face_normals are inward (geometric), so the outward direction is
-    // -normal: a top face (inward -Y) is pushed up toward the light. ndotl = dot(N,-L)
-    // is the outward-normal term; the /max(ndotl, 0.2) divisor gives grazing surfaces
-    // more bias. The cap scales with the texel so far cascades (coarse texels) get
-    // enough bias to suppress acne while near cascades stay sub-voxel.
-    float bias = shadow_params.normal_bias_scale * shadow_params.texel_world_size[cascade] / max(ndotl, 0.2);
-    bias = min(bias, shadow_params.texel_world_size[cascade] * 3.0);
+    // Outward-normal bias so the surface's own shadow texel does not self-shadow; the
+    // /max(ndotl, 0.2) divisor adds more bias for grazing surfaces.
+    float texel = shadow_params.texel_world_size[cascade];
+    float bias = min(shadow_params.normal_bias_scale * texel / max(ndotl, 0.2), texel * 3.0);
     vec3 p = pos_rel - normal * bias;
 
     float factor = sampleShadowCascade(cascade, p);
