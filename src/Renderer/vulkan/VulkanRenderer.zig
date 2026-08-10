@@ -223,7 +223,6 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
 fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
     defer zone.end();
-    self.destroyRendererSwapchainResources();
     errdefer self.destroyRendererSwapchainResources();
 
     self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });

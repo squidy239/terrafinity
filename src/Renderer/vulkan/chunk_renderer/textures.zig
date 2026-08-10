@@ -67,6 +67,25 @@ pub const Services = struct {
     single_time: *core.SingleTime,
 };
 
+pub const PackBlocksDir = struct {
+    path: []u8,
+    dir: std.Io.Dir,
+    is_default: bool,
+};
+
+/// Opens (creating it for the built-in `default` pack) the selected pack's blocks
+/// directory. The returned `path` must be freed by the caller.
+pub fn openPackBlocksDir(io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !PackBlocksDir {
+    const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{selected_pack});
+    errdefer allocator.free(pack_path);
+    const is_default = std.mem.eql(u8, selected_pack, "default");
+    const dir = if (is_default)
+        try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
+    else
+        try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
+    return .{ .path = pack_path, .dir = dir, .is_default = is_default };
+}
+
 pub const TextureManager = struct {
     services: Services,
     gamma_correction: bool,
@@ -82,35 +101,28 @@ pub const TextureManager = struct {
     }
 
     pub fn loadTextures(self: *TextureManager, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
-        const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{selected_pack});
-        defer allocator.free(pack_path);
+        const pack = try openPackBlocksDir(io, allocator, selected_pack);
+        defer allocator.free(pack.path);
+        defer pack.dir.close(io);
 
-        const is_default = std.mem.eql(u8, selected_pack, "default");
-
-        var pack_dir = if (is_default)
-            try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
-        else
-            try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
-        defer pack_dir.close(io);
-
-        if (is_default) {
+        if (pack.is_default) {
             const default_textures = @import("textures").default;
             for (visible_block_names, default_textures) |name, data| {
                 const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
                 defer allocator.free(filename);
 
-                if (pack_dir.openFile(io, filename, .{})) |f| {
+                if (pack.dir.openFile(io, filename, .{})) |f| {
                     f.close(io);
                 } else |err| {
                     switch (err) {
-                        error.FileNotFound => try pack_dir.writeFile(io, .{ .data = data, .sub_path = filename }),
+                        error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
                         else => |e| return e,
                     }
                 }
             }
         }
 
-        try self.loadTextureDirectory(io, pack_dir, allocator, ".png");
+        try self.loadTextureDirectory(io, pack.dir, allocator, ".png");
     }
 
     pub fn loadTextureDirectory(
@@ -208,24 +220,15 @@ pub const TextureManager = struct {
     }
 
     fn createSampler(self: *TextureManager) !void {
-        const anisotropy = self.services.vk_ctx.sampler_anisotropy;
-        self.sampler = try self.services.dev.createSampler(&.{
+        self.sampler = try core.createSampler(self.services.dev, &self.services.vk_ctx.vkalloc, .{
             .mag_filter = .nearest,
             .min_filter = .linear,
-            .mipmap_mode = .linear,
-            .address_mode_u = .repeat,
-            .address_mode_v = .repeat,
-            .address_mode_w = .repeat,
-            .mip_lod_bias = 0.0,
-            .anisotropy_enable = if (anisotropy) .true else .false,
+            .address_mode = .repeat,
+            .anisotropy_enable = self.services.vk_ctx.sampler_anisotropy,
             .max_anisotropy = 16.0,
-            .compare_enable = .false,
-            .compare_op = .always,
-            .min_lod = 0.0,
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_black,
-            .unnormalized_coordinates = .false,
-        }, &self.services.vk_ctx.vkalloc);
+        });
     }
 
     fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {
@@ -298,18 +301,8 @@ pub const TextureManager = struct {
     }
 
     fn destroyTexture(self: *TextureManager, tex: *Texture) void {
-        if (tex.view != .null_handle) {
-            self.services.dev.destroyImageView(tex.view, &self.services.vk_ctx.vkalloc);
-            tex.view = .null_handle;
-        }
-        if (tex.image != .null_handle) {
-            self.services.dev.destroyImage(tex.image, &self.services.vk_ctx.vkalloc);
-            tex.image = .null_handle;
-        }
-        if (tex.memory != .null_handle) {
-            self.services.dev.freeMemory(tex.memory, &self.services.vk_ctx.vkalloc);
-            tex.memory = .null_handle;
-        }
+        core.destroyIfValid(self.services.dev, &tex.view, &self.services.vk_ctx.vkalloc);
+        core.destroyImageWithMemory(self.services.dev, &tex.image, &tex.memory, &self.services.vk_ctx.vkalloc);
     }
 
     fn uploadSingleTexture(
@@ -425,21 +418,16 @@ pub const TextureManager = struct {
         mip_count: u32,
     ) void {
         const t = transitionFor(old_layout, new_layout);
-        self.services.dev.cmdPipelineBarrier2(cmd, &.{
-            .image_memory_barrier_count = 1,
-            .p_image_memory_barriers = (&vk.ImageMemoryBarrier2{
-                .src_stage_mask = t.src.stage,
-                .src_access_mask = t.src.access,
-                .dst_stage_mask = t.dst.stage,
-                .dst_access_mask = t.dst.access,
-                .old_layout = old_layout,
-                .new_layout = new_layout,
-                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .image = image,
-                .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
-            })[0..1],
-        });
+        core.pipelineBarrier(cmd, self.services.dev, vk.ImageMemoryBarrier2, (&core.imageBarrier2Range(
+            image,
+            .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
+            old_layout,
+            new_layout,
+            t.src.stage,
+            t.src.access,
+            t.dst.stage,
+            t.dst.access,
+        ))[0..1]);
     }
 
     pub fn deinit(self: *TextureManager) void {

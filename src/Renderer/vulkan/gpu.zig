@@ -1120,6 +1120,14 @@ pub const IndirectScene = struct {
         self.fillFrameData(frame, mesh_data_slice, indirect_draw_slice, count_slice, stats_slice);
     }
 
+    /// Waits for device idle under the queue mutex so no in-flight submission races the
+    /// buffer reallocation, then frees. Shared by the draw-capacity and candidate growth paths.
+    fn waitIdleLocked(self: *IndirectScene, io: std.Io) !void {
+        self.vk_ctx.queue_mutex.lockUncancelable(io);
+        defer self.vk_ctx.queue_mutex.unlock(io);
+        _ = try self.dev.deviceWaitIdle();
+    }
+
     fn growDrawCapacity(self: *IndirectScene, io: std.Io, min_capacity: u32) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
         defer zone.end();
@@ -1140,9 +1148,7 @@ pub const IndirectScene = struct {
 
         std.log.info("IndirectScene: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
+        try self.waitIdleLocked(io);
 
         const old_draw_capacity = self.draw_capacity;
         const num_frames = self.frame_buffers.items.len;
@@ -1218,9 +1224,7 @@ pub const IndirectScene = struct {
         const new_capacity = old_capacity * 2;
         std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
 
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
+        try self.waitIdleLocked(io);
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
         @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
@@ -1263,7 +1267,7 @@ pub const IndirectScene = struct {
         defer zone.end();
         if (self.mesh_data_descriptor_set_layout == .null_handle) {
             const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
-            self.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
+            self.mesh_data_descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);
         }
 
         const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight) };
@@ -1282,14 +1286,7 @@ pub const IndirectScene = struct {
     }
 
     fn destroyMeshDataDescriptorResources(self: *IndirectScene) void {
-        if (self.mesh_data_descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.mesh_data_descriptor_pool, &self.vk_ctx.vkalloc);
-            self.mesh_data_descriptor_pool = .null_handle;
-        }
-        if (self.mesh_data_descriptor_sets_per_frame.len > 0) {
-            self.allocator.free(self.mesh_data_descriptor_sets_per_frame);
-            self.mesh_data_descriptor_sets_per_frame = &.{};
-        }
+        core.destroyFrameDescriptorResources(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.mesh_data_descriptor_pool, &self.mesh_data_descriptor_sets_per_frame);
     }
 };
 

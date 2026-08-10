@@ -67,6 +67,12 @@ pub const RenderTarget = struct {
     view: vk.ImageView = .null_handle,
 };
 
+/// CPU mapping of a per-frame shader parameter storage buffer, used by the sky and
+/// shadow passes to upload their (16-byte aligned) param structs each frame.
+pub const ParamBuffer = struct {
+    mapping: []align(16) u8,
+};
+
 pub fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.AllocationCallbacks) void {
     const T = @TypeOf(handle.*);
     if (handle.* == .null_handle) return;
@@ -76,6 +82,7 @@ pub fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.Allo
         vk.Pipeline => dev.destroyPipeline(handle.*, vkalloc),
         vk.PipelineLayout => dev.destroyPipelineLayout(handle.*, vkalloc),
         vk.DescriptorSetLayout => dev.destroyDescriptorSetLayout(handle.*, vkalloc),
+        vk.DescriptorPool => dev.destroyDescriptorPool(handle.*, vkalloc),
         vk.Sampler => dev.destroySampler(handle.*, vkalloc),
         else => @compileError("destroyIfValid: unsupported type " ++ @typeName(T)),
     }
@@ -634,6 +641,14 @@ pub fn setViewportAndScissor(dev: DeviceProxy, cmd: vk.CommandBuffer, extent: vk
     })[0..1]);
 }
 
+/// Sets the dynamic cull mode, depth compare op, and depth write enable together.
+/// These are always bound dynamically because every pass sets the same three states.
+pub fn setDynamicState(dev: DeviceProxy, cmd: vk.CommandBuffer, cull_mode: vk.CullModeFlags, compare_op: vk.CompareOp, depth_write: bool) void {
+    dev.cmdSetCullMode(cmd, cull_mode);
+    dev.cmdSetDepthCompareOp(cmd, compare_op);
+    dev.cmdSetDepthWriteEnable(cmd, if (depth_write) .true else .false);
+}
+
 /// GPU-immediate helper: allocate a one-shot command buffer from a shared transient pool,
 /// record, submit on the graphics queue, and wait on a reusable fence. Used for one-off
 /// uploads and buffer copies that must complete synchronously.
@@ -720,6 +735,83 @@ pub fn createShaderModule(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbac
         .code_size = spv.len * @sizeOf(u32),
         .p_code = spv.ptr,
     }, vkalloc);
+}
+
+/// Sampler options that vary between call sites; the remaining ~8 fields are fixed by
+/// the common use case (clamped sampling of an image for a fragment shader).
+pub const SamplerOptions = struct {
+    mag_filter: vk.Filter = .linear,
+    min_filter: vk.Filter = .linear,
+    mipmap_mode: vk.SamplerMipmapMode = .linear,
+    address_mode: vk.SamplerAddressMode = .clamp_to_edge,
+    compare_enable: bool = false,
+    compare_op: vk.CompareOp = .always,
+    anisotropy_enable: bool = false,
+    max_anisotropy: f32 = 1.0,
+    max_lod: f32 = 0,
+    border_color: vk.BorderColor = .float_opaque_black,
+};
+
+pub fn createSampler(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, opts: SamplerOptions) !vk.Sampler {
+    return dev.createSampler(&.{
+        .flags = .{},
+        .mag_filter = opts.mag_filter,
+        .min_filter = opts.min_filter,
+        .mipmap_mode = opts.mipmap_mode,
+        .address_mode_u = opts.address_mode,
+        .address_mode_v = opts.address_mode,
+        .address_mode_w = opts.address_mode,
+        .mip_lod_bias = 0,
+        .anisotropy_enable = if (opts.anisotropy_enable) .true else .false,
+        .max_anisotropy = opts.max_anisotropy,
+        .compare_enable = if (opts.compare_enable) .true else .false,
+        .compare_op = opts.compare_op,
+        .min_lod = 0,
+        .max_lod = opts.max_lod,
+        .border_color = opts.border_color,
+        .unnormalized_coordinates = .false,
+    }, vkalloc);
+}
+
+/// Full-RGBA opaque blend attachment (no blending) shared by fullscreen passes.
+pub fn opaqueBlendAttachment() vk.PipelineColorBlendAttachmentState {
+    return .{
+        .blend_enable = .false,
+        .src_color_blend_factor = .one,
+        .dst_color_blend_factor = .zero,
+        .color_blend_op = .add,
+        .src_alpha_blend_factor = .one,
+        .dst_alpha_blend_factor = .zero,
+        .alpha_blend_op = .add,
+        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+    };
+}
+
+/// Vertex input with no vertex bindings or attributes (fullscreen-triangle passes).
+pub fn emptyVertexInput() vk.PipelineVertexInputStateCreateInfo {
+    return .{
+        .flags = .{},
+        .vertex_binding_description_count = 0,
+        .p_vertex_binding_descriptions = null,
+        .vertex_attribute_description_count = 0,
+        .p_vertex_attribute_descriptions = null,
+    };
+}
+
+/// Depth-stencil state with the given compare op, write flag, and optional depth test.
+pub fn depthStencilState(depth_test: bool, compare_op: vk.CompareOp, write_enable: bool) vk.PipelineDepthStencilStateCreateInfo {
+    return .{
+        .flags = .{},
+        .depth_test_enable = if (depth_test) .true else .false,
+        .depth_write_enable = if (write_enable) .true else .false,
+        .depth_compare_op = compare_op,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = undefined,
+        .back = undefined,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
 }
 
 const ShaderStage = struct {
@@ -908,6 +1000,19 @@ pub fn buildDepthOnlyPipeline(
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
     }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info);
+}
+
+pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {
+    return dev.createDescriptorSetLayout(&.{ .flags = flags, .binding_count = @intCast(bindings.len), .p_bindings = bindings.ptr }, vkalloc);
+}
+
+/// Destroys a per-frame descriptor pool and frees its descriptor-set array.
+pub fn destroyFrameDescriptorResources(dev: DeviceProxy, allocator: std.mem.Allocator, vkalloc: *const vk.AllocationCallbacks, pool: *vk.DescriptorPool, sets: *[]vk.DescriptorSet) void {
+    destroyIfValid(dev, pool, vkalloc);
+    if (sets.*.len > 0) {
+        allocator.free(sets.*);
+        sets.* = &.{};
+    }
 }
 
 pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator, vkalloc: *const vk.AllocationCallbacks, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {

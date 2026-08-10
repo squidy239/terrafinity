@@ -257,6 +257,22 @@ pub fn snapCenter(center: Vec3d, radius: f32, shadow_map_size: u32, basis: Light
     return center + right * @as(Vec3d, @splat(snapped_x - ls_x)) + up * @as(Vec3d, @splat(snapped_y - ls_y));
 }
 
+/// All 8 corners of an axis-aligned box. Shared by `depthRange` (the production range
+/// sweep) and the tests that verify it, so both iterate the same corner set.
+pub fn sceneCorners(scene_min: Vec3d, scene_max: Vec3d) [8]Vec3d {
+    var corners: [8]Vec3d = undefined;
+    var i: usize = 0;
+    for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
+        for ([2]f64{ scene_min[1], scene_max[1] }) |y| {
+            for ([2]f64{ scene_min[2], scene_max[2] }) |z| {
+                corners[i] = .{ x, y, z };
+                i += 1;
+            }
+        }
+    }
+    return corners;
+}
+
 /// Ortho depth range from the live scene AABB projected on the light axis, extended by
 /// the sphere radius so the whole receiver slice is covered. The projection matrix AND
 /// the compute cull use this same range: geometry outside it is neither drawn nor
@@ -267,15 +283,10 @@ pub fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: 
     const l: Vec3d = @floatCast(light_dir);
     var z_min: f64 = std.math.inf(f64);
     var z_max: f64 = -std.math.inf(f64);
-    inline for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
-        inline for ([2]f64{ scene_min[1], scene_max[1] }) |y| {
-            inline for ([2]f64{ scene_min[2], scene_max[2] }) |z| {
-                const corner: Vec3d = .{ x, y, z };
-                const proj = dot3d(corner - center, l);
-                z_min = @min(z_min, proj);
-                z_max = @max(z_max, proj);
-            }
-        }
+    for (sceneCorners(scene_min, scene_max)) |corner| {
+        const proj = dot3d(corner - center, l);
+        z_min = @min(z_min, proj);
+        z_max = @max(z_max, proj);
     }
     const r: f64 = radius;
     var near: f64 = @min(z_min, -r);
@@ -579,14 +590,10 @@ test "depth range covers scene and clamps at max_depth_range" {
 
     const range = depthRange(scene_min, scene_max, center, light_dir, 64.0, 4096.0);
     const l: Vec3d = @floatCast(light_dir);
-    inline for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
-        inline for ([2]f64{ scene_min[1], scene_max[1] }) |y| {
-            inline for ([2]f64{ scene_min[2], scene_max[2] }) |z| {
-                const proj = dot3d(Vec3d{ x, y, z } - center, l);
-                try testing.expect(proj >= @as(f64, range.near) - 1e-3);
-                try testing.expect(proj <= @as(f64, range.far) + 1e-3);
-            }
-        }
+    for (sceneCorners(scene_min, scene_max)) |corner| {
+        const proj = dot3d(corner - center, l);
+        try testing.expect(proj >= @as(f64, range.near) - 1e-3);
+        try testing.expect(proj <= @as(f64, range.far) + 1e-3);
     }
 
     // At low elevation the AABB spans a long light axis, forcing the clamp.

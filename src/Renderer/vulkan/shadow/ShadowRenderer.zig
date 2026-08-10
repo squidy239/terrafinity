@@ -83,9 +83,7 @@ comptime {
     if (@sizeOf(ShadowPushConstants) > 128) @compileError("ShadowPushConstants exceeds max push constant size");
 }
 
-const ParamBuffer = struct {
-    mapping: []align(16) u8,
-};
+const ParamBuffer = core.ParamBuffer;
 
 /// Owns the shadow depth texture array (1 layer per cascade), the depth-only pipeline,
 /// the per-frame ShadowParams storage buffer, the comparison sampler, the shared
@@ -219,32 +217,20 @@ fn createSharedSetLayout(self: *ShadowRenderer) !void {
         .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
         .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
     };
-    self.shadow_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{ .push_descriptor_bit = true }, .binding_count = bindings.len, .p_bindings = bindings[0..] }, &self.vk_ctx.vkalloc);
+    self.shadow_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{ .push_descriptor_bit = true }, &bindings);
 }
 
 fn createSampler(self: *ShadowRenderer) !void {
-    self.compare_sampler = try self.dev.createSampler(&.{
-        .flags = .{},
-        .mag_filter = .linear,
-        .min_filter = .linear,
+    self.compare_sampler = try core.createSampler(self.dev, &self.vk_ctx.vkalloc, .{
         .mipmap_mode = .nearest,
-        .address_mode_u = .clamp_to_border,
-        .address_mode_v = .clamp_to_border,
-        .address_mode_w = .clamp_to_border,
-        .mip_lod_bias = 0,
-        .anisotropy_enable = .false,
-        .max_anisotropy = 1.0,
-        .compare_enable = .true,
+        .address_mode = .clamp_to_border,
+        .compare_enable = true,
         .compare_op = .less_or_equal,
-        .min_lod = 0,
-        .max_lod = 0,
         .border_color = .float_opaque_white,
-        .unnormalized_coordinates = .false,
-    }, &self.vk_ctx.vkalloc);
+    });
 }
 
 fn createPipelineLayout(self: *ShadowRenderer) !void {
-    if (self.pipeline_layout != .null_handle) return;
     const pc_range: vk.PushConstantRange = .{
         .stage_flags = .{ .vertex_bit = true },
         .offset = 0,
@@ -426,13 +412,7 @@ fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
     const cmd = try self.single_time.begin();
 
     // These barriers span the whole array; makeImageBarrier2 only covers a single layer.
-    const full_range = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .depth_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = 0,
-        .layer_count = self.cascade_count,
-    };
+    const full_range = depthRange(0, self.cascade_count);
 
     const pre_barrier = core.imageBarrier2Range(self.image, full_range, .undefined, .transfer_dst_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true });
     core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&pre_barrier)[0..1]);
@@ -446,6 +426,17 @@ fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
     self.single_time.end(io, cmd) catch |err| {
         std.log.err("ShadowRenderer: failed to clear depth array: {any}", .{err});
         return err;
+    };
+}
+
+/// Depth-aspect subresource range over `layer_count` layers starting at `base_layer`.
+fn depthRange(base_layer: u32, layer_count: u32) vk.ImageSubresourceRange {
+    return .{
+        .aspect_mask = .{ .depth_bit = true },
+        .base_mip_level = 0,
+        .level_count = 1,
+        .base_array_layer = base_layer,
+        .layer_count = layer_count,
     };
 }
 
@@ -738,13 +729,7 @@ fn recordCascadePass(
     defer zone.end();
 
     const extent: vk.Extent2D = .{ .width = self.map_size, .height = self.map_size };
-    const layer_range = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .depth_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = cascade,
-        .layer_count = 1,
-    };
+    const layer_range = depthRange(cascade, 1);
 
     // Within-command-buffer dependency: this frame's fragment reads (opaque/transparent
     // sample the shadow array) precede the write to this cascade's layer. makeImageBarrier2
@@ -762,9 +747,7 @@ fn recordCascadePass(
     // handedness to the camera, so the exterior/occluder faces (top faces, sun-facing
     // sides) are the BACK faces there. Culling back faces would keep the cave
     // interior's faces instead and the surface would never reach the map.
-    self.dev.cmdSetCullMode(cmd_buffer, .{ .front_bit = true });
-    self.dev.cmdSetDepthCompareOp(cmd_buffer, .less_or_equal);
-    self.dev.cmdSetDepthWriteEnable(cmd_buffer, .true);
+    core.setDynamicState(self.dev, cmd_buffer, .{ .front_bit = true }, .less_or_equal, true);
     core.setViewportAndScissor(self.dev, cmd_buffer, extent);
 
     const mesh_desc_set = self.scene.mesh_data_descriptor_sets_per_frame[frame_idx];

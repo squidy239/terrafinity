@@ -37,6 +37,10 @@ pub const MaterialGpu = extern struct {
     volume_color: [3]f32 align(16),
 };
 
+/// Default material values (matching BlockMaterial's field defaults) used to fill a new
+/// material buffer before the pack's materials.zon overrides individual blocks.
+const default_material_gpu: MaterialGpu = .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } };
+
 comptime {
     if (@sizeOf(MaterialGpu) != 32) @compileError("MaterialGpu size mismatch with GLSL std430 layout (expected 32, got " ++ std.fmt.comptimePrint("{}", .{@sizeOf(MaterialGpu)}) ++ ")");
 }
@@ -54,23 +58,16 @@ pub const BlockMaterials = struct {
     descriptor_set: vk.DescriptorSet = .null_handle,
 
     pub fn load(self: *BlockMaterials, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
-        const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{selected_pack});
-        defer allocator.free(pack_path);
+        const pack = try textures.openPackBlocksDir(io, allocator, selected_pack);
+        defer allocator.free(pack.path);
+        defer pack.dir.close(io);
 
-        const is_default = std.mem.eql(u8, selected_pack, "default");
-
-        var pack_dir = if (is_default)
-            try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
-        else
-            try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
-        defer pack_dir.close(io);
-
-        if (is_default) {
+        if (pack.is_default) {
             const default_materials_zon = @import("materials").default;
-            if (pack_dir.openFile(io, "materials.zon", .{})) |f| {
+            if (pack.dir.openFile(io, "materials.zon", .{})) |f| {
                 f.close(io);
             } else |err| switch (err) {
-                error.FileNotFound => try pack_dir.writeFile(io, .{ .data = default_materials_zon, .sub_path = "materials.zon" }),
+                error.FileNotFound => try pack.dir.writeFile(io, .{ .data = default_materials_zon, .sub_path = "materials.zon" }),
                 else => |e| return e,
             }
         }
@@ -79,10 +76,10 @@ pub const BlockMaterials = struct {
         const count = indexer.count;
         const slice = try self.memory.cpuToGpu().alloc(MaterialGpu, count);
         errdefer self.memory.cpuToGpu().free(slice);
-        @memset(slice, .{ .density = 0.0, .fresnel_power = 5.0, .min_opacity = 0.15, .volume_color = .{ 1.0, 1.0, 1.0 } });
+        @memset(slice, default_material_gpu);
 
         var zon_file: ?std.Io.File = null;
-        if (pack_dir.openFile(io, "materials.zon", .{})) |f| {
+        if (pack.dir.openFile(io, "materials.zon", .{})) |f| {
             zon_file = f;
         } else |err| switch (err) {
             error.FileNotFound => std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{}),
@@ -114,15 +111,9 @@ pub const BlockMaterials = struct {
     }
 
     pub fn deinit(self: *BlockMaterials) void {
-        if (self.descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.descriptor_pool, &self.vk_ctx.vkalloc);
-            self.descriptor_pool = .null_handle;
-        }
+        core.destroyIfValid(self.dev, &self.descriptor_pool, &self.vk_ctx.vkalloc);
         if (self.mapped.len > 0) self.memory.cpuToGpu().free(self.mapped);
-        if (self.descriptor_set_layout != .null_handle) {
-            self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, &self.vk_ctx.vkalloc);
-            self.descriptor_set_layout = .null_handle;
-        }
+        core.destroyIfValid(self.dev, &self.descriptor_set_layout, &self.vk_ctx.vkalloc);
     }
 
     fn createDescriptorResources(self: *BlockMaterials) !void {
@@ -134,7 +125,7 @@ pub const BlockMaterials = struct {
                 .stage_flags = .{ .fragment_bit = true },
                 .p_immutable_samplers = null,
             };
-            self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
+            self.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);
         }
 
         if (self.descriptor_pool == .null_handle) {
