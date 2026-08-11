@@ -6,6 +6,7 @@ pub const Vulkan = @import("Renderer/vulkan/VulkanRenderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const ChunkPos = @import("world/World.zig").ChunkPos;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
+pub const Csm = @import("Renderer/vulkan/shadow/Csm.zig");
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
@@ -33,6 +34,9 @@ pub const FrameDrawContext = struct {
     output_image: vk.Image,
     output_view: vk.ImageView,
     swapchain_image_layout: *vk.ImageLayout,
+    /// Current player speed in blocks/frame-second; the shadow staleness padding reads
+    /// it live so a speed change cannot pop shadow boundaries.
+    player_speed: f32 = 0,
 };
 
 pub const VTable = struct {
@@ -85,4 +89,5 @@ pub const RenderOptions = struct {
     selected_pack: []const u8 = "default",
     inside_transparent: bool = false,
     sky: SkyConfig = .default(),
+    shadow: Csm.ShadowConfig = .{},
 };

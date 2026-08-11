@@ -1,4 +1,4 @@
-timeout 6s zig build run -Dtest_play &> /dev/null &
+timeout 6s zig build run -Dtest_play=5 &> /dev/null &
 sleep 5s
 mkdir -p /tmp/screenshots
 cosmic-screenshot --interactive=false --save-dir /tmp/screenshots > /dev/null

@@ -818,15 +818,23 @@ comptime {
     if (@sizeOf(MeshCandidate) != 32) @compileError("MeshCandidate size mismatch with GLSL layout (expected 32, got " ++ @typeName(@TypeOf(@sizeOf(MeshCandidate))) ++ ")");
 }
 
+/// Per-cascade shadow cull slots. The shadow raster draws up to `cascades_per_frame`
+/// cascades per frame, each culling and drawing its own box into a dedicated slot; this
+/// is the fixed upper bound on those slots so the buffers can size every frame's
+/// indirect/mesh regions at allocation time.
+pub const shadow_slot_count: u32 = 8;
+
 pub const CullCount = extern struct {
     opaque_count: u32,
     transparent_count: u32,
     opaque_face_count: u32,
     transparent_face_count: u32,
+    shadow_count: [shadow_slot_count]u32,
+    shadow_face_count: [shadow_slot_count]u32,
 };
 
 comptime {
-    if (@sizeOf(CullCount) != 16) @compileError("CullCount size mismatch");
+    if (@sizeOf(CullCount) != 80) @compileError("CullCount size mismatch");
 }
 
 pub const MeshData = extern struct {
@@ -845,7 +853,16 @@ pub const CandidateTransform = struct {
 };
 
 pub const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
+/// World blocks along one edge of a level-0 chunk; candidate AABB size = scale * this.
+pub const chunk_size_blocks: f32 = 32.0;
+/// Main-pass draw slots (opaque + transparent).
 pub const draw_type_count = 2;
+/// Total indirect slots per frame: the main passes plus one shadow slot per cascade
+/// that may be rasterized in a frame. Buffers and the cull dispatch must size everything
+/// by this, not by `draw_type_count`.
+pub const slot_count: u32 = draw_type_count + shadow_slot_count;
+/// The first shadow draw's slot offset, in draw units.
+pub const shadow_slot_base: u32 = draw_type_count;
 
 const PersistentCandidates = struct {
     buffer: vk.Buffer = .null_handle,
@@ -880,8 +897,8 @@ const PerFrameBuffers = struct {
 
     fn deinit(self: *PerFrameBuffers, allocator: std.mem.Allocator, cpu_to_gpu_gpa: std.mem.Allocator, gpu_only_gpa: std.mem.Allocator, draw_capacity: u32) void {
         for (self.items) |*item| {
-            if (item.indirect_draw_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
-            if (item.mesh_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * draw_type_count]);
+            if (item.indirect_draw_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * slot_count]);
+            if (item.mesh_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * slot_count]);
             if (item.count_slice.len > 0) gpu_only_gpa.free(item.count_slice);
             if (item.stats_slice.len > 0) cpu_to_gpu_gpa.free(item.stats_slice);
         }
@@ -911,6 +928,14 @@ pub const IndirectScene = struct {
 
     draw_capacity: u32 = 4096,
     max_draw_indirect_count: u32 = 65_535,
+
+    /// Version bumped on every candidate slot write/release; the render thread rescans
+    /// the live candidate AABB only when it changes. Written by streaming threads.
+    aabb_version: std.atomic.Value(u64) = .init(0),
+    /// Render-thread cache of the scan; never touched by writers.
+    aabb_min: [3]f64 = .{ 0, 0, 0 },
+    aabb_max: [3]f64 = .{ 0, 0, 0 },
+    aabb_scanned_version: u64 = std.math.maxInt(u64),
 
     mesh_data_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     mesh_data_descriptor_pool: vk.DescriptorPool = .null_handle,
@@ -978,6 +1003,11 @@ pub const IndirectScene = struct {
         }
     }
 
+    /// Marks the candidate buffer as changed so render-side AABB caches rescan.
+    fn bumpAabbVersion(self: *IndirectScene) void {
+        _ = self.aabb_version.fetchAdd(1, .monotonic);
+    }
+
     pub fn writeCandidate(self: *IndirectScene, gpu_index: u32, mesh: MeshBuffer, is_transparent: bool, transform: CandidateTransform) void {
         self.persistent.mapped[gpu_index] = .{
             .absolute_position = transform.absolute_position,
@@ -986,12 +1016,50 @@ pub const IndirectScene = struct {
             .is_transparent = if (is_transparent) 1 else 0,
             .face_offset = mesh.face_offset,
         };
+        self.bumpAabbVersion();
+    }
+
+    /// Deactivates a slot without freeing its index (retirement happens later).
+    pub fn markInactive(self: *IndirectScene, gpu_index: u32) void {
+        self.persistent.mapped[gpu_index].face_count = 0;
+        self.bumpAabbVersion();
     }
 
     pub fn releaseCandidate(self: *IndirectScene, io: std.Io, gpu_index: u32) void {
         self.persistent.mapped[gpu_index].face_count = 0;
         self.index_pool.freeIndex(io, gpu_index);
         self.tryShrinkMaxAllocatedIndex(gpu_index);
+        self.bumpAabbVersion();
+    }
+
+    /// World-space AABB of live opaque candidates, in absolute blocks. Lazily rescanned
+    /// on the render thread when the slot version changed. Transparent candidates are
+    /// excluded: the shadow cull skips them (they neither cast nor need occluder depth
+    /// range), so including them would only inflate the AABB and waste depth precision.
+    pub fn getSceneAABB(self: *IndirectScene) struct { min: [3]f64, max: [3]f64 } {
+        const version = self.aabb_version.load(.acquire);
+        if (version != self.aabb_scanned_version) {
+            var min: [3]f64 = .{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) };
+            var max: [3]f64 = .{ -std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
+            const count = self.max_allocated_index.load(.monotonic);
+            for (self.persistent.mapped[0..count]) |candidate| {
+                if (candidate.face_count == 0 or candidate.is_transparent != 0) continue;
+                const pos: [3]f64 = .{ candidate.absolute_position[0], candidate.absolute_position[1], candidate.absolute_position[2] };
+                const size: f64 = @as(f64, candidate.scale) * chunk_size_blocks;
+                inline for (0..3) |i| {
+                    min[i] = @min(min[i], pos[i]);
+                    max[i] = @max(max[i], pos[i] + size);
+                }
+            }
+            if (count == 0) {
+                min = .{ 0, 0, 0 };
+                max = .{ 0, 0, 0 };
+            }
+            self.aabb_min = min;
+            self.aabb_max = max;
+            self.aabb_scanned_version = version;
+        }
+        return .{ .min = self.aabb_min, .max = self.aabb_max };
     }
 
     pub fn ensureCapacity(self: *IndirectScene, io: std.Io, total_candidates: u32) !void {
@@ -1019,7 +1087,7 @@ pub const IndirectScene = struct {
         count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
         stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     ) void {
-        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
+        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
 
         const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
         const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
@@ -1044,12 +1112,20 @@ pub const IndirectScene = struct {
     }
 
     fn allocateIndirectBuffers(self: *IndirectScene, frame: *PerFrameData) !void {
-        const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, self.draw_capacity * draw_type_count);
-        const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, self.draw_capacity * draw_type_count);
+        const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, self.draw_capacity * slot_count);
+        const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, self.draw_capacity * slot_count);
         const count_slice = try self.memory.gpuOnly().alignedAlloc(CullCount, cull_buffer_alignment, 1);
         const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
 
         self.fillFrameData(frame, mesh_data_slice, indirect_draw_slice, count_slice, stats_slice);
+    }
+
+    /// Waits for device idle under the queue mutex so no in-flight submission races the
+    /// buffer reallocation, then frees. Shared by the draw-capacity and candidate growth paths.
+    fn waitIdleLocked(self: *IndirectScene, io: std.Io) !void {
+        self.vk_ctx.queue_mutex.lockUncancelable(io);
+        defer self.vk_ctx.queue_mutex.unlock(io);
+        _ = try self.dev.deviceWaitIdle();
     }
 
     fn growDrawCapacity(self: *IndirectScene, io: std.Io, min_capacity: u32) !void {
@@ -1072,9 +1148,7 @@ pub const IndirectScene = struct {
 
         std.log.info("IndirectScene: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
+        try self.waitIdleLocked(io);
 
         const old_draw_capacity = self.draw_capacity;
         const num_frames = self.frame_buffers.items.len;
@@ -1091,22 +1165,22 @@ pub const IndirectScene = struct {
         var allocated_frames: usize = 0;
         errdefer {
             for (0..allocated_frames) |i| {
-                self.memory.cpuToGpu().free(new_mesh_data[i][0 .. new_capacity * draw_type_count]);
-                self.memory.cpuToGpu().free(new_indirect[i][0 .. new_capacity * draw_type_count]);
+                self.memory.cpuToGpu().free(new_mesh_data[i][0 .. new_capacity * slot_count]);
+                self.memory.cpuToGpu().free(new_indirect[i][0 .. new_capacity * slot_count]);
                 self.memory.gpuOnly().free(new_count_slices[i]);
                 self.memory.cpuToGpu().free(new_stats_slices[i]);
             }
         }
         for (0..num_frames) |i| {
-            const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, new_capacity * draw_type_count);
+            const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, new_capacity * slot_count);
             errdefer self.memory.cpuToGpu().free(mesh_data_slice);
-            const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, new_capacity * draw_type_count);
+            const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, new_capacity * slot_count);
             errdefer self.memory.cpuToGpu().free(indirect_draw_slice);
             const count_slice = try self.memory.gpuOnly().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.gpuOnly().free(count_slice);
             const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.cpuToGpu().free(stats_slice);
-            stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0 };
+            stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
 
             new_mesh_data[i] = mesh_data_slice.ptr;
             new_indirect[i] = indirect_draw_slice.ptr;
@@ -1122,14 +1196,14 @@ pub const IndirectScene = struct {
             const old_stats = frame.stats_slice;
 
             if (old_draw_capacity > 0) {
-                @memcpy(new_mesh[0 .. old_draw_capacity * draw_type_count], old_mesh[0 .. old_draw_capacity * draw_type_count]);
-                @memcpy(new_ind[0 .. old_draw_capacity * draw_type_count], old_ind[0 .. old_draw_capacity * draw_type_count]);
+                @memcpy(new_mesh[0 .. old_draw_capacity * slot_count], old_mesh[0 .. old_draw_capacity * slot_count]);
+                @memcpy(new_ind[0 .. old_draw_capacity * slot_count], old_ind[0 .. old_draw_capacity * slot_count]);
             }
 
-            self.fillFrameData(frame, new_mesh[0 .. new_capacity * draw_type_count], new_ind[0 .. new_capacity * draw_type_count], new_count, new_stats);
+            self.fillFrameData(frame, new_mesh[0 .. new_capacity * slot_count], new_ind[0 .. new_capacity * slot_count], new_count, new_stats);
 
-            self.memory.cpuToGpu().free(old_mesh[0 .. old_draw_capacity * draw_type_count]);
-            self.memory.cpuToGpu().free(old_ind[0 .. old_draw_capacity * draw_type_count]);
+            self.memory.cpuToGpu().free(old_mesh[0 .. old_draw_capacity * slot_count]);
+            self.memory.cpuToGpu().free(old_ind[0 .. old_draw_capacity * slot_count]);
             self.memory.gpuOnly().free(old_count);
             self.memory.cpuToGpu().free(old_stats);
         }
@@ -1150,9 +1224,7 @@ pub const IndirectScene = struct {
         const new_capacity = old_capacity * 2;
         std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
 
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
+        try self.waitIdleLocked(io);
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
         @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
@@ -1195,7 +1267,7 @@ pub const IndirectScene = struct {
         defer zone.end();
         if (self.mesh_data_descriptor_set_layout == .null_handle) {
             const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
-            self.mesh_data_descriptor_set_layout = try self.dev.createDescriptorSetLayout(&.{ .flags = .{}, .binding_count = 1, .p_bindings = (&binding)[0..1] }, &self.vk_ctx.vkalloc);
+            self.mesh_data_descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);
         }
 
         const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight) };
@@ -1208,20 +1280,13 @@ pub const IndirectScene = struct {
         const info: vk.DescriptorBufferInfo = .{
             .buffer = self.frame_buffers.items[frame_idx].mesh_data,
             .offset = self.frame_buffers.items[frame_idx].mesh_data_offset,
-            .range = self.draw_capacity * draw_type_count * @sizeOf(MeshData),
+            .range = self.draw_capacity * slot_count * @sizeOf(MeshData),
         };
         self.dev.updateDescriptorSets((&core.bufferWriteDescriptorSet(self.mesh_data_descriptor_sets_per_frame[frame_idx], 0, .storage_buffer, &info))[0..1], null);
     }
 
     fn destroyMeshDataDescriptorResources(self: *IndirectScene) void {
-        if (self.mesh_data_descriptor_pool != .null_handle) {
-            self.dev.destroyDescriptorPool(self.mesh_data_descriptor_pool, &self.vk_ctx.vkalloc);
-            self.mesh_data_descriptor_pool = .null_handle;
-        }
-        if (self.mesh_data_descriptor_sets_per_frame.len > 0) {
-            self.allocator.free(self.mesh_data_descriptor_sets_per_frame);
-            self.mesh_data_descriptor_sets_per_frame = &.{};
-        }
+        core.destroyFrameDescriptorResources(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.mesh_data_descriptor_pool, &self.mesh_data_descriptor_sets_per_frame);
     }
 };
 

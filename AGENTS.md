@@ -741,3 +741,35 @@ Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen
 ### Filtered tests
 
 `zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.
+
+### Matrix layout for GLSL push/params (CSM gotcha)
+
+zm matrices (lookAtRH, orthographicRH, translation) store the translation in the **last column of each row**, and `v · M` (row-vector) is the row-major convention. When you `@bitCast(zm.data)` into a `[16]f32` and hand it to GLSL as `mat4`, the GLSL `M * v` computes `v · M_zm` (row-vector dotted with each row). This is fine for the camera view (eye at origin → last column is `(0,0,0,1)`, so `w` stays 1), but a light/projection matrix with a **non-origin eye has a non-(0,0,0,1) last column → GLSL `w` becomes a huge projective term** and the matrix is silently wrong.
+
+Fix that was adopted for CSM: build the light view-projection **directly in standard GLSL column-major layout** (translation in the 4th column, bottom row `(0,0,0,1)`, so `w == 1`):
+
+```
+flat[i*4+j] = M[i][j];   // column-major GLSL: M[c][r] = flat[c*4+r]
+row0: (s.x/r, u.x/r, f.x/fnf, 0)
+row1: (s.y/r, u.y/r, f.y/fnf, 0)
+row2: (s.z/r, u.z/r, f.z/fnf, 0)
+row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
+```
+where `s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = view_pos - center`. Vulkan NDC depth is `[0,1]`, so near maps to 0 and far maps to 1; do not apply the OpenGL `z * 0.5 + 0.5` conversion to shadow depth. Verify any such matrix with a CPU helper `out[i] = sum_j flat[j*4+i]·v[j]` against ground-truth light-space coordinates (the Csm tests do this). zm's `lookAtRH`/`orthographicRH` compose with the *opposite* product order to what a column-vector mental model expects; prefer building these matrices by hand.
+
+### Filtered tests (cont.)
+
+`-Dtest_filter` only sees tests from files reachable in the module import graph. A new `.zig` file with tests is invisible until something reachable from `main.zig` references it (e.g. `pub const Csm = @import(...)` in Renderer.zig, or a field type like `shadow: Csm.ShadowConfig` in RenderOptions forces its analysis).
+
+### Shader `#include` dependencies must be registered as build inputs
+
+glslc resolves `#include "shadow.glsl"` internally, but the Zig build graph only knows the inputs you declare with `addFileArg`/`addFileInput`. If an included file is not registered, editing it does NOT invalidate the glslc cache and the compiled SPIR-V goes stale while Zig source (e.g. `ShadowParams` layout) recompiles — a silent layout mismatch that breaks rendering (no shadows). Symptom: the `.spv` mtime predates your edit and `spirv-dis` shows the old member offsets.
+
+Fix: register every `#include` with `addFileInput` on the same `addSystemCommand`:
+
+```zig
+frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
+frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
+```
+
+`addFileInput` tracks the dependency without appending it to the glslc argv (unlike `addFileArg`). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` and cross-check against the Zig `@offsetOf` asserts.

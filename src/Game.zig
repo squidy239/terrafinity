@@ -65,6 +65,8 @@ debug_menu: struct {
     meshes: std.atomic.Value(u64) = .init(0),
     opaque_faces: std.atomic.Value(u64) = .init(0),
     transparent_faces: std.atomic.Value(u64) = .init(0),
+    shadow_faces: std.atomic.Value(u64) = .init(0),
+    shadow_cascade: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
 } = .{},
 
 const NodeData = struct {
@@ -496,10 +498,14 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     asyncs.end();
     const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
 
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
+    var frame_ctx_mut = frame_ctx;
+    frame_ctx_mut.player_speed = self.player.fly_speed.load(.unordered);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx_mut, player_pos);
 
     self.debug_menu.opaque_faces.store(self.vulkan_renderer.frame_stats.opaque_faces, .unordered);
     self.debug_menu.transparent_faces.store(self.vulkan_renderer.frame_stats.transparent_faces, .unordered);
+    self.debug_menu.shadow_faces.store(self.vulkan_renderer.frame_stats.shadow_faces, .unordered);
+    self.debug_menu.shadow_cascade.store(if (self.vulkan_renderer.frame_stats.shadow_cascade) |c| c else std.math.maxInt(u32), .unordered);
 
     try self.handleErrors();
 }
@@ -559,7 +565,7 @@ pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) voi
     self.group.async(io, wrapper.handler, .{ self, args });
 }
 
-pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.RelativePosition) void {
+pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position) void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleMouseMotion" });
     defer z.end();
     const sensitivity = self.getMouseSensitivity(io);

@@ -67,6 +67,12 @@ pub const RenderTarget = struct {
     view: vk.ImageView = .null_handle,
 };
 
+/// CPU mapping of a per-frame shader parameter storage buffer, used by the sky and
+/// shadow passes to upload their (16-byte aligned) param structs each frame.
+pub const ParamBuffer = struct {
+    mapping: []align(16) u8,
+};
+
 pub fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.AllocationCallbacks) void {
     const T = @TypeOf(handle.*);
     if (handle.* == .null_handle) return;
@@ -76,13 +82,14 @@ pub fn destroyIfValid(dev: DeviceProxy, handle: anytype, vkalloc: *const vk.Allo
         vk.Pipeline => dev.destroyPipeline(handle.*, vkalloc),
         vk.PipelineLayout => dev.destroyPipelineLayout(handle.*, vkalloc),
         vk.DescriptorSetLayout => dev.destroyDescriptorSetLayout(handle.*, vkalloc),
+        vk.DescriptorPool => dev.destroyDescriptorPool(handle.*, vkalloc),
         vk.Sampler => dev.destroySampler(handle.*, vkalloc),
         else => @compileError("destroyIfValid: unsupported type " ++ @typeName(T)),
     }
     handle.* = .null_handle;
 }
 
-fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory, vkalloc: *const vk.AllocationCallbacks) void {
+pub fn destroyImageWithMemory(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMemory, vkalloc: *const vk.AllocationCallbacks) void {
     if (image.* != .null_handle) {
         dev.destroyImage(image.*, vkalloc);
         image.* = .null_handle;
@@ -95,7 +102,26 @@ fn destroyIfValidImage(dev: DeviceProxy, image: *vk.Image, memory: *vk.DeviceMem
 
 pub fn destroyRenderTarget(dev: DeviceProxy, rt: *RenderTarget, vkalloc: *const vk.AllocationCallbacks) void {
     destroyIfValid(dev, &rt.view, vkalloc);
-    destroyIfValidImage(dev, &rt.image, &rt.memory, vkalloc);
+    destroyImageWithMemory(dev, &rt.image, &rt.memory, vkalloc);
+}
+
+/// Allocates device-local memory for `image_info`, creates the image, and binds them.
+/// Shared by single-target and layered (shadow array) image creation.
+pub fn allocateImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, image_info: *const vk.ImageCreateInfo) !struct { image: vk.Image, memory: vk.DeviceMemory } {
+    var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
+    dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = image_info, .plane_aspect = .{} }, &mem_reqs2);
+    const mem_reqs = mem_reqs2.memory_requirements;
+
+    const alloc_info: vk.MemoryAllocateInfo = .{
+        .allocation_size = mem_reqs.size,
+        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+    };
+    const memory = try dev.allocateMemory(&alloc_info, vkalloc);
+    errdefer dev.freeMemory(memory, vkalloc);
+    const image = try dev.createImage(image_info, vkalloc);
+    errdefer dev.destroyImage(image, vkalloc);
+    try dev.bindImageMemory(image, memory, 0);
+    return .{ .image = image, .memory = memory };
 }
 
 pub fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageAspectFlags) vk.ImageViewCreateInfo {
@@ -128,23 +154,12 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
         .sharing_mode = .exclusive,
         .samples = .{ .@"1_bit" = true },
     };
-    var mem_reqs2: vk.MemoryRequirements2 = .{
-        .memory_requirements = undefined,
-    };
-    dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
-    const mem_reqs = mem_reqs2.memory_requirements;
-
-    const alloc_info: vk.MemoryAllocateInfo = .{
-        .allocation_size = mem_reqs.size,
-        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
-    };
-
     var target: RenderTarget = .{};
     errdefer destroyRenderTarget(dev, &target, vkalloc);
 
-    target.memory = try dev.allocateMemory(&alloc_info, vkalloc);
-    target.image = try dev.createImage(&image_info, vkalloc);
-    try dev.bindImageMemory(target.image, target.memory, 0);
+    const alloc = try allocateImageWithMemory(dev, mem_props, vkalloc, &image_info);
+    target.memory = alloc.memory;
+    target.image = alloc.image;
     target.view = try dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), vkalloc);
     return target;
 }
@@ -405,15 +420,17 @@ const cpu_to_gpu_vtable = std.mem.Allocator.VTable{
 // Barriers
 // ---------------------------------------------------------------------------
 
-pub fn makeImageBarrier2(
+/// Image barrier over an explicit subresource range (any layers/mips), shared by the
+/// single-layer `makeImageBarrier2` and the layered shadow-array barriers.
+pub fn imageBarrier2Range(
     image: vk.Image,
+    range: vk.ImageSubresourceRange,
     old_layout: vk.ImageLayout,
     new_layout: vk.ImageLayout,
     src_stage: vk.PipelineStageFlags2,
     src_access: vk.AccessFlags2,
     dst_stage: vk.PipelineStageFlags2,
     dst_access: vk.AccessFlags2,
-    aspect: vk.ImageAspectFlags,
 ) vk.ImageMemoryBarrier2 {
     return .{
         .src_stage_mask = src_stage,
@@ -425,14 +442,36 @@ pub fn makeImageBarrier2(
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .image = image,
-        .subresource_range = .{
+        .subresource_range = range,
+    };
+}
+
+pub fn makeImageBarrier2(
+    image: vk.Image,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+    src_stage: vk.PipelineStageFlags2,
+    src_access: vk.AccessFlags2,
+    dst_stage: vk.PipelineStageFlags2,
+    dst_access: vk.AccessFlags2,
+    aspect: vk.ImageAspectFlags,
+) vk.ImageMemoryBarrier2 {
+    return imageBarrier2Range(
+        image,
+        .{
             .aspect_mask = aspect,
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
             .layer_count = 1,
         },
-    };
+        old_layout,
+        new_layout,
+        src_stage,
+        src_access,
+        dst_stage,
+        dst_access,
+    );
 }
 
 pub fn makeBufferBarrier2(
@@ -550,6 +589,22 @@ pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load
     };
 }
 
+/// Depth attachment cleared to an explicit depth; used by the shadow pass (standard
+/// depth clears to far = 1.0, unlike the main reversed-Z targets).
+pub fn renderingAttachmentDepthClear(view: vk.ImageView, layout: vk.ImageLayout, clear_depth: f32) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = view,
+        .image_layout = layout,
+        .resolve_mode = .{},
+        .resolve_image_view = .null_handle,
+        .resolve_image_layout = .undefined,
+        .load_op = .clear,
+        .store_op = .store,
+        .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
+    };
+}
+
 pub fn renderingInfo(
     extent: vk.Extent2D,
     color_attachments: []const vk.RenderingAttachmentInfo,
@@ -584,6 +639,14 @@ pub fn setViewportAndScissor(dev: DeviceProxy, cmd: vk.CommandBuffer, extent: vk
         .offset = .{ .x = 0, .y = 0 },
         .extent = extent,
     })[0..1]);
+}
+
+/// Sets the dynamic cull mode, depth compare op, and depth write enable together.
+/// These are always bound dynamically because every pass sets the same three states.
+pub fn setDynamicState(dev: DeviceProxy, cmd: vk.CommandBuffer, cull_mode: vk.CullModeFlags, compare_op: vk.CompareOp, depth_write: bool) void {
+    dev.cmdSetCullMode(cmd, cull_mode);
+    dev.cmdSetDepthCompareOp(cmd, compare_op);
+    dev.cmdSetDepthWriteEnable(cmd, if (depth_write) .true else .false);
 }
 
 /// GPU-immediate helper: allocate a one-shot command buffer from a shared transient pool,
@@ -674,35 +737,108 @@ pub fn createShaderModule(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbac
     }, vkalloc);
 }
 
-pub fn buildGraphicsPipeline(
+/// Sampler options that vary between call sites; the remaining ~8 fields are fixed by
+/// the common use case (clamped sampling of an image for a fragment shader).
+pub const SamplerOptions = struct {
+    mag_filter: vk.Filter = .linear,
+    min_filter: vk.Filter = .linear,
+    mipmap_mode: vk.SamplerMipmapMode = .linear,
+    address_mode: vk.SamplerAddressMode = .clamp_to_edge,
+    compare_enable: bool = false,
+    compare_op: vk.CompareOp = .always,
+    anisotropy_enable: bool = false,
+    max_anisotropy: f32 = 1.0,
+    max_lod: f32 = 0,
+    border_color: vk.BorderColor = .float_opaque_black,
+};
+
+pub fn createSampler(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, opts: SamplerOptions) !vk.Sampler {
+    return dev.createSampler(&.{
+        .flags = .{},
+        .mag_filter = opts.mag_filter,
+        .min_filter = opts.min_filter,
+        .mipmap_mode = opts.mipmap_mode,
+        .address_mode_u = opts.address_mode,
+        .address_mode_v = opts.address_mode,
+        .address_mode_w = opts.address_mode,
+        .mip_lod_bias = 0,
+        .anisotropy_enable = if (opts.anisotropy_enable) .true else .false,
+        .max_anisotropy = opts.max_anisotropy,
+        .compare_enable = if (opts.compare_enable) .true else .false,
+        .compare_op = opts.compare_op,
+        .min_lod = 0,
+        .max_lod = opts.max_lod,
+        .border_color = opts.border_color,
+        .unnormalized_coordinates = .false,
+    }, vkalloc);
+}
+
+/// Full-RGBA opaque blend attachment (no blending) shared by fullscreen passes.
+pub fn opaqueBlendAttachment() vk.PipelineColorBlendAttachmentState {
+    return .{
+        .blend_enable = .false,
+        .src_color_blend_factor = .one,
+        .dst_color_blend_factor = .zero,
+        .color_blend_op = .add,
+        .src_alpha_blend_factor = .one,
+        .dst_alpha_blend_factor = .zero,
+        .alpha_blend_op = .add,
+        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+    };
+}
+
+/// Vertex input with no vertex bindings or attributes (fullscreen-triangle passes).
+pub fn emptyVertexInput() vk.PipelineVertexInputStateCreateInfo {
+    return .{
+        .flags = .{},
+        .vertex_binding_description_count = 0,
+        .p_vertex_binding_descriptions = null,
+        .vertex_attribute_description_count = 0,
+        .p_vertex_attribute_descriptions = null,
+    };
+}
+
+/// Depth-stencil state with the given compare op, write flag, and optional depth test.
+pub fn depthStencilState(depth_test: bool, compare_op: vk.CompareOp, write_enable: bool) vk.PipelineDepthStencilStateCreateInfo {
+    return .{
+        .flags = .{},
+        .depth_test_enable = if (depth_test) .true else .false,
+        .depth_write_enable = if (write_enable) .true else .false,
+        .depth_compare_op = compare_op,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = undefined,
+        .back = undefined,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
+}
+
+const ShaderStage = struct {
+    flags: vk.ShaderStageFlags,
+    module: vk.ShaderModule,
+};
+
+/// Shared graphics-pipeline builder. The stage list and rasterization state are chosen
+/// by the caller; empty `color_formats`/`blend_attachments` yields a depth-only pipeline.
+fn createGraphicsPipeline(
     dev: DeviceProxy,
     vkalloc: *const vk.AllocationCallbacks,
     pipeline_creation_feedback: bool,
-    vert_module: vk.ShaderModule,
-    frag_module: vk.ShaderModule,
+    comptime num_stages: usize,
+    stages: []const ShaderStage,
     color_formats: []const vk.Format,
     depth_format: vk.Format,
     depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
     blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    prsci: vk.PipelineRasterizationStateCreateInfo,
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "buildGraphicsPipeline" });
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipeline" });
     defer zone.end();
     const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = .triangle_list, .primitive_restart_enable = .false };
     const pvsci: vk.PipelineViewportStateCreateInfo = .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
-    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
     const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
         .rasterization_samples = .{ .@"1_bit" = true },
         .sample_shading_enable = .false,
@@ -710,13 +846,16 @@ pub fn buildGraphicsPipeline(
         .alpha_to_coverage_enable = .false,
         .alpha_to_one_enable = .false,
     };
-    const pcbsci: vk.PipelineColorBlendStateCreateInfo = .{
-        .logic_op_enable = .false,
-        .logic_op = .copy,
-        .attachment_count = @intCast(blend_attachments.len),
-        .p_attachments = blend_attachments.ptr,
-        .blend_constants = .{ 0, 0, 0, 0 },
-    };
+    var pcbsci: vk.PipelineColorBlendStateCreateInfo = undefined;
+    if (blend_attachments.len > 0) {
+        pcbsci = .{
+            .logic_op_enable = .false,
+            .logic_op = .copy,
+            .attachment_count = @intCast(blend_attachments.len),
+            .p_attachments = blend_attachments.ptr,
+            .blend_constants = .{ 0, 0, 0, 0 },
+        };
+    }
 
     var dyn_states_buf: [5]vk.DynamicState = undefined;
     var dyn_states = std.ArrayList(vk.DynamicState).initBuffer(&dyn_states_buf);
@@ -729,21 +868,20 @@ pub fn buildGraphicsPipeline(
     }
     const dyn: vk.PipelineDynamicStateCreateInfo = .{ .flags = .{}, .dynamic_state_count = @intCast(dyn_states.items.len), .p_dynamic_states = dyn_states.items.ptr };
 
-    const pssci: [2]vk.PipelineShaderStageCreateInfo = .{
-        shaderStageCreateInfo(.{ .vertex_bit = true }, vert_module),
-        shaderStageCreateInfo(.{ .fragment_bit = true }, frag_module),
-    };
+    var pssci: [num_stages]vk.PipelineShaderStageCreateInfo = undefined;
+    for (stages, 0..) |stage, i| pssci[i] = shaderStageCreateInfo(stage.flags, stage.module);
 
     var pipeline_feedback: vk.PipelineCreationFeedback = .{ .flags = .{}, .duration = 0 };
-    var stage_feedbacks: [2]vk.PipelineCreationFeedback = .{ .{ .flags = .{}, .duration = 0 }, .{ .flags = .{}, .duration = 0 } };
-    var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{ .p_pipeline_creation_feedback = &pipeline_feedback, .pipeline_stage_creation_feedback_count = 2, .p_pipeline_stage_creation_feedbacks = &stage_feedbacks };
+    var stage_feedbacks: [num_stages]vk.PipelineCreationFeedback = undefined;
+    for (0..num_stages) |i| stage_feedbacks[i] = .{ .flags = .{}, .duration = 0 };
+    var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{ .p_pipeline_creation_feedback = &pipeline_feedback, .pipeline_stage_creation_feedback_count = num_stages, .p_pipeline_stage_creation_feedbacks = &stage_feedbacks };
 
     const stencil_format: vk.Format = if (depth_format == .d32_sfloat_s8_uint or depth_format == .d24_unorm_s8_uint) depth_format else .undefined;
     var rendering_info: vk.PipelineRenderingCreateInfo = .{
         .p_next = null,
         .view_mask = 0,
         .color_attachment_count = @intCast(color_formats.len),
-        .p_color_attachment_formats = color_formats.ptr,
+        .p_color_attachment_formats = if (color_formats.len > 0) color_formats.ptr else null,
         .depth_attachment_format = depth_format,
         .stencil_attachment_format = stencil_format,
     };
@@ -754,7 +892,7 @@ pub fn buildGraphicsPipeline(
     const gpci: vk.GraphicsPipelineCreateInfo = .{
         .flags = .{},
         .p_next = @ptrCast(&rendering_info),
-        .stage_count = 2,
+        .stage_count = num_stages,
         .p_stages = &pssci,
         .p_vertex_input_state = &vertex_input_info,
         .p_input_assembly_state = &piasci,
@@ -763,7 +901,7 @@ pub fn buildGraphicsPipeline(
         .p_rasterization_state = &prsci,
         .p_multisample_state = &pmsci,
         .p_depth_stencil_state = ds_ptr,
-        .p_color_blend_state = &pcbsci,
+        .p_color_blend_state = if (blend_attachments.len > 0) &pcbsci else null,
         .p_dynamic_state = &dyn,
         .layout = layout,
         .render_pass = .null_handle,
@@ -784,6 +922,86 @@ pub fn buildGraphicsPipeline(
     }
 
     return pipeline;
+}
+
+/// Colour pipeline: vertex+fragment stages, an optional depth stencil state, and a
+/// colour blend attachment per `blend_attachments` entry.
+pub fn buildGraphicsPipeline(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    frag_module: vk.ShaderModule,
+    color_formats: []const vk.Format,
+    depth_format: vk.Format,
+    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
+    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+) !vk.Pipeline {
+    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
+        .front_face = .clockwise,
+        .depth_bias_enable = .false,
+        .depth_bias_constant_factor = 0,
+        .depth_bias_clamp = 0,
+        .depth_bias_slope_factor = 0,
+        .line_width = 1,
+    };
+    return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 2, &.{
+        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
+        .{ .flags = .{ .fragment_bit = true }, .module = frag_module },
+    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info);
+}
+
+/// Depth-only pipeline: a single vertex stage, no colour attachments, standard (not
+/// reversed-Z) depth with LESS_OR_EQUAL, optional depth clamp and slope bias. Used by
+/// the shadow pass; cull mode is set dynamically via cmdSetCullMode.
+pub fn buildDepthOnlyPipeline(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    depth_format: vk.Format,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    depth_bias_constant: f32,
+    depth_bias_slope: f32,
+    depth_bias_clamp: f32,
+    depth_clamp: bool,
+) !vk.Pipeline {
+    const prsci: vk.PipelineRasterizationStateCreateInfo = .{
+        .depth_clamp_enable = if (depth_clamp) .true else .false,
+        .rasterizer_discard_enable = .false,
+        .polygon_mode = .fill,
+        .cull_mode = .{}, // Set dynamically via cmdSetCullMode
+        .front_face = .clockwise,
+        .depth_bias_enable = .true,
+        .depth_bias_constant_factor = depth_bias_constant,
+        .depth_bias_clamp = depth_bias_clamp,
+        .depth_bias_slope_factor = depth_bias_slope,
+        .line_width = 1,
+    };
+    const depth_stencil = depthStencilState(true, .less_or_equal, true);
+    return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
+        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info);
+}
+
+pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {
+    return dev.createDescriptorSetLayout(&.{ .flags = flags, .binding_count = @intCast(bindings.len), .p_bindings = bindings.ptr }, vkalloc);
+}
+
+/// Destroys a per-frame descriptor pool and frees its descriptor-set array.
+pub fn destroyFrameDescriptorResources(dev: DeviceProxy, allocator: std.mem.Allocator, vkalloc: *const vk.AllocationCallbacks, pool: *vk.DescriptorPool, sets: *[]vk.DescriptorSet) void {
+    destroyIfValid(dev, pool, vkalloc);
+    if (sets.*.len > 0) {
+        allocator.free(sets.*);
+        sets.* = &.{};
+    }
 }
 
 pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator, vkalloc: *const vk.AllocationCallbacks, pool: *vk.DescriptorPool, layout: vk.DescriptorSetLayout, sets: *[]vk.DescriptorSet, pool_sizes: []const vk.DescriptorPoolSize) !void {

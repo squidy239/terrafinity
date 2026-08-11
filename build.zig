@@ -15,26 +15,32 @@ pub fn build(b: *std.Build) void {
     const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
+    const shader_include = b.path("src/Renderer/vulkan/shadow").getPath(b);
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
         if (optimize == .Debug) "-g" else "-Werror",
         "-Werror",
+        "-I",
+        shader_include,
         "-o",
     };
 
     const vert_cmd = b.addSystemCommand(&shader_cmd);
     const vert_spv = vert_cmd.addOutputFileArg("vertexshader.spv");
     vert_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/vertexshader.vert"));
+    vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
 
     const frag_cmd = b.addSystemCommand(&shader_cmd);
     const frag_spv = frag_cmd.addOutputFileArg("fragshader.spv");
     frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
+    frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 
     const trans_frag_cmd = b.addSystemCommand(&shader_cmd);
     const trans_frag_spv = trans_frag_cmd.addOutputFileArg("transparent_frag.spv");
     trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/transparent_frag.frag"));
+    trans_frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 
     const comp_vert_cmd = b.addSystemCommand(&shader_cmd);
     const comp_vert_spv = comp_vert_cmd.addOutputFileArg("composite_vert.spv");
@@ -55,6 +61,11 @@ pub fn build(b: *std.Build) void {
     const sky_frag_cmd = b.addSystemCommand(&shader_cmd);
     const sky_frag_spv = sky_frag_cmd.addOutputFileArg("sky_frag.spv");
     sky_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.frag"));
+
+    const shadow_vert_cmd = b.addSystemCommand(&shader_cmd);
+    const shadow_vert_spv = shadow_vert_cmd.addOutputFileArg("shadow_vert.spv");
+    shadow_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/shadow/shadow.vert"));
+    shadow_vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -79,6 +90,7 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&cull_cmd.step);
     exe.step.dependOn(&sky_vert_cmd.step);
     exe.step.dependOn(&sky_frag_cmd.step);
+    exe.step.dependOn(&shadow_vert_cmd.step);
 
     exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
     exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
@@ -88,6 +100,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
     exe.root_module.addAnonymousImport("sky_vert_spv", .{ .root_source_file = sky_vert_spv });
     exe.root_module.addAnonymousImport("sky_frag_spv", .{ .root_source_file = sky_frag_spv });
+    exe.root_module.addAnonymousImport("shadow_vert_spv", .{ .root_source_file = shadow_vert_spv });
 
     for (generator_sources) |generator_source| {
         const generator = b.addLibrary(.{

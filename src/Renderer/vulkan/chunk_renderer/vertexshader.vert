@@ -1,6 +1,8 @@
 #version 460 core
 #extension GL_ARB_gpu_shader_int64 : require
 
+#include "face_decode.glsl"
+
 struct PushConstants {
     mat4 projview;
     vec3 sun_dir;
@@ -31,42 +33,6 @@ layout(std430, set = 1, binding = 0) readonly buffer MeshDataBuffer {
     MeshData meshes[];
 };
 
-const uint CHUNK_SIZE = 32u;
-const uint COORD_MASK = CHUNK_SIZE - 1u;
-
-uint decodeBlockType(uint64_t val) {
-    return uint(val & 0xFFFFu);
-}
-
-uvec3 decodeLengths(uint64_t val) {
-    return uvec3(
-        uint(val >> 26u) & COORD_MASK,
-        uint(val >> 21u) & COORD_MASK,
-        uint(val >> 16u) & COORD_MASK
-    );
-}
-
-uvec3 decodePosition(uint64_t val) {
-    return uvec3(
-        uint(val >> 41u) & COORD_MASK,
-        uint(val >> 36u) & COORD_MASK,
-        uint(val >> 31u) & COORD_MASK
-    );
-}
-
-uint decodeSide(uint64_t val) {
-    return uint(val >> 46u) & 0x7u;
-}
-
-const vec3 CUBE_FACES[6][4] = {
-    { vec3( 0.5, -0.5,  0.5), vec3( 0.5,  0.5,  0.5), vec3( 0.5,  0.5, -0.5), vec3( 0.5, -0.5, -0.5) },
-    { vec3(-0.5, -0.5, -0.5), vec3(-0.5,  0.5, -0.5), vec3(-0.5,  0.5,  0.5), vec3(-0.5, -0.5,  0.5) },
-    { vec3(-0.5,  0.5,  0.5), vec3(-0.5,  0.5, -0.5), vec3( 0.5,  0.5, -0.5), vec3( 0.5,  0.5,  0.5) },
-    { vec3(-0.5, -0.5, -0.5), vec3(-0.5, -0.5,  0.5), vec3( 0.5, -0.5,  0.5), vec3( 0.5, -0.5, -0.5) },
-    { vec3(-0.5, -0.5,  0.5), vec3(-0.5,  0.5,  0.5), vec3( 0.5,  0.5,  0.5), vec3( 0.5, -0.5,  0.5) },
-    { vec3(-0.5,  0.5, -0.5), vec3(-0.5, -0.5, -0.5), vec3( 0.5, -0.5, -0.5), vec3( 0.5,  0.5, -0.5) }
-};
-
 float bouncingMod(float x, float n) {
     x = abs(x);
     float cycle     = floor(x / n);
@@ -90,7 +56,7 @@ void main() {
     side          = decodeSide(val);
     block_array_layer = block_type_local;
 
-    vec3 coords = CUBE_FACES[side][local_vertex];
+    vec3 coords = cube_faces[side][local_vertex];
     coords += ceil(coords) * lengths;
     coords *= scale;
     vec3 local_frag_coords = vec3(local_pos) * scale + coords;
