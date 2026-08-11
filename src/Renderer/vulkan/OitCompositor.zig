@@ -46,8 +46,6 @@ pub const OitCompositor = struct {
         core.destroyIfValid(self.dev, &self.sampler, &self.vk_ctx.vkalloc);
     }
 
-    /// Destroys everything except the sampler (which lives for the compositor's lifetime):
-    /// the composition pipeline/layout, descriptor resources, and the three OIT targets.
     fn destroyTransientResources(self: *OitCompositor) void {
         core.destroyIfValid(self.dev, &self.composition_pipeline, &self.vk_ctx.vkalloc);
         core.destroyIfValid(self.dev, &self.composition_layout, &self.vk_ctx.vkalloc);

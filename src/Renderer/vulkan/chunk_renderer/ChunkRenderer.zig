@@ -894,10 +894,6 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
         // inside the same total_candidates > 0 block. The shadow raster below is gated
         // on the identical conditions, so it never draws a count that was not reset.
         if (shadowActive(ctx)) |shadow| {
-            // One cull per refreshed cascade against its own box and depth range, into its
-            // own shadow slot. reset_count=false is safe only because the main cull just
-            // zeroed the WHOLE CullCount (including all shadow counts) and these dispatches
-            // run inside the same total_candidates > 0 block.
             const cascade_count = shadow.frameCascadeCount();
             for (0..cascade_count) |slot| {
                 self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, 1 + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);

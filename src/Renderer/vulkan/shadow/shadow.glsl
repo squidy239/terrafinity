@@ -110,7 +110,8 @@ float sampleShadowCascade(int cascade, vec3 p) {
 }
 
 // Returns the shadow factor in [0,1]: 1.0 fully lit, 0.0 fully shadowed.
-// `normal` and `ndotl` feed the normal-offset bias; ndotl is dot(normal, sun_dir).
+// `normal` and `ndotl` feed the normal-offset bias; ndotl is the Lambert term
+// dot(normal, -sun_dir) passed by the callers.
 float sampleShadow(vec3 pos_rel, vec3 normal, float ndotl) {
     uint count = shadow_params.cascade_count;
     if (count == 0u) return 1.0;
@@ -129,8 +130,9 @@ float sampleShadow(vec3 pos_rel, vec3 normal, float ndotl) {
     // Blend band: cross-fade with the next cascade around each split so the texel size
     // change does not show a hard seam. The cross-fade completes exactly at the split
     // (t = 1), matching the point where shadowCascadeIndex flips over to the next
-    // cascade, so the factor is continuous across the boundary.
-    if (cascade < int(count) - 1) {
+    // cascade, so the factor is continuous across the boundary. Skipped at blend 0
+    // (smoothstep's edges would coincide, which is undefined).
+    if (cascade < int(count) - 1 && shadow_params.blend_fraction > 0.0) {
         float split = shadow_params.split_radius[cascade];
         float band = split * shadow_params.blend_fraction;
         float t = smoothstep(split - band, split, d);

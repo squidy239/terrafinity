@@ -985,18 +985,7 @@ pub fn buildDepthOnlyPipeline(
         .depth_bias_slope_factor = depth_bias_slope,
         .line_width = 1,
     };
-    const depth_stencil: vk.PipelineDepthStencilStateCreateInfo = .{
-        .flags = .{},
-        .depth_test_enable = .true,
-        .depth_write_enable = .true,
-        .depth_compare_op = .less_or_equal,
-        .depth_bounds_test_enable = .false,
-        .stencil_test_enable = .false,
-        .front = undefined,
-        .back = undefined,
-        .min_depth_bounds = 0.0,
-        .max_depth_bounds = 1.0,
-    };
+    const depth_stencil = depthStencilState(true, .less_or_equal, true);
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
     }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info);
