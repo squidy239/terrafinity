@@ -77,7 +77,7 @@ pub const ShadowConfig = struct {
     /// Fraction of each cascade's split radius over which it cross-fades into the next
     /// cascade, so the texel-resolution change does not show a seam. The band runs from
     /// split*(1 - cascade_blend) up to the split itself.
-    cascade_blend: f32 = 0,
+    cascade_blend: f32 = 1,
     /// Fraction of `max_shadow_distance` at which the outermost cascade begins fading to
     /// fully lit (reaching lit at `max_shadow_distance`), hiding the shadow map's edge.
     last_cascade_fade: f32 = 0.85,
