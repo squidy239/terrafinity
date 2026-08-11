@@ -902,7 +902,7 @@ test "cube benchmark" {
 
     const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
-        13107,
+        13104,
         .{ .name = "benchmark chunk cache" },
     );
     errdefer {
@@ -912,7 +912,7 @@ test "cube benchmark" {
 
     const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
         allocator,
-        819,
+        816,
         .{ .name = "benchmark grid cache" },
     );
     errdefer {
