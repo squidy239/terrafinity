@@ -88,6 +88,8 @@ pub const DefaultGenerator = struct {
 
     pub const Params = struct {
         terrain_block_randomness: f32,
+        slope_stone_bias: f32,
+        erosion_strength: f32,
         terrain_noise: Noise.Noise(f32),
         terrain_noise_balance: f32,
         large_terrain_noise: Noise.Noise(f32),
@@ -121,6 +123,8 @@ pub const DefaultGenerator = struct {
 
         pub const default = Params{
             .terrain_block_randomness = 0.25,
+            .slope_stone_bias = 0.3,
+            .erosion_strength = 0.2,
             .terrain_noise = .{
                 .frequency = 0.002,
                 .noise_type = .perlin,
@@ -218,7 +222,7 @@ pub const DefaultGenerator = struct {
 
     const GenContext = struct { params: *const Params, rand: *std.Random, chunk_scale: f32 };
 
-    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32 };
+    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_stone_bias: f32 };
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
@@ -272,6 +276,13 @@ pub const DefaultGenerator = struct {
         for (heights, chunk_blocks) |heights_row, *col| {
             const th: FloatV = heights_row;
             const th_arr: [ChunkSize]f32 = th;
+            // Approximate the column-to-column height differential with one neighbor; normalizing
+            // by the rock depth ties "full bias" to cliff-scale drops.
+            var slope_row: [ChunkSize]f32 = undefined;
+            for (0..ChunkSize - 1) |z| {
+                slope_row[z] = @min(@abs(th_arr[z] - th_arr[z + 1]) / depth_threshold, 1.0);
+            }
+            slope_row[ChunkSize - 1] = slope_row[ChunkSize - 2];
             for (block_height_vec, col) |bh, *row| {
                 const diff: FloatV = th - @as(FloatV, @splat(@as(f32, @floatFromInt(bh))));
                 const below_depth: BoolV = diff >= @as(FloatV, @splat(depth_threshold));
@@ -300,7 +311,7 @@ pub const DefaultGenerator = struct {
                 while (surface_bits != 0) {
                     const z: usize = @ctz(surface_bits);
                     surface_bits &= surface_bits - 1;
-                    row[z] = randGround(ctx.rand, th_arr[z] * terrain_scales[@intFromBool(th_arr[z] <= sea_level_f)], .{ .block_height = bh, .sea_level = sea_level, .block_randomness = ctx.params.terrain_block_randomness, .one_d_terrain_scale = one_d_terrain_scale });
+                    row[z] = randGround(ctx.rand, th_arr[z] * terrain_scales[@intFromBool(th_arr[z] <= sea_level_f)], .{ .block_height = bh, .sea_level = sea_level, .block_randomness = ctx.params.terrain_block_randomness, .one_d_terrain_scale = one_d_terrain_scale, .slope = slope_row[z], .slope_stone_bias = ctx.params.slope_stone_bias });
                 }
             }
         }
@@ -352,7 +363,8 @@ pub const DefaultGenerator = struct {
         const grass_threshold: f32 = 0.25;
         const dirt_threshold: f32 = 0.4;
         const stone_threshold: f32 = 0.6;
-        const r = std.math.lerp(height_percent * ctx.one_d_terrain_scale, rand.float(f32), ctx.block_randomness);
+        // Steep slopes wash away grass and snow, exposing dirt and stone.
+        const r = std.math.lerp(height_percent * ctx.one_d_terrain_scale, rand.float(f32), ctx.block_randomness) + ctx.slope * ctx.slope_stone_bias;
         return if (ctx.block_height < ctx.sea_level) Block.dirt else if (r < grass_threshold) Block.grass else if (r < dirt_threshold) Block.dirt else if (r < stone_threshold) Block.stone else Block.snow;
     }
 
@@ -424,6 +436,23 @@ pub const DefaultGenerator = struct {
             height[x] = height_row;
         }
         heights_zone.end();
+
+        const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosion" });
+        // Erosion: columns steeper than their neighbor shed height, rounding peaks and ridges.
+        var erode_amount: [ChunkSize][ChunkSize]f32 = undefined;
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |z| {
+                const nz = height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
+                const nx = height[if (x + 1 < ChunkSize) x + 1 else x - 1][z];
+                erode_amount[x][z] = @max(@abs(height[x][z] - nz), @abs(height[x][z] - nx));
+            }
+        }
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |z| {
+                height[x][z] -= erode_amount[x][z] * params.erosion_strength;
+            }
+        }
+        erosion_zone.end();
         return height;
     }
 
@@ -512,6 +541,8 @@ comptime {
 const field_specs = .{
     .seed = .{ .is_seed = true },
     .terrain_block_randomness = .{ .min = 0, .max = 1 },
+    .slope_stone_bias = .{ .min = 0, .max = 1 },
+    .erosion_strength = .{ .min = 0, .max = 1 },
     .terrain_min = .{ .min = -100000, .max = 0 },
     .terrain_max = .{ .min = 0, .max = 100000 },
     .sea_level = .{ .min = -1000, .max = 1000 },

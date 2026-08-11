@@ -1012,7 +1012,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
                 },
                 .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
-            .pos = .{ 0, 100, 0 },
+            .pos = .{ 0, 1000, 0 },
             .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },
