@@ -395,7 +395,10 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .info = &generator_info,
     .create = &generator_create,
     .get_source = &generator_get_source,
-    .config_default = &generator_config_default,
+    .preset_count = &generator_preset_count,
+    .preset_name = &generator_preset_name,
+    .preset_default_index = &generator_preset_default_index,
+    .preset_config = &generator_preset_config,
     .config_from_zon = &generator_config_from_zon,
     .config_set_seeds = &generator_config_set_seeds,
 };
@@ -433,8 +436,43 @@ pub fn generator_info() callconv(.c) *const generator_api.GeneratorInfo {
     return &generator_info_data;
 }
 
-pub fn generator_config_default(allocator: *const std.mem.Allocator) callconv(.c) ?*generator_api.ConfigTree {
-    return generator_api.fromStruct(Generator.Params, allocator.*, &Generator.Params.default, field_specs) catch null;
+const planet_presets = [_]Generator.Params{
+    .default,
+    blk: {
+        var p = Generator.Params.default;
+        // Dense swarm of small worlds.
+        p.density = 80;
+        p.box_size = 2048;
+        p.max_radius = 384;
+        break :blk p;
+    },
+    blk: {
+        var p = Generator.Params.default;
+        // A few huge worlds.
+        p.density = 15;
+        p.box_size = 8192;
+        p.max_radius = 1024;
+        break :blk p;
+    },
+};
+const planet_preset_names = [_][]const u8{ "Default", "Dense Worlds", "Giant Worlds" };
+const planet_preset_default: usize = 0;
+
+pub fn generator_preset_count() callconv(.c) usize {
+    return planet_presets.len;
+}
+
+pub fn generator_preset_name(index: usize) callconv(.c) *const []const u8 {
+    return &planet_preset_names[index];
+}
+
+pub fn generator_preset_default_index() callconv(.c) usize {
+    return planet_preset_default;
+}
+
+pub fn generator_preset_config(allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*generator_api.ConfigTree {
+    if (index >= planet_presets.len) return null;
+    return generator_api.fromStruct(Generator.Params, allocator.*, &planet_presets[index], field_specs) catch null;
 }
 
 pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {

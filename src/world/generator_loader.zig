@@ -32,7 +32,7 @@ pub const Generator = struct {
         defer allocator.free(path);
 
         const file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .lock = .shared }) catch |err| switch (err) {
-            error.FileNotFound => return self.api.config_default(&allocator) orelse return error.OutOfMemory,
+            error.FileNotFound => return self.defaultConfig(allocator) orelse return error.OutOfMemory,
             else => return err,
         };
         defer file.close(io);
@@ -46,8 +46,33 @@ pub const Generator = struct {
         bytes[stat.size] = 0;
 
         if (self.api.config_from_zon(&allocator, bytes[0..stat.size].ptr, stat.size)) |tree| return tree;
-        std.log.warn("generator {s}: invalid config, using defaults", .{self.info.name});
-        return self.api.config_default(&allocator) orelse return error.OutOfMemory;
+        std.log.warn("generator {s}: invalid config, using default preset", .{self.info.name});
+        return self.defaultConfig(allocator) orelse return error.OutOfMemory;
+    }
+
+    /// Number of presets the generator ships with.
+    pub fn presetCount(self: *const Generator) usize {
+        return self.api.preset_count();
+    }
+
+    /// Name of the preset at `index`.
+    pub fn presetName(self: *const Generator, index: usize) []const u8 {
+        return self.api.preset_name(index).*;
+    }
+
+    /// Index of the preset used as the default.
+    pub fn defaultPresetIndex(self: *const Generator) usize {
+        return self.api.preset_default_index();
+    }
+
+    /// Builds the config tree for the preset at `index`.
+    pub fn presetConfig(self: *const Generator, allocator: std.mem.Allocator, index: usize) ?*ConfigTree {
+        return self.api.preset_config(&allocator, index);
+    }
+
+    /// Builds the config tree for the default preset.
+    pub fn defaultConfig(self: *const Generator, allocator: std.mem.Allocator) ?*ConfigTree {
+        return self.presetConfig(allocator, self.defaultPresetIndex());
     }
 
     pub fn saveConfig(self: *Generator, allocator: std.mem.Allocator, io: std.Io, config_dir: []const u8, tree: *ConfigTree) !void {

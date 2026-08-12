@@ -81,6 +81,8 @@ fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
         error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
         error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
         error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+        error.WorldNameExists => error_writer.print("A world with this name already exists.", .{}) catch unreachable,
+        error.InvalidName => error_writer.print("World names can't contain '/'.", .{}) catch unreachable,
         else => error_writer.print("{any}", .{err}) catch unreachable,
     }
     dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
@@ -335,15 +337,24 @@ var new_game_generator_name: []const u8 = "Terrain";
 var new_game_generator_name_allocated = false;
 var new_game_generator: ?*generator_loader.Generator = null;
 var new_game_config: ?*generator_api.ConfigTree = null;
+var new_game_preset_index: usize = 0;
 
 fn selectNewGameGenerator(allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {
     if (new_game_generator == generator) return;
     if (new_game_config) |config| generator_api.free(allocator, config);
     if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
-    new_game_config = generator.api.config_default(&allocator) orelse return error.OutOfMemory;
+    new_game_preset_index = generator.defaultPresetIndex();
+    new_game_config = generator.defaultConfig(allocator) orelse return error.OutOfMemory;
     new_game_generator = generator;
     new_game_generator_name = try allocator.dupe(u8, generator.info.name);
     new_game_generator_name_allocated = true;
+}
+
+fn selectNewGamePreset(allocator: std.mem.Allocator, index: usize) !void {
+    const generator = new_game_generator orelse return;
+    if (new_game_config) |config| generator_api.free(allocator, config);
+    new_game_config = generator.presetConfig(allocator, index) orelse return error.OutOfMemory;
+    new_game_preset_index = index;
 }
 
 const max_generator_dropdown_entries: usize = 16;
@@ -370,6 +381,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     dvui.structUI(@src(), "World", &new_game_world_config, 32, .{}, .{ .background = false, .color_fill = .transparent });
 
     try self.generatorDropdown(allocator);
+    try self.presetDropdown(allocator);
 
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
@@ -393,6 +405,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     std.log.info("Creating world: {any}\n", .{world_name});
     var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
     defer worlds_dir.close(io);
+    if (try worldExists(io, worlds_dir, world_name)) return error.WorldNameExists;
     var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
     defer world_folder.close(io);
     const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
@@ -406,6 +419,14 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     try self.openGame(io, allocator, game_path);
     self.menu_state.ingame = true;
     self.menu_state.newgame = false;
+    return true;
+}
+
+fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
+    _ = std.Io.Dir.statFile(dir, io, name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     return true;
 }
 
@@ -428,6 +449,21 @@ fn generatorDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
     dvui.labelNoFmt(@src(), "Generator", .{}, .{ .font = .{ .size = 24 } });
     _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
     if (choice != previous) try selectNewGameGenerator(allocator, &self.generators.generators.items[choice]);
+}
+
+fn presetDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
+    _ = self;
+    const generator = new_game_generator orelse return;
+    const count = generator.presetCount();
+    if (count == 0) return;
+    var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
+    const n = @min(count, max_generator_dropdown_entries);
+    for (0..n) |i| names_buffer[i] = generator.presetName(i);
+    if (new_game_preset_index >= n) new_game_preset_index = 0;
+    const previous = new_game_preset_index;
+    dvui.labelNoFmt(@src(), "Preset", .{}, .{ .font = .{ .size = 24 } });
+    _ = dvui.dropdown(@src(), names_buffer[0..n], .{ .choice = &new_game_preset_index }, .{}, .{});
+    if (new_game_preset_index != previous) try selectNewGamePreset(allocator, new_game_preset_index);
 }
 
 fn selectedGeneratorIndex(self: *@This(), count: usize) usize {

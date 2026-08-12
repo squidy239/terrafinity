@@ -88,16 +88,22 @@ pub const DefaultGenerator = struct {
 
     pub const Params = struct {
         terrain_block_randomness: f32,
-        slope_stone_bias: f32,
+        slope_randomness: f32,
+        ground_threshold: f32,
+        dirt_band: f32,
         erosion_strength: f32,
         terrain_noise: Noise.Noise(f32),
         terrain_noise_balance: f32,
+        ridge_sharpness: f32,
         large_terrain_noise: Noise.Noise(f32),
         large_terrain_noise_warp: Noise.Noise(f32),
         cave_noise: Noise.Noise(f32),
         terrain_min: i32,
         terrain_max: i32,
         sea_level: i32,
+        height_power: f32,
+        dirt_depth: f32,
+        snow_line: f32,
         cave_threshold: f32,
         cave_expansion_max: f32,
         cave_expansion_start: f32,
@@ -123,7 +129,9 @@ pub const DefaultGenerator = struct {
 
         pub const default = Params{
             .terrain_block_randomness = 0.25,
-            .slope_stone_bias = 0.3,
+            .slope_randomness = 0.15,
+            .ground_threshold = 0.3,
+            .dirt_band = 0.2,
             .erosion_strength = 0.2,
             .terrain_noise = .{
                 .frequency = 0.002,
@@ -141,7 +149,8 @@ pub const DefaultGenerator = struct {
                 .domain_warp_type = .simplex,
                 .domain_warp_amp = 10,
             },
-            .terrain_noise_balance = 0.9,
+            .terrain_noise_balance = 1,
+            .ridge_sharpness = 2,
             .large_terrain_noise = .{
                 .frequency = 0.0008,
                 .noise_type = .perlin,
@@ -192,6 +201,9 @@ pub const DefaultGenerator = struct {
             .terrain_min = -4096,
             .terrain_max = 8196,
             .sea_level = 0,
+            .height_power = 1,
+            .dirt_depth = 5,
+            .snow_line = 0.6,
             .cave_threshold = -10000.0,
             .cave_expansion_max = 8192,
             .cave_expansion_start = 0,
@@ -222,7 +234,7 @@ pub const DefaultGenerator = struct {
 
     const GenContext = struct { params: *const Params, rand: *std.Random, chunk_scale: f32 };
 
-    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_stone_bias: f32 };
+    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32 };
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
@@ -269,20 +281,23 @@ pub const DefaultGenerator = struct {
         const TagV = @Vector(ChunkSize, Block.Tag);
         const zero_v: FloatV = @splat(0);
         const one_v: FloatV = @splat(1);
-        // Preserves the old integer test floor(th) - bh > ceil(5 * scale), translated to f32.
-        const depth_threshold: f32 = @ceil(5.0 * scale) + 1.0;
+        // Preserves the old integer test floor(th) - bh > ceil(dirt_depth * scale), translated to f32.
+        const depth_threshold: f32 = @ceil(ctx.params.dirt_depth * scale) + 1.0;
 
         const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(IntV, @splat(chunk_pos.position[1] * ChunkSize));
-        for (heights, chunk_blocks) |heights_row, *col| {
+        // Get the full column-to-column height differential once, like the erosion pass,
+        // then index it when placing blocks. Normalizing by the rock depth ties "full bias"
+        // to cliff-scale drops.
+        const differential = getDifferential(heights);
+        var slope_grid: [ChunkSize][ChunkSize]f32 = undefined;
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |z| {
+                slope_grid[x][z] = std.math.pow(f32, @min(differential[x][z] / depth_threshold, 1.0), 2.0);
+            }
+        }
+        for (heights, chunk_blocks, 0..) |heights_row, *col, x| {
             const th: FloatV = heights_row;
             const th_arr: [ChunkSize]f32 = th;
-            // Approximate the column-to-column height differential with one neighbor; normalizing
-            // by the rock depth ties "full bias" to cliff-scale drops.
-            var slope_row: [ChunkSize]f32 = undefined;
-            for (0..ChunkSize - 1) |z| {
-                slope_row[z] = @min(@abs(th_arr[z] - th_arr[z + 1]) / depth_threshold, 1.0);
-            }
-            slope_row[ChunkSize - 1] = slope_row[ChunkSize - 2];
             for (block_height_vec, col) |bh, *row| {
                 const diff: FloatV = th - @as(FloatV, @splat(@as(f32, @floatFromInt(bh))));
                 const below_depth: BoolV = diff >= @as(FloatV, @splat(depth_threshold));
@@ -311,7 +326,17 @@ pub const DefaultGenerator = struct {
                 while (surface_bits != 0) {
                     const z: usize = @ctz(surface_bits);
                     surface_bits &= surface_bits - 1;
-                    row[z] = randGround(ctx.rand, th_arr[z] * terrain_scales[@intFromBool(th_arr[z] <= sea_level_f)], .{ .block_height = bh, .sea_level = sea_level, .block_randomness = ctx.params.terrain_block_randomness, .one_d_terrain_scale = one_d_terrain_scale, .slope = slope_row[z], .slope_stone_bias = ctx.params.slope_stone_bias });
+                    row[z] = randGround(ctx.rand, th_arr[z] * terrain_scales[@intFromBool(th_arr[z] <= sea_level_f)], .{
+                        .block_height = bh,
+                        .sea_level = sea_level,
+                        .block_randomness = ctx.params.terrain_block_randomness,
+                        .one_d_terrain_scale = one_d_terrain_scale,
+                        .slope = slope_grid[x][z],
+                        .slope_randomness = ctx.params.slope_randomness,
+                        .ground_threshold = ctx.params.ground_threshold,
+                        .dirt_band = ctx.params.dirt_band,
+                        .snow_line = ctx.params.snow_line,
+                    });
                 }
             }
         }
@@ -360,12 +385,20 @@ pub const DefaultGenerator = struct {
     }
 
     fn randGround(rand: *const std.Random, height_percent: f32, ctx: GroundContext) Block {
-        const grass_threshold: f32 = 0.25;
-        const dirt_threshold: f32 = 0.4;
-        const stone_threshold: f32 = 0.6;
-        // Steep slopes wash away grass and snow, exposing dirt and stone.
-        const r = std.math.lerp(height_percent * ctx.one_d_terrain_scale, rand.float(f32), ctx.block_randomness) + ctx.slope * ctx.slope_stone_bias;
-        return if (ctx.block_height < ctx.sea_level) Block.dirt else if (r < grass_threshold) Block.grass else if (r < dirt_threshold) Block.dirt else if (r < stone_threshold) Block.stone else Block.snow;
+        if (ctx.block_height < ctx.sea_level) return Block.dirt;
+
+        // Jitter the slope so ground, dirt, and stone boundaries break up instead
+        // of tracing smooth contours.
+        const a = ctx.slope + (rand.float(f32) * 2.0 - 1.0) * ctx.slope_randomness;
+
+        if (a < ctx.ground_threshold) {
+            // Soft ground: grass or snow by altitude.
+            const cover = std.math.lerp(height_percent * ctx.one_d_terrain_scale, rand.float(f32), ctx.block_randomness);
+            return if (cover < ctx.snow_line) Block.grass else Block.snow;
+        }
+        // Dirt occupies a band of width `dirt_band` above the ground threshold;
+        // steeper ground is stone.
+        return if (a - ctx.dirt_band < ctx.ground_threshold) Block.dirt else Block.stone;
     }
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]f32 {
@@ -425,35 +458,52 @@ pub const DefaultGenerator = struct {
         const one_v: FloatV = @splat(1);
         const two_v: FloatV = @splat(2);
         const half_v: FloatV = @splat(0.5);
+        const sharpness_v: FloatV = @splat(params.ridge_sharpness);
+        const height_power_v: FloatV = @splat(params.height_power);
+        const balance_v: FloatV = @splat(params.terrain_noise_balance);
         for (0..ChunkSize) |x| {
             const raw: FloatV = @as(FloatV, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize].*);
             const inv = one_v - raw;
-            const pow_a = (raw * two_v) * (raw * two_v) * half_v;
-            const pow_b = one_v - (inv * two_v) * (inv * two_v) * half_v;
-            const warped = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*) * @select(f32, raw < half_v, pow_a, pow_b);
-            const bounds = @select(f32, warped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
-            const height_row: @Vector(ChunkSize, f32) = warped * @abs(bounds) * @as(FloatV, @splat(scale));
+            // Detail shaping: raw valleys dip toward zero, peaks rise; sharpness
+            // steeps the curve, balance mixes it against the pure large shape.
+            const pow_a = half_v * @exp2(sharpness_v * @log2(@abs(raw * two_v)));
+            const pow_b = one_v - half_v * @exp2(sharpness_v * @log2(inv * two_v));
+            const shaping = @select(f32, raw < half_v, pow_a, pow_b);
+            const large = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*);
+            const mixed = one_v + (shaping - one_v) * balance_v;
+            const warped = large * mixed;
+            // Vertical contrast: a signed power curve sharpens peaks and flattens
+            // lowlands while staying inside the min/max envelope.
+            const magnitude = @exp2(height_power_v * @log2(@abs(warped)));
+            const shaped = @select(f32, warped < zero_v, -magnitude, magnitude);
+            const bounds = @select(f32, shaped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
+            const height_row: @Vector(ChunkSize, f32) = shaped * @abs(bounds) * @as(FloatV, @splat(scale));
             height[x] = height_row;
         }
         heights_zone.end();
 
         const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosion" });
         // Erosion: columns steeper than their neighbor shed height, rounding peaks and ridges.
-        var erode_amount: [ChunkSize][ChunkSize]f32 = undefined;
+        const differential = getDifferential(height);
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                const nz = height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
-                const nx = height[if (x + 1 < ChunkSize) x + 1 else x - 1][z];
-                erode_amount[x][z] = @max(@abs(height[x][z] - nz), @abs(height[x][z] - nx));
-            }
-        }
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                height[x][z] -= erode_amount[x][z] * params.erosion_strength;
+                height[x][z] -= differential[x][z] * params.erosion_strength;
             }
         }
         erosion_zone.end();
         return height;
+    }
+
+    fn getDifferential(height: [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
+        var differential: [ChunkSize][ChunkSize]f32 = undefined;
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |z| {
+                const nz = height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
+                const nx = height[if (x + 1 < ChunkSize) x + 1 else x - 1][z];
+                differential[x][z] = @max(@abs(height[x][z] - nz), @abs(height[x][z] - nx));
+            }
+        }
+        return differential;
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -529,7 +579,10 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .info = &generatorInfo,
     .create = &generatorCreate,
     .get_source = &generatorGetSource,
-    .config_default = &generatorConfigDefault,
+    .preset_count = &generatorPresetCount,
+    .preset_name = &generatorPresetName,
+    .preset_default_index = &generatorPresetDefaultIndex,
+    .preset_config = &generatorPresetConfig,
     .config_from_zon = &generatorConfigFromZon,
     .config_set_seeds = &generatorConfigSetSeeds,
 };
@@ -541,8 +594,10 @@ comptime {
 const field_specs = .{
     .seed = .{ .is_seed = true },
     .terrain_block_randomness = .{ .min = 0, .max = 1 },
-    .slope_stone_bias = .{ .min = 0, .max = 1 },
-    .erosion_strength = .{ .min = 0, .max = 1 },
+    .slope_randomness = .{ .min = 0, .max = 1 },
+    .ground_threshold = .{ .min = 0, .max = 1 },
+    .dirt_band = .{ .min = 0, .max = 1 },
+    .erosion_strength = .{ .min = 0, .max = 10 },
     .terrain_min = .{ .min = -100000, .max = 0 },
     .terrain_max = .{ .min = 0, .max = 100000 },
     .sea_level = .{ .min = -1000, .max = 1000 },
@@ -551,6 +606,10 @@ const field_specs = .{
     .cave_expansion_start = .{ .min = 0, .max = 20000 },
     .terrain_scale = .{ .min = 0.1, .max = 4 },
     .terrain_noise_balance = .{ .min = 0, .max = 1 },
+    .ridge_sharpness = .{ .min = 1, .max = 8 },
+    .height_power = .{ .min = 0.25, .max = 4 },
+    .dirt_depth = .{ .min = 1, .max = 32 },
+    .snow_line = .{ .min = 0, .max = 1 },
     .frequency = .{ .min = 0, .max = 0.5 },
     .octaves = .{ .min = 1, .max = 16 },
     .lacunarity = .{ .min = 1, .max = 4 },
@@ -582,8 +641,38 @@ pub fn generatorInfo() callconv(.c) *const generator_api.GeneratorInfo {
     return &generator_info_data;
 }
 
-pub fn generatorConfigDefault(allocator: *const std.mem.Allocator) callconv(.c) ?*generator_api.ConfigTree {
-    return generator_api.fromStruct(DefaultGenerator.Params, allocator.*, &DefaultGenerator.Params.default, field_specs) catch null;
+const terrain_presets = [_]DefaultGenerator.Params{
+    .default,
+    blk: {
+        var p = DefaultGenerator.Params.default;
+        // Sculpted: heavy erosion and ping-pong large-scale noise round the
+        // terrain into flowing hills.
+        p.erosion_strength = 3.7537832;
+        p.large_terrain_noise.fractal_type = .ping_pong;
+        p.large_terrain_noise.octaves = 5;
+        p.large_terrain_noise_warp.fractal_type = .none;
+        p.cave_noise.domain_warp_amp = 827.6712;
+        break :blk p;
+    },
+};
+const terrain_preset_names = [_][]const u8{ "Default", "Sculpted" };
+const terrain_preset_default: usize = 0;
+
+pub fn generatorPresetCount() callconv(.c) usize {
+    return terrain_presets.len;
+}
+
+pub fn generatorPresetName(index: usize) callconv(.c) *const []const u8 {
+    return &terrain_preset_names[index];
+}
+
+pub fn generatorPresetDefaultIndex() callconv(.c) usize {
+    return terrain_preset_default;
+}
+
+pub fn generatorPresetConfig(allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*generator_api.ConfigTree {
+    if (index >= terrain_presets.len) return null;
+    return generator_api.fromStruct(DefaultGenerator.Params, allocator.*, &terrain_presets[index], field_specs) catch null;
 }
 
 pub fn generatorConfigFromZon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {

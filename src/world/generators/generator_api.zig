@@ -5,7 +5,7 @@ const World = @import("../World.zig");
 /// Shared interface between the terrafinity host and generator shared
 /// libraries. Both sides are compiled by the same `zig build` with the same
 /// compiler, so every type here has identical layout across the DLL boundary.
-pub const ApiVersion: u32 = 1;
+pub const ApiVersion: u32 = 2;
 
 pub const GeneratorInfo = struct {
     name: []const u8,
@@ -79,12 +79,19 @@ pub const GeneratorApi = extern struct {
     info: *const fn () callconv(.c) *const GeneratorInfo,
     create: *const fn (opts: *const CreateOptions, config: *const ConfigTree) callconv(.c) ?*anyopaque,
     get_source: *const fn (instance: *anyopaque) callconv(.c) *const World.ChunkSource,
-    /// Returns the default config tree, with specs describing how the host
-    /// should render each param. All strings must be allocated with the given
-    /// allocator; the host frees the whole tree with `generator_api.free`.
-    config_default: *const fn (allocator: *const std.mem.Allocator) callconv(.c) ?*ConfigTree,
+    /// Number of named presets the generator ships with.
+    preset_count: *const fn () callconv(.c) usize,
+    /// Name of the preset at `index`. The returned pointer references a static
+    /// slice owned by the generator; it stays valid for the life of the library.
+    preset_name: *const fn (index: usize) callconv(.c) *const []const u8,
+    /// Index of the preset used as the default when no config is supplied.
+    preset_default_index: *const fn () callconv(.c) usize,
+    /// Builds the config tree for the preset at `index`. All strings are
+    /// allocated with the given allocator; the host frees the whole tree with
+    /// `generator_api.free`.
+    preset_config: *const fn (allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*ConfigTree,
     /// Returns null if the bytes are not a valid config; the host then falls
-    /// back to the default config.
+    /// back to the default preset.
     config_from_zon: *const fn (allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*ConfigTree,
     /// Returns null on failure. Fills in unspecified seeds (params with `Spec.is_seed`, value 0) and
     /// must be called before `create` so the chosen seeds can be persisted.

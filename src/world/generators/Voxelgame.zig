@@ -354,8 +354,45 @@ pub fn generator_info() callconv(.c) *const generator_api.GeneratorInfo {
     return &generator_info_data;
 }
 
-pub fn generator_config_default(allocator: *const std.mem.Allocator) callconv(.c) ?*generator_api.ConfigTree {
-    return generator_api.fromStruct(Generator.Params, allocator.*, &Generator.Params.default, field_specs) catch null;
+const voxelgame_presets = [_]Generator.Params{
+    .default,
+    blk: {
+        var p = Generator.Params.default;
+        // Caves on, carved by strong simplex noise.
+        p.caves = true;
+        p.caveness = 0.3;
+        p.cave_noise.fractal_type = .fbm;
+        p.cave_noise.octaves = 5;
+        break :blk p;
+    },
+    blk: {
+        var p = Generator.Params.default;
+        // Flat plains: single low-frequency octave, wide variance.
+        p.terrain_noise2.octaves = 1;
+        p.terrain_noise2.fractal_type = .none;
+        p.terrain_min = -128;
+        p.terrain_max = 128;
+        break :blk p;
+    },
+};
+const voxelgame_preset_names = [_][]const u8{ "Default", "Caverns", "Plains" };
+const voxelgame_preset_default: usize = 0;
+
+pub fn generator_preset_count() callconv(.c) usize {
+    return voxelgame_presets.len;
+}
+
+pub fn generator_preset_name(index: usize) callconv(.c) *const []const u8 {
+    return &voxelgame_preset_names[index];
+}
+
+pub fn generator_preset_default_index() callconv(.c) usize {
+    return voxelgame_preset_default;
+}
+
+pub fn generator_preset_config(allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*generator_api.ConfigTree {
+    if (index >= voxelgame_presets.len) return null;
+    return generator_api.fromStruct(Generator.Params, allocator.*, &voxelgame_presets[index], field_specs) catch null;
 }
 
 pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {
@@ -405,7 +442,10 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .info = &generator_info,
     .create = &generator_create,
     .get_source = &generator_get_source,
-    .config_default = &generator_config_default,
+    .preset_count = &generator_preset_count,
+    .preset_name = &generator_preset_name,
+    .preset_default_index = &generator_preset_default_index,
+    .preset_config = &generator_preset_config,
     .config_from_zon = &generator_config_from_zon,
     .config_set_seeds = &generator_config_set_seeds,
 };
