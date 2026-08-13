@@ -264,7 +264,6 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
 }
 
 pub fn debugInfo(self: *@This(), io: std.Io) !void {
-    _ = io;
     var fmt_buffer: [16000]u8 = undefined;
     const box = dvui.box(@src(), .{}, .{
         .gravity_x = 0.0,
@@ -287,19 +286,15 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const chunk_misses = self.game.world.chunks.misses();
 
     const chunk_hit_ratio = @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(chunk_hits + chunk_misses));
-    var shadow_buf: [128]u8 = undefined;
-    const shadow_cascade = self.game.debug_menu.shadow_cascade.load(.unordered);
-    const shadow_line = if (shadow_cascade == std.math.maxInt(u32))
-        "shadows: off"
-    else
-        try std.fmt.bufPrint(&shadow_buf, "shadow cascade {d}: {d} faces", .{ shadow_cascade, self.game.debug_menu.shadow_faces.load(.unordered) });
+    const player_pos = self.game.getPlayerPos(io);
+    const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
         \\opaque faces: {d}
         \\transparent faces: {d}
-        \\{s}
+        \\pos: {d}, {d}, {d}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\chunk hit ratio: {d:.2}
@@ -309,7 +304,9 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
             self.game.debug_menu.meshes.load(.unordered),
             self.game.debug_menu.opaque_faces.load(.unordered),
             self.game.debug_menu.transparent_faces.load(.unordered),
-            shadow_line,
+            pos[0],
+            pos[1],
+            pos[2],
             chunk_count,
             grid_count,
             chunk_hit_ratio,
@@ -357,7 +354,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
     try self.config_lock.lock(io);
     const firstconfig = self.config.*;
 
-    dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{ });
+    dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 
     // Remove config strings from struct_ui's string_map to prevent double-free.
     // struct_ui.deinit (called by Window.deinit) would otherwise free these strings,

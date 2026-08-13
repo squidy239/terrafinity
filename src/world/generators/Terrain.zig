@@ -87,29 +87,29 @@ pub const DefaultGenerator = struct {
     }
 
     pub const Params = struct {
+        /// If null, a random seed will be generated. Will be set after setSeeds is called.
+        seed: ?u64,
+        terrain_scale: f32,
         terrain_block_randomness: f32,
         slope_randomness: f32,
         ground_threshold: f32,
         dirt_band: f32,
         erosion_strength: f32,
-        terrain_noise: Noise.Noise(f32),
-        terrain_noise_balance: f32,
-        ridge_sharpness: f32,
-        large_terrain_noise: Noise.Noise(f32),
-        large_terrain_noise_warp: Noise.Noise(f32),
-        cave_noise: Noise.Noise(f32),
         terrain_min: i32,
         terrain_max: i32,
         sea_level: i32,
         height_power: f32,
         dirt_depth: f32,
         snow_line: f32,
+        terrain_noise_balance: f32,
+        ridge_sharpness: f32,
+        terrain_noise: Noise.Noise(f32),
+        large_terrain_noise: Noise.Noise(f32),
+        large_terrain_noise_warp: Noise.Noise(f32),
+        cave_noise: Noise.Noise(f32),
         cave_threshold: f32,
         cave_expansion_max: f32,
         cave_expansion_start: f32,
-        /// If null, a random seed will be generated. Will be set after setSeeds is called.
-        seed: ?u64,
-        terrain_scale: f32,
         gen_structures: bool,
         trees: []const TreeConfig,
 
@@ -282,19 +282,12 @@ pub const DefaultGenerator = struct {
         const zero_v: FloatV = @splat(0);
         const one_v: FloatV = @splat(1);
         // Preserves the old integer test floor(th) - bh > ceil(dirt_depth * scale), translated to f32.
-        const depth_threshold: f32 = @ceil(ctx.params.dirt_depth * scale) + 1.0;
+        const depth_threshold: f32 = @floor(ctx.params.dirt_depth * scale) + 1.0;
 
         const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(IntV, @splat(chunk_pos.position[1] * ChunkSize));
-        // Get the full column-to-column height differential once, like the erosion pass,
-        // then index it when placing blocks. Normalizing by the rock depth ties "full bias"
-        // to cliff-scale drops.
+        // The differential is the slope (block-space gradient magnitude) and is LOD-invariant,
+        // so it feeds randGround directly with no divisor or normalization.
         const differential = getDifferential(heights);
-        var slope_grid: [ChunkSize][ChunkSize]f32 = undefined;
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                slope_grid[x][z] = std.math.pow(f32, @min(differential[x][z] / depth_threshold, 1.0), 2.0);
-            }
-        }
         for (heights, chunk_blocks, 0..) |heights_row, *col, x| {
             const th: FloatV = heights_row;
             const th_arr: [ChunkSize]f32 = th;
@@ -331,7 +324,7 @@ pub const DefaultGenerator = struct {
                         .sea_level = sea_level,
                         .block_randomness = ctx.params.terrain_block_randomness,
                         .one_d_terrain_scale = one_d_terrain_scale,
-                        .slope = slope_grid[x][z],
+                        .slope = differential[x][z],
                         .slope_randomness = ctx.params.slope_randomness,
                         .ground_threshold = ctx.params.ground_threshold,
                         .dirt_band = ctx.params.dirt_band,
@@ -484,10 +477,13 @@ pub const DefaultGenerator = struct {
 
         const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosion" });
         // Erosion: columns steeper than their neighbor shed height, rounding peaks and ridges.
+        // Normalize by the LOD scale so coarse chunks erode the same world-space height as
+        // the fine LOD (a coarse block is `ratio` world blocks tall).
+        const erosion_scale = 1.0 / World.ChunkPos.toScale(level);
         const differential = getDifferential(height);
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
-                height[x][z] -= differential[x][z] * params.erosion_strength;
+                height[x][z] -= differential[x][z] * params.erosion_strength * erosion_scale;
             }
         }
         erosion_zone.end();
@@ -500,7 +496,9 @@ pub const DefaultGenerator = struct {
             for (0..ChunkSize) |z| {
                 const nz = height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
                 const nx = height[if (x + 1 < ChunkSize) x + 1 else x - 1][z];
-                differential[x][z] = @max(@abs(height[x][z] - nz), @abs(height[x][z] - nx));
+                const gz = height[x][z] - nz;
+                const gx = height[x][z] - nx;
+                differential[x][z] = @sqrt(gx * gx + gz * gz);
             }
         }
         return differential;
