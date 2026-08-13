@@ -20,6 +20,54 @@ const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 const Ui = @This();
 
+pub const main_theme: dvui.Theme = blk: {
+    const text: dvui.Color = .{ .r = 216, .g = 240, .b = 216, .a = 255 };
+    const fill: dvui.Color = .{ .r = 16, .g = 24, .b = 16, .a = 255 };
+    const border: dvui.Color = .{ .r = 77, .g = 129, .b = 77, .a = 255 };
+    const accent: dvui.Color = .{ .r = 156, .g = 204, .b = 0, .a = 255 };
+    const control_fill: dvui.Color = .{ .r = 44, .g = 77, .b = 44, .a = 255 };
+    const control_hover: dvui.Color = .{ .r = 61, .g = 107, .b = 61, .a = 255 };
+    const highlight_fill: dvui.Color = .{ .r = 0, .g = 128, .b = 128, .a = 255 };
+    const highlight_hover: dvui.Color = .{ .r = 0, .g = 160, .b = 160, .a = 255 };
+    break :blk .{
+        .name = "Terrafinity",
+        .dark = true,
+        .embedded_fonts = &.{
+            .{ .family = dvui.Font.array("Press Start 2P"), .bytes = press_start_2p },
+        },
+        .font_body = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .font_heading = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .font_title = .find(.{ .family = "Press Start 2P", .size = 24 }),
+        .font_mono = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .focus = accent,
+        .text_select = accent,
+        .fill = fill,
+        .text = text,
+        .border = border,
+        .max_default_corner_radius = 0.0,
+        .control = .{
+            .fill = control_fill,
+            .fill_hover = control_hover,
+            .fill_press = accent,
+            .text = text,
+            .text_press = .black,
+            .border = accent,
+        },
+        .window = .{ .fill = fill },
+        .highlight = .{
+            .fill = highlight_fill,
+            .fill_hover = highlight_hover,
+            .fill_press = accent,
+            .text = .white,
+        },
+    };
+};
+
+pub const menu_theme: dvui.Theme = blk: {
+    const mt: dvui.Theme = main_theme;
+    break :blk mt;
+};
+
 window: *wio.Window,
 vk_ctx: *VulkanContext,
 config: *Config,
@@ -93,6 +141,7 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
     defer dw.end();
 
     try self.ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+    dvui.themeSet(main_theme);
     var menu_changed: bool = false;
     {
         const ov = dvui.overlay(@src(), .{ .expand = .both });
@@ -307,7 +356,8 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     try self.config_lock.lock(io);
     const firstconfig = self.config.*;
-    dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
+
+    dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{ });
 
     // Remove config strings from struct_ui's string_map to prevent double-free.
     // struct_ui.deinit (called by Window.deinit) would otherwise free these strings,
@@ -739,10 +789,6 @@ fn configChoiceDropdown(name: []const u8, spec: generator_api.Spec, choice: *usi
     dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = id });
     if (choice.* >= spec.entries.len and spec.entries.len > 0) choice.* = 0;
     _ = dvui.dropdown(@src(), spec.entries, .{ .choice = choice }, .{}, .{ .id_extra = id });
-}
-
-pub fn loadFonts(window: *dvui.Window) !void {
-    try window.addFont("Press Start 2P", press_start_2p, null);
 }
 
 const HoverOptions = struct {

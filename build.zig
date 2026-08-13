@@ -254,13 +254,11 @@ fn createDependencies(
         .optimize = optimize,
         .libc = true,
         .@"stb-image" = true,
-        .freetype = false,
         .@"tree-sitter" = false,
-        .tvg = false,
+        .tvg = true,
         .backend = .custom,
     });
     const dvui_mod = dvui_dep.module("dvui");
-    dvui_mod.link_libc = true;
 
     // dvui_vk renderer (for Vulkan UI drawing)
     const dvui_vk_dep = b.dependency("dvui_vk", .{

@@ -84,8 +84,6 @@ pub fn main(init: std.process.Init) !void {
     var ui_window = try dvui.Window.init(@src(), gpa, dvui_backend, .{});
     defer ui_window.deinit();
 
-    try Ui.loadFonts(&ui_window);
-
     var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();
 
