@@ -99,10 +99,14 @@ pub const DefaultGenerator = struct {
         terrain_max: i32,
         sea_level: i32,
         height_power: f32,
+        /// Power applied to the continental (large) noise before combining.
+        large_power: f32,
+        /// Power applied to the mountain (small/ridged) noise before combining.
+        small_power: f32,
         dirt_depth: f32,
         snow_line: f32,
+        /// Weight of the mountain (ridged) noise added on top of the continental noise.
         terrain_noise_balance: f32,
-        ridge_sharpness: f32,
         terrain_noise: Noise.Noise(f32),
         large_terrain_noise: Noise.Noise(f32),
         large_terrain_noise_warp: Noise.Noise(f32),
@@ -150,7 +154,6 @@ pub const DefaultGenerator = struct {
                 .domain_warp_amp = 10,
             },
             .terrain_noise_balance = 1,
-            .ridge_sharpness = 2,
             .large_terrain_noise = .{
                 .frequency = 0.0008,
                 .noise_type = .perlin,
@@ -202,6 +205,8 @@ pub const DefaultGenerator = struct {
             .terrain_max = 8196,
             .sea_level = 0,
             .height_power = 1,
+            .large_power = 1,
+            .small_power = 1,
             .dirt_depth = 5,
             .snow_line = 0.6,
             .cave_threshold = -10000.0,
@@ -242,12 +247,16 @@ pub const DefaultGenerator = struct {
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
         _ = world;
-        if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrain_max, 0 }, chunk_pos.level).position[1]) {
+        // The height field is shaped * |bounds| * scale, so terrain_scale stretches the
+        // vertical min/max envelope; cull against the scaled world height, not the raw params.
+        const max_global_y: i64 = @intFromFloat(@round(@as(f32, @floatFromInt(self.params.terrain_max)) * self.params.terrain_scale));
+        const min_global_y: i64 = @intFromFloat(@round(@as(f32, @floatFromInt(self.params.terrain_min)) * self.params.terrain_scale));
+        if (chunk_pos.position[1] > ChunkPos.fromGlobalBlockPos(.{ 0, max_global_y, 0 }, chunk_pos.level).position[1]) {
             blocks.merge(.{ .uniform = .air }, grid_buffer);
             return;
         }
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
-        const is_below_min = chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, self.params.terrain_min, 0 }, chunk_pos.level).position[1];
+        const is_below_min = chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1];
         if (!is_below_min) {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
@@ -448,23 +457,22 @@ pub const DefaultGenerator = struct {
 
         const heights_zone = tracy.Zone.begin(.{ .src = @src(), .name = "blockHeights" });
         const zero_v: FloatV = @splat(0);
-        const one_v: FloatV = @splat(1);
-        const two_v: FloatV = @splat(2);
-        const half_v: FloatV = @splat(0.5);
-        const sharpness_v: FloatV = @splat(params.ridge_sharpness);
         const height_power_v: FloatV = @splat(params.height_power);
+        const large_power_v: FloatV = @splat(params.large_power);
+        const small_power_v: FloatV = @splat(params.small_power);
         const balance_v: FloatV = @splat(params.terrain_noise_balance);
+        const sum_norm: FloatV = @splat(1.0 / (1.0 + params.terrain_noise_balance));
         for (0..ChunkSize) |x| {
             const raw: FloatV = @as(FloatV, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize].*);
-            const inv = one_v - raw;
-            // Detail shaping: raw valleys dip toward zero, peaks rise; sharpness
-            // steeps the curve, balance mixes it against the pure large shape.
-            const pow_a = half_v * @exp2(sharpness_v * @log2(@abs(raw * two_v)));
-            const pow_b = one_v - half_v * @exp2(sharpness_v * @log2(inv * two_v));
-            const shaping = @select(f32, raw < half_v, pow_a, pow_b);
             const large = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*);
-            const mixed = one_v + (shaping - one_v) * balance_v;
-            const warped = large * mixed;
+            // Signed power per noise: steepens (>1) or flattens (<1) each field
+            // before combining, so continents and mountains are shaped independently.
+            const large_shaped = signedPow(large, large_power_v);
+            const raw_shaped = signedPow(raw, small_power_v);
+            // Additive: large = continents, raw = mountains (peaks and valleys).
+            // Normalize by 1 + balance so the sum stays in [-1,1] without hard-clamping
+            // peaks into flat plateaus at the world height cap.
+            const warped = (large_shaped + raw_shaped * balance_v) * sum_norm;
             // Vertical contrast: a signed power curve sharpens peaks and flattens
             // lowlands while staying inside the min/max envelope.
             const magnitude = @exp2(height_power_v * @log2(@abs(warped)));
@@ -488,6 +496,12 @@ pub const DefaultGenerator = struct {
         }
         erosion_zone.end();
         return height;
+    }
+
+    /// Signed power curve: sign-preserving |v|^power, steeping (>1) or flattening (<1).
+    inline fn signedPow(v: @Vector(ChunkSize, f32), power: @Vector(ChunkSize, f32)) @Vector(ChunkSize, f32) {
+        const magnitude = @exp2(power * @log2(@abs(v)));
+        return @select(f32, v < @as(@Vector(ChunkSize, f32), @splat(0)), -magnitude, magnitude);
     }
 
     fn getDifferential(height: [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
@@ -604,8 +618,9 @@ const field_specs = .{
     .cave_expansion_start = .{ .min = 0, .max = 20000 },
     .terrain_scale = .{ .min = 0.1, .max = 4 },
     .terrain_noise_balance = .{ .min = 0, .max = 1 },
-    .ridge_sharpness = .{ .min = 1, .max = 8 },
     .height_power = .{ .min = 0.25, .max = 4 },
+    .large_power = .{ .min = 0.25, .max = 8 },
+    .small_power = .{ .min = 0.25, .max = 8 },
     .dirt_depth = .{ .min = 1, .max = 32 },
     .snow_line = .{ .min = 0, .max = 1 },
     .frequency = .{ .min = 0, .max = 0.5 },
@@ -652,8 +667,37 @@ const terrain_presets = [_]DefaultGenerator.Params{
         p.cave_noise.domain_warp_amp = 827.6712;
         break :blk p;
     },
+    blk: {
+        var p = DefaultGenerator.Params.default;
+        // Testt: low rolling terrain with clean surface types and few structures.
+        p.terrain_block_randomness = 0.0;
+        p.slope_randomness = 0.0;
+        p.ground_threshold = 0.5;
+        p.dirt_band = 0.7;
+        p.erosion_strength = 1.0;
+        p.terrain_min = -512;
+        p.terrain_max = 2048;
+        p.large_power = 1.5;
+        p.small_power = 1.5;
+        p.dirt_depth = 2.0;
+        p.terrain_noise_balance = 0.3;
+        p.terrain_noise.frequency = 0.008;
+        p.terrain_noise.fractal_type = .ping_pong;
+        p.terrain_noise.domain_warp_type = .basic_grid;
+        p.terrain_noise.domain_warp_amp = 0.0;
+        p.large_terrain_noise.fractal_type = .ping_pong;
+        p.large_terrain_noise.octaves = 4;
+        p.large_terrain_noise_warp.noise_type = .perlin;
+        p.large_terrain_noise_warp.rotation_type = .improve_xy_planes;
+        p.large_terrain_noise_warp.fractal_type = .none;
+        p.large_terrain_noise_warp.octaves = 0;
+        p.large_terrain_noise_warp.domain_warp_amp = 100.0;
+        p.cave_noise.domain_warp_amp = 827.6712;
+        p.gen_structures = false;
+        break :blk p;
+    },
 };
-const terrain_preset_names = [_][]const u8{ "Default", "Sculpted" };
+const terrain_preset_names = [_][]const u8{ "Default", "Sculpted", "Continental" };
 const terrain_preset_default: usize = 0;
 
 pub fn generatorPresetCount() callconv(.c) usize {
