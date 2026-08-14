@@ -9,6 +9,7 @@ pub const Block = enum(Tag) {
     wood = normal_start + 3,
     snow = normal_start + 4,
     leaves = normal_start + 5,
+    sand = normal_start + 6,
 
     water = transparent_end - 1, //position is 7 hardcoded for waves, TODO make this a property
 

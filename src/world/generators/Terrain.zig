@@ -105,6 +105,8 @@ pub const DefaultGenerator = struct {
         small_power: f32,
         dirt_depth: f32,
         snow_line: f32,
+        beach_band: f32,
+        sand_slope: f32,
         /// Weight of the mountain (ridged) noise added on top of the continental noise.
         terrain_noise_balance: f32,
         terrain_noise: Noise.Noise(f32),
@@ -209,6 +211,8 @@ pub const DefaultGenerator = struct {
             .small_power = 1,
             .dirt_depth = 5,
             .snow_line = 0.6,
+            .beach_band = 6,
+            .sand_slope = 0.3,
             .cave_threshold = -10000.0,
             .cave_expansion_max = 8192,
             .cave_expansion_start = 0,
@@ -239,7 +243,7 @@ pub const DefaultGenerator = struct {
 
     const GenContext = struct { params: *const Params, rand: *std.Random, chunk_scale: f32 };
 
-    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32 };
+    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32, beach_band_blocks: f32, sand_slope: f32 };
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
@@ -316,7 +320,8 @@ pub const DefaultGenerator = struct {
                 }
 
                 var tags: TagV = @splat(@intFromEnum(Block.air));
-                tags = @select(Block.Tag, below_or, @select(Block.Tag, below_depth, @as(TagV, @splat(@intFromEnum(Block.stone))), @as(TagV, @splat(@intFromEnum(Block.dirt)))), tags);
+                const land_tag: TagV = @splat(@intFromEnum(if (bh <= sea_level) Block.sand else Block.dirt));
+                tags = @select(Block.Tag, below_or, @select(Block.Tag, below_depth, @as(TagV, @splat(@intFromEnum(Block.stone))), land_tag), tags);
                 if (bh <= sea_level) {
                     tags = @select(Block.Tag, @as(BoolV, @bitCast(~below_or_bits)), @as(TagV, @splat(@intFromEnum(Block.water))), tags);
                 }
@@ -338,6 +343,8 @@ pub const DefaultGenerator = struct {
                         .ground_threshold = ctx.params.ground_threshold,
                         .dirt_band = ctx.params.dirt_band,
                         .snow_line = ctx.params.snow_line,
+                        .beach_band_blocks = ctx.params.beach_band * scale,
+                        .sand_slope = ctx.params.sand_slope,
                     });
                 }
             }
@@ -387,11 +394,15 @@ pub const DefaultGenerator = struct {
     }
 
     fn randGround(rand: *const std.Random, height_percent: f32, ctx: GroundContext) Block {
-        if (ctx.block_height < ctx.sea_level) return Block.dirt;
+        if (ctx.block_height < ctx.sea_level) return Block.sand;
 
         // Jitter the slope so ground, dirt, and stone boundaries break up instead
         // of tracing smooth contours.
         const a = ctx.slope + (rand.float(f32) * 2.0 - 1.0) * ctx.slope_randomness;
+
+        // Sand beaches on the gentle shoreline use their own slope threshold,
+        // so they can be narrower or wider than the grass band.
+        if (@as(f32, @floatFromInt(ctx.block_height - ctx.sea_level)) <= ctx.beach_band_blocks and a < ctx.sand_slope) return Block.sand;
 
         if (a < ctx.ground_threshold) {
             // Soft ground: grass or snow by altitude.
@@ -623,6 +634,8 @@ const field_specs = .{
     .small_power = .{ .min = 0.25, .max = 8 },
     .dirt_depth = .{ .min = 1, .max = 32 },
     .snow_line = .{ .min = 0, .max = 1 },
+    .beach_band = .{ .min = 0, .max = 32 },
+    .sand_slope = .{ .min = 0, .max = 1 },
     .frequency = .{ .min = 0, .max = 0.5 },
     .octaves = .{ .min = 1, .max = 16 },
     .lacunarity = .{ .min = 1, .max = 4 },
