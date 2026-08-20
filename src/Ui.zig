@@ -44,7 +44,7 @@ pub const main_theme: dvui.Theme = blk: {
         .fill = fill,
         .text = text,
         .border = border,
-        .max_default_corner_radius = 0.0,
+        .max_default_corner_radius = 5.0,
         .control = .{
             .fill = control_fill,
             .fill_hover = control_hover,
@@ -79,6 +79,9 @@ worlds_path: []const u8,
 menu_background: dvui.Texture,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
+
+/// World awaiting deletion confirmation, owned by the Ui allocator.
+delete_world_name: ?[]const u8 = null,
 
 menu_state: struct {
     ingame: bool = false,
@@ -117,6 +120,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
     if (new_game_config) |config| generator_api.free(allocator, config);
     if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
+    if (self.delete_world_name) |name| allocator.free(name);
     new_game_config = null;
     new_game_generator = null;
 }
@@ -623,7 +627,11 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         const text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
         text.addText(item.name, .{ .font = .{ .family = pixel_font } });
         text.deinit();
-        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
+
+        const bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 1.0, .expand = .horizontal });
+        defer bottom.deinit();
+
+        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.0, .expand = .horizontal, .margin = .{ .x = 8, .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .blue, .corner_radius = .all(2) })) {
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
@@ -632,7 +640,44 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             self.menu_state.main = false;
             return true;
         }
+
+        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red , .corner_radius = .all(2)})) {
+            if (self.delete_world_name) |old| allocator.free(old);
+            self.delete_world_name = try allocator.dupe(u8, item.name);
+        }
     }
+
+    if (self.delete_world_name) |name| {
+        const confirm = dvui.floatingWindow(
+            @src(),
+            .{ .modal = true, .resize = .none },
+            .{ .max_size_content = .width(480) },
+        );
+        defer confirm.deinit();
+
+        dvui.labelNoFmt(@src(), "Delete world", .{}, .{ .gravity_x = 0.5, .font = .{ .size = 24 } });
+
+        var message_buffer: [512]u8 = undefined;
+        const message = std.fmt.bufPrint(&message_buffer, "Are you sure you want to delete \"{s}\"? This cannot be undone.", .{name}) catch unreachable;
+        const message_text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
+        message_text.addText(message, .{});
+        message_text.deinit();
+
+        const buttons = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+        defer buttons.deinit();
+
+        if (dvui.button(@src(), "Cancel", .{}, .{ .margin = .all(8) })) {
+            allocator.free(name);
+            self.delete_world_name = null;
+        }
+        if (dvui.button(@src(), "Delete", .{}, .{ .margin = .all(8), .color_fill = .red })) {
+            try worlds_folder.deleteTree(io, name);
+            allocator.free(name);
+            self.delete_world_name = null;
+            return true;
+        }
+    }
+
     return false;
 }
 
