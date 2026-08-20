@@ -308,8 +308,6 @@ fn createDependencies(
         .optimize = optimize,
     }).module("zm");
 
-    // Fastnoise is always compiled in ReleaseSafe, independent of the overall
-    // build mode, so noise math keeps its runtime checks even in Debug.
     const fastnoise_mod = b.addModule("fastnoise", .{
         .root_source_file = b.path("src/libs/fastnoise.zig"),
         .target = target,

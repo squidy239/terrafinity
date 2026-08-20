@@ -664,18 +664,6 @@ pub fn generatorInfo() callconv(.c) *const generator_api.GeneratorInfo {
 }
 
 const terrain_presets = [_]DefaultGenerator.Params{
-    .default,
-    blk: {
-        var p = DefaultGenerator.Params.default;
-        // Sculpted: heavy erosion and ping-pong large-scale noise round the
-        // terrain into flowing hills.
-        p.erosion_strength = 3.7537832;
-        p.large_terrain_noise.fractal_type = .ping_pong;
-        p.large_terrain_noise.octaves = 5;
-        p.large_terrain_noise_warp.fractal_type = .none;
-        p.cave_noise.domain_warp_amp = 827.6712;
-        break :blk p;
-    },
     blk: {
         var p = DefaultGenerator.Params.default;
         // Continental: broad flat landmasses from low-frequency ping-pong noise, no structures.
@@ -705,8 +693,20 @@ const terrain_presets = [_]DefaultGenerator.Params{
         p.gen_structures = false;
         break :blk p;
     },
+    blk: {
+        var p = DefaultGenerator.Params.default;
+        // Sculpted: heavy erosion and ping-pong large-scale noise round the
+        // terrain into flowing hills.
+        p.erosion_strength = 3.7537832;
+        p.large_terrain_noise.fractal_type = .ping_pong;
+        p.large_terrain_noise.octaves = 5;
+        p.large_terrain_noise_warp.fractal_type = .none;
+        p.cave_noise.domain_warp_amp = 827.6712;
+        break :blk p;
+    },
+    .default,
 };
-const terrain_preset_names = [_][]const u8{ "Default", "Sculpted", "Continental" };
+const terrain_preset_names = [_][]const u8{ "Continental", "Sculpted", "Plain" };
 const terrain_preset_default: usize = 0;
 
 pub fn generatorPresetCount() callconv(.c) usize {
