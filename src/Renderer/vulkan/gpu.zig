@@ -563,7 +563,10 @@ pub const MeshUploader = struct {
         while (true) {
             if (self.pool_reservoir.tryBorrowPool()) |b| return b;
             try self.flush(io);
-            try std.Io.sleep(io, .fromNanoseconds(0), .awake);
+            // Every pool is held by an upload whose transfer batch is still on the
+            // GPU, so blocking on the transfer timeline is bounded and frees pools
+            // as the uploads holding them retire.
+            try self.waitForTransferCompletion(io);
         }
     }
 
@@ -571,11 +574,30 @@ pub const MeshUploader = struct {
         self.pool_reservoir.returnPool(self.dev, pool);
     }
 
+    /// Blocks until the transfer queue completes at least one more batch than it
+    /// has now, or returns immediately when nothing is in flight. Callers flush
+    /// first so all pending work sits on the queue. This is a non-cancelable
+    /// Vulkan wait (not `Io`-cancelable); callers must check `io.checkCancel()`
+    /// before calling, and a GPU hang will block indefinitely.
+    fn waitForTransferCompletion(self: *MeshUploader, io: std.Io) !void {
+        try io.checkCancel();
+        const last_submitted = self.vk_ctx.transfer_semaphore_value.load(.monotonic);
+        const completed = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
+        if (completed >= last_submitted) return;
+        _ = try self.dev.waitSemaphores(&.{
+            .semaphore_count = 1,
+            .p_semaphores = (&self.transfer.semaphore)[0..1],
+            .p_values = (&(completed + 1))[0..1],
+        }, std.math.maxInt(u64));
+    }
+
     pub fn allocStaging(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) ![]u8 {
         while (true) {
             if (self.staging_ring.alloc(io, buffer_size)) |slice| return slice;
             try self.flush(io);
-            try std.Io.sleep(io, .fromNanoseconds(0), .awake);
+            // A full ring owns staging that only the GPU can release; wait for the
+            // next transfer completion instead of busy-spinning.
+            try self.waitForTransferCompletion(io);
         }
     }
 
@@ -600,19 +622,12 @@ pub const MeshUploader = struct {
 
             try self.flush(io);
 
-            // Exclude concurrent transfer submits across the buffer swap and copy: a
-            // submit referencing the old buffer must not race the graphics-side copy.
-            // Lock order is always transfer then graphics, so no path can deadlock.
-            const exclusive_transfer = !self.shared_queue;
-            if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.lockUncancelable(io);
-            defer if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.unlock(io);
-
-            self.vk_ctx.queue_mutex.lockUncancelable(io);
-            defer self.vk_ctx.queue_mutex.unlock(io);
-
-            if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
-
-            std.log.info("growing face data buffer...", .{});
+            // Drain the GPU before swapping the buffer. These waits must not hold
+            // the queue mutex: the render thread needs it to submit the frames that
+            // advance the graphics timeline drainInFlightFrames blocks on.
+            // Two concurrent growers may both drain sequentially; the retry after
+            // locking detects the first grow and makes the double-drain benign
+            // (wasteful but correct).
             try self.drainInFlightFrames();
 
             const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
@@ -624,6 +639,20 @@ pub const MeshUploader = struct {
                 }, std.math.maxInt(u64));
             }
 
+            // Exclude concurrent transfer submits across the buffer swap and copy: a
+            // submit referencing the old buffer must not race the graphics-side copy.
+            // Lock order is always transfer then graphics, so no path can deadlock.
+            const exclusive_transfer = !self.shared_queue;
+            if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.lockUncancelable(io);
+            defer if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.unlock(io);
+
+            self.vk_ctx.queue_mutex.lockUncancelable(io);
+            defer self.vk_ctx.queue_mutex.unlock(io);
+
+            // Another thread may have grown the buffer while we drained; retry first.
+            if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
+
+            std.log.info("growing face data buffer...", .{});
             const grow_info = try self.region_allocator.grow(io, self.memory.gpuOnly());
 
             const face_buf_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, self.region_allocator.buffer_slice.ptr);

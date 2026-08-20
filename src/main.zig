@@ -30,7 +30,8 @@ pub const tracy_options: tracy.Options = .{
 
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
-    const gpa = init.gpa;
+    var tracy_allocator: tracy.Allocator = .{ .parent = init.gpa, .secure = true };
+    const gpa = tracy_allocator.allocator();
     const io = init.io;
 
     const config_path: []const u8 = "Config.zon";
@@ -83,8 +84,6 @@ pub fn main(init: std.process.Init) !void {
     const dvui_backend = dvui.Backend.init(&backend);
     var ui_window = try dvui.Window.init(@src(), gpa, dvui_backend, .{});
     defer ui_window.deinit();
-
-    try Ui.loadFonts(&ui_window);
 
     var keymap = Key.Map.init(gpa);
     defer keymap.map.deinit();

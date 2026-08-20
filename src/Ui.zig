@@ -20,6 +20,54 @@ const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
 const pixel_font = sliceToBounded("Press Start 2P", 50);
 const Ui = @This();
 
+pub const main_theme: dvui.Theme = blk: {
+    const text: dvui.Color = .{ .r = 216, .g = 240, .b = 216, .a = 255 };
+    const fill: dvui.Color = .{ .r = 16, .g = 24, .b = 16, .a = 255 };
+    const border: dvui.Color = .{ .r = 77, .g = 129, .b = 77, .a = 255 };
+    const accent: dvui.Color = .{ .r = 156, .g = 204, .b = 0, .a = 255 };
+    const control_fill: dvui.Color = .{ .r = 44, .g = 77, .b = 44, .a = 255 };
+    const control_hover: dvui.Color = .{ .r = 61, .g = 107, .b = 61, .a = 255 };
+    const highlight_fill: dvui.Color = .{ .r = 0, .g = 128, .b = 128, .a = 255 };
+    const highlight_hover: dvui.Color = .{ .r = 0, .g = 160, .b = 160, .a = 255 };
+    break :blk .{
+        .name = "Terrafinity",
+        .dark = true,
+        .embedded_fonts = &.{
+            .{ .family = dvui.Font.array("Press Start 2P"), .bytes = press_start_2p },
+        },
+        .font_body = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .font_heading = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .font_title = .find(.{ .family = "Press Start 2P", .size = 24 }),
+        .font_mono = .find(.{ .family = "Press Start 2P", .size = 14 }),
+        .focus = accent,
+        .text_select = accent,
+        .fill = fill,
+        .text = text,
+        .border = border,
+        .max_default_corner_radius = 5.0,
+        .control = .{
+            .fill = control_fill,
+            .fill_hover = control_hover,
+            .fill_press = accent,
+            .text = text,
+            .text_press = .black,
+            .border = accent,
+        },
+        .window = .{ .fill = fill },
+        .highlight = .{
+            .fill = highlight_fill,
+            .fill_hover = highlight_hover,
+            .fill_press = accent,
+            .text = .white,
+        },
+    };
+};
+
+pub const menu_theme: dvui.Theme = blk: {
+    const mt: dvui.Theme = main_theme;
+    break :blk mt;
+};
+
 window: *wio.Window,
 vk_ctx: *VulkanContext,
 config: *Config,
@@ -31,6 +79,9 @@ worlds_path: []const u8,
 menu_background: dvui.Texture,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
+
+/// World awaiting deletion confirmation, owned by the Ui allocator.
+delete_world_name: ?[]const u8 = null,
 
 menu_state: struct {
     ingame: bool = false,
@@ -69,6 +120,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
     if (new_game_config) |config| generator_api.free(allocator, config);
     if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
+    if (self.delete_world_name) |name| allocator.free(name);
     new_game_config = null;
     new_game_generator = null;
 }
@@ -81,6 +133,8 @@ fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
         error.OutOfMemory => error_writer.print("Out of memory.", .{}) catch unreachable,
         error.ParseZon => error_writer.print("A ZON file in this world has an invalid format.", .{}) catch unreachable,
         error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
+        error.WorldNameExists => error_writer.print("A world with this name already exists.", .{}) catch unreachable,
+        error.InvalidName => error_writer.print("World names can't contain '/'.", .{}) catch unreachable,
         else => error_writer.print("{any}", .{err}) catch unreachable,
     }
     dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
@@ -91,6 +145,7 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
     defer dw.end();
 
     try self.ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+    dvui.themeSet(main_theme);
     var menu_changed: bool = false;
     {
         const ov = dvui.overlay(@src(), .{ .expand = .both });
@@ -213,7 +268,6 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
 }
 
 pub fn debugInfo(self: *@This(), io: std.Io) !void {
-    _ = io;
     var fmt_buffer: [16000]u8 = undefined;
     const box = dvui.box(@src(), .{}, .{
         .gravity_x = 0.0,
@@ -235,20 +289,17 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const chunk_hits = self.game.world.chunks.hits();
     const chunk_misses = self.game.world.chunks.misses();
 
-    const chunk_hit_ratio = @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(chunk_hits + chunk_misses));
-    var shadow_buf: [128]u8 = undefined;
-    const shadow_cascade = self.game.debug_menu.shadow_cascade.load(.unordered);
-    const shadow_line = if (shadow_cascade == std.math.maxInt(u32))
-        "shadows: off"
-    else
-        try std.fmt.bufPrint(&shadow_buf, "shadow cascade {d}: {d} faces", .{ shadow_cascade, self.game.debug_menu.shadow_faces.load(.unordered) });
+    const total = chunk_hits + chunk_misses;
+    const chunk_hit_ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(total));
+    const player_pos = self.game.getPlayerPos(io);
+    const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
         \\opaque faces: {d}
         \\transparent faces: {d}
-        \\{s}
+        \\pos: {d}, {d}, {d}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\chunk hit ratio: {d:.2}
@@ -258,7 +309,9 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
             self.game.debug_menu.meshes.load(.unordered),
             self.game.debug_menu.opaque_faces.load(.unordered),
             self.game.debug_menu.transparent_faces.load(.unordered),
-            shadow_line,
+            pos[0],
+            pos[1],
+            pos[2],
             chunk_count,
             grid_count,
             chunk_hit_ratio,
@@ -305,6 +358,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io) !bool {
 
     try self.config_lock.lock(io);
     const firstconfig = self.config.*;
+
     dvui.structUI(@src(), "Settings", self.config, 32, .{Config.structui_options}, .{});
 
     // Remove config strings from struct_ui's string_map to prevent double-free.
@@ -335,15 +389,24 @@ var new_game_generator_name: []const u8 = "Terrain";
 var new_game_generator_name_allocated = false;
 var new_game_generator: ?*generator_loader.Generator = null;
 var new_game_config: ?*generator_api.ConfigTree = null;
+var new_game_preset_index: usize = 0;
 
 fn selectNewGameGenerator(allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {
     if (new_game_generator == generator) return;
     if (new_game_config) |config| generator_api.free(allocator, config);
     if (new_game_generator_name_allocated) allocator.free(new_game_generator_name);
-    new_game_config = generator.api.config_default(&allocator) orelse return error.OutOfMemory;
+    new_game_preset_index = generator.defaultPresetIndex();
+    new_game_config = generator.defaultConfig(allocator) orelse return error.OutOfMemory;
     new_game_generator = generator;
     new_game_generator_name = try allocator.dupe(u8, generator.info.name);
     new_game_generator_name_allocated = true;
+}
+
+fn selectNewGamePreset(allocator: std.mem.Allocator, index: usize) !void {
+    const generator = new_game_generator orelse return;
+    if (new_game_config) |config| generator_api.free(allocator, config);
+    new_game_config = generator.presetConfig(allocator, index) orelse return error.OutOfMemory;
+    new_game_preset_index = index;
 }
 
 const max_generator_dropdown_entries: usize = 16;
@@ -370,6 +433,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     dvui.structUI(@src(), "World", &new_game_world_config, 32, .{}, .{ .background = false, .color_fill = .transparent });
 
     try self.generatorDropdown(allocator);
+    try self.presetDropdown(allocator);
 
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
@@ -393,6 +457,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     std.log.info("Creating world: {any}\n", .{world_name});
     var worlds_dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{});
     defer worlds_dir.close(io);
+    if (try worldExists(io, worlds_dir, world_name)) return error.WorldNameExists;
     var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
     defer world_folder.close(io);
     const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
@@ -406,6 +471,14 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     try self.openGame(io, allocator, game_path);
     self.menu_state.ingame = true;
     self.menu_state.newgame = false;
+    return true;
+}
+
+fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
+    _ = std.Io.Dir.statFile(dir, io, name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     return true;
 }
 
@@ -428,6 +501,21 @@ fn generatorDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
     dvui.labelNoFmt(@src(), "Generator", .{}, .{ .font = .{ .size = 24 } });
     _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
     if (choice != previous) try selectNewGameGenerator(allocator, &self.generators.generators.items[choice]);
+}
+
+fn presetDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
+    _ = self;
+    const generator = new_game_generator orelse return;
+    const count = generator.presetCount();
+    if (count == 0) return;
+    var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
+    const n = @min(count, max_generator_dropdown_entries);
+    for (0..n) |i| names_buffer[i] = generator.presetName(i);
+    if (new_game_preset_index >= n) new_game_preset_index = 0;
+    const previous = new_game_preset_index;
+    dvui.labelNoFmt(@src(), "Preset", .{}, .{ .font = .{ .size = 24 } });
+    _ = dvui.dropdown(@src(), names_buffer[0..n], .{ .choice = &new_game_preset_index }, .{}, .{});
+    if (new_game_preset_index != previous) try selectNewGamePreset(allocator, new_game_preset_index);
 }
 
 fn selectedGeneratorIndex(self: *@This(), count: usize) usize {
@@ -540,7 +628,11 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         const text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
         text.addText(item.name, .{ .font = .{ .family = pixel_font } });
         text.deinit();
-        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0, .expand = .horizontal, .margin = .{ .x = 64, .w = 64 }, .font = .{ .family = pixel_font }, .color_fill = .blue })) {
+
+        const bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 1.0, .expand = .horizontal });
+        defer bottom.deinit();
+
+        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.0, .expand = .horizontal, .margin = .{ .x = 8, .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .blue, .corner_radius = .all(2) })) {
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
@@ -549,7 +641,50 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             self.menu_state.main = false;
             return true;
         }
+
+        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corner_radius = .all(2) })) {
+            if (self.delete_world_name) |old| allocator.free(old);
+            self.delete_world_name = try allocator.dupe(u8, item.name);
+        }
     }
+
+    if (self.delete_world_name) |name| {
+        var open: bool = true;
+        const confirm = dvui.floatingWindow(
+            @src(),
+            .{ .modal = true, .resize = .none, .open_flag = &open },
+            .{ .max_size_content = .width(480) },
+        );
+        defer confirm.deinit();
+
+        dvui.labelNoFmt(@src(), "Delete world", .{}, .{ .gravity_x = 0.5, .font = .{ .size = 24 } });
+
+        var message_buffer: [512]u8 = undefined;
+        const message = std.fmt.bufPrint(&message_buffer, "Are you sure you want to delete \"{s}\"? This cannot be undone.", .{name}) catch unreachable;
+        const message_text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
+        message_text.addText(message, .{});
+        message_text.deinit();
+
+        const buttons = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+        defer buttons.deinit();
+
+        if (dvui.button(@src(), "Cancel", .{}, .{ .margin = .all(8) })) {
+            allocator.free(name);
+            self.delete_world_name = null;
+        }
+        if (self.delete_world_name != null and dvui.button(@src(), "Delete", .{}, .{ .margin = .all(8), .color_fill = .red })) {
+            try worlds_folder.deleteTree(io, name);
+            allocator.free(name);
+            self.delete_world_name = null;
+            return true;
+        }
+        // Dismissed via Esc or clicking outside the modal.
+        if (!open and self.delete_world_name != null) {
+            allocator.free(name);
+            self.delete_world_name = null;
+        }
+    }
+
     return false;
 }
 
@@ -703,10 +838,6 @@ fn configChoiceDropdown(name: []const u8, spec: generator_api.Spec, choice: *usi
     dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = id });
     if (choice.* >= spec.entries.len and spec.entries.len > 0) choice.* = 0;
     _ = dvui.dropdown(@src(), spec.entries, .{ .choice = choice }, .{}, .{ .id_extra = id });
-}
-
-pub fn loadFonts(window: *dvui.Window) !void {
-    try window.addFont("Press Start 2P", press_start_2p, null);
 }
 
 const HoverOptions = struct {

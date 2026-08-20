@@ -200,6 +200,7 @@ const Deps = struct {
     vk: *std.Build.Module,
     zignal: *std.Build.Module,
     zm: *std.Build.Module,
+    fastnoise: *std.Build.Module,
 };
 
 fn createDependencies(
@@ -254,13 +255,11 @@ fn createDependencies(
         .optimize = optimize,
         .libc = true,
         .@"stb-image" = true,
-        .freetype = false,
         .@"tree-sitter" = false,
-        .tvg = false,
+        .tvg = true,
         .backend = .custom,
     });
     const dvui_mod = dvui_dep.module("dvui");
-    dvui_mod.link_libc = true;
 
     // dvui_vk renderer (for Vulkan UI drawing)
     const dvui_vk_dep = b.dependency("dvui_vk", .{
@@ -309,6 +308,12 @@ fn createDependencies(
         .optimize = optimize,
     }).module("zm");
 
+    const fastnoise_mod = b.addModule("fastnoise", .{
+        .root_source_file = b.path("src/libs/fastnoise.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     return .{
         .rocksdb = rocksdb_mod,
         .obj = obj_mod,
@@ -320,6 +325,7 @@ fn createDependencies(
         .vk = vulkan_zig_mod,
         .zignal = zignal_mod,
         .zm = zm_mod,
+        .fastnoise = fastnoise_mod,
     };
 }
 
@@ -334,6 +340,7 @@ fn configureModule(deps: *const Deps, mod: *std.Build.Module) void {
     mod.addImport("vk", deps.vk);
     mod.addImport("zignal", deps.zignal);
     mod.addImport("zm", deps.zm);
+    mod.addImport("fastnoise", deps.fastnoise);
 
     // Vulkan bindings (for our game renderer - imported as "vulkan")
     mod.addImport("vulkan", deps.vk);

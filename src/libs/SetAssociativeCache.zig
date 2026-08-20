@@ -134,17 +134,18 @@ pub fn SetAssociativeCacheType(
             value_count_max: u64,
             options: Options,
         ) !SetAssociativeCache {
-            const sets = @divExact(value_count_max, layout.ways);
-
             assert(value_count_max >= value_count_min);
             assert(value_count_max % layout.ways == 0);
 
-            const counts_size = @divExact(value_count_max * layout.clock_bits, 8);
+            const sets = @divExact(value_count_max, layout.ways);
+
+            const counts_size = div_ceil(value_count_max * layout.clock_bits, 8);
 
             // Each clock hand is guaranteed (by comptime asserts) to not span multiple cache lines.
             // But in order to shrink the lower-bound cache size, we do not require that `clocks`
-            // itself is a multiple of the cache line size.
-            const clocks_size = @divExact(sets * clock_hand_bits, 8);
+            // itself is a multiple of the cache line size. Rounding up to a byte boundary keeps
+            // the documented contract: `value_count_max` only needs to be a multiple of `ways`.
+            const clocks_size = div_ceil(sets * clock_hand_bits, 8);
 
             assert(value_count_max % value_count_max_multiple == 0);
 
@@ -158,7 +159,7 @@ pub fn SetAssociativeCacheType(
             );
             errdefer allocator.free(values);
 
-            const counts = try allocator.alloc(u64, @divExact(counts_size, @sizeOf(u64)));
+            const counts = try allocator.alloc(u64, div_ceil(counts_size, @sizeOf(u64)));
             errdefer allocator.free(counts);
 
             const clocks = try allocator.alloc(u64, div_ceil(clocks_size, @sizeOf(u64)));

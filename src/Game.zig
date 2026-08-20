@@ -97,14 +97,20 @@ const NodeData = struct {
 /// aggregate flips. Setting creates the parent ghost if absent; clearing prunes it
 /// when it tracks nothing. The aggregate is monotonic in the slot value, so
 /// `was != is` is the directed transition condition for both directions of the walk.
+/// `highest` is a snapshot of `highest_level` taken at the outermost call; reusing
+/// it for the recursive bubble-up avoids N extra RwLock acquisitions and gives a
+/// consistent cutoff for the whole walk (concurrent `highest_level` changes take
+/// effect on the next top-level call).
 fn markSubtree(
     self: *@This(),
     io: std.Io,
     allocator: std.mem.Allocator,
     pos: World.ChunkPos,
     covered: bool,
+    highest: i32,
 ) !void {
-    _, const highest = self.getLevels(io);
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree" });
+    defer zone.end();
     const parent = pos.parent();
     if (parent.level > highest) return;
     const pos_in_parent = pos.posInParent();
@@ -112,6 +118,24 @@ fn markSubtree(
     var bubble_up = false;
     {
         const bucket = self.loaded_or_meshed.getBucket(parent);
+        const p = pos_in_parent;
+
+        // Fast path: read under the shared lock and skip the exclusive lock
+        // entirely when the slot already holds the target value. The synthetic
+        // NodeData on miss has `structures_generated = false` only to satisfy
+        // the type; only `covered_children[p]` is examined here.
+        {
+            const mark_subtree_fast = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_fast" });
+            defer mark_subtree_fast.end();
+            const initial = bucket.get(io, parent) orelse if (covered)
+                @as(NodeData, .{ .structures_generated = false })
+            else
+                return;
+            if (initial.covered_children[p[0]][p[1]][p[2]] == covered) return;
+        }
+
+        const mark_subtree_write = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_write" });
+        defer mark_subtree_write.end();
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
 
@@ -120,9 +144,8 @@ fn markSubtree(
         else
             bucket.hash_map.get(parent) orelse return;
 
-        const p = pos_in_parent;
-        // The slot already holds the target value: nothing changed, so the put
-        // and the bubble-up can be skipped entirely.
+        // Re-check after acquiring the exclusive lock; another thread may have
+        // flipped the slot while we waited.
         if (state.covered_children[p[0]][p[1]][p[2]] == covered) {
             return;
         }
@@ -131,9 +154,6 @@ fn markSubtree(
         state.covered_children[p[0]][p[1]][p[2]] = covered;
         const is_covering = state.isCovering();
 
-        // The thread sanitizer warning that points here may be indirectly related to https://codeberg.org/ziglang/zig/issues/35250
-        // If its not I have no idea but I will come back to it once 35250 is fixed
-        // It repos better with 1 loaded_or_meshed bucket and 128 threads for Io
         if (!covered and state.noCoveredChildren() and !state.is_active and !state.is_queued) {
             _ = bucket.hash_map.remove(parent);
         } else {
@@ -144,7 +164,7 @@ fn markSubtree(
     }
 
     if (bubble_up) {
-        try self.markSubtree(io, allocator, parent, covered);
+        try self.markSubtree(io, allocator, parent, covered, highest);
     }
 }
 
@@ -225,7 +245,8 @@ fn tryRemoveChunkFromLoaded(
     }
 
     if (was_covering and !is_covering) {
-        try self.markSubtree(io, allocator, chunk_pos, false);
+        _, const highest = self.getLevels(io);
+        try self.markSubtree(io, allocator, chunk_pos, false, highest);
     }
 }
 
@@ -706,36 +727,48 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
 }
 
 pub fn getPlayerPos(self: *@This(), io: std.Io) @Vector(3, f64) {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getPlayerPos" });
+    defer z.end();
     self.player.physics.mutex.lockUncancelable(io);
     defer self.player.physics.mutex.unlock(io);
     return self.player.physics.pos;
 }
 
 fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getCameraFront" });
+    defer z.end();
     self.player.view_direction_mutex.lockUncancelable(io);
     defer self.player.view_direction_mutex.unlock(io);
     return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
 }
 
 fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getLevels" });
+    defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.lowest_level, self.options.highest_level };
 }
 
 fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getRenderDistance" });
+    defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.render_distance_x, self.options.render_distance_y };
 }
 
 fn getInnerGenRadius(self: *@This(), io: std.Io, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getInnerGenRadius" });
+    defer z.end();
     if (level <= (self.getLevels(io))[0]) return @splat(0);
     const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }
 
 fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
+    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getMouseSensitivity" });
+    defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return self.options.mouse_sensitivity;
@@ -772,6 +805,8 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     var was_covering = false;
     var is_covering = false;
     {
+        const mark_write = tracy.Zone.begin(.{ .src = @src(), .name = "mark_write" });
+        defer mark_write.end();
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
@@ -788,7 +823,10 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     }
 
     if (!was_covering and is_covering) {
-        try self.markSubtree(io, allocator, chunk_pos, true);
+        const mark_get_levels = tracy.Zone.begin(.{ .src = @src(), .name = "mark_get_levels" });
+        defer mark_get_levels.end();
+        _, const highest = self.getLevels(io);
+        try self.markSubtree(io, allocator, chunk_pos, true, highest);
     }
 }
 
@@ -1012,7 +1050,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
                 },
                 .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
-            .pos = .{ 0, 100, 0 },
+            .pos = .{ 0, 1000, 0 },
             .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },
