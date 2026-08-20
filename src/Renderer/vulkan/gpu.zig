@@ -566,7 +566,7 @@ pub const MeshUploader = struct {
             // Every pool is held by an upload whose transfer batch is still on the
             // GPU, so blocking on the transfer timeline is bounded and frees pools
             // as the uploads holding them retire.
-            try self.waitForTransferCompletion();
+            try self.waitForTransferCompletion(io);
         }
     }
 
@@ -576,8 +576,11 @@ pub const MeshUploader = struct {
 
     /// Blocks until the transfer queue completes at least one more batch than it
     /// has now, or returns immediately when nothing is in flight. Callers flush
-    /// first so all pending work sits on the queue.
-    fn waitForTransferCompletion(self: *MeshUploader) !void {
+    /// first so all pending work sits on the queue. This is a non-cancelable
+    /// Vulkan wait (not `Io`-cancelable); callers must check `io.checkCancel()`
+    /// before calling, and a GPU hang will block indefinitely.
+    fn waitForTransferCompletion(self: *MeshUploader, io: std.Io) !void {
+        try io.checkCancel();
         const last_submitted = self.vk_ctx.transfer_semaphore_value.load(.monotonic);
         const completed = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
         if (completed >= last_submitted) return;
@@ -594,7 +597,7 @@ pub const MeshUploader = struct {
             try self.flush(io);
             // A full ring owns staging that only the GPU can release; wait for the
             // next transfer completion instead of busy-spinning.
-            try self.waitForTransferCompletion();
+            try self.waitForTransferCompletion(io);
         }
     }
 
@@ -622,6 +625,9 @@ pub const MeshUploader = struct {
             // Drain the GPU before swapping the buffer. These waits must not hold
             // the queue mutex: the render thread needs it to submit the frames that
             // advance the graphics timeline drainInFlightFrames blocks on.
+            // Two concurrent growers may both drain sequentially; the retry after
+            // locking detects the first grow and makes the double-drain benign
+            // (wasteful but correct).
             try self.drainInFlightFrames();
 
             const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);

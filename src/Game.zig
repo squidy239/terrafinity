@@ -97,6 +97,10 @@ const NodeData = struct {
 /// aggregate flips. Setting creates the parent ghost if absent; clearing prunes it
 /// when it tracks nothing. The aggregate is monotonic in the slot value, so
 /// `was != is` is the directed transition condition for both directions of the walk.
+/// `highest` is a snapshot of `highest_level` taken at the outermost call; reusing
+/// it for the recursive bubble-up avoids N extra RwLock acquisitions and gives a
+/// consistent cutoff for the whole walk (concurrent `highest_level` changes take
+/// effect on the next top-level call).
 fn markSubtree(
     self: *@This(),
     io: std.Io,
@@ -117,14 +121,18 @@ fn markSubtree(
         const p = pos_in_parent;
 
         // Fast path: read under the shared lock and skip the exclusive lock
-        // entirely when the slot already holds the target value.
-        const mark_subtree_fast = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_fast" });
-        defer mark_subtree_fast.end();
-        const initial = bucket.get(io, parent) orelse if (covered)
-            @as(NodeData, .{ .structures_generated = false })
-        else
-            return;
-        if (initial.covered_children[p[0]][p[1]][p[2]] == covered) return;
+        // entirely when the slot already holds the target value. The synthetic
+        // NodeData on miss has `structures_generated = false` only to satisfy
+        // the type; only `covered_children[p]` is examined here.
+        {
+            const mark_subtree_fast = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_fast" });
+            defer mark_subtree_fast.end();
+            const initial = bucket.get(io, parent) orelse if (covered)
+                @as(NodeData, .{ .structures_generated = false })
+            else
+                return;
+            if (initial.covered_children[p[0]][p[1]][p[2]] == covered) return;
+        }
 
         const mark_subtree_write = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_write" });
         defer mark_subtree_write.end();

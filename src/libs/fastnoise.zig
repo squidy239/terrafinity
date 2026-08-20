@@ -122,7 +122,8 @@ pub const DomainWarpType = enum {
 /// Configuration of the generator is done via the struct's fields, which are intended
 /// to be modified directly as-needed.
 // Lookup tables are module-level so every Noise(Float) instantiation
-// shares one copy; the values are FastNoise's f32 tables.
+// shares one copy; the values are FastNoise's f32 tables. `f64` uses
+// them via `@floatCast` (exact for these values); not duplicated per-Float.
 const warp_gradient_pairs: [16][2]f32 = .{
     .{ 0.130526192220052, 0.99144486137381 },
     .{ 0.38268343236509, 0.923879532511287 },
@@ -977,19 +978,29 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
             var hash = hash_in;
             hash ^= hash >> splat(IntV, 15);
-            if (comptime N == 8 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
+            if (comptime N == 8 and Float == f32 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
                 // One vpermps per component selects the table entry from the
                 // low three hash bits of each lane.  The XOR-sign path below
-                // is the fallback for other targets and widths.
+                // is the fallback for other targets and widths. Only valid for f32.
                 const table_gx: @Vector(8, Float) = @bitCast(grad_gx_table);
                 const table_gy: @Vector(8, Float) = @bitCast(grad_gy_table);
                 const gx = vpermpsF32(hash, table_gx);
                 const gy = vpermpsF32(hash, table_gy);
                 return @mulAdd(FloatV, gx, xd, gy * yd);
             }
-            const hbits: @Vector(N, u32) = @bitCast(hash);
-            const sx = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(xd)) ^ (hbits << splat(@Vector(N, u5), 31))));
-            const sy = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(yd)) ^ ((hbits >> splat(@Vector(N, u5), 1)) << splat(@Vector(N, u5), 31))));
+            var sx: FloatV = undefined;
+            var sy: FloatV = undefined;
+            if (Float == f32) {
+                const hbits: @Vector(N, u32) = @bitCast(hash);
+                sx = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(xd)) ^ (hbits << splat(@Vector(N, u5), 31))));
+                sy = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(yd)) ^ ((hbits >> splat(@Vector(N, u5), 1)) << splat(@Vector(N, u5), 31))));
+            } else {
+                // f64 fallback via selects; bit trick would need u64 63-bit shift.
+                const pos_x = (hash & splat(IntV, 1)) == splat(IntV, 0);
+                const pos_y = (hash & splat(IntV, 2)) == splat(IntV, 0);
+                sx = @select(Float, pos_x, xd, -xd);
+                sy = @select(Float, pos_y, yd, -yd);
+            }
             // The swap bit exchanges the components, matching FastNoise2's table.
             const swap = (hash & splat(IntV, 4)) != splat(IntV, 0);
             const u = @select(Float, swap, sy, sx);
@@ -1010,10 +1021,16 @@ pub fn Noise(comptime Float: type) type {
             const h13 = hash & splat(IntV, 13);
             const u = @select(Float, h13 > splat(IntV, 7), yd, xd);
             const v = @select(Float, h13 == splat(IntV, 12), xd, @select(Float, h13 < splat(IntV, 2), yd, zd));
-            const hbits: @Vector(N, u32) = @bitCast(hash);
-            const su = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(u)) ^ (hbits << splat(@Vector(N, u5), 31))));
-            const sv = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(v)) ^ ((hbits >> splat(@Vector(N, u5), 1)) << splat(@Vector(N, u5), 31))));
-            return su + sv;
+            if (Float == f32) {
+                const hbits: @Vector(N, u32) = @bitCast(hash);
+                const su = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(u)) ^ (hbits << splat(@Vector(N, u5), 31))));
+                const sv = @as(FloatV, @bitCast(@as(@Vector(N, u32), @bitCast(v)) ^ ((hbits >> splat(@Vector(N, u5), 1)) << splat(@Vector(N, u5), 31))));
+                return su + sv;
+            } else {
+                const pos_u = (hash & splat(IntV, 1)) == splat(IntV, 0);
+                const pos_v = (hash & splat(IntV, 2)) == splat(IntV, 0);
+                return @select(Float, pos_u, u, -u) + @select(Float, pos_v, v, -v);
+            }
         }
 
         inline fn gradCoord3DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32), z_primed: @Vector(N, i32), xd: @Vector(N, Float), yd: @Vector(N, Float), zd: @Vector(N, Float)) @Vector(N, Float) {
@@ -1041,9 +1058,9 @@ pub fn Noise(comptime Float: type) type {
             @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const idx = (hash >> splat(IntV, 1)) & splat(IntV, 0xF);
-            if (comptime N == 8 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
+            if (comptime N == 8 and Float == f32 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
                 // Two vpermps per component select the pair; the values are
-                // identical to the select-tree fallback.
+                // identical to the select-tree fallback. Only f32 tables exist.
                 const table_gx_lo: @Vector(8, Float) = @bitCast(warp_gx_lo);
                 const table_gy_lo: @Vector(8, Float) = @bitCast(warp_gy_lo);
                 const table_gx_hi: @Vector(8, Float) = @bitCast(warp_gx_hi);
@@ -3079,8 +3096,8 @@ test "warp gradient select tree matches the pair table" {
         const hash: i32 = @as(i32, @intCast(index1)) << 1;
         const grad = Noise(f32).gradient2DTableVec(1, @as(@Vector(1, i32), @splat(hash)));
         const pair = index1 & 15;
-        try std.testing.expectEqual(Noise(f32).warp_gradient_pairs[pair][0], grad.xg[0]);
-        try std.testing.expectEqual(Noise(f32).warp_gradient_pairs[pair][1], grad.yg[0]);
+        try std.testing.expectEqual(warp_gradient_pairs[pair][0], grad.xg[0]);
+        try std.testing.expectEqual(warp_gradient_pairs[pair][1], grad.yg[0]);
     }
 }
 

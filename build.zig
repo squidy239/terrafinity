@@ -311,7 +311,7 @@ fn createDependencies(
     const fastnoise_mod = b.addModule("fastnoise", .{
         .root_source_file = b.path("src/libs/fastnoise.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = optimize,
     });
 
     return .{

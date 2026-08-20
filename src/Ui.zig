@@ -289,7 +289,8 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const chunk_hits = self.game.world.chunks.hits();
     const chunk_misses = self.game.world.chunks.misses();
 
-    const chunk_hit_ratio = @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(chunk_hits + chunk_misses));
+    const total = chunk_hits + chunk_misses;
+    const chunk_hit_ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(total));
     const player_pos = self.game.getPlayerPos(io);
     const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const str = try std.fmt.bufPrint(
@@ -641,16 +642,17 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             return true;
         }
 
-        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red , .corner_radius = .all(2)})) {
+        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corner_radius = .all(2) })) {
             if (self.delete_world_name) |old| allocator.free(old);
             self.delete_world_name = try allocator.dupe(u8, item.name);
         }
     }
 
     if (self.delete_world_name) |name| {
+        var open: bool = true;
         const confirm = dvui.floatingWindow(
             @src(),
-            .{ .modal = true, .resize = .none },
+            .{ .modal = true, .resize = .none, .open_flag = &open },
             .{ .max_size_content = .width(480) },
         );
         defer confirm.deinit();
@@ -670,11 +672,16 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             allocator.free(name);
             self.delete_world_name = null;
         }
-        if (dvui.button(@src(), "Delete", .{}, .{ .margin = .all(8), .color_fill = .red })) {
+        if (self.delete_world_name != null and dvui.button(@src(), "Delete", .{}, .{ .margin = .all(8), .color_fill = .red })) {
             try worlds_folder.deleteTree(io, name);
             allocator.free(name);
             self.delete_world_name = null;
             return true;
+        }
+        // Dismissed via Esc or clicking outside the modal.
+        if (!open and self.delete_world_name != null) {
+            allocator.free(name);
+            self.delete_world_name = null;
         }
     }
 
