@@ -35,7 +35,7 @@ const Planet = struct {
 };
 
 pub const Generator = struct {
-    pub const Noise = @import("fastnoise.zig");
+    pub const Noise = @import("fastnoise");
 
     params: Params,
     /// Planet radius upper bound, clamped to box_size / 2 so the sphere always

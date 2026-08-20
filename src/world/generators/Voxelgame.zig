@@ -10,7 +10,7 @@ const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
 
 pub const Generator = struct {
-    pub const Noise = @import("fastnoise.zig");
+    pub const Noise = @import("fastnoise");
 
     const thc_fragments = 8;
 
