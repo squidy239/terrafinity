@@ -98,9 +98,9 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     defer z.end();
 
     const modified = chunk.modified.load(.seq_cst);
-    try self.options_lock.lock(io);
+    try self.options_lock.lockShared(io);
     const save_mode = self.save_mode.*;
-    self.options_lock.unlock(io);
+    self.options_lock.unlockShared(io);
     switch (save_mode) {
         .everything => {},
         .modified_grids_all_uniforms => switch (chunk.encoding) {
