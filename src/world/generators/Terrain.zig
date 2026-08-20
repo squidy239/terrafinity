@@ -353,7 +353,7 @@ pub const DefaultGenerator = struct {
         const caves = tracy.Zone.begin(.{ .src = @src() });
         defer caves.end();
         const cave_grid_size: usize = 4;
-        const CaveInterp = interpolation.TrilinearInterpolator3D(f32, cave_grid_size, cave_grid_size, cave_grid_size, ChunkSize, ChunkSize, ChunkSize);
+        const CaveInterp = interpolation.MultilinearInterpolator(f32, 3, .{ cave_grid_size, cave_grid_size, cave_grid_size }, .{ ChunkSize, ChunkSize, ChunkSize });
         const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const one_d_terrain_scale_vec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunk_scale));
         const cave_noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });

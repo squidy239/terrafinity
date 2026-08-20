@@ -1,102 +1,197 @@
 const std = @import("std");
-const ChunkSize = @import("Chunk.zig").ChunkSize;
 
-/// Creates a SIMD trilinear interpolator type over a coarse control grid.
+/// Creates a SIMD N-linear interpolator type over a coarse control grid.
 ///
-/// `Float` is the floating-point type of the grid and samples; `gx`/`gy`/`gz`
-/// are the grid densities along each axis, `nx`/`ny`/`nz` the number of
-/// samples along each axis. The grid is stored with X along the SIMD lanes,
-/// so interpolation along X is one vector operation per (y, z) slice. The
-/// per-sample lerp factors are precomputed at compile time; Y and Z use the
-/// FMA-friendly `v0 + t * (v1 - v0)` form, X uses masked vector multiplies,
-/// and the final stage runs fused with the stage before it so no intermediate
-/// result round-trips through memory.
-pub fn TrilinearInterpolator3D(
+/// `dims[k]` is the control-grid density along axis `k`, `samples[k]` the
+/// number of samples along it. Axis 0 is stored along the SIMD lanes, so
+/// interpolation along it is one vector operation per remaining-axis slice.
+/// The per-sample lerp factors are precomputed at compile time; axes 1..N-1
+/// use the FMA-friendly `v0 + t * (v1 - v0)` form, axis 0 uses masked vector
+/// multiplies, and every stage runs fused inside the loop of the stage before
+/// it, so no intermediate result round-trips through memory.
+///
+/// Layout conventions (identical to the hand-written 3D version):
+///   `Grid`    = `[dims[N-1]]...[dims[1]][dims[0]]Float`  (axis 0 innermost)
+///   `Samples` = `[samples[1]]...[samples[N-1]]@Vector(samples[0], Float)`
+pub fn MultilinearInterpolator(
     comptime Float: type,
-    comptime gx: usize,
-    comptime gy: usize,
-    comptime gz: usize,
-    comptime nx: usize,
-    comptime ny: usize,
-    comptime nz: usize,
+    comptime N: usize,
+    comptime dims: [N]usize,
+    comptime samples: [N]usize,
 ) type {
     if (@typeInfo(Float) != .float) @compileError("Float must be a floating-point type");
-    if (gx < 2 or gy < 2 or gz < 2) @compileError("grid densities must be at least 2");
-
-    const weights_x = computeAxisWeights(Float, gx, nx);
-    const lerp_y = computeAxisLerpData(Float, gy, ny);
-    const lerp_z = computeAxisLerpData(Float, gz, nz);
+    if (N == 0) @compileError("need at least one dimension");
+    for (dims) |d| if (d < 2) @compileError("grid densities must be at least 2");
+    for (samples) |s| if (s < 1) @compileError("sample counts must be at least 1");
 
     return struct {
         const Self = @This();
 
-        /// Control-point grid, X along the SIMD lane dimension.
-        grid: [gz][gy]@Vector(gx, Float),
+        /// A vector of samples along axis 0.
+        pub const Lane = @Vector(samples[0], Float);
+        /// A vector of control points along axis 0.
+        pub const Row = @Vector(dims[0], Float);
 
-        pub fn init(grid: [gz][gy][gx]Float) Self {
-            var self: Self = undefined;
-            for (0..gz) |z| {
-                for (0..gy) |y| {
-                    self.grid[z][y] = grid[z][y];
-                }
+        /// Control points / samples left once axes `< from` are reduced away.
+        fn gridCount(comptime from: usize) usize {
+            var p: usize = 1;
+            for (from..N) |i| p *= dims[i];
+            return p;
+        }
+        fn sampleCount(comptime from: usize) usize {
+            var p: usize = 1;
+            for (from..N) |i| p *= samples[i];
+            return p;
+        }
+
+        /// Number of control-point rows: one per coordinate of axes 1..N-1.
+        pub const rows = gridCount(1);
+        pub const total_samples = sampleCount(1);
+
+        pub const Grid = blk: {
+            var T: type = [dims[0]]Float;
+            for (1..N) |i| T = [dims[i]]T;
+            break :blk T;
+        };
+
+        pub const Samples = blk: {
+            var T: type = Lane;
+            var i: usize = N;
+            while (i > 1) : (i -= 1) T = [samples[i - 1]]T;
+            break :blk T;
+        };
+
+        /// Row stride of each axis; axis 1 is fastest-varying. `[0]` unused.
+        const row_stride = blk: {
+            var s: [N]usize = undefined;
+            s[0] = 0;
+            var acc: usize = 1;
+            for (1..N) |d| {
+                s[d] = acc;
+                acc *= dims[d];
             }
+            break :blk s;
+        };
+
+        const weights_0 = computeAxisWeights(Float, dims[0], samples[0]);
+
+        /// Control-point grid: axis 0 along the SIMD lanes, the remaining axes
+        /// flattened with axis 1 fastest-varying.
+        cells: [rows]Row,
+
+        pub fn init(grid: Grid) Self {
+            var self: Self = undefined;
+            var pos: usize = 0;
+            collectRows(Grid, &grid, &self.cells, &pos);
             return self;
         }
 
-        /// Sample at normalized coordinates in [0, 1].
-        pub fn sample(self: *const Self, tx: Float, ty: Float, tz: Float) Float {
-            const cx = cellOf(Float, gx, tx);
-            const cy = cellOf(Float, gy, ty);
-            const cz = cellOf(Float, gz, tz);
-            const fx = fracOf(Float, gx, tx);
-            const fy = fracOf(Float, gy, ty);
-            const fz = fracOf(Float, gz, tz);
+        /// Collects the `[dims[0]]Float` control rows of a nested grid, in memory order.
+        fn collectRows(comptime T: type, value: *const T, cells: []Row, pos: *usize) void {
+            const info = @typeInfo(T);
+            if (info == .array and @typeInfo(info.array.child) != .float) {
+                for (value) |*elem| collectRows(info.array.child, elem, cells, pos);
+            } else {
+                cells[pos.*] = value.*;
+                pos.* += 1;
+            }
+        }
+
+        fn rowIndex(coord: [N]usize) usize {
+            var r: usize = 0;
+            inline for (1..N) |d| r += coord[d] * row_stride[d];
+            return r;
+        }
+
+        /// The control point at integer grid coordinates.
+        pub fn at(self: *const Self, coord: [N]usize) Float {
+            const row: [dims[0]]Float = self.cells[rowIndex(coord)];
+            return row[coord[0]];
+        }
+
+        /// Sample at normalized coordinates in [0, 1]^N.
+        pub fn sample(self: *const Self, t: [N]Float) Float {
+            const corners = 1 << N;
+            var cell: [N]usize = undefined;
+            var frac: [N]Float = undefined;
+            inline for (0..N) |d| {
+                cell[d] = cellOf(Float, dims[d], t[d]);
+                frac[d] = fracOf(Float, dims[d], t[d]);
+            }
 
             var result: Float = 0;
-            inline for (0..2) |oz| {
-                inline for (0..2) |oy| {
-                    const row: [gx]Float = self.grid[cz + oz][cy + oy];
-                    const wy: Float = if (oy == 0) 1.0 - fy else fy;
-                    const wz: Float = if (oz == 0) 1.0 - fz else fz;
-                    inline for (0..2) |ox| {
-                        const wx: Float = if (ox == 0) 1.0 - fx else fx;
-                        result += wx * wy * wz * row[cx + ox];
-                    }
+            inline for (0..corners) |corner| {
+                var w: Float = 1;
+                var row: usize = 0;
+                inline for (1..N) |d| {
+                    const o = (corner >> @intCast(d)) & 1;
+                    w *= if (o == 0) 1.0 - frac[d] else frac[d];
+                    row += (cell[d] + o) * row_stride[d];
                 }
+                const o0 = corner & 1;
+                const w0: Float = if (o0 == 0) 1.0 - frac[0] else frac[0];
+                const cell_row: [dims[0]]Float = self.cells[row];
+                result += w * w0 * cell_row[cell[0] + o0];
             }
             return result;
         }
 
-        /// Interpolate a regular `nx` by `ny` by `nz` sample grid covering the
-        /// unit cube. Row `[y][z]` is a vector of `nx` samples along X.
-        pub fn sampleGrid(self: *const Self) [ny][nz]@Vector(nx, Float) {
+        /// Reduce one control-point row along axis 0 into `samples[0]` lanes.
+        inline fn reduceLaneAxis(self: *const Self, row: usize) Lane {
             @setFloatMode(.optimized);
-            var after_x: [gz][gy]@Vector(nx, Float) = undefined;
-            for (0..gz) |cz| {
-                for (0..gy) |cy| {
-                    var acc: @Vector(nx, Float) = @splat(0);
-                    const row = self.grid[cz][cy];
-                    inline for (0..gx - 1) |cell| {
-                        acc += weights_x.lo[cell] * @as(@Vector(nx, Float), @splat(row[cell]));
-                        acc += weights_x.hi[cell] * @as(@Vector(nx, Float), @splat(row[cell + 1]));
+            var acc: Lane = @splat(0);
+            const points = self.cells[row];
+            inline for (0..dims[0] - 1) |cell| {
+                acc += weights_0.lo[cell] * @as(Lane, @splat(points[cell]));
+                acc += weights_0.hi[cell] * @as(Lane, @splat(points[cell + 1]));
+            }
+            return acc;
+        }
+
+        /// Reduce `axis` (the innermost index of `in`) and recurse; the last
+        /// axis writes straight into `out`, so it is fused with its parent.
+        fn reduceAxis(
+            comptime axis: usize,
+            in: *const [gridCount(axis)]Lane,
+            out: []Lane,
+        ) void {
+            @setFloatMode(.optimized);
+            const lerp = comptime computeAxisLerpData(Float, dims[axis], samples[axis]);
+            for (0..samples[axis]) |i| {
+                const c = lerp.cell[i];
+                const f: Lane = @splat(lerp.frac[i]);
+                if (axis == N - 1) {
+                    out[i] = in[c] + f * (in[c + 1] - in[c]);
+                } else {
+                    const stride = dims[axis];
+                    const inner = comptime gridCount(axis + 1);
+                    const chunk = sampleCount(axis + 1);
+                    var buf: [inner]Lane = undefined;
+                    for (0..inner) |j| {
+                        const lo = in[j * stride + c];
+                        const hi = in[j * stride + c + 1];
+                        buf[j] = lo + f * (hi - lo);
                     }
-                    after_x[cz][cy] = acc;
+                    reduceAxis(axis + 1, &buf, out[i * chunk ..][0..chunk]);
                 }
             }
+        }
 
-            var result: [ny][nz]@Vector(nx, Float) = undefined;
-            for (0..ny) |y| {
-                const cy = lerp_y.cell[y];
-                const fy = @as(@Vector(nx, Float), @splat(lerp_y.frac[y]));
-                var y_lerp: [gz]@Vector(nx, Float) = undefined;
-                for (0..gz) |cz| {
-                    y_lerp[cz] = after_x[cz][cy] + fy * (after_x[cz][cy + 1] - after_x[cz][cy]);
-                }
-                for (0..nz) |z| {
-                    const cz = lerp_z.cell[z];
-                    const fz = @as(@Vector(nx, Float), @splat(lerp_z.frac[z]));
-                    result[y][z] = y_lerp[cz] + fz * (y_lerp[cz + 1] - y_lerp[cz]);
-                }
+        /// Interpolate a regular sample grid covering the unit cube.
+        pub fn sampleGrid(self: *const Self) Samples {
+            @setFloatMode(.optimized);
+            var result: Samples = undefined;
+            // result and a flat lane array share one contiguous layout; a flat
+            // view lets reduceAxis write each lane in place, with no extra copy.
+            const out: *[total_samples]Lane = @ptrCast(&result);
+
+            var stage: [rows]Lane = undefined;
+            for (0..rows) |r| stage[r] = self.reduceLaneAxis(r);
+
+            if (N == 1) {
+                out[0] = stage[0];
+            } else {
+                reduceAxis(1, &stage, out);
             }
             return result;
         }
@@ -105,15 +200,15 @@ pub fn TrilinearInterpolator3D(
 
 fn AxisWeights(comptime Float: type, comptime g: usize, comptime n: usize) type {
     return struct {
-        lo: [g - 1][n]Float,
-        hi: [g - 1][n]Float,
+        lo: [g - 1]@Vector(n, Float),
+        hi: [g - 1]@Vector(n, Float),
     };
 }
 
 /// For each grid cell, the lerp weights of the samples that land in it; all
 /// other lanes are zero. Sample `i` has coordinate `i / n` along the axis.
 fn computeAxisWeights(comptime Float: type, comptime g: usize, comptime n: usize) AxisWeights(Float, g, n) {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(100_000);
     var weights: AxisWeights(Float, g, n) = undefined;
     inline for (0..g - 1) |cell| {
         var lo: [n]Float = @splat(0);
@@ -159,32 +254,101 @@ fn fracOf(comptime Float: type, comptime g: usize, t: Float) Float {
     return scaled - @as(Float, @floatFromInt(cellOf(Float, g, t)));
 }
 
-fn randGrid(comptime Float: type, comptime gx: usize, comptime gy: usize, comptime gz: usize) [gz][gy][gx]Float {
-    var grid: [gz][gy][gx]Float = undefined;
+/// Fills a nested control-grid array with deterministic pseudo-random values.
+fn randGrid(comptime G: type) G {
+    var grid: G = undefined;
     var rng = std.Random.DefaultPrng.init(1234);
-    const rand = rng.random();
-    for (&grid) |*plane| {
-        for (plane) |*row| {
-            for (row) |*value| {
-                value.* = rand.float(Float) * 2.0 - 1.0;
-            }
-        }
-    }
+    fillRand(G, &grid, rng.random());
     return grid;
 }
 
+/// Writes pseudo-random values into a nested array of floats, at any depth.
+fn fillRand(comptime T: type, value: *T, rand: std.Random) void {
+    const info = @typeInfo(T);
+    if (info == .array) {
+        for (value) |*elem| fillRand(info.array.child, elem, rand);
+    } else if (info == .float) {
+        value.* = rand.float(T) * 2.0 - 1.0;
+    } else {
+        @compileError("control grids are nested arrays of floats");
+    }
+}
+
+/// The first scalar of a nested grid/sample array, whatever its depth.
+fn firstScalar(comptime Float: type, value: anytype) Float {
+    const T = @TypeOf(value);
+    if (@typeInfo(T) == .array) return firstScalar(Float, value[0]);
+    if (@typeInfo(T) == .vector) return value[0];
+    return value;
+}
+
+/// Renders `[n0]x[n1]x...` for an axis size list, at comptime.
+fn axisLabel(comptime sizes: []const usize) []const u8 {
+    var buf: [64]u8 = undefined;
+    var pos: usize = 0;
+    inline for (sizes, 0..) |s, i| {
+        if (i != 0) {
+            buf[pos] = 'x';
+            pos += 1;
+        }
+        var tmp: [20]u8 = undefined;
+        const text = std.fmt.bufPrint(&tmp, "{d}", .{s}) catch unreachable;
+        @memcpy(buf[pos..][0..text.len], text);
+        pos += text.len;
+    }
+    const out: [pos]u8 = buf[0..pos].*;
+    return &out;
+}
+
+fn benchGrid(
+    comptime Float: type,
+    comptime N: usize,
+    comptime dims: [N]usize,
+    comptime samples: [N]usize,
+    comptime iterations: usize,
+    io: std.Io,
+) void {
+    const Grid = MultilinearInterpolator(Float, N, dims, samples);
+    const volume: usize = comptime blk: {
+        var v: usize = 1;
+        for (samples) |s| v *= s;
+        break :blk v;
+    };
+    const samples_per_pass: f64 = @floatFromInt(iterations * volume);
+    const interp = Grid.init(randGrid(Grid.Grid));
+
+    var sink: Float = 0;
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |_| {
+        sink += firstScalar(Float, interp.sampleGrid());
+    }
+    const end = std.Io.Clock.Timestamp.now(io, .awake);
+    const ns_per_sample = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / samples_per_pass;
+    std.debug.print(
+        "{s} -> {s}: {d:.3} ns/sample, {d:.3} us per pass (sink {d})\n",
+        .{
+            comptime axisLabel(&dims),
+            comptime axisLabel(&samples),
+            ns_per_sample,
+            ns_per_sample * @as(f64, @floatFromInt(volume)) * @as(f64, @floatFromInt(iterations)) / 1000.0,
+            sink,
+        },
+    );
+}
+
 test "sample returns grid points exactly" {
-    const Grid = TrilinearInterpolator3D(f32, 4, 6, 5, 8, 8, 8);
-    const interp = Grid.init(randGrid(f32, 4, 6, 5));
+    const Grid = MultilinearInterpolator(f32, 3, .{ 4, 6, 5 }, .{ 8, 8, 8 });
+    const grid = randGrid(Grid.Grid);
+    const interp = Grid.init(grid);
     inline for (0..5) |z| {
         inline for (0..6) |y| {
             inline for (0..4) |x| {
-                const expected = interp.grid[z][y][x];
-                const actual = interp.sample(
+                const expected = grid[z][y][x];
+                const actual = interp.sample(.{
                     @as(f32, @floatFromInt(x)) / 3.0,
                     @as(f32, @floatFromInt(y)) / 5.0,
                     @as(f32, @floatFromInt(z)) / 4.0,
-                );
+                });
                 try std.testing.expectEqual(expected, actual);
             }
         }
@@ -192,18 +356,18 @@ test "sample returns grid points exactly" {
 }
 
 test "sampleGrid matches scalar sample" {
-    const Grid = TrilinearInterpolator3D(f32, 8, 8, 8, 16, 16, 16);
-    const interp = Grid.init(randGrid(f32, 8, 8, 8));
+    const Grid = MultilinearInterpolator(f32, 3, .{ 8, 8, 8 }, .{ 16, 16, 16 });
+    const interp = Grid.init(randGrid(Grid.Grid));
     const samples = interp.sampleGrid();
     for (0..16) |y| {
         for (0..16) |z| {
             const row: [16]f32 = samples[y][z];
             for (0..16) |x| {
-                const expected = interp.sample(
+                const expected = interp.sample(.{
                     @as(f32, @floatFromInt(x)) / 16.0,
                     @as(f32, @floatFromInt(y)) / 16.0,
                     @as(f32, @floatFromInt(z)) / 16.0,
-                );
+                });
                 try std.testing.expectApproxEqAbs(expected, row[x], 1e-4);
             }
         }
@@ -211,18 +375,18 @@ test "sampleGrid matches scalar sample" {
 }
 
 test "f64 asymmetric grid density matches scalar sample" {
-    const Grid = TrilinearInterpolator3D(f64, 8, 16, 8, 16, 16, 16);
-    const interp = Grid.init(randGrid(f64, 8, 16, 8));
+    const Grid = MultilinearInterpolator(f64, 3, .{ 8, 16, 8 }, .{ 16, 16, 16 });
+    const interp = Grid.init(randGrid(Grid.Grid));
     const samples = interp.sampleGrid();
     for (0..16) |y| {
         for (0..16) |z| {
             const row: [16]f64 = samples[y][z];
             for (0..16) |x| {
-                const expected = interp.sample(
+                const expected = interp.sample(.{
                     @as(f64, @floatFromInt(x)) / 16.0,
                     @as(f64, @floatFromInt(y)) / 16.0,
                     @as(f64, @floatFromInt(z)) / 16.0,
-                );
+                });
                 try std.testing.expectApproxEqAbs(expected, row[x], 1e-12);
             }
         }
@@ -230,7 +394,7 @@ test "f64 asymmetric grid density matches scalar sample" {
 }
 
 test "sampleGrid reproduces linear fields" {
-    const Grid = TrilinearInterpolator3D(f32, 8, 16, 8, 32, 32, 32);
+    const Grid = MultilinearInterpolator(f32, 3, .{ 8, 16, 8 }, .{ 32, 32, 32 });
     var grid: [8][16][8]f32 = undefined;
     for (0..8) |z| {
         for (0..16) |y| {
@@ -258,20 +422,25 @@ test "sampleGrid reproduces linear fields" {
 test "benchmark sampleGrid" {
     const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;
     const io = std.testing.io;
-    const samples_per_pass: f64 = @floatFromInt(iterations * ChunkSize * ChunkSize * ChunkSize);
 
-    inline for (.{ .{ 4, 4, 4 }, .{ 8, 8, 8 }, .{ 16, 16, 16 }, .{ 8, 16, 8 } }) |density| {
-        const Grid = TrilinearInterpolator3D(f32, density[0], density[1], density[2], ChunkSize, ChunkSize, ChunkSize);
-        const interp = Grid.init(randGrid(f32, density[0], density[1], density[2]));
-
-        var sink: f32 = 0;
-        const start = std.Io.Clock.Timestamp.now(io, .awake);
-        for (0..iterations) |_| {
-            const samples = interp.sampleGrid();
-            sink += samples[0][0][0];
-        }
-        const end = std.Io.Clock.Timestamp.now(io, .awake);
-        const ns_per_sample = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / samples_per_pass;
-        std.debug.print("grid {d}x{d}x{d}: {d:.1} ns/sample, {d:.2} us per chunk (sink {d})\n", .{ density[0], density[1], density[2], ns_per_sample, ns_per_sample * @as(f64, @floatFromInt(ChunkSize * ChunkSize * ChunkSize)) / 1000.0, sink });
+    inline for (@as([2][4]usize, .{
+        .{ 4, 4, 32, 32 },
+        .{ 8, 8, 128, 128 },
+    })) |cfg| {
+        benchGrid(f32, 2, cfg[0..2].*, cfg[2..4].*, iterations, io);
+    }
+    inline for (@as([4][6]usize, .{
+        .{ 4, 4, 4, 32, 32, 32 },
+        .{ 8, 8, 8, 128, 128, 128 },
+        .{ 32, 32, 32, 32, 32, 32 },
+        .{ 8, 16, 8, 32, 32, 32 },
+    })) |cfg| {
+        benchGrid(f32, 3, cfg[0..3].*, cfg[3..6].*, iterations, io);
+    }
+    inline for (@as([2][8]usize, .{
+        .{ 4, 4, 4, 4, 32, 32, 32, 32 },
+        .{ 4, 4, 4, 4, 8, 8, 8, 8 },
+    })) |cfg| {
+        benchGrid(f32, 4, cfg[0..4].*, cfg[4..8].*, iterations, io);
     }
 }
