@@ -6,10 +6,6 @@ const DeviceProxy = vk.DeviceProxy;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 const core = @import("core.zig");
 
-// ---------------------------------------------------------------------------
-// IndexPool
-// ---------------------------------------------------------------------------
-
 pub const IndexPool = struct {
     free_indices: []u32,
     head: u32,
@@ -55,10 +51,6 @@ pub const IndexPool = struct {
         self.head += added;
     }
 };
-
-// ---------------------------------------------------------------------------
-// StagingRing
-// ---------------------------------------------------------------------------
 
 pub const StagingRing = struct {
     const transfer_alignment: vk.DeviceSize = 256;
@@ -166,10 +158,6 @@ pub const StagingRing = struct {
         }
     }
 };
-
-// ---------------------------------------------------------------------------
-// GpuRegionAllocator
-// ---------------------------------------------------------------------------
 
 const log = std.log.scoped(.gpu_region_allocator);
 
@@ -344,10 +332,6 @@ pub const GpuRegionAllocator = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// CommandPoolReservoir
-// ---------------------------------------------------------------------------
-
 const reservoir_size = 512;
 
 pub const CommandPoolReservoir = struct {
@@ -392,10 +376,6 @@ pub const CommandPoolReservoir = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// GpuMemory
-// ---------------------------------------------------------------------------
-
 /// Shared GPU allocation pools: device-local and host-visible GPU-visible memory,
 /// each wrapped in a DebugAllocator backed by one VulkanBackingAllocator.
 pub const GpuMemory = struct {
@@ -439,11 +419,10 @@ pub const GpuMemory = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// MeshUploader
-// ---------------------------------------------------------------------------
-
 pub const max_batch = 512;
+
+/// Vulkan's guaranteed minimum for `maxDrawIndirectCount`, used when the driver reports 0.
+const fallback_max_draw_indirect_count: u32 = 65_535;
 
 /// Upper bound on the transfer back-pressure waits. These waits are satisfied by
 /// already-submitted GPU work in normal operation; a timeout means the GPU is
@@ -865,10 +844,6 @@ pub const MeshUploader = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// IndirectScene
-// ---------------------------------------------------------------------------
-
 pub const MeshCandidate = extern struct {
     absolute_position: [4]f32 align(@sizeOf([4]f32)),
     face_offset: u32,
@@ -1012,7 +987,7 @@ pub const IndirectScene = struct {
             .memory = memory,
         };
 
-        self.max_draw_indirect_count = if (vk_ctx.props.limits.max_draw_indirect_count > 0) vk_ctx.props.limits.max_draw_indirect_count else 65_535;
+        self.max_draw_indirect_count = if (vk_ctx.props.limits.max_draw_indirect_count > 0) vk_ctx.props.limits.max_draw_indirect_count else fallback_max_draw_indirect_count;
         self.draw_capacity = initial_draw_capacity;
 
         const persistent_candidates_slice = try memory.cpuToGpu().alloc(MeshCandidate, initial_candidates);
@@ -1101,28 +1076,27 @@ pub const IndirectScene = struct {
     /// range), so including them would only inflate the AABB and waste depth precision.
     pub fn getSceneAABB(self: *IndirectScene) struct { min: [3]f64, max: [3]f64 } {
         const version = self.aabb_version.load(.acquire);
-        if (version != self.aabb_scanned_version) {
-            var min: [3]f64 = .{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) };
-            var max: [3]f64 = .{ -std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
-            const count = self.max_allocated_index.load(.monotonic);
-            for (self.persistent.mapped[0..count]) |candidate| {
-                if (candidate.face_count == 0 or candidate.is_transparent != 0) continue;
-                const pos: [3]f64 = .{ candidate.absolute_position[0], candidate.absolute_position[1], candidate.absolute_position[2] };
-                const size: f64 = @as(f64, candidate.scale) * chunk_size_blocks;
-                inline for (0..3) |i| {
-                    min[i] = @min(min[i], pos[i]);
-                    max[i] = @max(max[i], pos[i] + size);
-                }
+        if (version == self.aabb_scanned_version) return .{ .min = self.aabb_min, .max = self.aabb_max };
+
+        var min: [3]f64 = @splat(std.math.inf(f64));
+        var max: [3]f64 = @splat(-std.math.inf(f64));
+        const count = self.max_allocated_index.load(.monotonic);
+        for (self.persistent.mapped[0..count]) |candidate| {
+            if (candidate.face_count == 0 or candidate.is_transparent != 0) continue;
+            const size: f64 = @as(f64, candidate.scale) * chunk_size_blocks;
+            for (&min, &max, candidate.absolute_position[0..3]) |*axis_min, *axis_max, pos| {
+                axis_min.* = @min(axis_min.*, pos);
+                axis_max.* = @max(axis_max.*, pos + size);
             }
-            if (count == 0) {
-                min = .{ 0, 0, 0 };
-                max = .{ 0, 0, 0 };
-            }
-            self.aabb_min = min;
-            self.aabb_max = max;
-            self.aabb_scanned_version = version;
         }
-        return .{ .min = self.aabb_min, .max = self.aabb_max };
+        if (count == 0) {
+            min = @splat(0);
+            max = @splat(0);
+        }
+        self.aabb_min = min;
+        self.aabb_max = max;
+        self.aabb_scanned_version = version;
+        return .{ .min = min, .max = max };
     }
 
     pub fn ensureCapacity(self: *IndirectScene, io: std.Io, total_candidates: u32) !void {
@@ -1183,10 +1157,18 @@ pub const IndirectScene = struct {
         self.fillFrameData(frame, mesh_data_slice, indirect_draw_slice, count_slice, stats_slice);
     }
 
-    /// Waits for device idle under the queue mutexes so no in-flight submission races the
-    /// buffer reallocation, then frees. Shared by the draw-capacity and candidate growth paths.
-    fn waitIdleLocked(self: *IndirectScene, io: std.Io) !void {
-        try self.vk_ctx.deviceWaitIdleLocked(io);
+    /// Doubles the draw capacity until it covers `min_capacity`, failing when the device's
+    /// indirect-draw limit cannot hold the result.
+    fn nextDrawCapacity(self: *IndirectScene, min_capacity: u32) !u32 {
+        var new_capacity = self.draw_capacity;
+        while (new_capacity < min_capacity) {
+            new_capacity = std.math.mul(u32, new_capacity, 2) catch return error.MaxDrawCapacityExceeded;
+        }
+        if (new_capacity > self.max_draw_indirect_count) {
+            std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, self.max_draw_indirect_count });
+            return error.MaxDrawCapacityExceeded;
+        }
+        return new_capacity;
     }
 
     fn growDrawCapacity(self: *IndirectScene, io: std.Io, min_capacity: u32) !void {
@@ -1195,21 +1177,10 @@ pub const IndirectScene = struct {
 
         if (min_capacity <= self.draw_capacity) return;
 
-        var new_capacity = self.draw_capacity;
-        while (new_capacity < min_capacity) {
-            new_capacity = std.math.mul(u32, new_capacity, 2) catch return error.MaxDrawCapacityExceeded;
-        }
-
-        const clamped_capacity = @min(new_capacity, self.max_draw_indirect_count);
-        if (clamped_capacity < new_capacity) {
-            std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, self.max_draw_indirect_count });
-            return error.MaxDrawCapacityExceeded;
-        }
-        new_capacity = clamped_capacity;
-
+        const new_capacity = try self.nextDrawCapacity(min_capacity);
         std.log.info("IndirectScene: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
-        try self.waitIdleLocked(io);
+        try self.vk_ctx.deviceWaitIdleLocked(io);
 
         const old_draw_capacity = self.draw_capacity;
         const num_frames = self.frame_buffers.items.len;
@@ -1225,14 +1196,14 @@ pub const IndirectScene = struct {
 
         var allocated_frames: usize = 0;
         errdefer {
-            for (0..allocated_frames) |i| {
-                self.memory.cpuToGpu().free(new_mesh_data[i][0 .. new_capacity * slot_count]);
-                self.memory.cpuToGpu().free(new_indirect[i][0 .. new_capacity * slot_count]);
-                self.memory.gpuOnly().free(new_count_slices[i]);
-                self.memory.cpuToGpu().free(new_stats_slices[i]);
+            for (new_mesh_data[0..allocated_frames], new_indirect[0..allocated_frames], new_count_slices[0..allocated_frames], new_stats_slices[0..allocated_frames]) |mesh, indirect, count, stats| {
+                self.memory.cpuToGpu().free(mesh[0 .. new_capacity * slot_count]);
+                self.memory.cpuToGpu().free(indirect[0 .. new_capacity * slot_count]);
+                self.memory.gpuOnly().free(count);
+                self.memory.cpuToGpu().free(stats);
             }
         }
-        for (0..num_frames) |i| {
+        for (new_mesh_data, new_indirect, new_count_slices, new_stats_slices) |*mesh_dst, *indirect_dst, *count_dst, *stats_dst| {
             const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, new_capacity * slot_count);
             errdefer self.memory.cpuToGpu().free(mesh_data_slice);
             const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, new_capacity * slot_count);
@@ -1243,10 +1214,10 @@ pub const IndirectScene = struct {
             errdefer self.memory.cpuToGpu().free(stats_slice);
             stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
 
-            new_mesh_data[i] = mesh_data_slice.ptr;
-            new_indirect[i] = indirect_draw_slice.ptr;
-            new_count_slices[i] = count_slice;
-            new_stats_slices[i] = stats_slice;
+            mesh_dst.* = mesh_data_slice.ptr;
+            indirect_dst.* = indirect_draw_slice.ptr;
+            count_dst.* = count_slice;
+            stats_dst.* = stats_slice;
             allocated_frames += 1;
         }
 
@@ -1272,9 +1243,7 @@ pub const IndirectScene = struct {
         self.draw_capacity = new_capacity;
         self.buffers_version += 1;
 
-        for (self.frame_buffers.items[0..num_frames], 0..) |_, i| {
-            self.updateMeshDataDescriptorSet(@intCast(i));
-        }
+        for (0..num_frames) |i| self.updateMeshDataDescriptorSet(@intCast(i));
     }
 
     fn growPersistentCandidates(self: *IndirectScene, io: std.Io) !void {
@@ -1285,7 +1254,7 @@ pub const IndirectScene = struct {
         const new_capacity = old_capacity * 2;
         std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
 
-        try self.waitIdleLocked(io);
+        try self.vk_ctx.deviceWaitIdleLocked(io);
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
         @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
@@ -1350,10 +1319,6 @@ pub const IndirectScene = struct {
         core.destroyFrameDescriptorResources(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.mesh_data_descriptor_pool, &self.mesh_data_descriptor_sets_per_frame);
     }
 };
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 test "GpuRegionAllocator checkAllAllocationFailures" {
     const allocFn = struct {

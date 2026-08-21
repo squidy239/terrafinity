@@ -39,6 +39,8 @@ const RenderBufferKey = union(enum) {
 
 const batch_size = 512;
 const pending_queue_size = 512;
+/// Stack scratch for one chunk's meshing; larger meshes spill to the fallback allocator.
+const mesh_scratch_bytes = 64 * 1024;
 
 const SubmissionBatch = struct {
     cmds: [batch_size]vk.CommandBuffer = undefined,
@@ -269,7 +271,7 @@ pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding:
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addChunk" });
     defer zone.end();
 
-    var buffer: [65536]u8 = undefined;
+    var buffer: [mesh_scratch_bytes]u8 = undefined;
     var bfa: BFA = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
     defer opaque_faces.deinit(bfa.allocator());
@@ -916,24 +918,24 @@ fn pushShadowSet2(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, pipeline_l
     self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, pipeline_layout, 2, &writes);
 }
 
+/// Culls the main view and every active shadow cascade into this frame's CullCount.
+/// reset_count=false for the cascades is safe only because the main cull just zeroed the
+/// WHOLE CullCount (including shadow_count/shadow_face_count). The shadow raster is gated
+/// on the identical conditions, so it never draws a count that was not reset.
+fn dispatchFrameCulling(self: *ChunkRenderer, ctx: *const PassContext) void {
+    self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, 0, 0.0, true);
+    if (shadowActive(ctx)) |shadow| {
+        for (0..shadow.frameCascadeCount()) |slot| {
+            self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, 1 + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);
+        }
+    }
+    self.cullBarrierAndCopyStats(ctx.cmd_buffer, ctx.frame_idx);
+}
+
 fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
     defer zone.end();
-    if (ctx.total_candidates > 0) {
-        self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, 0, 0.0, true);
-        // Shadow cull for this frame's cascade; the results feed the end-of-frame raster.
-        // reset_count=false is safe only because the main cull just zeroed the WHOLE
-        // CullCount (including shadow_count/shadow_face_count) and this dispatch runs
-        // inside the same total_candidates > 0 block. The shadow raster below is gated
-        // on the identical conditions, so it never draws a count that was not reset.
-        if (shadowActive(ctx)) |shadow| {
-            const cascade_count = shadow.frameCascadeCount();
-            for (0..cascade_count) |slot| {
-                self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, 1 + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);
-            }
-        }
-        self.cullBarrierAndCopyStats(ctx.cmd_buffer, ctx.frame_idx);
-    }
+    if (ctx.total_candidates > 0) self.dispatchFrameCulling(ctx);
 
     const color_attachment = core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
     const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);

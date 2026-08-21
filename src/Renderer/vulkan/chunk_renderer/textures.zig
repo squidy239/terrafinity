@@ -30,6 +30,12 @@ const Texture = struct {
     num_mip_levels: u16 = 0,
 };
 
+/// One texture file found in the pack directory, owned by the loader until upload ends.
+const TextureEntry = struct {
+    name: []const u8,
+    block: Block,
+};
+
 const StageAccess = struct {
     stage: vk.PipelineStageFlags2,
     access: vk.AccessFlags2,
@@ -113,11 +119,9 @@ pub const TextureManager = struct {
 
                 if (pack.dir.openFile(io, filename, .{})) |f| {
                     f.close(io);
-                } else |err| {
-                    switch (err) {
-                        error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
-                        else => |e| return e,
-                    }
+                } else |err| switch (err) {
+                    error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
+                    else => |e| return e,
                 }
             }
         }
@@ -143,28 +147,23 @@ pub const TextureManager = struct {
             self.destroyTexture(&self.default_texture);
         }
 
-        var entry_names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var entries: std.ArrayListUnmanaged(TextureEntry) = .empty;
         defer {
-            for (entry_names.items) |n| allocator.free(n);
-            entry_names.deinit(allocator);
-        }
-        var entry_blocks: std.ArrayListUnmanaged(Block) = .empty;
-        defer entry_blocks.deinit(allocator);
-
-        {
-            var dir_it = std.Io.Dir.iterate(dir);
-            while (try dir_it.next(io)) |entry| {
-                if (entry.kind != .file or std.mem.indexOf(u8, entry.name, keyword) == null) continue;
-                const dot = std.mem.indexOfScalar(u8, entry.name, '.') orelse entry.name.len;
-                const block_type = std.meta.stringToEnum(Block, entry.name[0..dot]) orelse continue;
-                if (!block_type.isVisible()) continue;
-
-                try entry_names.append(allocator, try allocator.dupe(u8, entry.name));
-                try entry_blocks.append(allocator, block_type);
-            }
+            for (entries.items) |entry| allocator.free(entry.name);
+            entries.deinit(allocator);
         }
 
-        if (entry_names.items.len == 0) return error.NoTexturesFound;
+        var dir_it = std.Io.Dir.iterate(dir);
+        while (try dir_it.next(io)) |dir_entry| {
+            if (dir_entry.kind != .file or std.mem.indexOf(u8, dir_entry.name, keyword) == null) continue;
+            const dot = std.mem.indexOfScalar(u8, dir_entry.name, '.') orelse dir_entry.name.len;
+            const block_type = std.meta.stringToEnum(Block, dir_entry.name[0..dot]) orelse continue;
+            if (!block_type.isVisible()) continue;
+
+            try entries.append(allocator, .{ .name = try allocator.dupe(u8, dir_entry.name), .block = block_type });
+        }
+
+        if (entries.items.len == 0) return error.NoTexturesFound;
 
         const format: vk.Format = if (self.gamma_correction) .r8g8b8a8_srgb else .r8g8b8a8_unorm;
 
@@ -173,7 +172,7 @@ pub const TextureManager = struct {
             self.services.single_time.free(cmd);
 
         var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
-        try staging_slices.ensureTotalCapacity(allocator, entry_names.items.len + 1);
+        try staging_slices.ensureTotalCapacity(allocator, entries.items.len + 1);
         defer {
             for (staging_slices.items) |s| self.services.memory.cpuToGpu().free(s);
             staging_slices.deinit(allocator);
@@ -186,8 +185,8 @@ pub const TextureManager = struct {
             staging_slices.appendAssumeCapacity(staging);
         }
 
-        for (entry_names.items, entry_blocks.items) |name, block_type| {
-            const texture_file = try dir.openFile(io, name, .{});
+        for (entries.items) |entry| {
+            const texture_file = try dir.openFile(io, entry.name, .{});
             defer texture_file.close(io);
 
             const stat = try texture_file.stat(io);
@@ -201,7 +200,7 @@ pub const TextureManager = struct {
             const w: u32 = @intCast(loaded_img.cols);
             const h: u32 = @intCast(loaded_img.rows);
 
-            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(block_type), w, h, loaded_img.asBytes(), format);
+            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(entry.block), w, h, loaded_img.asBytes(), format);
             staging_slices.appendAssumeCapacity(staging);
         }
 
@@ -210,13 +209,13 @@ pub const TextureManager = struct {
         try end_err;
 
         self.default_texture.view = try self.createTextureView(&self.default_texture, format);
-        for (entry_blocks.items) |block_type| {
-            const tex = self.textures.getPtr(block_type);
+        for (entries.items) |entry| {
+            const tex = self.textures.getPtr(entry.block);
             tex.view = try self.createTextureView(tex, format);
         }
 
         try self.createDescriptorResources();
-        std.log.info("Loaded {d} bindless textures", .{entry_names.items.len});
+        std.log.info("Loaded {d} bindless textures", .{entries.items.len});
     }
 
     fn createSampler(self: *TextureManager) !void {
@@ -295,8 +294,8 @@ pub const TextureManager = struct {
             .descriptor_count = @intCast(num_textures),
             .descriptor_type = .combined_image_sampler,
             .p_image_info = &image_infos,
-            .p_buffer_info = &core.null_buffer_info,
-            .p_texel_buffer_view = &core.null_buffer_view,
+            .p_buffer_info = (&core.null_buffer_info)[0..1],
+            .p_texel_buffer_view = (&core.null_buffer_view)[0..1],
         }}, null);
     }
 

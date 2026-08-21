@@ -117,7 +117,7 @@ pub const OitCompositor = struct {
         };
         for (self.descriptor_sets_per_frame) |desc_set| {
             var writes: [4]vk.WriteDescriptorSet = undefined;
-            inline for (0..4) |i| writes[i] = core.imageWriteDescriptorSet(desc_set, @intCast(i), &image_infos[i]);
+            for (&writes, &image_infos, 0..) |*write, *info, binding| write.* = core.imageWriteDescriptorSet(desc_set, @intCast(binding), info);
             self.dev.updateDescriptorSets(&writes, null);
         }
     }

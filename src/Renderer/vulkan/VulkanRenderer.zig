@@ -20,6 +20,11 @@ const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
 const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
 const ShadowRenderer = @import("shadow/ShadowRenderer.zig").ShadowRenderer;
 
+/// Starting sizes of the indirect scene's candidate and draw-slot buffers; both grow on
+/// demand, so these only set how many chunks fit before the first reallocation.
+const initial_scene_candidates: u32 = 4096;
+const initial_draw_capacity: u32 = 4096;
+
 const FrameDebugStats = struct {
     frame_number: u64 = 0,
     total_meshes: u32 = 0,
@@ -119,7 +124,7 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, 64 * 1024 * 1024, max_face_bytes * 64);
     errdefer self.uploader.deinit();
 
-    try self.scene.init(allocator, vk_ctx, &self.memory, 4096, 4096);
+    try self.scene.init(allocator, vk_ctx, &self.memory, initial_scene_candidates, initial_draw_capacity);
     errdefer self.scene.deinit();
 
     self.shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
@@ -228,21 +233,19 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });
 
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
-    var depth_format: vk.Format = .undefined;
+    self.depth_format = .undefined;
     for (depth_formats) |fmt| {
         // The transparent pass samples the depth, so both features are required.
         const features = self.vk_ctx.instance.getPhysicalDeviceFormatProperties(self.vk_ctx.pdev, fmt).optimal_tiling_features;
         if (features.depth_stencil_attachment_bit and features.sampled_image_bit) {
-            depth_format = fmt;
             self.depth_format = fmt;
             break;
         }
     }
-    if (depth_format == .undefined) return error.DepthFormatNotSupported;
+    if (self.depth_format == .undefined) return error.DepthFormatNotSupported;
 
-    const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
-    self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, depth_aspect_mask);
-    self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
+    self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, self.depthAspectMask());
+    self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
 
     try self.oit.recreate(extent, self.render_color.view);
 
@@ -250,8 +253,9 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
     self.frame_sequence = 0;
 }
 
-fn depthHasStencil(self: *const VulkanRenderer) bool {
-    return self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
+fn depthAspectMask(self: *const VulkanRenderer) vk.ImageAspectFlags {
+    const has_stencil = self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
+    return if (has_stencil) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
 }
 
 pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
@@ -278,16 +282,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
-    if (self.scene.frame_buffers.items[current_frame].stats_mapped) |counts| {
-        self.frame_stats.opaque_drawn = counts[0].opaque_count;
-        self.frame_stats.transparent_drawn = counts[0].transparent_count;
-        self.frame_stats.opaque_faces = counts[0].opaque_face_count;
-        self.frame_stats.transparent_faces = counts[0].transparent_face_count;
-        var shadow_faces: u32 = 0;
-        for (counts[0].shadow_face_count) |faces| shadow_faces +%= faces;
-        self.frame_stats.shadow_faces = shadow_faces;
-        self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
-    }
+    self.readCullStats(current_frame);
 
     self.render_options_lock.lockSharedUncancelable(io);
     defer self.render_options_lock.unlockShared(io);
@@ -313,8 +308,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     try self.dev.beginCommandBuffer(cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
     errdefer self.dev.endCommandBuffer(cmd_buffer) catch {};
 
-    const depth_aspect_mask: vk.ImageAspectFlags = if (self.depthHasStencil()) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
-    const frame_start_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const depth_aspect_mask = self.depthAspectMask();
+    const frame_start_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
 
     const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
 
@@ -368,22 +363,37 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     self.chunk.recordPasses(&pass_ctx);
 
-    const frame_end_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const frame_elapsed_ns: u64 = @intCast(@max(0, frame_end_ns - frame_start_ns));
+    const frame_end_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
+    self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
 
+    self.frame_sequence += 1;
+    try self.dev.endCommandBuffer(cmd_buffer);
+}
+
+/// Copies the previous frame's GPU cull counters, which the compute pass wrote into the
+/// host-visible stats buffer, into the debug stats shown by the UI.
+fn readCullStats(self: *VulkanRenderer, current_frame: u32) void {
+    const counts = self.scene.frame_buffers.items[current_frame].stats_mapped orelse return;
+    self.frame_stats.opaque_drawn = counts[0].opaque_count;
+    self.frame_stats.transparent_drawn = counts[0].transparent_count;
+    self.frame_stats.opaque_faces = counts[0].opaque_face_count;
+    self.frame_stats.transparent_faces = counts[0].transparent_face_count;
+    var shadow_faces: u32 = 0;
+    for (counts[0].shadow_face_count) |faces| shadow_faces +%= faces;
+    self.frame_stats.shadow_faces = shadow_faces;
+    self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
+}
+
+fn publishFrameStats(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64), frame_end_ns: u64, elapsed_ns: u64) void {
     self.frame_stats.frame_number = self.vk_ctx.frame_number.load(.acquire) + 1;
     self.frame_stats.total_meshes = @intCast(self.chunk.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
     self.frame_stats.camera_front = self.camera.front();
-    self.frame_stats.elapsed_ns = frame_elapsed_ns;
+    self.frame_stats.elapsed_ns = elapsed_ns;
 
-    if (frame_end_ns - self.last_stat_log_ns >= std.time.ns_per_s) {
-        self.last_stat_log_ns = @intCast(frame_end_ns);
-        self.frame_stats.log();
-    }
-
-    self.frame_sequence += 1;
-    try self.dev.endCommandBuffer(cmd_buffer);
+    if (frame_end_ns -| self.last_stat_log_ns < std.time.ns_per_s) return;
+    self.last_stat_log_ns = frame_end_ns;
+    self.frame_stats.log();
 }
 
 fn vtableAddChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {

@@ -1241,7 +1241,7 @@ test "VulkanRenderer mesh upload" {
 
     ctx.swapchain_extent = .{ .width = 640, .height = 480 };
     ctx.queue_mutex.lockUncancelable(std.testing.io);
-    try ctx.createSwapchainLocked(false);
+    try ctx.createSwapchainLocked(std.testing.io, false);
     ctx.queue_mutex.unlock(std.testing.io);
 
     var render_opts: Renderer.RenderOptions = .{};

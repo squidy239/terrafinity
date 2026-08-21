@@ -7,10 +7,6 @@ const DeviceProxy = vk.DeviceProxy;
 const Frustum = @import("Frustum.zig").Frustum;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 
-// ---------------------------------------------------------------------------
-// Camera
-// ---------------------------------------------------------------------------
-
 const near_plane: f32 = 0.01;
 
 pub const Camera = struct {
@@ -56,10 +52,6 @@ fn makeInfReversedZProjRh(fov_y_radians: f32, aspect_w_by_h: f32, z_near: f32) z
         },
     };
 }
-
-// ---------------------------------------------------------------------------
-// Render targets
-// ---------------------------------------------------------------------------
 
 pub const RenderTarget = struct {
     image: vk.Image = .null_handle,
@@ -163,10 +155,6 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
     target.view = try dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), vkalloc);
     return target;
 }
-
-// ---------------------------------------------------------------------------
-// Memory
-// ---------------------------------------------------------------------------
 
 /// Represents a single VkBuffer allocation and its associated resources.
 /// raw_alloc is the full underlying allocation (CPU-side), used for range
@@ -420,10 +408,6 @@ const cpu_to_gpu_vtable = std.mem.Allocator.VTable{
     .free = freeCpuToGpu,
 };
 
-// ---------------------------------------------------------------------------
-// Barriers
-// ---------------------------------------------------------------------------
-
 /// Image barrier over an explicit subresource range (any layers/mips), shared by the
 /// single-layer `makeImageBarrier2` and the layered shadow-array barriers.
 pub fn imageBarrier2Range(
@@ -527,13 +511,9 @@ pub fn pipelineBarrier(cmd: vk.CommandBuffer, dev: DeviceProxy, comptime barrier
     dev.cmdPipelineBarrier2(cmd, &info);
 }
 
-// ---------------------------------------------------------------------------
-// Descriptors
-// ---------------------------------------------------------------------------
-
-pub const null_image_info: [1]vk.DescriptorImageInfo = .{.{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined }};
-pub const null_buffer_info: [1]vk.DescriptorBufferInfo = .{.{ .buffer = .null_handle, .offset = 0, .range = 0 }};
-pub const null_buffer_view: [1]vk.BufferView = .{vk.BufferView.null_handle};
+pub const null_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = .null_handle, .image_layout = .undefined };
+pub const null_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
+pub const null_buffer_view: vk.BufferView = .null_handle;
 
 pub fn bufferWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descriptor_type: vk.DescriptorType, buffer_info: *const vk.DescriptorBufferInfo) vk.WriteDescriptorSet {
     return .{
@@ -542,9 +522,9 @@ pub fn bufferWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, des
         .dst_array_element = 0,
         .descriptor_count = 1,
         .descriptor_type = descriptor_type,
-        .p_image_info = &null_image_info,
+        .p_image_info = (&null_image_info)[0..1],
         .p_buffer_info = (&buffer_info.*)[0..1],
-        .p_texel_buffer_view = &null_buffer_view,
+        .p_texel_buffer_view = (&null_buffer_view)[0..1],
     };
 }
 
@@ -556,14 +536,10 @@ pub fn imageWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, imag
         .descriptor_count = 1,
         .descriptor_type = .combined_image_sampler,
         .p_image_info = (&image_info.*)[0..1],
-        .p_buffer_info = &null_buffer_info,
-        .p_texel_buffer_view = &null_buffer_view,
+        .p_buffer_info = (&null_buffer_info)[0..1],
+        .p_texel_buffer_view = (&null_buffer_view)[0..1],
     };
 }
-
-// ---------------------------------------------------------------------------
-// Rendering info
-// ---------------------------------------------------------------------------
 
 pub fn renderingAttachmentColor(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
     return .{
@@ -625,10 +601,6 @@ pub fn renderingInfo(
         .p_stencil_attachment = null,
     };
 }
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
 
 pub fn setViewportAndScissor(dev: DeviceProxy, cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
     dev.cmdSetViewport(cmd, 0, (&vk.Viewport{
@@ -718,10 +690,6 @@ pub const SingleTime = struct {
         }
     }
 };
-
-// ---------------------------------------------------------------------------
-// Pipelines
-// ---------------------------------------------------------------------------
 
 pub fn shaderStageCreateInfo(stage: vk.ShaderStageFlags, module: vk.ShaderModule) vk.PipelineShaderStageCreateInfo {
     return .{
@@ -876,8 +844,7 @@ fn createGraphicsPipeline(
     for (stages, 0..) |stage, i| pssci[i] = shaderStageCreateInfo(stage.flags, stage.module);
 
     var pipeline_feedback: vk.PipelineCreationFeedback = .{ .flags = .{}, .duration = 0 };
-    var stage_feedbacks: [num_stages]vk.PipelineCreationFeedback = undefined;
-    for (0..num_stages) |i| stage_feedbacks[i] = .{ .flags = .{}, .duration = 0 };
+    var stage_feedbacks: [num_stages]vk.PipelineCreationFeedback = @splat(.{ .flags = .{}, .duration = 0 });
     var feedback_info: vk.PipelineCreationFeedbackCreateInfo = .{ .p_pipeline_creation_feedback = &pipeline_feedback, .pipeline_stage_creation_feedback_count = num_stages, .p_pipeline_stage_creation_feedbacks = &stage_feedbacks };
 
     const stencil_format: vk.Format = if (depth_format == .d32_sfloat_s8_uint or depth_format == .d24_unorm_s8_uint) depth_format else .undefined;
@@ -1028,10 +995,6 @@ pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator,
 
     try dev.allocateDescriptorSets(&.{ .descriptor_pool = pool.*, .descriptor_set_count = @intCast(num_frames), .p_set_layouts = layouts.ptr }, sets.*.ptr);
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 test "findMemoryType" {
     var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
