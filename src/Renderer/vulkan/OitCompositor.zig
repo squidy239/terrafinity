@@ -143,20 +143,22 @@ pub const OitCompositor = struct {
         for (read_images, 0..) |image, i| {
             pre_comp_barriers[i] = core.makeImageBarrier2(image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect);
         }
+        const src_stage: vk.PipelineStageFlags2 = switch (swapchain_old_layout) {
+            .undefined => .{ .top_of_pipe_bit = true },
+            .present_src_khr => .{ .color_attachment_output_bit = true },
+            else => .{ .all_commands_bit = true },
+        };
+        const src_access: vk.AccessFlags2 = switch (swapchain_old_layout) {
+            .undefined => .{},
+            .present_src_khr => .{},
+            else => .{ .memory_write_bit = true },
+        };
         pre_comp_barriers[4] = core.makeImageBarrier2(
             output_image,
             swapchain_old_layout,
             .color_attachment_optimal,
-            switch (swapchain_old_layout) {
-                .undefined => .{ .top_of_pipe_bit = true },
-                .present_src_khr => .{ .color_attachment_output_bit = true },
-                else => .{ .all_commands_bit = true },
-            },
-            switch (swapchain_old_layout) {
-                .undefined => .{},
-                .present_src_khr => .{},
-                else => .{ .memory_write_bit = true },
-            },
+            src_stage,
+            src_access,
             .{ .color_attachment_output_bit = true },
             .{ .color_attachment_write_bit = true, .color_attachment_read_bit = true },
             color_aspect,
@@ -173,7 +175,7 @@ pub const OitCompositor = struct {
 
         const oit_desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[current_frame];
         self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.composition_layout, 0, (&oit_desc_set)[0..1], null);
-        self.dev.cmdDraw(cmd_buffer, 3, 1, 0, 0);
+        self.dev.cmdDraw(cmd_buffer, core.fullscreen_triangle_vertices, 1, 0, 0);
 
         self.dev.cmdEndRendering(cmd_buffer);
         core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{}, color_aspect))[0..1]);

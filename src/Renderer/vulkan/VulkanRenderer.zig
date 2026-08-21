@@ -19,17 +19,23 @@ const OitCompositor = @import("OitCompositor.zig").OitCompositor;
 const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
 const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
 const ShadowRenderer = @import("shadow/ShadowRenderer.zig").ShadowRenderer;
+const DepthPyramid = @import("occlusion/DepthPyramid.zig").DepthPyramid;
 
 /// Starting sizes of the indirect scene's candidate and draw-slot buffers; both grow on
 /// demand, so these only set how many chunks fit before the first reallocation.
 const initial_scene_candidates: u32 = 4096;
 const initial_draw_capacity: u32 = 4096;
+const initial_staging_bytes = 64 * 1024 * 1024;
+const uploader_face_quota = 64;
 
 const FrameDebugStats = struct {
     frame_number: u64 = 0,
     total_meshes: u32 = 0,
     opaque_drawn: u32 = 0,
+    opaque_late_drawn: u32 = 0,
     transparent_drawn: u32 = 0,
+    hiz_occluded: u32 = 0,
+    frustum_culled: u32 = 0,
     opaque_faces: u32 = 0,
     transparent_faces: u32 = 0,
     shadow_faces: u32 = 0,
@@ -47,7 +53,7 @@ const FrameDebugStats = struct {
             self.player_pos[0],   self.player_pos[1],   self.player_pos[2],
             self.camera_front[0], self.camera_front[1], self.camera_front[2],
         });
-        std.log.info("Meshes in map: {d}  drawn opaque: {d}  transparent: {d}", .{ self.total_meshes, self.opaque_drawn, self.transparent_drawn });
+        std.log.info("Meshes in map: {d}  drawn opaque: {d} ({d} late)  transparent: {d}  occluded: {d}  frustum culled: {d}", .{ self.total_meshes, self.opaque_drawn, self.opaque_late_drawn, self.transparent_drawn, self.hiz_occluded, self.frustum_culled });
         std.log.info("Faces drawn - opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
         if (self.shadow_cascade) |c| {
             std.log.info("Shadow - cascade {d}: {d} faces", .{ c, self.shadow_faces });
@@ -77,6 +83,7 @@ oit: OitCompositor = undefined,
 chunk: ChunkRenderer = undefined,
 sky: SkyRenderer = undefined,
 shadow: ShadowRenderer = undefined,
+pyramid: DepthPyramid = undefined,
 
 render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
@@ -86,11 +93,9 @@ init_time_ns: u64 = 0,
 last_stat_log_ns: u64 = 0,
 frame_stats: FrameDebugStats = .{},
 
-/// Monotonically increasing frame counter used to detect the first frame after initialization
-/// or swapchain recreation. Frame 0 uses `.undefined` as the old layout for render targets
-/// (skipping layout transition on initial layout). Subsequent frames use the actual prior
-/// layout (e.g. `.shader_read_only_optimal`) to properly transition back to color attachment.
-/// Do not reset this counter outside of init — partial-frame resets would use wrong old layouts.
+/// Monotonically increasing frame counter detecting the first frame after init or
+/// swapchain recreation, whose render targets still hold their initial layout.
+/// Do not reset outside init; partial-frame resets would use the wrong old layout.
 frame_sequence: u64 = 0,
 
 pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext, render_options: *const Renderer.RenderOptions, render_options_lock: *std.Io.RwLock) !void {
@@ -109,8 +114,10 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
 
     self.init_time_ns = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
 
+    var memory_ready = false;
     try self.memory.init(io, allocator, vk_ctx);
-    errdefer self.memory.deinit();
+    memory_ready = true;
+    errdefer if (memory_ready) self.memory.deinit();
 
     self.single_time = .{
         .dev = vk_ctx.dev,
@@ -121,13 +128,21 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     };
 
     const max_face_bytes = @as(vk.DeviceSize, World.ChunkSize) * World.ChunkSize * World.ChunkSize * 6 * @sizeOf(Mesher.Face);
-    self.uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, 64 * 1024 * 1024, max_face_bytes * 64);
+    const uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, initial_staging_bytes, max_face_bytes * uploader_face_quota);
+    self.uploader = uploader;
     errdefer self.uploader.deinit();
 
+    var scene_ready = false;
     try self.scene.init(allocator, vk_ctx, &self.memory, initial_scene_candidates, initial_draw_capacity);
-    errdefer self.scene.deinit();
+    scene_ready = true;
+    errdefer if (scene_ready) self.scene.deinit();
 
-    self.shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
+    const pyramid = try DepthPyramid.init(allocator, vk_ctx, &self.memory, &self.single_time);
+    self.pyramid = pyramid;
+    errdefer self.pyramid.deinit();
+
+    const shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
+    self.shadow = shadow;
     errdefer self.shadow.deinit();
 
     self.render_options_lock.lockSharedUncancelable(io);
@@ -135,14 +150,18 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.render_options_lock.unlockShared(io);
     try self.shadow.recreate(io, initial_shadow_config);
 
-    self.oit = try OitCompositor.init(allocator, vk_ctx);
+    const oit = try OitCompositor.init(allocator, vk_ctx);
+    self.oit = oit;
     errdefer self.oit.deinit();
 
-    self.sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
+    const sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
+    self.sky = sky;
     errdefer self.sky.deinit();
 
-    try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, &self.shadow, render_options, render_options_lock);
-    errdefer self.chunk.deinit(io);
+    var chunk_ready = false;
+    try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, &self.shadow, &self.pyramid, render_options, render_options_lock);
+    chunk_ready = true;
+    errdefer if (chunk_ready) self.chunk.deinit(io);
 
     try self.recreateSwapchainResourcesLocked(io);
 
@@ -174,10 +193,10 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
             @panic("VulkanRenderer.deinit: deviceWaitIdle failed - cannot safely release GPU resources");
         };
 
-        self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch {};
-        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch {};
+        self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
+        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
         if (self.vk_ctx.ui_command_pool != .null_handle) {
-            self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch {};
+            self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("UI command pool reset failed during deinit: {}", .{err});
         }
         self.single_time.destroyFence();
     }
@@ -185,6 +204,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.chunk.deinit(io);
     self.sky.deinit();
     self.shadow.deinit();
+    self.pyramid.deinit();
     self.scene.deinit();
     self.uploader.deinit();
     self.destroyRendererSwapchainResources();
@@ -213,7 +233,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     const actual_extent = self.vk_ctx.swapchain_extent;
 
-    try self.createRenderTargets(actual_extent);
+    try self.createRenderTargets(io, actual_extent);
 
     try self.chunk.createPipelines(self.depth_format);
     try self.sky.createPipelines(self.depth_format);
@@ -225,7 +245,7 @@ fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     core.destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
 }
 
-fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
+fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
     defer zone.end();
     errdefer self.destroyRendererSwapchainResources();
@@ -246,6 +266,8 @@ fn createRenderTargets(self: *VulkanRenderer, extent: vk.Extent2D) !void {
 
     self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, self.depthAspectMask());
     self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
+
+    try self.pyramid.recreate(io, extent);
 
     try self.oit.recreate(extent, self.render_color.view);
 
@@ -290,11 +312,10 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     const inside_transparent = self.render_options.inside_transparent;
+    const occlusion_culling = self.render_options.occlusion_culling;
     const sky_config = self.render_options.sky;
 
     const vp = self.camera.computeViewProjection(aspect, fov);
-    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const elapsed_sec = @as(f32, @floatFromInt(now_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
     // Shadow config changes recreate the depth array before any command buffer records;
     // recreate is a no-op when nothing changed.
@@ -310,6 +331,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     const depth_aspect_mask = self.depthAspectMask();
     const frame_start_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
+    const elapsed_sec = @as(f32, @floatFromInt(frame_start_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
     const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
 
@@ -335,6 +357,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .elapsed_sec = elapsed_sec,
         .sun_dir = frame_sky.sun_dir,
         .inside_transparent = inside_transparent,
+        .occlusion_culling = occlusion_culling,
         .swapchain_old_layout = swapchain_old_layout,
         .swapchain_layout_ptr = swapchain_layout_ptr,
         .output_image = output_image,
@@ -374,12 +397,16 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 /// host-visible stats buffer, into the debug stats shown by the UI.
 fn readCullStats(self: *VulkanRenderer, current_frame: u32) void {
     const counts = self.scene.frame_buffers.items[current_frame].stats_mapped orelse return;
-    self.frame_stats.opaque_drawn = counts[0].opaque_count;
-    self.frame_stats.transparent_drawn = counts[0].transparent_count;
-    self.frame_stats.opaque_faces = counts[0].opaque_face_count;
-    self.frame_stats.transparent_faces = counts[0].transparent_face_count;
+    const stats = counts[0];
+    self.frame_stats.opaque_drawn = stats.opaque_count + stats.opaque_late_count;
+    self.frame_stats.opaque_late_drawn = stats.opaque_late_count;
+    self.frame_stats.transparent_drawn = stats.transparent_count;
+    self.frame_stats.hiz_occluded = stats.occluded_count;
+    self.frame_stats.frustum_culled = stats.frustum_culled_count;
+    self.frame_stats.opaque_faces = stats.opaque_face_count + stats.opaque_late_face_count;
+    self.frame_stats.transparent_faces = stats.transparent_face_count;
     var shadow_faces: u32 = 0;
-    for (counts[0].shadow_face_count) |faces| shadow_faces +%= faces;
+    for (stats.shadow_face_count) |faces| shadow_faces +%= faces;
     self.frame_stats.shadow_faces = shadow_faces;
     self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
 }

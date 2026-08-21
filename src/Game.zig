@@ -63,6 +63,10 @@ last_frametime: std.Io.Timestamp,
 debug_menu: struct {
     fps: std.atomic.Value(f32) = .init(0),
     meshes: std.atomic.Value(u64) = .init(0),
+    opaque_drawn: std.atomic.Value(u32) = .init(0),
+    transparent_drawn: std.atomic.Value(u32) = .init(0),
+    occluded: std.atomic.Value(u32) = .init(0),
+    frustum_culled: std.atomic.Value(u32) = .init(0),
     opaque_faces: std.atomic.Value(u64) = .init(0),
     transparent_faces: std.atomic.Value(u64) = .init(0),
     shadow_faces: std.atomic.Value(u64) = .init(0),
@@ -523,6 +527,10 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     frame_ctx_mut.player_speed = self.player.fly_speed.load(.unordered);
     try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx_mut, player_pos);
 
+    self.debug_menu.opaque_drawn.store(self.vulkan_renderer.frame_stats.opaque_drawn, .unordered);
+    self.debug_menu.transparent_drawn.store(self.vulkan_renderer.frame_stats.transparent_drawn, .unordered);
+    self.debug_menu.occluded.store(self.vulkan_renderer.frame_stats.hiz_occluded, .unordered);
+    self.debug_menu.frustum_culled.store(self.vulkan_renderer.frame_stats.frustum_culled, .unordered);
     self.debug_menu.opaque_faces.store(self.vulkan_renderer.frame_stats.opaque_faces, .unordered);
     self.debug_menu.transparent_faces.store(self.vulkan_renderer.frame_stats.transparent_faces, .unordered);
     self.debug_menu.shadow_faces.store(self.vulkan_renderer.frame_stats.shadow_faces, .unordered);

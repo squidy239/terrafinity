@@ -297,6 +297,10 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
+        \\opaque drawn: {d}
+        \\transparent drawn: {d}
+        \\occluded: {d}
+        \\frustum culled: {d}
         \\opaque faces: {d}
         \\transparent faces: {d}
         \\pos: {d}, {d}, {d}
@@ -307,6 +311,10 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         .{
             @trunc(self.game.debug_menu.fps.load(.unordered)),
             self.game.debug_menu.meshes.load(.unordered),
+            self.game.debug_menu.opaque_drawn.load(.unordered),
+            self.game.debug_menu.transparent_drawn.load(.unordered),
+            self.game.debug_menu.occluded.load(.unordered),
+            self.game.debug_menu.frustum_culled.load(.unordered),
             self.game.debug_menu.opaque_faces.load(.unordered),
             self.game.debug_menu.transparent_faces.load(.unordered),
             pos[0],

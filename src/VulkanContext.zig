@@ -660,14 +660,19 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         if (current_gamma == gamma_correction and extent_same and self.present_mode == self.last_present_mode_requested) return;
     }
 
+    // Lock order is transfer then graphics, matching deviceWaitIdleLocked and the
+    // uploader submit path; taking them in the opposite order would deadlock those
+    // paths against a swapchain recreation during a resize. Callers must NOT hold
+    // either mutex.
+    self.transfer_queue_mutex.lockUncancelable(io);
+    defer self.transfer_queue_mutex.unlock(io);
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
-    // The caller holds the queue mutex; take the transfer mutex too so the
-    // deviceWaitIdle does not race workers' transfer submissions.
-    self.transfer_queue_mutex.lockUncancelable(io);
-    defer self.transfer_queue_mutex.unlock(io);
     _ = self.dev.deviceWaitIdle() catch {};
     self.dev.resetCommandPool(self.command_pool, .{}) catch {};
     if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
@@ -1214,9 +1219,7 @@ test "VulkanRenderer init and deinit" {
     defer ctx.deinit(std.testing.io);
 
     ctx.swapchain_extent = .{ .width = 640, .height = 480 };
-    ctx.queue_mutex.lockUncancelable(std.testing.io);
-    try ctx.createSwapchainLocked(false);
-    ctx.queue_mutex.unlock(std.testing.io);
+    try ctx.createSwapchainLocked(std.testing.io, false);
 
     var render_opts: Renderer.RenderOptions = .{};
     var render_opts_lock: std.Io.RwLock = .init;
@@ -1240,9 +1243,7 @@ test "VulkanRenderer mesh upload" {
     defer ctx.deinit(std.testing.io);
 
     ctx.swapchain_extent = .{ .width = 640, .height = 480 };
-    ctx.queue_mutex.lockUncancelable(std.testing.io);
     try ctx.createSwapchainLocked(std.testing.io, false);
-    ctx.queue_mutex.unlock(std.testing.io);
 
     var render_opts: Renderer.RenderOptions = .{};
     var render_opts_lock: std.Io.RwLock = .init;

@@ -62,9 +62,7 @@ pub fn main(init: std.process.Init) !void {
 
     vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
     vk_ctx.present_mode = config.game_config.render_options.present_mode;
-    vk_ctx.queue_mutex.lockUncancelable(io);
     try vk_ctx.createSwapchainLocked(io, false);
-    vk_ctx.queue_mutex.unlock(io);
 
     var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
     defer backend.deinit();
@@ -359,8 +357,8 @@ fn recreateSwapchainOrFail(
 }
 
 fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) !void {
-    vk_ctx.queue_mutex.lockUncancelable(io);
-    defer vk_ctx.queue_mutex.unlock(io);
+    // Only this thread submits graphics work, so the idle is safe without the queue
+    // mutex; it protects the renderer's command-pool reset against in-flight frames.
     vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
         std.log.err("queueWaitIdle failed during swapchain recreate: {}", .{err});
         return err;

@@ -1,11 +1,18 @@
 #version 460 core
 #extension GL_ARB_gpu_shader_int64 : require
 
+#include "occlusion.glsl"
+
 layout(local_size_x = 64) in;
 
 #define chunk_size 32.0
-// First shadow slot; cascade slots span [shadow_slot_base, shadow_slot_base + shadow_slot_count).
-#define shadow_slot_base 2u
+// Main-pass slots: 0 = opaque early (visible last frame), 1 = opaque late (newly
+// disoccluded), 2 = transparent. Shadow cascade slots span
+// [shadow_slot_base, shadow_slot_base + shadow_slot_count).
+#define opaque_early_slot 0u
+#define opaque_late_slot 1u
+#define transparent_slot 2u
+#define shadow_slot_base 3u
 #define shadow_slot_count 8u
 
 struct MeshCandidate {
@@ -43,11 +50,19 @@ layout(std430, binding = 2) writeonly buffer OutputMeshDataBuffer {
 
 layout(std430, binding = 3) buffer CountBuffer {
     uint opaque_count;
+    uint opaque_late_count;
     uint transparent_count;
     uint opaque_face_count;
+    uint opaque_late_face_count;
     uint transparent_face_count;
+    uint occluded_count;
+    uint frustum_culled_count;
     uint shadow_count[shadow_slot_count];
     uint shadow_face_count[shadow_slot_count];
+};
+
+layout(std430, binding = 4) buffer VisibilityBuffer {
+    uint visible_last_frame[];
 };
 
 layout(push_constant) uniform PushConsts {
@@ -55,8 +70,9 @@ layout(push_constant) uniform PushConsts {
     vec4 player_pos;
     uint total_candidates;
     uint draw_capacity;
-    // 0 = main pass (slots 0-1 split by is_transparent); 1+k = shadow cull for cascade
-    // slot k (opaque only), decoded here as slot = mode - 1.
+    // 0 = early main pass (frustum + visible-last-frame, opaque only); 1 = late main
+    // pass (frustum + Hi-Z occlusion, updates visibility); 2+k = shadow cull for
+    // cascade slot k (opaque only), decoded here as slot = mode - 2.
     uint mode;
     float min_chunk_size;
 } pc;
@@ -69,63 +85,7 @@ bool boxInFrustum(vec3 b_min, vec3 b_max) {
     return true;
 }
 
-void main() {
-    uint g_idx = gl_GlobalInvocationID.x;
-    if (g_idx >= pc.total_candidates) return;
-
-    MeshCandidate candidate = candidate_meshes[g_idx];
-    if (candidate.face_count == 0u) return;
-
-    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
-    float size = candidate.scale * chunk_size;
-    if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) return;
-
-    if (pc.mode >= 1u) {
-        // Shadow cull for cascade slot (pc.mode - 1): opaque only, writes into slot
-        // shadow_slot_base + slot. Each cascade's planes are pushed so it culls to its
-        // own box and depth range.
-        if (candidate.is_transparent != 0u) return;
-        if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
-        uint slot = pc.mode - 1u;
-        uint idx = atomicAdd(shadow_count[slot], 1u);
-        if (idx >= pc.draw_capacity) {
-            atomicMin(shadow_count[slot], pc.draw_capacity);
-            return;
-        }
-        atomicAdd(shadow_face_count[slot], candidate.face_count);
-        uint out_idx = idx + (shadow_slot_base + slot) * pc.draw_capacity;
-        out_indirect[out_idx] = DrawIndirectCommand(
-            6u,
-            candidate.face_count,
-            0u,
-            candidate.face_offset
-        );
-        out_meshes[out_idx] = MeshData(
-            candidate.absolute_position,
-            vec4(relative_pos, 1.0),
-            candidate.scale
-        );
-        return;
-    }
-
-    uint idx;
-    if (candidate.is_transparent == 0u) {
-        idx = atomicAdd(opaque_count, 1u);
-        if (idx >= pc.draw_capacity) {
-            atomicMin(opaque_count, pc.draw_capacity);
-            return;
-        }
-        atomicAdd(opaque_face_count, candidate.face_count);
-    } else {
-        idx = atomicAdd(transparent_count, 1u);
-        if (idx >= pc.draw_capacity) {
-            atomicMin(transparent_count, pc.draw_capacity);
-            return;
-        }
-        atomicAdd(transparent_face_count, candidate.face_count);
-    }
-
-    uint out_idx = idx + (candidate.is_transparent * pc.draw_capacity);
+void writeDraw(uint out_idx, MeshCandidate candidate, vec3 relative_pos) {
     out_indirect[out_idx] = DrawIndirectCommand(
         6u,
         candidate.face_count,
@@ -137,4 +97,87 @@ void main() {
         vec4(relative_pos, 1.0),
         candidate.scale
     );
+}
+
+void main() {
+    uint g_idx = gl_GlobalInvocationID.x;
+    if (g_idx >= pc.total_candidates) return;
+
+    MeshCandidate candidate = candidate_meshes[g_idx];
+    if (candidate.face_count == 0u) return;
+
+    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
+    float size = candidate.scale * chunk_size;
+    if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) {
+        // Count once per frame from the early (main-view) cull only.
+        if (pc.mode == 0u) atomicAdd(frustum_culled_count, 1u);
+        return;
+    }
+
+    if (pc.mode >= 2u) {
+        // Shadow cull for cascade slot (pc.mode - 2): opaque only, writes into slot
+        // shadow_slot_base + slot. Each cascade's planes are pushed so it culls to its
+        // own box and depth range.
+        if (candidate.is_transparent != 0u) return;
+        if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
+        uint slot = pc.mode - 2u;
+        uint idx = atomicAdd(shadow_count[slot], 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(shadow_count[slot], pc.draw_capacity);
+            return;
+        }
+        atomicAdd(shadow_face_count[slot], candidate.face_count);
+        writeDraw(idx + (shadow_slot_base + slot) * pc.draw_capacity, candidate, relative_pos);
+        return;
+    }
+
+    bool occlusion_on = hiz.enabled != 0u;
+
+    if (pc.mode == 0u) {
+        // Early pass: opaque meshes that were visible last frame. With occlusion off
+        // this draws every opaque mesh and the late pass adds nothing opaque.
+        if (candidate.is_transparent != 0u) return;
+        if (occlusion_on && visible_last_frame[g_idx] == 0u) return;
+        uint idx = atomicAdd(opaque_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(opaque_count, pc.draw_capacity);
+            return;
+        }
+        atomicAdd(opaque_face_count, candidate.face_count);
+        writeDraw(idx + opaque_early_slot * pc.draw_capacity, candidate, relative_pos);
+        return;
+    }
+
+    // Late pass: test against the depth pyramid built from the previous frame, drawn
+    // from that frame's camera, so the box must be expressed in that camera's space.
+    // This lets meshes occluded by geometry drawn last frame finally get culled.
+    vec3 occlusion_relative_pos = candidate.absolute_position.xyz - hiz.occlusion_player_pos.xyz;
+    uint was_visible = visible_last_frame[g_idx];
+    bool occluded = occlusion_on && hizOccluded(occlusion_relative_pos, occlusion_relative_pos + vec3(size));
+    if (occlusion_on) visible_last_frame[g_idx] = occluded ? 0u : 1u;
+    if (occluded) {
+        atomicAdd(occluded_count, 1u);
+        return;
+    }
+
+    if (candidate.is_transparent != 0u) {
+        uint idx = atomicAdd(transparent_count, 1u);
+        if (idx >= pc.draw_capacity) {
+            atomicMin(transparent_count, pc.draw_capacity);
+            return;
+        }
+        atomicAdd(transparent_face_count, candidate.face_count);
+        writeDraw(idx + transparent_slot * pc.draw_capacity, candidate, relative_pos);
+        return;
+    }
+
+    // Opaque meshes visible last frame were already drawn by the early pass.
+    if (!occlusion_on || was_visible != 0u) return;
+    uint idx = atomicAdd(opaque_late_count, 1u);
+    if (idx >= pc.draw_capacity) {
+        atomicMin(opaque_late_count, pc.draw_capacity);
+        return;
+    }
+    atomicAdd(opaque_late_face_count, candidate.face_count);
+    writeDraw(idx + opaque_late_slot * pc.draw_capacity, candidate, relative_pos);
 }

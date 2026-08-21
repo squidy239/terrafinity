@@ -63,7 +63,7 @@ pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) (std.Io.Canc
     return self.vtable.removeChunk(self.userdata, io, chunk_pos);
 }
 
-///draws all loaded chunk meshes to the screen, this function should only be called on the main thread
+/// Draws all loaded chunk meshes to the screen. Only call on the main thread.
 pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
     return self.vtable.draw(self.userdata, io, target, frame_ctx, viewpos);
 }
@@ -88,6 +88,7 @@ pub const RenderOptions = struct {
     present_mode: VulkanContext.PresentMode = .mailbox,
     selected_pack: []const u8 = "default",
     inside_transparent: bool = false,
+    occlusion_culling: bool = true,
     sky: SkyConfig = .default(),
     shadow: Csm.ShadowConfig = .{},
 };

@@ -401,7 +401,9 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
     const first_frame = ctx.frame_sequence == 0;
     const color_old_layout: vk.ImageLayout = if (first_frame) .undefined else .shader_read_only_optimal;
     const depth_old_layout: vk.ImageLayout = if (first_frame) .undefined else .depth_stencil_read_only_optimal;
-    const src_stage: vk.PipelineStageFlags2 = if (first_frame) .{ .top_of_pipe_bit = true } else .{ .fragment_shader_bit = true };
+    // compute covers the previous frame's pyramid build, which read the depth before
+    // this frame's sky clear overwrites it.
+    const src_stage: vk.PipelineStageFlags2 = if (first_frame) .{ .top_of_pipe_bit = true } else .{ .fragment_shader_bit = true, .compute_shader_bit = true };
     const color_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .shader_read_bit = true };
     const depth_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true };
 
@@ -439,7 +441,7 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
 
     const desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[ctx.frame_idx];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, (&desc_set)[0..1], null);
-    self.dev.cmdDraw(cmd_buffer, 3, 1, 0, 0);
+    self.dev.cmdDraw(cmd_buffer, core.fullscreen_triangle_vertices, 1, 0, 0);
 
     self.dev.cmdEndRendering(cmd_buffer);
 }

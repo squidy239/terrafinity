@@ -82,6 +82,7 @@ pub const StagingRing = struct {
         self.entries.deinit(self.allocator);
     }
 
+    /// Records the GPU buffer that backs the ring's mapping; alloc returns null until set.
     pub fn resolve(self: *StagingRing, buffer: vk.Buffer) void {
         std.debug.assert(buffer != .null_handle);
         self.buffer = buffer;
@@ -212,6 +213,8 @@ pub const GpuRegionAllocator = struct {
         gpu_allocator.free(self.buffer_slice);
     }
 
+    /// Records the GPU buffer and base offset that back buffer_slice; allocRegion
+    /// returns null until this is set.
     pub fn resolve(self: *GpuRegionAllocator, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) void {
         std.debug.assert(buffer != .null_handle);
         self.buffer.store(buffer, .release);
@@ -563,13 +566,10 @@ pub const MeshUploader = struct {
         self.pool_reservoir.returnPool(self.dev, pool);
     }
 
-    /// Blocks until the transfer queue completes at least one more batch than it
-    /// has now, or returns immediately when nothing is in flight. Callers flush
-    /// first so all pending work sits on the queue. This is a non-cancelable
-    /// Vulkan wait (not `Io`-cancelable); callers must check `io.checkCancel()`
-    /// before calling. The wait is bounded in normal operation (the GPU always
-    /// completes submitted batches), but a stall would otherwise hang silently;
-    /// the wait times out and retries while logging instead.
+    /// Blocks until the transfer queue completes at least one more batch than it has
+    /// now, or returns immediately when nothing is in flight. This is a non-cancelable
+    /// Vulkan wait; callers must check `io.checkCancel()` first, and the timeout-and-retry
+    /// loop logs instead of hanging silently on a stalled GPU.
     fn waitForTransferCompletion(self: *MeshUploader, io: std.Io) !void {
         try io.checkCancel();
         const last_submitted = self.vk_ctx.transfer_semaphore_value.load(.monotonic);
@@ -630,12 +630,9 @@ pub const MeshUploader = struct {
 
             try self.flush(io);
 
-            // Drain the GPU before swapping the buffer. These waits must not hold
-            // the queue mutex: the render thread needs it to submit the frames that
-            // advance the graphics timeline drainInFlightFrames blocks on.
-            // Two concurrent growers may both drain sequentially; the retry after
-            // locking detects the first grow and makes the double-drain benign
-            // (wasteful but correct).
+            // Drain the GPU before swapping the buffer, without holding the queue mutex
+            // (the render thread needs it to advance the graphics timeline). Concurrent
+            // growers may both drain; the retry after locking makes the double-drain benign.
             try self.drainInFlightFrames();
 
             const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
@@ -864,15 +861,21 @@ pub const shadow_slot_count: u32 = 8;
 
 pub const CullCount = extern struct {
     opaque_count: u32,
+    opaque_late_count: u32,
     transparent_count: u32,
     opaque_face_count: u32,
+    opaque_late_face_count: u32,
     transparent_face_count: u32,
+    /// Meshes culled by the Hi-Z occlusion test (stats only).
+    occluded_count: u32,
+    /// Meshes outside the main-view frustum, counted by the early cull (stats only).
+    frustum_culled_count: u32,
     shadow_count: [shadow_slot_count]u32,
     shadow_face_count: [shadow_slot_count]u32,
 };
 
 comptime {
-    if (@sizeOf(CullCount) != 80) @compileError("CullCount size mismatch");
+    if (@sizeOf(CullCount) != 96) @compileError("CullCount size mismatch");
 }
 
 pub const MeshData = extern struct {
@@ -893,8 +896,13 @@ pub const CandidateTransform = struct {
 pub const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
 /// World blocks along one edge of a level-0 chunk; candidate AABB size = scale * this.
 pub const chunk_size_blocks: f32 = 32.0;
-/// Main-pass draw slots (opaque + transparent).
-pub const draw_type_count = 2;
+/// Main-pass draw slots (opaque early + opaque late + transparent).
+pub const draw_type_count = 3;
+/// Opaque meshes that were visible last frame, drawn before the Hi-Z pyramid builds.
+pub const opaque_early_slot: u32 = 0;
+/// Opaque meshes the early pass missed (newly disoccluded), drawn after the late cull.
+pub const opaque_late_slot: u32 = 1;
+pub const transparent_slot: u32 = 2;
 /// Total indirect slots per frame: the main passes plus one shadow slot per cascade
 /// that may be rasterized in a frame. Buffers and the cull dispatch must size everything
 /// by this, not by `draw_type_count`.
@@ -911,6 +919,14 @@ const PersistentCandidates = struct {
 
 const RetiredCandidateSlice = struct {
     slice: []MeshCandidate,
+    graphics_timeline_value: u64,
+};
+
+/// Old visibility buffer kept alive after a candidate-buffer growth until the render
+/// thread is done reading the current `visibility_slice`; the render thread and worker
+/// growth paths are unsynchronized, so freeing here would leave a use-after-free window.
+const RetiredVisibilitySlice = struct {
+    slice: []align(cull_buffer_alignment.toByteUnits()) u32,
     graphics_timeline_value: u64,
 };
 
@@ -959,6 +975,7 @@ pub const IndirectScene = struct {
     index_pool: IndexPool = undefined,
     max_allocated_index: std.atomic.Value(u32) = .init(0),
     retired_candidate_slices: std.ArrayList(RetiredCandidateSlice) = .empty,
+    retired_visibility_slices: std.ArrayList(RetiredVisibilitySlice) = .empty,
     frame_buffers: PerFrameBuffers = .{},
     /// Bumped whenever the candidate buffer or per-frame buffers are reallocated;
     /// consumers that bind these buffers (e.g. the cull dispatch) re-bind on change.
@@ -974,6 +991,16 @@ pub const IndirectScene = struct {
     aabb_min: [3]f64 = .{ 0, 0, 0 },
     aabb_max: [3]f64 = .{ 0, 0, 0 },
     aabb_scanned_version: u64 = std.math.maxInt(u64),
+
+    /// One u32 per candidate slot: nonzero when the mesh passed last frame's late cull.
+    /// Written by the late cull, read by the early cull; wrong bits only cost perf
+    /// (a mesh drawn one pass later or one frame earlier), never correctness.
+    visibility_buffer: vk.Buffer = .null_handle,
+    visibility_offset: vk.DeviceSize = 0,
+    visibility_slice: []align(cull_buffer_alignment.toByteUnits()) u32 = &.{},
+    /// True when the visibility buffer holds garbage (fresh or regrown); the next
+    /// recorded frame zero-fills it before the early cull reads it.
+    visibility_needs_clear: std.atomic.Value(bool) = .init(true),
 
     mesh_data_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     mesh_data_descriptor_pool: vk.DescriptorPool = .null_handle,
@@ -999,6 +1026,13 @@ pub const IndirectScene = struct {
         self.persistent.offset = cand_info.offset;
         self.persistent.slice = persistent_candidates_slice;
 
+        const visibility_slice = try memory.gpuOnly().alignedAlloc(u32, cull_buffer_alignment, initial_candidates);
+        errdefer memory.gpuOnly().free(visibility_slice);
+        const vis_info = memory.backing_allocator.getBufferAndOffset(.gpu_only, visibility_slice.ptr);
+        self.visibility_buffer = vis_info.buffer;
+        self.visibility_offset = vis_info.offset;
+        self.visibility_slice = visibility_slice;
+
         self.index_pool = try IndexPool.init(allocator, initial_candidates);
         errdefer self.index_pool.deinit(allocator);
 
@@ -1019,7 +1053,10 @@ pub const IndirectScene = struct {
 
         for (self.retired_candidate_slices.items) |entry| self.memory.cpuToGpu().free(entry.slice);
         self.retired_candidate_slices.deinit(self.allocator);
+        for (self.retired_visibility_slices.items) |entry| self.memory.gpuOnly().free(entry.slice);
+        self.retired_visibility_slices.deinit(self.allocator);
         self.index_pool.deinit(self.allocator);
+        self.memory.gpuOnly().free(self.visibility_slice);
         self.memory.cpuToGpu().free(self.persistent.slice);
     }
 
@@ -1072,27 +1109,23 @@ pub const IndirectScene = struct {
 
     /// World-space AABB of live opaque candidates, in absolute blocks. Lazily rescanned
     /// on the render thread when the slot version changed. Transparent candidates are
-    /// excluded: the shadow cull skips them (they neither cast nor need occluder depth
-    /// range), so including them would only inflate the AABB and waste depth precision.
+    /// excluded: the shadow cull skips them, so including them only inflates the AABB.
     pub fn getSceneAABB(self: *IndirectScene) struct { min: [3]f64, max: [3]f64 } {
         const version = self.aabb_version.load(.acquire);
         if (version == self.aabb_scanned_version) return .{ .min = self.aabb_min, .max = self.aabb_max };
 
-        var min: [3]f64 = @splat(std.math.inf(f64));
-        var max: [3]f64 = @splat(-std.math.inf(f64));
+        var min_v: @Vector(3, f64) = @splat(std.math.inf(f64));
+        var max_v: @Vector(3, f64) = @splat(-std.math.inf(f64));
         const count = self.max_allocated_index.load(.monotonic);
         for (self.persistent.mapped[0..count]) |candidate| {
             if (candidate.face_count == 0 or candidate.is_transparent != 0) continue;
+            const pos: @Vector(3, f64) = .{ candidate.absolute_position[0], candidate.absolute_position[1], candidate.absolute_position[2] };
             const size: f64 = @as(f64, candidate.scale) * chunk_size_blocks;
-            for (&min, &max, candidate.absolute_position[0..3]) |*axis_min, *axis_max, pos| {
-                axis_min.* = @min(axis_min.*, pos);
-                axis_max.* = @max(axis_max.*, pos + size);
-            }
+            min_v = @min(min_v, pos);
+            max_v = @max(max_v, pos + @as(@Vector(3, f64), @splat(size)));
         }
-        if (count == 0) {
-            min = @splat(0);
-            max = @splat(0);
-        }
+        const min: [3]f64 = if (count == 0) @splat(0) else @bitCast(min_v);
+        const max: [3]f64 = if (count == 0) @splat(0) else @bitCast(max_v);
         self.aabb_min = min;
         self.aabb_max = max;
         self.aabb_scanned_version = version;
@@ -1114,6 +1147,16 @@ pub const IndirectScene = struct {
                 _ = items.swapRemove(i);
             }
         }
+        const vis_items = &self.retired_visibility_slices;
+        i = vis_items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = vis_items.items[i];
+            if (current_graphics_val >= entry.graphics_timeline_value) {
+                self.memory.gpuOnly().free(entry.slice);
+                _ = vis_items.swapRemove(i);
+            }
+        }
     }
 
     fn fillFrameData(
@@ -1124,7 +1167,7 @@ pub const IndirectScene = struct {
         count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
         stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     ) void {
-        stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
+        stats_slice[0] = std.mem.zeroes(CullCount);
 
         const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
         const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
@@ -1212,7 +1255,7 @@ pub const IndirectScene = struct {
             errdefer self.memory.gpuOnly().free(count_slice);
             const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.cpuToGpu().free(stats_slice);
-            stats_slice[0] = .{ .opaque_count = 0, .transparent_count = 0, .opaque_face_count = 0, .transparent_face_count = 0, .shadow_count = @splat(0), .shadow_face_count = @splat(0) };
+            stats_slice[0] = std.mem.zeroes(CullCount);
 
             mesh_dst.* = mesh_data_slice.ptr;
             indirect_dst.* = indirect_draw_slice.ptr;
@@ -1259,6 +1302,26 @@ pub const IndirectScene = struct {
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
         @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
 
+        const new_visibility = self.memory.gpuOnly().alignedAlloc(u32, cull_buffer_alignment, new_capacity) catch |err| {
+            self.memory.cpuToGpu().free(new_slice);
+            return err;
+        };
+        const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
+        // The old visibility slice is NOT freed here: a worker thread may grow the
+        // scene while the render thread reads `visibility_slice`, and the render thread
+        // does not share the retirement mutex. Deferring the free closes the window.
+        const old_visibility_slice = self.visibility_slice;
+        self.visibility_slice = new_visibility;
+        try self.retired_visibility_slices.append(self.allocator, .{
+            .slice = old_visibility_slice,
+            .graphics_timeline_value = current_frame_num + self.num_in_flight,
+        });
+
+        const current_vis_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, new_visibility.ptr);
+        self.visibility_buffer = current_vis_info.buffer;
+        self.visibility_offset = current_vis_info.offset;
+        self.visibility_needs_clear.store(true, .release);
+
         @memcpy(new_slice[0..old_capacity], self.persistent.slice[0..old_capacity]);
 
         const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_slice.ptr);
@@ -1269,7 +1332,6 @@ pub const IndirectScene = struct {
         self.persistent.offset = info.offset;
         self.persistent.slice = new_slice;
 
-        const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
         try self.retired_candidate_slices.append(self.allocator, .{
             .slice = old_slice,
             .graphics_timeline_value = current_frame_num + self.num_in_flight,

@@ -114,14 +114,16 @@ pub const TextureManager = struct {
         if (pack.is_default) {
             const default_textures = @import("textures").default;
             for (visible_block_names, default_textures) |name, data| {
-                const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
-                defer allocator.free(filename);
+                {
+                    const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
+                    defer allocator.free(filename);
 
-                if (pack.dir.openFile(io, filename, .{})) |f| {
-                    f.close(io);
-                } else |err| switch (err) {
-                    error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
-                    else => |e| return e,
+                    if (pack.dir.openFile(io, filename, .{})) |f| {
+                        f.close(io);
+                    } else |err| switch (err) {
+                        error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
+                        else => |e| return e,
+                    }
                 }
             }
         }
@@ -186,21 +188,7 @@ pub const TextureManager = struct {
         }
 
         for (entries.items) |entry| {
-            const texture_file = try dir.openFile(io, entry.name, .{});
-            defer texture_file.close(io);
-
-            const stat = try texture_file.stat(io);
-            const content = try allocator.alloc(u8, stat.size);
-            defer allocator.free(content);
-            if (try texture_file.readPositionalAll(io, content, 0) != content.len) return error.EndOfStream;
-
-            var loaded_img = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, content);
-            defer loaded_img.deinit(allocator);
-
-            const w: u32 = @intCast(loaded_img.cols);
-            const h: u32 = @intCast(loaded_img.rows);
-
-            const staging = try self.uploadSingleTexture(cmd, self.textures.getPtr(entry.block), w, h, loaded_img.asBytes(), format);
+            const staging = try self.uploadEntry(io, cmd, dir, allocator, entry, format);
             staging_slices.appendAssumeCapacity(staging);
         }
 
@@ -216,6 +204,26 @@ pub const TextureManager = struct {
 
         try self.createDescriptorResources();
         std.log.info("Loaded {d} bindless textures", .{entries.items.len});
+    }
+
+    /// Loads one texture file into staging and returns the staging slice; the file handle,
+    /// file contents, and decoded image are released on return, not at call-site scope end.
+    fn uploadEntry(self: *TextureManager, io: std.Io, cmd: vk.CommandBuffer, dir: std.Io.Dir, allocator: std.mem.Allocator, entry: TextureEntry, format: vk.Format) ![]u8 {
+        const texture_file = try dir.openFile(io, entry.name, .{});
+        defer texture_file.close(io);
+
+        const stat = try texture_file.stat(io);
+        const content = try allocator.alloc(u8, stat.size);
+        defer allocator.free(content);
+        if (try texture_file.readPositionalAll(io, content, 0) != content.len) return error.EndOfStream;
+
+        var loaded_img = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, content);
+        defer loaded_img.deinit(allocator);
+
+        const w: u32 = @intCast(loaded_img.cols);
+        const h: u32 = @intCast(loaded_img.rows);
+
+        return self.uploadSingleTexture(cmd, self.textures.getPtr(entry.block), w, h, loaded_img.asBytes(), format);
     }
 
     fn createSampler(self: *TextureManager) !void {

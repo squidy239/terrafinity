@@ -1,0 +1,32 @@
+#version 460 core
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src_depth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D dst_mip;
+
+layout(push_constant) uniform PushConsts {
+    ivec2 src_size;
+    ivec2 dst_size;
+} pc;
+
+// Reversed-Z MIN reduction: each destination texel stores the farthest depth over its
+// source footprint. The last texel in a row/column absorbs the extra source texel when
+// the source dimension is odd, so every source texel is covered and the pyramid stays
+// conservative for occlusion tests.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.dst_size.x || coord.y >= pc.dst_size.y) return;
+
+    ivec2 base = coord * 2;
+    int extent_x = (coord.x == pc.dst_size.x - 1) ? (pc.src_size.x - base.x) : 2;
+    int extent_y = (coord.y == pc.dst_size.y - 1) ? (pc.src_size.y - base.y) : 2;
+
+    float farthest = 1.0;
+    for (int y = 0; y < extent_y; y++) {
+        for (int x = 0; x < extent_x; x++) {
+            farthest = min(farthest, texelFetch(src_depth, base + ivec2(x, y), 0).r);
+        }
+    }
+    imageStore(dst_mip, coord, vec4(farthest));
+}

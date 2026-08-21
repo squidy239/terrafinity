@@ -18,6 +18,7 @@ const OitCompositor = @import("../OitCompositor.zig").OitCompositor;
 const textures = @import("textures.zig");
 const BlockMaterials = @import("BlockMaterials.zig").BlockMaterials;
 const ShadowRenderer = @import("../shadow/ShadowRenderer.zig").ShadowRenderer;
+const DepthPyramid = @import("../occlusion/DepthPyramid.zig").DepthPyramid;
 
 const ChunkPos = World.ChunkPos;
 
@@ -89,16 +90,24 @@ const CullPushConstants = extern struct {
     player_pos: [4]f32 align(16),
     total_candidates: u32,
     draw_capacity: u32,
-    /// 0 = main pass (slots 0-1 split by is_transparent); 1+k = shadow cull for cascade
-    /// slot k (opaque only), decoded to k = mode - 1 by cull.comp.
+    /// See the mode constants below; decoded by cull.comp.
     mode: u32,
     /// Minimum chunk AABB size in world blocks to cast a shadow (0 = off).
     min_chunk_size: f32,
 };
 
 comptime {
+    // Kept at or below 128 bytes, the Vulkan minimum guaranteed push-constant size;
+    // the occlusion camera lives in the Hi-Z params buffer instead.
     if (@sizeOf(CullPushConstants) != 128) @compileError("CullPushConstants size mismatch with GLSL layout");
 }
+
+/// Early main pass: frustum + visible-last-frame, opaque only.
+const cull_mode_early: u32 = 0;
+/// Late main pass: frustum + Hi-Z occlusion, updates visibility bits.
+const cull_mode_late: u32 = 1;
+/// Shadow cull for cascade slot k dispatches with mode = cull_mode_shadow_base + k.
+const cull_mode_shadow_base: u32 = 2;
 
 const cull_workgroup_size: u32 = 64;
 
@@ -129,6 +138,7 @@ pub const PassContext = struct {
     elapsed_sec: f32,
     sun_dir: @Vector(3, f32),
     inside_transparent: bool,
+    occlusion_culling: bool,
     swapchain_old_layout: vk.ImageLayout,
     swapchain_layout_ptr: ?*vk.ImageLayout,
     output_image: vk.Image,
@@ -159,6 +169,12 @@ oit: *OitCompositor,
 render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
 shadow: *ShadowRenderer,
+pyramid: *DepthPyramid,
+/// GLSL-transposed view-projection and camera position the current pyramid was built
+/// with; the cull tests with these (one frame stale) so boxes project onto the view
+/// that rendered the depth.
+last_cull_projview: [16]f32 = @splat(0),
+last_cull_player_pos: [4]f32 = .{ 0, 0, 0, 1 },
 num_in_flight: u32 = VulkanContext.max_frames_in_flight,
 
 texture_manager: textures.TextureManager,
@@ -185,6 +201,7 @@ pub fn init(
     scene: *gpu.IndirectScene,
     oit: *OitCompositor,
     shadow: *ShadowRenderer,
+    pyramid: *DepthPyramid,
     render_options: *const Renderer.RenderOptions,
     render_options_lock: *std.Io.RwLock,
 ) !void {
@@ -198,6 +215,7 @@ pub fn init(
         .scene = scene,
         .oit = oit,
         .shadow = shadow,
+        .pyramid = pyramid,
         .render_options = render_options,
         .render_options_lock = render_options_lock,
         .meshes = .init,
@@ -511,54 +529,58 @@ fn enqueueRetiredMesh(self: *ChunkRenderer, gpu_index: u32, face_offset: u32, fa
 
 fn retireOnePendingItem(self: *ChunkRenderer, io: std.Io, mesh: ?gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
     if (mesh) |m| {
-        var new_mesh = m;
-
-        const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
-        const mesh_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
-        const abs_vec: [4]f32 = .{ @floatCast(mesh_blockpos[0]), @floatCast(mesh_blockpos[1]), @floatCast(mesh_blockpos[2]), 1.0 };
-        const is_transparent = key == .transparent;
-        const transform: gpu.CandidateTransform = .{
-            .absolute_position = abs_vec,
-            .scale = ChunkPos.toScale(chunk_pos.level),
-        };
-
-        const existing = self.meshes.get(io, key);
-        if (existing) |old_mesh| {
-            // A previous attempt may have fully retired this upload before failing on the
-            // other half; re-processing it would free a region the live mesh still reads.
-            if (old_mesh.face_offset == new_mesh.face_offset and
-                old_mesh.face_count == new_mesh.face_count and
-                old_mesh.face_byte_count == new_mesh.face_byte_count)
-            {
-                return;
-            }
-            new_mesh.gpu_index = old_mesh.gpu_index;
-            self.scene.writeCandidate(old_mesh.gpu_index, new_mesh, is_transparent, transform);
-            const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
-            if (removed) |old| try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, false);
-        } else {
-            const gpu_idx = try self.scene.allocIndex(io);
-            new_mesh.gpu_index = gpu_idx;
-            self.scene.writeCandidate(gpu_idx, new_mesh, is_transparent, transform);
-            self.scene.updateMaxAllocatedIndex(gpu_idx);
-
-            const removed = self.meshes.fetchPut(io, self.allocator, key, new_mesh) catch |err| {
-                // Roll back so a retry of this pending item starts from a clean slate:
-                // without this the slot would keep drawing an unregistered mesh and the
-                // index would be permanently consumed.
-                self.scene.releaseCandidate(io, gpu_idx);
-                return err;
-            };
-            if (removed) |old| {
-                self.scene.markInactive(old.gpu_index);
-                try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, true);
-            }
-        }
+        try self.retireUploadedMesh(io, m, key, chunk_pos);
     } else {
         const existing = self.meshes.fetchRemove(io, key);
         if (existing) |old_mesh| {
             self.scene.markInactive(old_mesh.gpu_index);
             try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh.face_offset, old_mesh.face_byte_count, true);
+        }
+    }
+}
+
+fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
+    var new_mesh = new_mesh_in;
+
+    const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
+    const mesh_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
+    const abs_vec: [4]f32 = .{ @floatCast(mesh_blockpos[0]), @floatCast(mesh_blockpos[1]), @floatCast(mesh_blockpos[2]), 1.0 };
+    const is_transparent = key == .transparent;
+    const transform: gpu.CandidateTransform = .{
+        .absolute_position = abs_vec,
+        .scale = ChunkPos.toScale(chunk_pos.level),
+    };
+
+    const existing = self.meshes.get(io, key);
+    if (existing) |old_mesh| {
+        // A previous attempt may have fully retired this upload before failing on the
+        // other half; re-processing it would free a region the live mesh still reads.
+        if (old_mesh.face_offset == new_mesh.face_offset and
+            old_mesh.face_count == new_mesh.face_count and
+            old_mesh.face_byte_count == new_mesh.face_byte_count)
+        {
+            return;
+        }
+        new_mesh.gpu_index = old_mesh.gpu_index;
+        self.scene.writeCandidate(old_mesh.gpu_index, new_mesh, is_transparent, transform);
+        const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
+        if (removed) |old| try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, false);
+    } else {
+        const gpu_idx = try self.scene.allocIndex(io);
+        new_mesh.gpu_index = gpu_idx;
+        self.scene.writeCandidate(gpu_idx, new_mesh, is_transparent, transform);
+        self.scene.updateMaxAllocatedIndex(gpu_idx);
+
+        const removed = self.meshes.fetchPut(io, self.allocator, key, new_mesh) catch |err| {
+            // Roll back so a retry of this pending item starts from a clean slate:
+            // without this the slot would keep drawing an unregistered mesh and the
+            // index would be permanently consumed.
+            self.scene.releaseCandidate(io, gpu_idx);
+            return err;
+        };
+        if (removed) |old| {
+            self.scene.markInactive(old.gpu_index);
+            try self.enqueueRetiredMesh(old.gpu_index, old.face_offset, old.face_byte_count, true);
         }
     }
 }
@@ -649,12 +671,12 @@ fn createCullResources(self: *ChunkRenderer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createCullResources" });
     defer zone.end();
     if (self.cull.descriptor_set_layout == .null_handle) {
-        var bindings: [4]vk.DescriptorSetLayoutBinding = undefined;
+        var bindings: [5]vk.DescriptorSetLayoutBinding = undefined;
         for (&bindings, 0..) |*b, i| b.* = .{ .binding = @intCast(i), .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null };
         self.cull.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, &bindings);
     }
 
-    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
+    const pool_size = vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 5) };
     try core.createFrameDescriptorPool(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.cull.descriptor_pool, self.cull.descriptor_set_layout, &self.cull.descriptor_sets_per_frame, (&pool_size)[0..1]);
     errdefer self.destroyCullDescriptorResources();
 
@@ -663,10 +685,11 @@ fn createCullResources(self: *ChunkRenderer) !void {
         .offset = 0,
         .size = @sizeOf(CullPushConstants),
     };
+    const set_layouts: [2]vk.DescriptorSetLayout = .{ self.cull.descriptor_set_layout, self.pyramid.occlusion_set_layout };
     self.cull.pipeline_layout = try self.dev.createPipelineLayout(&.{
         .flags = .{},
-        .set_layout_count = 1,
-        .p_set_layouts = (&self.cull.descriptor_set_layout)[0..1],
+        .set_layout_count = set_layouts.len,
+        .p_set_layouts = &set_layouts,
         .push_constant_range_count = 1,
         .p_push_constant_ranges = (&pc_range)[0..1],
     }, &self.vk_ctx.vkalloc);
@@ -706,14 +729,15 @@ fn destroyCullDescriptorResources(self: *ChunkRenderer) void {
 fn updateCullDescriptorSet(self: *ChunkRenderer, frame_idx: u32) void {
     const scene = self.scene;
     const frame = &scene.frame_buffers.items[frame_idx];
-    const infos: [4]vk.DescriptorBufferInfo = .{
+    const infos: [5]vk.DescriptorBufferInfo = .{
         .{ .buffer = scene.persistent.buffer, .offset = scene.persistent.offset, .range = scene.persistent.slice.len * @sizeOf(gpu.MeshCandidate) },
         .{ .buffer = frame.indirect_draw, .offset = frame.indirect_draw_offset, .range = scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand) },
         .{ .buffer = frame.mesh_data, .offset = frame.mesh_data_offset, .range = scene.draw_capacity * gpu.slot_count * @sizeOf(gpu.MeshData) },
         .{ .buffer = frame.count, .offset = frame.count_offset, .range = @sizeOf(gpu.CullCount) },
+        .{ .buffer = scene.visibility_buffer, .offset = scene.visibility_offset, .range = scene.visibility_slice.len * @sizeOf(u32) },
     };
-    var writes: [4]vk.WriteDescriptorSet = undefined;
-    inline for (infos, 0..) |info, i| writes[i] = core.bufferWriteDescriptorSet(self.cull.descriptor_sets_per_frame[frame_idx], @intCast(i), .storage_buffer, &info);
+    var writes: [5]vk.WriteDescriptorSet = undefined;
+    for (&writes, &infos, 0..) |*write, *info, binding| write.* = core.bufferWriteDescriptorSet(self.cull.descriptor_sets_per_frame[frame_idx], @intCast(binding), .storage_buffer, info);
     self.dev.updateDescriptorSets(&writes, null);
 }
 
@@ -737,6 +761,7 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
 
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
     self.dev.cmdBindDescriptorSets(cmd_buffer, .compute, self.cull.pipeline_layout, 0, (&self.cull.descriptor_sets_per_frame[current_frame])[0..1], null);
+    self.pyramid.pushOcclusionSet(cmd_buffer, self.cull.pipeline_layout, 1, current_frame);
 
     var push_consts: CullPushConstants = undefined;
     for (planes, 0..) |plane, idx| push_consts.planes[idx] = plane;
@@ -752,7 +777,49 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
     self.dev.cmdDispatch(cmd_buffer, group_count, 1, 1);
 }
 
-/// One barrier covering both cull dispatches (main + shadow), then the count copy.
+/// Zero-fills the visibility buffer when it is fresh, or makes last frame's late-cull
+/// visibility writes visible to this frame's cull dispatches. Scoped to the live
+/// candidate count, not the whole (possibly oversized) buffer.
+fn prepareVisibility(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, total_candidates: u32) void {
+    const scene = self.scene;
+    const size: vk.DeviceSize = @as(vk.DeviceSize, total_candidates) * @sizeOf(u32);
+    if (scene.visibility_needs_clear.swap(false, .acq_rel)) {
+        self.dev.cmdFillBuffer(cmd_buffer, scene.visibility_buffer, scene.visibility_offset, size, 0);
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
+        return;
+    }
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
+}
+
+/// Makes the early cull's outputs visible to the draws that consume them (early opaque
+/// pass and the shadow raster at the frame tail).
+fn cullDrawBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
+    const scene = self.scene;
+    const frame = &scene.frame_buffers.items[current_frame];
+    const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
+        core.makeBufferBarrier2(frame.indirect_draw, frame.indirect_draw_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
+        core.makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(gpu.MeshData), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .vertex_shader_bit = true }, .{ .shader_read_bit = true }),
+        core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true }, .{ .indirect_command_read_bit = true }),
+    };
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &buffer_barriers);
+}
+
+/// The late cull rewrites buffers the early passes just consumed and continues the
+/// early cull's atomic counters, so it must wait for those reads and see those writes.
+fn preLateCullBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
+    const scene = self.scene;
+    const frame = &scene.frame_buffers.items[current_frame];
+    const buffer_barriers: [4]vk.BufferMemoryBarrier2 = .{
+        core.makeBufferBarrier2(frame.indirect_draw, frame.indirect_draw_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand), .{ .draw_indirect_bit = true, .compute_shader_bit = true }, .{ .shader_write_bit = true, .indirect_command_read_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }),
+        core.makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(gpu.MeshData), .{ .vertex_shader_bit = true, .compute_shader_bit = true }, .{ .shader_write_bit = true, .shader_read_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }),
+        core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), .{ .draw_indirect_bit = true, .compute_shader_bit = true }, .{ .shader_write_bit = true, .indirect_command_read_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }),
+        core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, scene.visibility_slice.len * @sizeOf(u32), .{ .compute_shader_bit = true }, .{ .shader_read_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }),
+    };
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &buffer_barriers);
+}
+
+/// One barrier covering the late cull's outputs, then the count copy into the
+/// host-visible stats buffer.
 fn cullBarrierAndCopyStats(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
     const scene = self.scene;
     const frame = &scene.frame_buffers.items[current_frame];
@@ -875,9 +942,25 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         const col = i % 4;
         dst.* = projview_array[col * 4 + row];
     }
+    // The cull tests against the pyramid built last frame, so it must project with the
+    // matrix and camera that frame's depth was rendered with, not this frame's.
+    self.pyramid.writeParams(ctx.frame_idx, self.last_cull_projview, self.last_cull_player_pos, ctx.occlusion_culling);
+    self.last_cull_projview = pc.projview;
+    self.last_cull_player_pos = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
 
-    self.recordOpaquePass(ctx, pc);
+    if (ctx.total_candidates > 0) self.dispatchFrameCulling(ctx);
+    self.recordOpaquePass(ctx, pc, .early);
+    self.recordPyramidAndLateCull(ctx);
+    self.recordOpaquePass(ctx, pc, .late);
+    // Depth is final now; transparent tests against it, samples it in the shader, and
+    // the end-of-frame pyramid build reduces it for next frame's cull.
+    self.depthToSampledBarrier(ctx, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true, .compute_shader_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true });
     self.recordTransparentPass(ctx, pc);
+
+    // Build next frame's occlusion pyramid from this frame's completed opaque depth.
+    // The late cull consumed the pyramid built last frame (double-buffered), so newly
+    // built occluders cull previously visible meshes within one frame.
+    self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
 
     const scatter_enabled: u32 = @intFromBool(!ctx.inside_transparent);
     self.oit.recordCompositionPass(ctx.cmd_buffer, ctx.extent, ctx.output_image, ctx.output_view, ctx.frame_idx, scatter_enabled, ctx.swapchain_old_layout, ctx.swapchain_layout_ptr, ctx.color_image);
@@ -918,24 +1001,53 @@ fn pushShadowSet2(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, pipeline_l
     self.dev.cmdPushDescriptorSetKHR(cmd_buffer, .graphics, pipeline_layout, 2, &writes);
 }
 
-/// Culls the main view and every active shadow cascade into this frame's CullCount.
-/// reset_count=false for the cascades is safe only because the main cull just zeroed the
-/// WHOLE CullCount (including shadow_count/shadow_face_count). The shadow raster is gated
-/// on the identical conditions, so it never draws a count that was not reset.
+/// Culls the early main pass and every active shadow cascade into this frame's CullCount.
+/// The reset-less cascade and late culls are safe only because the early cull just zeroed
+/// the whole CullCount, and the shadow raster never draws a count that was not reset.
 fn dispatchFrameCulling(self: *ChunkRenderer, ctx: *const PassContext) void {
-    self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, 0, 0.0, true);
+    self.prepareVisibility(ctx.cmd_buffer, ctx.total_candidates);
+    self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, cull_mode_early, 0.0, true);
     if (shadowActive(ctx)) |shadow| {
         for (0..shadow.frameCascadeCount()) |slot| {
-            self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, 1 + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);
+            self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, shadow.frameCascadePlanes(@intCast(slot)), ctx.total_candidates, ctx.view_pos, cull_mode_shadow_base + @as(u32, @intCast(slot)), shadow.frameMinChunkSize(), false);
         }
     }
-    self.cullBarrierAndCopyStats(ctx.cmd_buffer, ctx.frame_idx);
+    self.cullDrawBarrier(ctx.cmd_buffer, ctx.frame_idx);
 }
 
-fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants) void {
+/// Runs the late cull: re-tests every candidate against the previous frame's occlusion
+/// pyramid, draws newly disoccluded opaque meshes and all visible transparent meshes,
+/// and records the visibility bits the next frame's early cull reads.
+fn recordPyramidAndLateCull(self: *ChunkRenderer, ctx: *const PassContext) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordPyramidAndLateCull" });
+    defer zone.end();
+
+    if (ctx.total_candidates > 0) {
+        self.preLateCullBarrier(ctx.cmd_buffer, ctx.frame_idx);
+        self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, cull_mode_late, 0.0, false);
+        self.cullBarrierAndCopyStats(ctx.cmd_buffer, ctx.frame_idx);
+    }
+}
+
+/// Transitions depth from attachment to read-only, visible to the given consumers.
+fn depthToSampledBarrier(self: *ChunkRenderer, ctx: *const PassContext, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) void {
+    core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(
+        ctx.depth_image,
+        .depth_stencil_attachment_optimal,
+        .depth_stencil_read_only_optimal,
+        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+        .{ .depth_stencil_attachment_write_bit = true },
+        dst_stage,
+        dst_access,
+        ctx.depth_aspect_mask,
+    ))[0..1]);
+}
+
+const OpaquePhase = enum { early, late };
+
+fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants, phase: OpaquePhase) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
     defer zone.end();
-    if (ctx.total_candidates > 0) self.dispatchFrameCulling(ctx);
 
     const color_attachment = core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
     const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);
@@ -957,24 +1069,22 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
     // so it is pushed as null (robustness2.null_descriptor makes that legal).
     self.pushShadowSet2(ctx.cmd_buffer, self.graphics_state.opaque_pipeline_layout, ctx.frame_idx, null);
 
-    self.pushChunkConstants(ctx.cmd_buffer, self.graphics_state.opaque_pipeline_layout, pc, 0);
+    const slot: u32 = switch (phase) {
+        .early => gpu.opaque_early_slot,
+        .late => gpu.opaque_late_slot,
+    };
+    self.pushChunkConstants(ctx.cmd_buffer, self.graphics_state.opaque_pipeline_layout, pc, slot * self.scene.draw_capacity);
 
     if (ctx.total_candidates > 0) {
+        const count_field: vk.DeviceSize = switch (phase) {
+            .early => @offsetOf(gpu.CullCount, "opaque_count"),
+            .late => @offsetOf(gpu.CullCount, "opaque_late_count"),
+        };
         const frame = &self.scene.frame_buffers.items[ctx.frame_idx];
-        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset, frame.count_offset);
+        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset + @as(vk.DeviceSize, slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + count_field);
     }
 
     self.dev.cmdEndRendering(ctx.cmd_buffer);
-    core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(
-        ctx.depth_image,
-        .depth_stencil_attachment_optimal,
-        .depth_stencil_read_only_optimal,
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{ .depth_stencil_attachment_write_bit = true },
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true },
-        .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true },
-        ctx.depth_aspect_mask,
-    ))[0..1]);
 }
 
 fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants) void {
@@ -1018,11 +1128,11 @@ fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: Push
         self.dev.cmdBindDescriptorSets(ctx.cmd_buffer, .graphics, self.graphics_state.transparent_pipeline_layout, 3, (&self.block_materials.descriptor_set)[0..1], null);
     }
 
-    self.pushChunkConstants(ctx.cmd_buffer, self.graphics_state.transparent_pipeline_layout, pc, self.scene.draw_capacity);
+    self.pushChunkConstants(ctx.cmd_buffer, self.graphics_state.transparent_pipeline_layout, pc, gpu.transparent_slot * self.scene.draw_capacity);
 
     if (ctx.total_candidates > 0) {
         const frame = &self.scene.frame_buffers.items[ctx.frame_idx];
-        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset + @as(vk.DeviceSize, @intCast(self.scene.draw_capacity * @sizeOf(vk.DrawIndirectCommand))), frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "transparent_count"))));
+        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset + @as(vk.DeviceSize, gpu.transparent_slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "transparent_count"))));
     }
 
     self.dev.cmdEndRendering(ctx.cmd_buffer);

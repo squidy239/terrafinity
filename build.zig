@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
 
     const shader_include = b.path("src/Renderer/vulkan/shadow").getPath(b);
+    const occlusion_include = b.path("src/Renderer/vulkan/occlusion").getPath(b);
     const shader_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
@@ -24,6 +25,8 @@ pub fn build(b: *std.Build) void {
         "-Werror",
         "-I",
         shader_include,
+        "-I",
+        occlusion_include,
         "-o",
     };
 
@@ -53,6 +56,11 @@ pub fn build(b: *std.Build) void {
     const cull_cmd = b.addSystemCommand(&shader_cmd);
     const cull_spv = cull_cmd.addOutputFileArg("cull.spv");
     cull_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/cull.comp"));
+    cull_cmd.addFileInput(b.path("src/Renderer/vulkan/occlusion/occlusion.glsl"));
+
+    const pyramid_cmd = b.addSystemCommand(&shader_cmd);
+    const pyramid_spv = pyramid_cmd.addOutputFileArg("depth_pyramid.spv");
+    pyramid_cmd.addFileArg(b.path("src/Renderer/vulkan/occlusion/depth_pyramid.comp"));
 
     const sky_vert_cmd = b.addSystemCommand(&shader_cmd);
     const sky_vert_spv = sky_vert_cmd.addOutputFileArg("sky_vert.spv");
@@ -88,6 +96,7 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&comp_vert_cmd.step);
     exe.step.dependOn(&comp_frag_cmd.step);
     exe.step.dependOn(&cull_cmd.step);
+    exe.step.dependOn(&pyramid_cmd.step);
     exe.step.dependOn(&sky_vert_cmd.step);
     exe.step.dependOn(&sky_frag_cmd.step);
     exe.step.dependOn(&shadow_vert_cmd.step);
@@ -98,6 +107,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
     exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
     exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
+    exe.root_module.addAnonymousImport("depth_pyramid_spv", .{ .root_source_file = pyramid_spv });
     exe.root_module.addAnonymousImport("sky_vert_spv", .{ .root_source_file = sky_vert_spv });
     exe.root_module.addAnonymousImport("sky_frag_spv", .{ .root_source_file = sky_frag_spv });
     exe.root_module.addAnonymousImport("shadow_vert_spv", .{ .root_source_file = shadow_vert_spv });

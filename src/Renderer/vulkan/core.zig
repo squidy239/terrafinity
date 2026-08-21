@@ -9,6 +9,8 @@ const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 
 const near_plane: f32 = 0.01;
 
+pub const fullscreen_triangle_vertices: u32 = 3;
+
 pub const Camera = struct {
     front_x: std.atomic.Value(f32) = .init(0),
     front_y: std.atomic.Value(f32) = .init(0),
@@ -157,8 +159,7 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
 }
 
 /// Represents a single VkBuffer allocation and its associated resources.
-/// raw_alloc is the full underlying allocation (CPU-side), used for range
-/// checks and cleanup. The VkBuffer has the same size and layout.
+/// raw_alloc is the full CPU-side backing allocation, used for range checks and cleanup.
 pub const GpuBlock = struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
@@ -227,11 +228,9 @@ pub const VulkanBackingAllocator = struct {
         };
     }
 
-    /// Returns the buffer handle and byte offset for a pointer into a block.
-    /// The caller must own the pointer. The lookup serializes against concurrent
-    /// allocBlock/freeBlock: iterating the block map while another thread mutates
-    /// it (reallocation can free the entries array mid-iteration) is a data race
-    /// that can hang or crash the caller.
+    /// Returns the buffer handle and byte offset for a pointer into a block; the caller
+    /// must own the pointer. Serializes against concurrent allocBlock/freeBlock, which
+    /// can otherwise reallocate the block map mid-iteration.
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
         const addr = @intFromPtr(ptr);
         self.mutex.lockUncancelable(self.io);
@@ -258,7 +257,7 @@ pub const VulkanBackingAllocator = struct {
         const alignment_bytes = alignment.toByteUnits();
         const alloc_len = if (alignment_bytes > 1) len + alignment_bytes -| 1 else len;
 
-        const buffer, const memory, const mem_size = try self.createBufferAndMemory(pool, alloc_len);
+        const buffer, const memory, const mem_size = try self.createBufferWithMemory(pool, alloc_len);
         errdefer self.dev.freeMemory(memory, &self.vkalloc);
         errdefer self.dev.destroyBuffer(buffer, &self.vkalloc);
 
@@ -283,7 +282,7 @@ pub const VulkanBackingAllocator = struct {
         return result;
     }
 
-    fn createBufferAndMemory(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize) !struct { vk.Buffer, vk.DeviceMemory, usize } {
+    fn createBufferWithMemory(self: *VulkanBackingAllocator, pool: MemoryPool, len: usize) !struct { vk.Buffer, vk.DeviceMemory, usize } {
         const queue_family_indices: [2]u32 = .{ self.graphics_queue_family, self.transfer_queue_family };
         const is_concurrent = self.graphics_queue_family != self.transfer_queue_family;
 
