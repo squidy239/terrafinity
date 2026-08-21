@@ -200,7 +200,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     try self.dev.resetCommandPool(self.vk_ctx.command_pool, .{});
 
     const old_swapchain = self.vk_ctx.swapchain;
-    try self.vk_ctx.createSwapchainLocked(gamma_correction);
+    try self.vk_ctx.createSwapchainLocked(io, gamma_correction);
 
     if (self.vk_ctx.swapchain == old_swapchain and self.render_color.image != .null_handle) return;
 

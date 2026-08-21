@@ -416,9 +416,15 @@ fn submitBatch(self: *ChunkRenderer, io: std.Io) !void {
         return err;
     };
 
-    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count], batch_copy.chunk_positions[0..count], batch_copy.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
+    // Bind every slice before pushing any item: a push that fails partway through
+    // the batch must not leave unbound staging entries behind, or retire stops at
+    // the first entry without a timeline value and the ring wedges permanently.
+    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count]) |opaque_mesh, transparent_mesh| {
         if (opaque_mesh) |r| self.uploader.bindStaging(io, r.staging_slice, next_val);
         if (transparent_mesh) |r| self.uploader.bindStaging(io, r.staging_slice, next_val);
+    }
+
+    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count], batch_copy.chunk_positions[0..count], batch_copy.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
         try self.pushPendingUpload(io, .{
             .chunk_pos = chunk_pos,
             .timeline_value = next_val,
@@ -435,17 +441,44 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
 
     while (true) {
         if (try self.pending_uploads_queue.put(io, &.{pending}, 0) == 1) return;
+        // The queue is full. A retire pass either frees a slot (something retired)
+        // or holds the front item out as the peek; in both cases the next put
+        // succeeds against the freed slot.
         try self.retireCompletedUploads(io);
-        // Queue still full: suspend until the transfer queue completes its next
-        // batch, whose retirement frees queue slots. The front item's batch is
-        // always the next pending transfer, so this wait always makes progress.
-        const transfer_done_val = try self.dev.getSemaphoreCounterValue(self.uploader.transfer.semaphore);
-        _ = try self.dev.waitSemaphores(&.{
-            .semaphore_count = 1,
-            .p_semaphores = (&self.uploader.transfer.semaphore)[0..1],
-            .p_values = (&(transfer_done_val + 1))[0..1],
-        }, std.math.maxInt(u64));
+        if (self.peeked_upload) |front| {
+            // The front item's batch is the oldest pending transfer, so waiting on
+            // its timeline value is satisfied by already-submitted work; the next
+            // retire pass then consumes it and frees its slot. The wait is bounded
+            // in normal operation; a timeout means the GPU is stalled and must be
+            // reported instead of hanging silently.
+            const result = try self.dev.waitSemaphores(&.{
+                .semaphore_count = 1,
+                .p_semaphores = (&self.uploader.transfer.semaphore)[0..1],
+                .p_values = (&front.timeline_value)[0..1],
+            }, gpu.transfer_wait_timeout_ns);
+            if (result != .success) {
+                std.log.warn("ChunkRenderer: pending upload queue stalled waiting for transfer value {d}; GPU may be stuck", .{front.timeline_value});
+            }
+        }
     }
+}
+
+/// Returns a failed pending upload to the tail of the queue so later retire passes
+/// retry it while the rest of the queue keeps draining. Cannot block: the item's
+/// pool is still held (it is returned only on a successful retire), so the queue
+/// can hold at most 511 other items and one slot is always free.
+fn requeuePendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUpload) void {
+    _ = self.pending_uploads_queue.putUncancelable(io, (&pending)[0..1], 1) catch unreachable;
+}
+
+/// Retires one half of a pending upload; on failure re-queues the item so a
+/// persistent error cannot wedge the queue.
+fn retireOrRequeue(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUpload, mesh: ?gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
+    self.retireOnePendingItem(io, mesh, key, chunk_pos) catch |err| {
+        self.requeuePendingUpload(io, pending);
+        self.peeked_upload = null;
+        return err;
+    };
 }
 
 fn destroyMeshBuffer(self: *ChunkRenderer, io: std.Io, mesh: gpu.MeshBuffer) void {
@@ -547,8 +580,8 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
         };
 
         if (current_transfer_val >= pending.timeline_value) {
-            try self.retireOnePendingItem(io, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
-            try self.retireOnePendingItem(io, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
+            try self.retireOrRequeue(io, pending, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
+            try self.retireOrRequeue(io, pending, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
 
             self.uploader.returnPool(pending.pool);
             self.peeked_upload = null;
@@ -581,7 +614,7 @@ pub fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
 
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.vk_ctx.graphics_timeline_semaphore);
 
-    self.uploader.processRetiredFaceBuffers(current_graphics_val);
+    self.uploader.processRetiredFaceBuffers(io, current_graphics_val);
     self.scene.processRetired(current_graphics_val);
 
     const items = &self.retired_meshes;
@@ -1020,4 +1053,25 @@ test "RenderBufferKey.toPos" {
     try std.testing.expectEqual(pos_b, (RenderBufferKey{ .transparent = pos_b }).toPos());
     const pos: ChunkPos = .{ .level = 5, .position = .{ -100, 200, -300 } };
     try std.testing.expectEqual(pos, (RenderBufferKey{ .@"opaque" = pos }).toPos());
+}
+
+test "pushPendingUpload queue semantics: put(min=0) never blocks" {
+    // pushPendingUpload relies on put with min=0 returning 0 immediately when the
+    // queue is full (never suspending), so a retire pass always gets a chance to
+    // free the slot before the next attempt.
+    const io = std.testing.io;
+    var buf: [2]usize = undefined;
+    var queue: std.Io.Queue(usize) = .init(&buf);
+
+    var item: usize = 1;
+    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&item)[0..1], 0));
+    var item2: usize = 2;
+    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&item2)[0..1], 0));
+
+    var full_item: usize = 3;
+    try std.testing.expectEqual(@as(usize, 0), try queue.put(io, (&full_item)[0..1], 0));
+
+    var out: usize = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try queue.get(io, (&out)[0..1], 0));
+    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&full_item)[0..1], 0));
 }

@@ -240,10 +240,14 @@ pub const VulkanBackingAllocator = struct {
     }
 
     /// Returns the buffer handle and byte offset for a pointer into a block.
-    /// The caller must own the pointer and may not call this concurrently with
-    /// any alloc or free in this pool.
+    /// The caller must own the pointer. The lookup serializes against concurrent
+    /// allocBlock/freeBlock: iterating the block map while another thread mutates
+    /// it (reallocation can free the entries array mid-iteration) is a data race
+    /// that can hang or crash the caller.
     pub fn getBufferAndOffset(self: *VulkanBackingAllocator, pool: MemoryPool, ptr: *anyopaque) struct { buffer: vk.Buffer, offset: vk.DeviceSize } {
         const addr = @intFromPtr(ptr);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         var it = self.blocks[@intFromEnum(pool)].valueIterator();
         while (it.next()) |block| {
             const start = @intFromPtr(block.raw_alloc.ptr);

@@ -308,9 +308,7 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
 /// in-flight submission races the destroy, and records the freshly-applied resource
 /// state. device-waits before releasing the resources.
 fn teardownResources(self: *ShadowRenderer, io: std.Io, applied: Csm.ShadowConfig, count: u32, size: u32) !void {
-    self.vk_ctx.queue_mutex.lockUncancelable(io);
-    defer self.vk_ctx.queue_mutex.unlock(io);
-    _ = try self.dev.deviceWaitIdle();
+    try self.vk_ctx.deviceWaitIdleLocked(io);
     self.destroyShadowImage();
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
     self.config_applied = applied;

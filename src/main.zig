@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
     vk_ctx.present_mode = config.game_config.render_options.present_mode;
     vk_ctx.queue_mutex.lockUncancelable(io);
-    try vk_ctx.createSwapchainLocked(false);
+    try vk_ctx.createSwapchainLocked(io, false);
     vk_ctx.queue_mutex.unlock(io);
 
     var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
@@ -79,6 +79,7 @@ pub fn main(init: std.process.Init) !void {
         gpa,
         VulkanContext.max_frames_in_flight,
         vk_ctx.swapchain_format,
+        &vk_ctx.queue_mutex,
     );
 
     const dvui_backend = dvui.Backend.init(&backend);
@@ -101,8 +102,10 @@ pub fn main(init: std.process.Init) !void {
 
     var game: Game = undefined;
     if (options.test_play != null) {
+        const test_play_folder = try std.fs.path.join(gpa, &.{ worlds_path, "test_play" });
+        defer gpa.free(test_play_folder);
         vk_ctx.swapchain_gamma.store(config.game_config.render_options.gamma_correction, .monotonic);
-        try game.init(io, gpa, &config.game_config, &config_lock, worlds_path, vk_ctx, &generators);
+        try game.init(io, gpa, &config.game_config, &config_lock, test_play_folder, vk_ctx, &generators);
     }
     var ui: Ui = .{
         .window = &window,
@@ -227,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (ui.menu_state.pending_game_deinit) {
             ui.menu_state.pending_game_deinit = false;
-            _ = vk_ctx.dev.deviceWaitIdle() catch {};
+            vk_ctx.deviceWaitIdleLocked(io) catch {};
             game.deinit(io);
             vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
         }
@@ -235,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
         tracy.frameMark(null);
     }
     window.disableRelativeMouse();
-    _ = vk_ctx.dev.deviceWaitIdle() catch {};
+    vk_ctx.deviceWaitIdleLocked(io) catch {};
 }
 
 test {
@@ -367,7 +370,7 @@ fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, g
     if (ui.menu_state.ingame) {
         try game.renderer.recreateSwapchain(io);
     } else {
-        try vk_ctx.createSwapchainLocked(gamma_correction);
+        try vk_ctx.createSwapchainLocked(io, gamma_correction);
     }
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
 }

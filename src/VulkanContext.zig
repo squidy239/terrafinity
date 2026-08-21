@@ -195,7 +195,7 @@ fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.
         // so the integrated GPU (or another vendor's discrete GPU) is preferred instead.
         if (options.sanitize_thread) {
             const device_name = std.mem.sliceTo(&props.device_name, 0);
-            if (std.mem.indexOf(u8, device_name, "NVIDIA") != null or std.mem.indexOf(u8, device_name, "nvidia") != &self.vkalloc) score = 1;
+            if (std.mem.indexOf(u8, device_name, "NVIDIA") != null) score = 1;
         }
         if (score > best_score) {
             best_score = score;
@@ -646,7 +646,7 @@ fn destroySwapchainResources(self: *VulkanContext) void {
     self.swapchain_image_layouts = &.{};
 }
 
-pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void {
+pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
@@ -664,6 +664,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, gamma_correction: bool) !void
 
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
+    // The caller holds the queue mutex; take the transfer mutex too so the
+    // deviceWaitIdle does not race workers' transfer submissions.
+    self.transfer_queue_mutex.lockUncancelable(io);
+    defer self.transfer_queue_mutex.unlock(io);
     _ = self.dev.deviceWaitIdle() catch {};
     self.dev.resetCommandPool(self.command_pool, .{}) catch {};
     if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
@@ -858,6 +862,17 @@ pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: 
     });
 }
 
+/// Waits for device idle while excluding both submit paths: deviceWaitIdle must
+/// not run concurrently with any queue submission, and transfer submits only hold
+/// the transfer mutex. Lock order is transfer then graphics, like allocRegion.
+pub fn deviceWaitIdleLocked(self: *VulkanContext, io: std.Io) !void {
+    self.transfer_queue_mutex.lockUncancelable(io);
+    defer self.transfer_queue_mutex.unlock(io);
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+    _ = try self.dev.deviceWaitIdle();
+}
+
 pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
@@ -934,7 +949,10 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     defer self.queue_mutex.unlock(io);
 
     const current_transfer_val = self.transfer_semaphore_value.load(.monotonic);
-    const current_graphics_val = self.frame_number.fetchAdd(1, .release) + 1;
+    // Commit the frame number only after the submit succeeds: a failed submit must
+    // not claim a value the GPU never signals, or every later wait on it (transfer
+    // batches, drains, the beginFrame throttle) would block forever.
+    const current_graphics_val = self.frame_number.load(.monotonic) + 1;
     // On frame 0 prev_graphics_val is 0, equal to the timeline's initial value, so the wait
     // on it below is immediately satisfied; it only gates on prior frames from then on.
     const prev_graphics_val = current_graphics_val - 1;
@@ -978,6 +996,7 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit2" });
     defer zone_submit.end();
     try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], .null_handle);
+    self.frame_number.store(current_graphics_val, .release);
 }
 
 pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
@@ -1267,29 +1286,34 @@ test "StagingRing alloc wrap-around" {
     const staging_info = backing.getBufferAndOffset(.cpu_to_gpu, ring.mapping.ptr);
     ring.resolve(staging_info.buffer);
 
-    const s1 = ring.alloc(std.testing.io, 8);
+    const s1 = try ring.alloc(std.testing.io, 8);
     try std.testing.expect(s1 != null);
     @memset(s1.?, 0xab);
 
-    const s2 = ring.alloc(std.testing.io, 8);
+    const s2 = try ring.alloc(std.testing.io, 8);
     try std.testing.expect(s2 != null);
     @memset(s2.?, 0xcd);
 
     try std.testing.expect(s1.?[0] == 0xab);
     try std.testing.expect(s2.?[0] == 0xcd);
 
-    const s3 = ring.alloc(std.testing.io, ring.mapping.len);
+    const s3 = try ring.alloc(std.testing.io, ring.mapping.len);
     try std.testing.expect(s3 == null);
 
     ring.retire(std.testing.io, 1);
 
-    const s4 = ring.alloc(std.testing.io, 8);
+    const s4 = try ring.alloc(std.testing.io, 8);
     try std.testing.expect(s4 != null);
 }
 
 fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
     var ring = try gpu.StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
-    ring.deinit(alloc);
+    defer ring.deinit(alloc);
+    ring.resolve(@enumFromInt(1));
+    // Exercises the alloc path, whose entry bookkeeping allocation must propagate
+    // OutOfMemory instead of being mistaken for a full ring.
+    const slice = try ring.alloc(std.testing.io, 8);
+    try std.testing.expect(slice != null);
 }
 
 test "StagingRing checkAllAllocationFailures" {

@@ -95,7 +95,10 @@ pub const StagingRing = struct {
         self.buffer = buffer;
     }
 
-    pub fn alloc(self: *StagingRing, io: std.Io, size: vk.DeviceSize) ?[]u8 {
+    /// Allocates a staging slice, or null when the ring is full. The allocation
+    /// failure of the entry bookkeeping is reported so callers do not mistake it
+    /// for a full ring and spin.
+    pub fn alloc(self: *StagingRing, io: std.Io, size: vk.DeviceSize) !?[]u8 {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
@@ -110,7 +113,7 @@ pub const StagingRing = struct {
         }
 
         const slice = self.mapping[self.head..][0..@intCast(size)];
-        self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch return null;
+        self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch |err| return err;
         self.head += aligned;
 
         return slice;
@@ -442,6 +445,11 @@ pub const GpuMemory = struct {
 
 pub const max_batch = 512;
 
+/// Upper bound on the transfer back-pressure waits. These waits are satisfied by
+/// already-submitted GPU work in normal operation; a timeout means the GPU is
+/// stalled and must be reported instead of hanging silently.
+pub const transfer_wait_timeout_ns: u64 = 5 * std.time.ns_per_s;
+
 /// Byte stride of one face in the shared vertex/instance buffer. Each face is a single
 /// instanced uvec2 consumed by the concrete renderer's vertex shader.
 pub const face_stride: u32 = 8;
@@ -495,6 +503,8 @@ pub const MeshUploader = struct {
 
     flush_ctx: *anyopaque = undefined,
     flush_fn: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
+    /// Monotonic ns of the last transfer-stall log, to throttle repeated warnings.
+    last_transfer_stall_log: std.atomic.Value(u64) = .init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -578,22 +588,41 @@ pub const MeshUploader = struct {
     /// has now, or returns immediately when nothing is in flight. Callers flush
     /// first so all pending work sits on the queue. This is a non-cancelable
     /// Vulkan wait (not `Io`-cancelable); callers must check `io.checkCancel()`
-    /// before calling, and a GPU hang will block indefinitely.
+    /// before calling. The wait is bounded in normal operation (the GPU always
+    /// completes submitted batches), but a stall would otherwise hang silently;
+    /// the wait times out and retries while logging instead.
     fn waitForTransferCompletion(self: *MeshUploader, io: std.Io) !void {
         try io.checkCancel();
         const last_submitted = self.vk_ctx.transfer_semaphore_value.load(.monotonic);
         const completed = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
         if (completed >= last_submitted) return;
-        _ = try self.dev.waitSemaphores(&.{
+        const wait_value = completed + 1;
+        const result = try self.dev.waitSemaphores(&.{
             .semaphore_count = 1,
             .p_semaphores = (&self.transfer.semaphore)[0..1],
-            .p_values = (&(completed + 1))[0..1],
-        }, std.math.maxInt(u64));
+            .p_values = (&wait_value)[0..1],
+        }, transfer_wait_timeout_ns);
+        if (result != .success) self.logTransferStall(io, wait_value, completed, last_submitted);
+    }
+
+    /// Logs a stalled transfer wait at most once per second. The counter did not
+    /// advance within the timeout, meaning a batch the GPU should complete is stuck.
+    fn logTransferStall(self: *MeshUploader, io: std.Io, wait_value: u64, completed: u64, last_submitted: u64) void {
+        const now_ns: u64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+        const last_log = self.last_transfer_stall_log.load(.monotonic);
+        if (now_ns -| last_log < std.time.ns_per_s) return;
+        self.last_transfer_stall_log.store(now_ns, .monotonic);
+        std.log.warn("MeshUploader: transfer queue stalled {d}s waiting for value {d} (counter {d}, submitted {d}); GPU may be stuck", .{
+            transfer_wait_timeout_ns / std.time.ns_per_s,
+            wait_value,
+            completed,
+            last_submitted,
+        });
     }
 
     pub fn allocStaging(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) ![]u8 {
         while (true) {
-            if (self.staging_ring.alloc(io, buffer_size)) |slice| return slice;
+            if (try self.staging_ring.alloc(io, buffer_size)) |slice| return slice;
             try self.flush(io);
             // A full ring owns staging that only the GPU can release; wait for the
             // next transfer completion instead of busy-spinning.
@@ -712,20 +741,20 @@ pub const MeshUploader = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitToTransferQueue" });
         defer zone.end();
 
+        // Commit the counter only after the submit succeeds: a failed submit must
+        // not claim a value the GPU never signals, or every later wait on it
+        // (frames, drains, worker back-pressure) would block forever.
         const next_val = self.vk_ctx.transfer_semaphore_value.load(.monotonic) + 1;
-        self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
         var cb_submit_infos: [max_batch]vk.CommandBufferSubmitInfo = undefined;
         for (cb_submit_infos[0..count], cmds) |*info, cmd| info.* = .{ .command_buffer = cmd, .device_mask = 0 };
-
-        const current_graphics_val = wait_graphics_value;
 
         const submit_info: vk.SubmitInfo2 = .{
             .flags = .{},
             .wait_semaphore_info_count = 1,
             .p_wait_semaphore_infos = (&vk.SemaphoreSubmitInfo{
                 .semaphore = self.transfer.graphics_timeline_semaphore,
-                .value = current_graphics_val,
+                .value = wait_graphics_value,
                 .stage_mask = .{ .all_transfer_bit = true },
                 .device_index = 0,
             })[0..1],
@@ -741,6 +770,7 @@ pub const MeshUploader = struct {
         };
 
         try self.dev.queueSubmit2(self.transfer.queue, (&submit_info)[0..1], .null_handle);
+        self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
         return next_val;
     }
@@ -762,7 +792,11 @@ pub const MeshUploader = struct {
         self.staging_ring.retire(io, current_transfer_val);
     }
 
-    pub fn processRetiredFaceBuffers(self: *MeshUploader, current_graphics_val: u64) void {
+    pub fn processRetiredFaceBuffers(self: *MeshUploader, io: std.Io, current_graphics_val: u64) void {
+        // Serializes against allocRegion's append (which runs under the queue
+        // mutex): iterating the list while another thread reallocates it is a race.
+        self.vk_ctx.queue_mutex.lockUncancelable(io);
+        defer self.vk_ctx.queue_mutex.unlock(io);
         const items = &self.retired_face_buffers;
         var i: usize = items.items.len;
         while (i > 0) {
@@ -1149,12 +1183,10 @@ pub const IndirectScene = struct {
         self.fillFrameData(frame, mesh_data_slice, indirect_draw_slice, count_slice, stats_slice);
     }
 
-    /// Waits for device idle under the queue mutex so no in-flight submission races the
+    /// Waits for device idle under the queue mutexes so no in-flight submission races the
     /// buffer reallocation, then frees. Shared by the draw-capacity and candidate growth paths.
     fn waitIdleLocked(self: *IndirectScene, io: std.Io) !void {
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
-        _ = try self.dev.deviceWaitIdle();
+        try self.vk_ctx.deviceWaitIdleLocked(io);
     }
 
     fn growDrawCapacity(self: *IndirectScene, io: std.Io, min_capacity: u32) !void {

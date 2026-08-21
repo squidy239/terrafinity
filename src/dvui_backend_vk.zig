@@ -19,8 +19,24 @@ renderer: ?vk_renderer = null,
 renderer_gpa: ?std.mem.Allocator = null,
 cmd_buffer: vk.CommandBuffer = .null_handle,
 framebuffer_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+queue_lock_data: QueueLockData = undefined,
 
-pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, pdev: vk.PhysicalDevice, memory: vk_renderer.VkMemory, queue: vk.Queue, cmd_pool: vk.CommandPool, gpa: std.mem.Allocator, max_frames: u32, swapchain_format: vk.Format) !void {
+const QueueLockData = struct {
+    mutex: *std.Io.Mutex,
+    io: std.Io,
+};
+
+fn lockQueue(userdata: ?*anyopaque) void {
+    const data: *QueueLockData = @ptrCast(@alignCast(userdata.?));
+    data.mutex.lockUncancelable(data.io);
+}
+
+fn unlockQueue(userdata: ?*anyopaque) void {
+    const data: *QueueLockData = @ptrCast(@alignCast(userdata.?));
+    data.mutex.unlock(data.io);
+}
+
+pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, pdev: vk.PhysicalDevice, memory: vk_renderer.VkMemory, queue: vk.Queue, cmd_pool: vk.CommandPool, gpa: std.mem.Allocator, max_frames: u32, swapchain_format: vk.Format, queue_mutex: *std.Io.Mutex) !void {
     back.renderer_gpa = gpa;
     back.renderer = try vk_renderer.init(gpa, .{
         .dev = dev,
@@ -37,6 +53,15 @@ pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, pdev: vk.PhysicalDevice, 
         .comamnd_pool = cmd_pool,
         .max_frames_in_flight = max_frames,
     });
+    // Serialize the renderer's single-time texture uploads against the game's
+    // queue submissions: its vkQueueSubmit would otherwise race submitFrameWithExtra
+    // and the workers' fence uploads on the graphics queue.
+    back.queue_lock_data = .{ .mutex = queue_mutex, .io = back.io };
+    back.renderer.?.queue_lock = .{
+        .lockCB = lockQueue,
+        .unlockCB = unlockQueue,
+        .lock_userdata = &back.queue_lock_data,
+    };
 }
 
 pub fn setCommandBuffer(back: *@This(), cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
