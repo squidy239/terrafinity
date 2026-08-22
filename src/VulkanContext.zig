@@ -1323,6 +1323,49 @@ test "StagingRing checkAllAllocationFailures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
 }
 
+test "StagingRing allocPair atomicity" {
+    const io = std.testing.io;
+    var ring = try gpu.StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
+    defer ring.deinit(std.testing.allocator);
+    ring.resolve(@enumFromInt(1));
+
+    // Zero sizes yield null slots without consuming space.
+    const empty = (try ring.allocPair(io, .{ 0, 0 })).?;
+    try std.testing.expectEqual(null, empty[0]);
+    try std.testing.expectEqual(null, empty[1]);
+
+    const pair = (try ring.allocPair(io, .{ 8, 16 })).?;
+    try std.testing.expectEqual(@as(usize, 8), pair[0].?.len);
+    try std.testing.expectEqual(@as(usize, 16), pair[1].?.len);
+
+    // A pair that does not fit as a whole is refused entirely; nothing is consumed.
+    try std.testing.expectEqual(null, try ring.allocPair(io, .{ 512, 512 }));
+
+    // After both slices retire, the refused pair fits again.
+    ring.bind(io, pair[0].?, 1);
+    ring.bind(io, pair[1].?, 1);
+    ring.retire(io, 1);
+    const big = (try ring.allocPair(io, .{ 512, 512 })).?;
+    try std.testing.expect(big[0] != null and big[1] != null);
+
+    // A pair larger than the whole ring fails loudly instead of spinning forever.
+    try std.testing.expectError(error.StagingTooLarge, ring.allocPair(io, .{ 1024, 1024 }));
+}
+
+fn stagingRingAllocPairDeinit(alloc: std.mem.Allocator) !void {
+    var ring = try gpu.StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
+    defer ring.deinit(alloc);
+    ring.resolve(@enumFromInt(1));
+    // The entry bookkeeping reservation must propagate OutOfMemory before mutating
+    // the ring, so a failed pair leaves no partial state behind.
+    const pair = try ring.allocPair(std.testing.io, .{ 8, 8 });
+    try std.testing.expect(pair != null);
+}
+
+test "StagingRing allocPair checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocPairDeinit, .{});
+}
+
 test "GpuRegionAllocator init and deinit" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();

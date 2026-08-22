@@ -112,6 +112,40 @@ pub const StagingRing = struct {
         return slice;
     }
 
+    /// Reserves slices for both sizes as one atomic operation: either every nonzero
+    /// size gets a slice or the ring is left untouched and null is returned. A size
+    /// of zero yields null in that slot. Allocating both at once removes the
+    /// hold-and-wait where an unbound slice blocks FIFO retirement while its owner
+    /// waits for ring space that can never free past it.
+    pub fn allocPair(self: *StagingRing, io: std.Io, sizes: [2]vk.DeviceSize) !?[2]?[]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (self.buffer == null) return null;
+
+        var total: vk.DeviceSize = 0;
+        for (sizes) |size| total += std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
+        // A pair that cannot fit even in an empty ring would spin forever in the
+        // caller's retry loop; fail loudly instead.
+        if (total > self.mapping.len) return error.StagingTooLarge;
+
+        if (self.head + total > self.mapping.len) {
+            if (self.entries.items.len > 0) return null;
+            self.head = 0;
+        }
+
+        try self.entries.ensureUnusedCapacity(self.allocator, 2);
+        var result: [2]?[]u8 = .{ null, null };
+        for (sizes, &result) |size, *slot| {
+            if (size == 0) continue;
+            const slice = self.mapping[self.head..][0..@intCast(size)];
+            self.entries.appendAssumeCapacity(.{ .ptr = slice.ptr, .timeline_value = null });
+            self.head += std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
+            slot.* = slice;
+        }
+        return result;
+    }
+
     pub fn bind(self: *StagingRing, io: std.Io, slice: []const u8, timeline_value: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -483,6 +517,12 @@ pub const MeshUploader = struct {
     /// transfer pipeline locks only against itself.
     shared_queue: bool,
 
+    /// Serializes the resource acquisition phase of an upload. Every holder of a
+    /// pool, staging slice, or region outside this section is a fully provisioned
+    /// upload on a bounded path to submission, so the flush-and-wait loops inside
+    /// always wait on GPU progress and never on another blocked acquirer.
+    admission_mutex: std.Io.Mutex = .init,
+
     flush_ctx: *anyopaque = undefined,
     flush_fn: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
     /// Monotonic ns of the last transfer-stall log, to throttle repeated warnings.
@@ -551,7 +591,59 @@ pub const MeshUploader = struct {
         if (self.flush_fn) |f| try f(self.flush_ctx, io);
     }
 
-    pub fn borrowPool(self: *MeshUploader, io: std.Io) !CommandPoolReservoir.Borrowed {
+    /// Everything an upload needs, acquired all-or-nothing by reserveUpload. Slot 0
+    /// is the opaque mesh, slot 1 the transparent mesh; a zero-size slot holds null.
+    pub const UploadReservation = struct {
+        borrowed: CommandPoolReservoir.Borrowed,
+        staging: [2]?[]u8,
+        regions: [2]?GpuRegionAllocator.AllocResult,
+        sizes: [2]vk.DeviceSize,
+    };
+
+    pub fn reserveUpload(self: *MeshUploader, io: std.Io, sizes: [2]vk.DeviceSize) !UploadReservation {
+        self.admission_mutex.lockUncancelable(io);
+        defer self.admission_mutex.unlock(io);
+
+        const borrowed = try self.borrowPool(io);
+        errdefer self.returnPool(borrowed.pool);
+
+        const staging = try self.allocStagingPair(io, sizes);
+        errdefer self.cancelStagingSlices(io, staging);
+
+        var regions: [2]?GpuRegionAllocator.AllocResult = .{ null, null };
+        errdefer self.freeReservedRegions(io, regions, sizes);
+        for (sizes, &regions) |size, *slot| {
+            if (size > 0) slot.* = try self.allocRegion(io, size);
+        }
+
+        return .{ .borrowed = borrowed, .staging = staging, .regions = regions, .sizes = sizes };
+    }
+
+    /// Releases a reservation whose upload never reached submission.
+    pub fn cancelReservation(self: *MeshUploader, io: std.Io, reservation: UploadReservation) void {
+        self.cancelStagingSlices(io, reservation.staging);
+        self.freeReservedRegions(io, reservation.regions, reservation.sizes);
+        self.returnPool(reservation.borrowed.pool);
+    }
+
+    /// Cancels in reverse order so the tail entry retracts the ring head first,
+    /// letting the earlier entry become the tail and retract it further.
+    fn cancelStagingSlices(self: *MeshUploader, io: std.Io, staging: [2]?[]u8) void {
+        var i: usize = staging.len;
+        while (i > 0) {
+            i -= 1;
+            if (staging[i]) |slice| self.staging_ring.cancel(io, slice);
+        }
+    }
+
+    fn freeReservedRegions(self: *MeshUploader, io: std.Io, regions: [2]?GpuRegionAllocator.AllocResult, sizes: [2]vk.DeviceSize) void {
+        const graphics_val = self.vk_ctx.frame_number.load(.acquire);
+        for (regions, sizes) |region, size| {
+            if (region) |res| self.region_allocator.freeRegion(io, res.offset, size, graphics_val);
+        }
+    }
+
+    fn borrowPool(self: *MeshUploader, io: std.Io) !CommandPoolReservoir.Borrowed {
         while (true) {
             if (self.pool_reservoir.tryBorrowPool()) |b| return b;
             try self.flush(io);
@@ -599,9 +691,9 @@ pub const MeshUploader = struct {
         });
     }
 
-    pub fn allocStaging(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) ![]u8 {
+    fn allocStagingPair(self: *MeshUploader, io: std.Io, sizes: [2]vk.DeviceSize) ![2]?[]u8 {
         while (true) {
-            if (try self.staging_ring.alloc(io, buffer_size)) |slice| return slice;
+            if (try self.staging_ring.allocPair(io, sizes)) |slices| return slices;
             try self.flush(io);
             // A full ring owns staging that only the GPU can release; wait for the
             // next transfer completion instead of busy-spinning.
@@ -624,7 +716,7 @@ pub const MeshUploader = struct {
         return if (self.shared_queue) &self.vk_ctx.queue_mutex else &self.vk_ctx.transfer_queue_mutex;
     }
 
-    pub fn allocRegion(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) !GpuRegionAllocator.AllocResult {
+    fn allocRegion(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) !GpuRegionAllocator.AllocResult {
         while (true) {
             if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
 

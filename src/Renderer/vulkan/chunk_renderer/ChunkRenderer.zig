@@ -308,10 +308,17 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh" });
     defer zone.end();
 
-    const borrowed = try self.uploader.borrowPool(io);
-    const pool = borrowed.pool;
-    const cmd = borrowed.cmd;
-    errdefer self.uploader.returnPool(pool);
+    // Acquire every bounded resource up front, all or nothing: past this point the
+    // upload never blocks on acquisition, so whatever it holds is on a bounded path
+    // to submission and the uploader's backpressure loops can always make progress.
+    const reservation = try self.uploader.reserveUpload(io, .{
+        @intCast(opaque_mesh.len * @sizeOf(Mesher.Face)),
+        @intCast(transparent_mesh.len * @sizeOf(Mesher.Face)),
+    });
+    errdefer self.uploader.cancelReservation(io, reservation);
+
+    const pool = reservation.borrowed.pool;
+    const cmd = reservation.borrowed.cmd;
 
     try self.dev.resetCommandPool(pool, .{});
 
@@ -319,13 +326,8 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
 
     var opaque_res: ?gpu.UploadResult = null;
     var transparent_res: ?gpu.UploadResult = null;
-    errdefer {
-        if (opaque_res) |r| self.cancelUpload(io, r);
-        if (transparent_res) |r| self.cancelUpload(io, r);
-    }
-
-    if (opaque_mesh.len > 0) opaque_res = try self.uploadMeshBuffer(io, opaque_mesh, cmd);
-    if (transparent_mesh.len > 0) transparent_res = try self.uploadMeshBuffer(io, transparent_mesh, cmd);
+    if (opaque_mesh.len > 0) opaque_res = self.recordMeshUpload(opaque_mesh, cmd, reservation.staging[0].?, reservation.regions[0].?);
+    if (transparent_mesh.len > 0) transparent_res = self.recordMeshUpload(transparent_mesh, cmd, reservation.staging[1].?, reservation.regions[1].?);
 
     try self.dev.endCommandBuffer(cmd);
 
@@ -352,14 +354,13 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
     self.submission_batch.count += 1;
 }
 
-fn uploadMeshBuffer(self: *ChunkRenderer, io: std.Io, faces: []const Mesher.Face, cmd: vk.CommandBuffer) !gpu.UploadResult {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "uploadMeshBuffer" });
+/// Fills the pre-reserved staging slice and records the copy into the pre-reserved
+/// face region. Performs no resource acquisition and cannot block.
+fn recordMeshUpload(self: *ChunkRenderer, faces: []const Mesher.Face, cmd: vk.CommandBuffer, staging_slice: []u8, face_alloc: gpu.GpuRegionAllocator.AllocResult) gpu.UploadResult {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordMeshUpload" });
     defer zone.end();
 
     const buffer_size: vk.DeviceSize = @intCast(faces.len * @sizeOf(Mesher.Face));
-
-    const staging_slice = try self.uploader.allocStaging(io, buffer_size);
-    errdefer self.uploader.cancelStaging(io, staging_slice);
 
     const indexer = std.enums.EnumIndexer(World.Block);
     for (faces, std.mem.bytesAsSlice(Mesher.Face, staging_slice)[0..faces.len]) |face, *dest| {
@@ -369,7 +370,6 @@ fn uploadMeshBuffer(self: *ChunkRenderer, io: std.Io, faces: []const Mesher.Face
 
     const staging_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, staging_slice.ptr);
 
-    const face_alloc = try self.uploader.allocRegion(io, buffer_size);
     const face_byte_offset = face_alloc.offset;
     const face_buf = face_alloc.buffer;
     const face_buf_offset = face_alloc.buffer_offset;

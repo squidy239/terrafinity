@@ -420,6 +420,10 @@ This is especially important after swapchain recreation: the new fences are crea
 
 - Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.
 
+## Mesh upload backpressure: all-or-nothing reservation under an admission mutex
+
+`MeshUploader.reserveUpload` acquires everything an upload needs (command pool, both staging slices via `StagingRing.allocPair`, both face regions) atomically under `admission_mutex`. The invariant: any thread holding upload resources outside that section is fully provisioned and on a non-blocking path to `submitBatch`, so the flush-and-wait backpressure loops always wait on GPU progress, never on another blocked CPU thread. Do not add resource acquisition after `reserveUpload` in the `addMesh` path — holding a resource while blocking on another reintroduces the hold-and-wait deadlock (the staging ring retires FIFO and stops at the first unbound entry, so an unbound slice held by a blocked thread wedges the ring permanently).
+
 ## MangoHud and Vulkan Synchronization Validation
 
 When using `mangohud` combined with Vulkan Synchronization Validation (`VK_VALIDATION_VALIDATE_SYNC=1`), you may encounter `SYNC-HAZARD-READ-AFTER-WRITE` validation errors. This is due to a known issue where MangoHud's injected `vkCmdBeginRenderPass` issues a `VK_ATTACHMENT_LOAD_OP_LOAD` without a proper execution dependency on the application's prior layout transitions to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`. These errors are technically MangoHud bugs rather than application bugs. You can safely ignore validation messages containing `0xe4d96472` and `vkCmdBeginRenderPass`.
@@ -739,6 +743,7 @@ Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen
 - `JitteredGrid.getStructure` only finds a structure from positions **at or below** it (`structure_pos >= pos_in_box`), and for negative cells the structure position itself goes negative, so the in-range check always fails. Querying cells at negative coordinates silently returns null. If a structure grid must cover the whole world (e.g. planets near spawn on all sides), shift the grid by a large positive constant so every used cell index is positive.
 - The `level` parameter scales the query position by `2^level` internally (`real_position = scale * position`). Querying at position = `cell` with `scale == box_size` lands exactly on the cell origin, where `pos_in_box == 0` and the in-range check reduces to `jitter < scale` — always true when `inner_box_size < box_size`. This is the trick for O(1) "which structure owns this cell" lookups.
 - A sphere placed with a one-sided found region can never be found from all sides. To keep placement O(1) AND correct, clamp the structure position inside its cell (`clamp(jitter, radius, box_size - radius)`) so the whole sphere stays inside the owning cell; every block then finds the sphere through its own cell.
+
 ### Filtered tests
 
 `zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.
@@ -756,7 +761,8 @@ row1: (s.y/r, u.y/r, f.y/fnf, 0)
 row2: (s.z/r, u.z/r, f.z/fnf, 0)
 row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
 ```
-where `s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = view_pos - center`. Vulkan NDC depth is `[0,1]`, so near maps to 0 and far maps to 1; do not apply the OpenGL `z * 0.5 + 0.5` conversion to shadow depth. Verify any such matrix with a CPU helper `out[i] = sum_j flat[j*4+i]·v[j]` against ground-truth light-space coordinates (the Csm tests do this). zm's `lookAtRH`/`orthographicRH` compose with the *opposite* product order to what a column-vector mental model expects; prefer building these matrices by hand.
+
+where `s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = view_pos - center`. Vulkan NDC depth is `[0,1]`, so near maps to 0 and far maps to 1; do not apply the OpenGL `z * 0.5 + 0.5` conversion to shadow depth. Verify any such matrix with a CPU helper `out[i] = sum_j flat[j*4+i]·v[j]` against ground-truth light-space coordinates (the Csm tests do this). zm's `lookAtRH`/`orthographicRH` compose with the _opposite_ product order to what a column-vector mental model expects; prefer building these matrices by hand.
 
 ### Filtered tests (cont.)
 
