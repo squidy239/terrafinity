@@ -201,6 +201,7 @@ Maintaining a high-quality codebase requires strict adherence to structural hygi
 - **Explicit Over Implicit:** Never rely on hidden state or side effects. If a function mutates state, its name and signature must make that glaringly obvious.
 - **Constants Over Magic Values:** Avoid magic numbers or hardcoded string literals entirely. Bind them to properly named constants at the top of the file or within a dedicated namespace.
 - **Minimize Unsafe Casts:** Avoid things like ptrcast and aligncast if you can. Bitcast is safer and has less footguns so only ptrcast if their is a good reason. Ptrcasts are ALMOST NEVER the right solution, only use them for things like casting to/from opaque pointers.
+- **Never Use `std.mem.zeroes`:** Do not use `std.mem.zeroes(T)` to initialize values. It bypasses field defaults and future-proofs nothing: adding a non-zero default or a new field later silently changes behavior at every zeroed site. Prefer explicit initialization — `.{}` with defaulted fields, `@splat(0)` for arrays, or a named constructor like `fn zeroed() T` on the type when many call sites need an all-zero value.
 
 ### Use Capture Syntax Over Index Variables
 
@@ -780,3 +781,5 @@ frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 ```
 
 `addFileInput` tracks the dependency without appending it to the glslc argv (unlike `addFileArg`). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` and cross-check against the Zig `@offsetOf` asserts.
+
+## Almost never use std.mem.zeroes, it can mask bugs and is less explicit

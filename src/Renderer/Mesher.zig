@@ -52,53 +52,50 @@ inline fn getNeighborVec(comptime rotation: FaceRotation, neighbor_face: *const 
 
 fn meshUniformChunkFace(allocator: std.mem.Allocator, main_block: Block, neighbor_face: *const Chunk.Encoding.Face, comptime rotation: FaceRotation, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     if (neighbor_face.* == .uniform and meshOne(main_block, neighbor_face.uniform) == .none) return;
-    const one_visible = main_block.isVisible();
-    if (!one_visible) return;
+    if (!main_block.isVisible()) return;
     try opaque_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
     try transparent_faces.ensureUnusedCapacity(allocator, ChunkSize * ChunkSize);
-    const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(@as(@Vector(ChunkSize, bool), @splat(one_visible)));
+    const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(@as(@Vector(ChunkSize, bool), @splat(true)));
     const one_uniform_vec: @Vector(ChunkSize, Block.Tag) = @splat(@intFromEnum(main_block));
     const ones_transparent: @Int(.unsigned, ChunkSize) = @bitCast(Block.isTransparentVector(ChunkSize, one_uniform_vec));
 
-    const two_uniform_vec: @Vector(ChunkSize, Block.Tag) = if (neighbor_face.* == .uniform) @splat(@intFromEnum(neighbor_face.uniform)) else undefined;
-
-    for (0..ChunkSize) |i| {
+    for (0..ChunkSize) |row_index| {
         const two_vec: @Vector(ChunkSize, Block.Tag) = switch (neighbor_face.*) {
-            .grid => |*grid| @bitCast(grid[i]),
-            .uniform => two_uniform_vec,
+            .grid => |*grid| @bitCast(grid[row_index]),
+            .uniform => |block| @splat(@intFromEnum(block)),
         };
 
         const transparent, const @"opaque" = meshMany(ChunkSize, one_uniform_vec, ones_visible, ones_transparent, two_vec);
-        if (transparent != 0) addSideFaces(ChunkSize, transparent, comptime rotation, true, @intCast(i), opaque_faces, transparent_faces, main_block);
-        if (@"opaque" != 0) addSideFaces(ChunkSize, @"opaque", comptime rotation, false, @intCast(i), opaque_faces, transparent_faces, main_block);
+        if (transparent != 0) addSideFaces(ChunkSize, transparent, comptime rotation, true, @intCast(row_index), opaque_faces, transparent_faces, main_block);
+        if (@"opaque" != 0) addSideFaces(ChunkSize, @"opaque", comptime rotation, false, @intCast(row_index), opaque_faces, transparent_faces, main_block);
     }
 }
 
-inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, i: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face), block: Block) void {
+inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, row_index: u8, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face), block: Block) void {
     var mask = mask_start;
     const faces = switch (comptime transparent) {
         true => transparent_faces,
         false => opaque_faces,
     };
     while (mask != 0) {
-        const j = @ctz(mask);
+        const lane = @ctz(mask);
         mask &= (mask - 1);
         faces.addOneAssumeCapacity().* = .{
             .x = @intCast(switch (comptime rotation) {
                 .xminus => 0,
                 .xplus => ChunkSize - 1,
-                .yminus, .yplus => i,
-                .zminus, .zplus => i,
+                .yminus, .yplus => row_index,
+                .zminus, .zplus => row_index,
             }),
             .y = @intCast(switch (comptime rotation) {
-                .xminus, .xplus => i,
+                .xminus, .xplus => row_index,
                 .yminus => 0,
                 .yplus => ChunkSize - 1,
-                .zminus, .zplus => j,
+                .zminus, .zplus => lane,
             }),
             .z = @intCast(switch (comptime rotation) {
-                .xminus, .xplus => j,
-                .yminus, .yplus => j,
+                .xminus, .xplus => lane,
+                .yminus, .yplus => lane,
                 .zminus => 0,
                 .zplus => ChunkSize - 1,
             }),
@@ -138,16 +135,16 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
                 sh: {
                     comptime var mask = std.simd.iota(i32, ChunkSize) + @as(@Vector(ChunkSize, i32), @splat(1));
                     mask[ChunkSize - 1] = 0;
-                    var t = @shuffle(Block.Tag, center_row, undefined, mask);
-                    t[comptime ChunkSize - 1] = zplus_neighbors[y];
-                    break :sh t;
+                    var shifted_row = @shuffle(Block.Tag, center_row, undefined, mask);
+                    shifted_row[comptime ChunkSize - 1] = zplus_neighbors[y];
+                    break :sh shifted_row;
                 },
                 sh: {
                     comptime var mask = std.simd.iota(i32, ChunkSize) - @as(@Vector(ChunkSize, i32), @splat(1));
                     mask[0] = 0;
-                    var t = @shuffle(Block.Tag, center_row, undefined, mask);
-                    t[comptime 0] = zminus_neighbors[y];
-                    break :sh t;
+                    var shifted_row = @shuffle(Block.Tag, center_row, undefined, mask);
+                    shifted_row[comptime 0] = zminus_neighbors[y];
+                    break :sh shifted_row;
                 },
             };
             inline for (neighbor_vecs, std.enums.values(FaceRotation)) |neighbor_vec, rotation| {
@@ -484,16 +481,14 @@ test "MeshBehavior - Exact Rotation Generation" {
 
     // Ensure every single rotation enum was generated exactly once
     for (seen_rotations) |seen| {
-        if (!seen) {
-            return error.MissingFaceRotation;
-        }
+        if (!seen) return error.MissingFaceRotation;
     }
 }
 
 test "MeshBenchmark" {
-    inline for (0..4) |i| {
+    inline for (0..4) |benchmark_index| {
         var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.air)));
-        if (i == 1) {
+        if (benchmark_index == 1) {
             for (0..ChunkSize) |x| {
                 for (0..ChunkSize) |y| {
                     for (0..ChunkSize) |z| {
@@ -506,7 +501,7 @@ test "MeshBenchmark" {
                 }
             }
         }
-        if (i == 3) {
+        if (benchmark_index == 3) {
             var prng = std.Random.DefaultPrng.init(0);
             for (&grid) |*plane| {
                 for (plane) |*row| {
@@ -519,18 +514,18 @@ test "MeshBenchmark" {
         var alist: std.ArrayList(Face) = try .initCapacity(std.testing.allocator, 65536);
         defer alist.deinit(std.testing.allocator);
 
-        const test_amount = if (@import("builtin").mode == .Debug) 100 else (if (i == 3) 10000 else 500000);
+        const test_amount = if (@import("builtin").mode == .Debug) 100 else (if (benchmark_index == 3) 10000 else 500000);
         const st = std.Io.Timestamp.now(std.testing.io, .awake);
 
         for (0..test_amount) |_| {
-            try mesh(std.testing.allocator, if (i == 0) .{ .uniform = .leaves } else .{ .grid = &grid }, &@splat(Chunk.Encoding.Face{ .grid = @splat(@splat(.water)) }), &alist, &alist);
+            try mesh(std.testing.allocator, if (benchmark_index == 0) .{ .uniform = .leaves } else .{ .grid = &grid }, &@splat(Chunk.Encoding.Face{ .grid = @splat(@splat(.water)) }), &alist, &alist);
             alist.clearRetainingCapacity();
         }
 
         const et = std.Io.Timestamp.now(std.testing.io, .awake);
         const dt = st.durationTo(et);
         const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
-        std.log.info("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (i == 0) "uniform" else if (i == 1) "grid" else if (i == 2) "grid air" else "random", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
+        std.log.info("Mesh {s} benchmark: completed with an avg time of {d} us per mesh, {d} ns per block", .{ if (benchmark_index == 0) "uniform" else if (benchmark_index == 1) "grid" else if (benchmark_index == 2) "grid air" else "random", us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
     }
 }
 

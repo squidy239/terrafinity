@@ -134,8 +134,8 @@ pub const CascadeContext = struct {
 };
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
+    const interpolation = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return interpolation * interpolation * (3.0 - 2.0 * interpolation);
 }
 
 /// Day factor in [0,1] from the sun direction: 0 at night, 1 at day, ramping across
@@ -194,8 +194,8 @@ pub fn clampSunElevation(sun_dir: Vec3f, min_elevation_deg: f32) Vec3f {
 
 /// Lambda-weighted blend between a uniform and a logarithmic ramp, shared by the PSSM
 /// split distribution and the per-cascade refresh intervals.
-fn rampBlend(comptime T: type, count: usize, i: usize, first: T, last: T, lambda: T) T {
-    const t = if (count == 1) 1.0 else @as(T, @floatFromInt(i)) / @as(T, @floatFromInt(count - 1));
+fn rampBlend(comptime T: type, count: usize, cascade_index: usize, first: T, last: T, lambda: T) T {
+    const t = if (count == 1) 1.0 else @as(T, @floatFromInt(cascade_index)) / @as(T, @floatFromInt(count - 1));
     const uniform_i = first + (last - first) * t;
     const log_i = first * std.math.pow(T, last / first, t);
     return lambda * log_i + (1.0 - lambda) * uniform_i;
@@ -210,8 +210,8 @@ fn pssmSplits(near: f32, far: f32, count: u32, lambda: f32) [max_cascades]f32 {
     const n = @max(near, clamped_split_near);
     const safe_far = @max(far, n + 1.0);
     var splits: [max_cascades]f32 = @splat(0.0);
-    for (splits[0..safe_count], 0..) |*dest, i| {
-        dest.* = rampBlend(f32, safe_count, i, n, safe_far, lambda);
+    for (splits[0..safe_count], 0..) |*destination, cascade_index| {
+        destination.* = rampBlend(f32, safe_count, cascade_index, n, safe_far, lambda);
     }
     return splits;
 }
@@ -226,14 +226,14 @@ pub fn splitRadii(cfg: ShadowConfig) [max_cascades]f32 {
 /// Orthonormal basis with the light looking along `light_dir`, following the lookAtRH
 /// construction (s = f × up, u = s × f). Degenerate when light_dir is parallel to world_up.
 pub fn buildLightBasis(light_dir: Vec3f, up_ref: Vec3f) LightBasis {
-    const f = normalize3f(light_dir);
-    const up_choice: Vec3f = if (@abs(dot3f(f, up_ref)) > parallel_dot_threshold)
+    const forward = normalize3f(light_dir);
+    const up_choice: Vec3f = if (@abs(dot3f(forward, up_ref)) > parallel_dot_threshold)
         .{ 0.0, 0.0, 1.0 }
     else
         up_ref;
-    const s = normalize3f(cross3f(f, up_choice));
-    const u = normalize3f(cross3f(s, f));
-    return .{ .right = s, .up = u, .forward = f };
+    const right = normalize3f(cross3f(forward, up_choice));
+    const up = normalize3f(cross3f(right, forward));
+    return .{ .right = right, .up = up, .forward = forward };
 }
 
 /// Snaps the sphere center so its light-space XY lands on the texel grid, in absolute
@@ -257,12 +257,12 @@ fn snapCenter(center: Vec3d, radius: f32, shadow_map_size: u32, basis: LightBasi
 /// sweep) and the tests that verify it, so both iterate the same corner set.
 fn sceneCorners(scene_min: Vec3d, scene_max: Vec3d) [8]Vec3d {
     var corners: [8]Vec3d = undefined;
-    var i: usize = 0;
+    var corner_index: usize = 0;
     for ([2]f64{ scene_min[0], scene_max[0] }) |x| {
         for ([2]f64{ scene_min[1], scene_max[1] }) |y| {
             for ([2]f64{ scene_min[2], scene_max[2] }) |z| {
-                corners[i] = .{ x, y, z };
-                i += 1;
+                corners[corner_index] = .{ x, y, z };
+                corner_index += 1;
             }
         }
     }
@@ -358,15 +358,15 @@ pub fn nextRefreshSet(
     const count = @max(@min(cascade_count, max_cascades), 1);
     const budget = @max(@min(cascades_per_frame, max_cascades), 1);
     var order: [max_cascades]u32 = @splat(0);
-    for (order[0..count], 0..) |*dest, i| dest.* = @intCast(i);
+    for (order[0..count], 0..) |*destination, order_index| destination.* = @intCast(order_index);
     const priority = RefreshPriority{ .intervals = intervals, .last_refresh = last_refresh, .frame_number = frame_number };
     std.sort.insertion(u32, order[0..count], &priority, RefreshPriority.lessThan);
     var selected: [max_cascades]bool = @splat(false);
     var taken: u32 = 0;
-    for (order[0..count]) |c| {
+    for (order[0..count]) |cascade_index| {
         if (taken >= budget) break;
-        if (priority.lateness(c) < 0) continue;
-        selected[c] = true;
+        if (priority.lateness(cascade_index) < 0) continue;
+        selected[cascade_index] = true;
         taken += 1;
     }
     return selected;

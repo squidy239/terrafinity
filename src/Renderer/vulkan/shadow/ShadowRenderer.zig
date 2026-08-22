@@ -184,8 +184,9 @@ pub fn init(
     try self.createPipelineLayout();
 
     self.param_buffers = try allocator.alloc(ParamBuffer, VulkanContext.max_frames_in_flight);
+    for (self.param_buffers) |*buf| buf.* = .{ .mapping = &.{} };
     for (self.param_buffers) |*buf| {
-        buf.* = .{ .mapping = try memory.cpuToGpu().alignedAlloc(u8, .fromByteUnits(16), @sizeOf(ShadowParams)) };
+        buf.mapping = try memory.cpuToGpu().alignedAlloc(u8, .fromByteUnits(16), @sizeOf(ShadowParams));
     }
 
     return self;
@@ -527,9 +528,7 @@ fn latchLight(self: *ShadowRenderer, config: Csm.ShadowConfig, sun_dir: Csm.Vec3
         @cos(light_step_texels * (2.0 / @as(f32, @floatFromInt(self.map_size))))
     else
         light_change_cos_threshold;
-    if (Csm.shouldStepLight(old_light_dir, new_light_dir, step_cos)) {
-        self.light_dir = new_light_dir;
-    }
+    if (Csm.shouldStepLight(old_light_dir, new_light_dir, step_cos)) self.light_dir = new_light_dir;
     return Csm.dot3f(old_light_dir, new_light_dir) < light_change_cos_threshold;
 }
 
@@ -570,14 +569,14 @@ fn refreshCascades(self: *ShadowRenderer, count: u32, ctx: Csm.CascadeContext) v
 /// Computes one refreshed cascade into its pending slot with the frame's cull planes,
 /// and returns its texel size for the minimum chunk size. Each cascade culls and draws
 /// its own box into its own slot.
-fn refreshCascade(self: *ShadowRenderer, ctx: Csm.CascadeContext, c: usize) f32 {
-    const cascade = Csm.computeCascade(ctx, @intCast(c));
+fn refreshCascade(self: *ShadowRenderer, ctx: Csm.CascadeContext, cascade_index: usize) f32 {
+    const cascade = Csm.computeCascade(ctx, @intCast(cascade_index));
     const committed = Csm.committedOf(cascade);
     const slot = self.frame_cascade_count;
-    self.pending[c] = committed;
-    self.pending_valid[c] = true;
-    self.last_refresh[c] = self.frame_number;
-    self.frame_cascades[slot] = @intCast(c);
+    self.pending[cascade_index] = committed;
+    self.pending_valid[cascade_index] = true;
+    self.last_refresh[cascade_index] = self.frame_number;
+    self.frame_cascades[slot] = @intCast(cascade_index);
     self.frame_planes[slot] = cullPlanes(committed, ctx.view_pos);
     self.frame_cascade_count += 1;
     return cascade.texel;
@@ -603,12 +602,12 @@ fn writeParams(self: *ShadowRenderer, ctx: ParamsContext) void {
     if (ctx.active and active_count > 0) {
         params.cascade_count = active_count;
         const splits = Csm.splitRadii(ctx.config);
-        for (self.committed[0..active_count], 0..) |committed, c| {
+        for (self.committed[0..active_count], 0..) |committed, cascade| {
             const view_proj = Csm.viewProjAtOrigin(committed, ctx.view_pos);
-            @memcpy(params.light_viewproj[c][0..], view_proj[0..]);
-            params.split_radius[c] = splits[c];
-            params.texel_world_size[c] = 2.0 * committed.radius / @as(f32, @floatFromInt(self.map_size));
-            params.box_radius[c] = committed.radius;
+            @memcpy(params.light_viewproj[cascade][0..], view_proj[0..]);
+            params.split_radius[cascade] = splits[cascade];
+            params.texel_world_size[cascade] = 2.0 * committed.radius / @as(f32, @floatFromInt(self.map_size));
+            params.box_radius[cascade] = committed.radius;
         }
         params.normal_bias_scale = ctx.config.normal_bias_scale;
         params.blur_radius = ctx.config.blur_radius;

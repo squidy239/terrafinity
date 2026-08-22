@@ -45,21 +45,21 @@ const FrameDebugStats = struct {
     elapsed_ns: u64 = 0,
 
     pub fn log(self: *const FrameDebugStats) void {
-        const total_faces = self.opaque_faces + self.transparent_faces;
-        const elapsed_f: f64 = @floatFromInt(self.elapsed_ns);
-        const ms = elapsed_f / 1_000_000.0;
-        std.log.info("=== FRAME {d} DEBUG STATS ===", .{self.frame_number});
-        std.log.info("Player pos=({d:.1}, {d:.1}, {d:.1})  Camera front=({d:.3}, {d:.3}, {d:.3})", .{
-            self.player_pos[0],   self.player_pos[1],   self.player_pos[2],
-            self.camera_front[0], self.camera_front[1], self.camera_front[2],
+        std.log.info("Frame {d}: pos=({d:.1}, {d:.1}, {d:.1}) front=({d:.3}, {d:.3}, {d:.3}) time={d:.2}ms", .{
+            self.frame_number,
+            self.player_pos[0],
+            self.player_pos[1],
+            self.player_pos[2],
+            self.camera_front[0],
+            self.camera_front[1],
+            self.camera_front[2],
+            @as(f64, @floatFromInt(self.elapsed_ns)) / 1_000_000.0,
         });
-        std.log.info("Meshes in map: {d}  drawn opaque: {d} ({d} late)  transparent: {d}  occluded: {d}  frustum culled: {d}", .{ self.total_meshes, self.opaque_drawn, self.opaque_late_drawn, self.transparent_drawn, self.hiz_occluded, self.frustum_culled });
-        std.log.info("Faces drawn - opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, total_faces });
-        if (self.shadow_cascade) |c| {
-            std.log.info("Shadow - cascade {d}: {d} faces", .{ c, self.shadow_faces });
+        std.log.info("Meshes: {d} total, opaque drawn: {d} ({d} late), transparent: {d}, occluded: {d}, frustum culled: {d}", .{ self.total_meshes, self.opaque_drawn, self.opaque_late_drawn, self.transparent_drawn, self.hiz_occluded, self.frustum_culled });
+        std.log.info("Faces drawn - opaque: {d}  transparent: {d}  total: {d}", .{ self.opaque_faces, self.transparent_faces, self.opaque_faces + self.transparent_faces });
+        if (self.shadow_cascade) |cascade_index| {
+            std.log.info("Shadow - cascade {d}: {d} faces", .{ cascade_index, self.shadow_faces });
         }
-        std.log.info("Time: {d:.2} ms", .{ms});
-        std.log.info("========================", .{});
     }
 };
 
@@ -114,10 +114,8 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
 
     self.init_time_ns = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
 
-    var memory_ready = false;
     try self.memory.init(io, allocator, vk_ctx);
-    memory_ready = true;
-    errdefer if (memory_ready) self.memory.deinit();
+    errdefer self.memory.deinit();
 
     self.single_time = .{
         .dev = vk_ctx.dev,
@@ -127,22 +125,16 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
         .vkalloc = vk_ctx.vkalloc,
     };
 
-    const max_face_bytes = @as(vk.DeviceSize, World.ChunkSize) * World.ChunkSize * World.ChunkSize * 6 * @sizeOf(Mesher.Face);
-    const uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, initial_staging_bytes, max_face_bytes * uploader_face_quota);
-    self.uploader = uploader;
+    self.uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, initial_staging_bytes, Mesher.max_face_bytes * uploader_face_quota);
     errdefer self.uploader.deinit();
 
-    var scene_ready = false;
     try self.scene.init(allocator, vk_ctx, &self.memory, initial_scene_candidates, initial_draw_capacity);
-    scene_ready = true;
-    errdefer if (scene_ready) self.scene.deinit();
+    errdefer self.scene.deinit();
 
-    const pyramid = try DepthPyramid.init(allocator, vk_ctx, &self.memory, &self.single_time);
-    self.pyramid = pyramid;
+    self.pyramid = try DepthPyramid.init(allocator, vk_ctx, &self.memory, &self.single_time);
     errdefer self.pyramid.deinit();
 
-    const shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
-    self.shadow = shadow;
+    self.shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
     errdefer self.shadow.deinit();
 
     self.render_options_lock.lockSharedUncancelable(io);
@@ -150,18 +142,14 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.render_options_lock.unlockShared(io);
     try self.shadow.recreate(io, initial_shadow_config);
 
-    const oit = try OitCompositor.init(allocator, vk_ctx);
-    self.oit = oit;
+    self.oit = try OitCompositor.init(allocator, vk_ctx);
     errdefer self.oit.deinit();
 
-    const sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
-    self.sky = sky;
+    self.sky = try SkyRenderer.init(allocator, vk_ctx, &self.memory);
     errdefer self.sky.deinit();
 
-    var chunk_ready = false;
     try self.chunk.init(io, allocator, vk_ctx, &self.memory, &self.single_time, &self.uploader, &self.scene, &self.oit, &self.shadow, &self.pyramid, render_options, render_options_lock);
-    chunk_ready = true;
-    errdefer if (chunk_ready) self.chunk.deinit(io);
+    errdefer self.chunk.deinit(io);
 
     try self.recreateSwapchainResourcesLocked(io);
 
@@ -195,9 +183,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
         self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
         self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
-        if (self.vk_ctx.ui_command_pool != .null_handle) {
-            self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("UI command pool reset failed during deinit: {}", .{err});
-        }
+        if (self.vk_ctx.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("UI command pool reset failed during deinit: {}", .{err});
         self.single_time.destroyFence();
     }
 
@@ -253,16 +239,11 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });
 
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
-    self.depth_format = .undefined;
-    for (depth_formats) |fmt| {
+    self.depth_format = for (depth_formats) |format| {
         // The transparent pass samples the depth, so both features are required.
-        const features = self.vk_ctx.instance.getPhysicalDeviceFormatProperties(self.vk_ctx.pdev, fmt).optimal_tiling_features;
-        if (features.depth_stencil_attachment_bit and features.sampled_image_bit) {
-            self.depth_format = fmt;
-            break;
-        }
-    }
-    if (self.depth_format == .undefined) return error.DepthFormatNotSupported;
+        const features = self.vk_ctx.instance.getPhysicalDeviceFormatProperties(self.vk_ctx.pdev, format).optimal_tiling_features;
+        if (features.depth_stencil_attachment_bit and features.sampled_image_bit) break format;
+    } else return error.DepthFormatNotSupported;
 
     self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, self.depthAspectMask());
     self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
@@ -276,8 +257,10 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
 }
 
 fn depthAspectMask(self: *const VulkanRenderer) vk.ImageAspectFlags {
-    const has_stencil = self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint;
-    return if (has_stencil) .{ .depth_bit = true, .stencil_bit = true } else .{ .depth_bit = true };
+    return if (self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint)
+        .{ .depth_bit = true, .stencil_bit = true }
+    else
+        .{ .depth_bit = true };
 }
 
 pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
@@ -289,15 +272,10 @@ pub fn removeChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) !void
 }
 
 fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
-    const c = tracy.Zone.begin(.{ .src = @src() });
-    defer c.end();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
 
     const current_frame = frame_ctx.frame_index;
-    const cmd_buffer = frame_ctx.cmd_buffer;
-    const output_image = frame_ctx.output_image;
-    const output_view = frame_ctx.output_view;
-    const swapchain_old_layout = frame_ctx.swapchain_image_layout.*;
-    const swapchain_layout_ptr = frame_ctx.swapchain_image_layout;
 
     try self.chunk.processPendingUploads(io);
     try self.chunk.processRetired(io);
@@ -326,8 +304,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const total_candidates = self.scene.max_allocated_index.load(.monotonic);
     try self.scene.ensureCapacity(io, total_candidates);
 
-    try self.dev.beginCommandBuffer(cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
-    errdefer self.dev.endCommandBuffer(cmd_buffer) catch {};
+    try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
+    errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch {};
 
     const depth_aspect_mask = self.depthAspectMask();
     const frame_start_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
@@ -347,7 +325,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     };
 
     const pass_ctx: ChunkRenderer.PassContext = .{
-        .cmd_buffer = cmd_buffer,
+        .cmd_buffer = frame_ctx.cmd_buffer,
         .frame_idx = current_frame,
         .extent = extent,
         .view_pos = view_pos,
@@ -358,10 +336,10 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .sun_dir = frame_sky.sun_dir,
         .inside_transparent = inside_transparent,
         .occlusion_culling = occlusion_culling,
-        .swapchain_old_layout = swapchain_old_layout,
-        .swapchain_layout_ptr = swapchain_layout_ptr,
-        .output_image = output_image,
-        .output_view = output_view,
+        .swapchain_old_layout = frame_ctx.swapchain_image_layout.*,
+        .swapchain_layout_ptr = frame_ctx.swapchain_image_layout,
+        .output_image = frame_ctx.output_image,
+        .output_view = frame_ctx.output_view,
         .color_image = self.render_color.image,
         .color_view = self.render_color.view,
         .depth_image = self.render_depth.image,
@@ -373,7 +351,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     };
     self.sky.uploadParams(current_frame, &frame_sky.params);
     self.sky.record(&.{
-        .cmd_buffer = cmd_buffer,
+        .cmd_buffer = frame_ctx.cmd_buffer,
         .frame_idx = current_frame,
         .extent = extent,
         .color_image = self.render_color.image,
@@ -389,8 +367,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_end_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
     self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
 
-    self.frame_sequence += 1;
-    try self.dev.endCommandBuffer(cmd_buffer);
+    try self.dev.endCommandBuffer(frame_ctx.cmd_buffer);
 }
 
 /// Copies the previous frame's GPU cull counters, which the compute pass wrote into the

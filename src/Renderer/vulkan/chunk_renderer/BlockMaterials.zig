@@ -78,13 +78,10 @@ pub const BlockMaterials = struct {
         errdefer self.memory.cpuToGpu().free(slice);
         @memset(slice, default_material_gpu);
 
-        var zon_file: ?std.Io.File = null;
-        if (pack.dir.openFile(io, "materials.zon", .{})) |f| {
-            zon_file = f;
-        } else |err| switch (err) {
-            error.FileNotFound => std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{}),
+        const zon_file: ?std.Io.File = pack.dir.openFile(io, "materials.zon", .{}) catch |err| switch (err) {
+            error.FileNotFound => null,
             else => |e| return e,
-        }
+        };
         defer if (zon_file) |f| f.close(io);
 
         if (zon_file) |f| {
@@ -95,14 +92,16 @@ pub const BlockMaterials = struct {
             inline for (std.meta.fields(World.Block)) |fld| {
                 if (!@field(World.Block, fld.name).isVisible()) continue;
                 const mat = &@field(parsed, fld.name);
-                const idx = indexer.indexOf(@field(World.Block, fld.name));
-                slice[idx] = .{
+                const material_index = indexer.indexOf(@field(World.Block, fld.name));
+                slice[material_index] = .{
                     .density = mat.density,
                     .fresnel_power = mat.fresnel_power,
                     .min_opacity = mat.min_opacity,
                     .volume_color = mat.volume_color,
                 };
             }
+        } else {
+            std.log.warn("No materials.zon found in pack, using defaults for all blocks", .{});
         }
 
         self.mapped = slice;

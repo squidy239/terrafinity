@@ -92,24 +92,8 @@ pub const StagingRing = struct {
     /// failure of the entry bookkeeping is reported so callers do not mistake it
     /// for a full ring and spin.
     pub fn alloc(self: *StagingRing, io: std.Io, size: vk.DeviceSize) !?[]u8 {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        if (self.buffer == null) return null;
-
-        const aligned = std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
-        if (aligned > self.mapping.len) return null;
-
-        if (self.head + aligned > self.mapping.len) {
-            if (self.entries.items.len > 0) return null;
-            self.head = 0;
-        }
-
-        const slice = self.mapping[self.head..][0..@intCast(size)];
-        self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch |err| return err;
-        self.head += aligned;
-
-        return slice;
+        const result = try self.allocPair(io, .{ size, 0 });
+        return if (result) |pair| pair[0] else null;
     }
 
     /// Reserves slices for both sizes as one atomic operation: either every nonzero
@@ -134,12 +118,11 @@ pub const StagingRing = struct {
             self.head = 0;
         }
 
-        try self.entries.ensureUnusedCapacity(self.allocator, 2);
         var result: [2]?[]u8 = .{ null, null };
         for (sizes, &result) |size, *slot| {
             if (size == 0) continue;
             const slice = self.mapping[self.head..][0..@intCast(size)];
-            self.entries.appendAssumeCapacity(.{ .ptr = slice.ptr, .timeline_value = null });
+            self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch |err| return err;
             self.head += std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
             slot.* = slice;
         }
@@ -163,9 +146,9 @@ pub const StagingRing = struct {
         defer self.mutex.unlock(io);
 
         while (self.entries.items.len > 0) {
-            const e = self.entries.items[0];
-            const tv = e.timeline_value orelse break;
-            if (current_transfer_val < tv) break;
+            const entry = self.entries.items[0];
+            const timeline_value = entry.timeline_value orelse break;
+            if (current_transfer_val < timeline_value) break;
             _ = self.entries.orderedRemove(0);
         }
 
@@ -318,21 +301,21 @@ pub const GpuRegionAllocator = struct {
 
         self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length, .safe_graphics = current_graphics_val }) catch @panic("GpuRegionAllocator.freeRegion: insert OOM");
 
-        var i = insertion_index;
-        while (i > 0) {
-            if (self.free_regions.items[i - 1].offset + self.free_regions.items[i - 1].length == self.free_regions.items[i].offset) {
-                self.free_regions.items[i - 1].safe_graphics = @max(self.free_regions.items[i - 1].safe_graphics, self.free_regions.items[i].safe_graphics);
-                self.free_regions.items[i - 1].length += self.free_regions.items[i].length;
-                _ = self.free_regions.orderedRemove(i);
-                i -= 1;
+        var merge_index = insertion_index;
+        while (merge_index > 0) {
+            if (self.free_regions.items[merge_index - 1].offset + self.free_regions.items[merge_index - 1].length == self.free_regions.items[merge_index].offset) {
+                self.free_regions.items[merge_index - 1].safe_graphics = @max(self.free_regions.items[merge_index - 1].safe_graphics, self.free_regions.items[merge_index].safe_graphics);
+                self.free_regions.items[merge_index - 1].length += self.free_regions.items[merge_index].length;
+                _ = self.free_regions.orderedRemove(merge_index);
+                merge_index -= 1;
             } else break;
         }
 
-        while (i + 1 < self.free_regions.items.len) {
-            if (self.free_regions.items[i].offset + self.free_regions.items[i].length == self.free_regions.items[i + 1].offset) {
-                self.free_regions.items[i].safe_graphics = @max(self.free_regions.items[i].safe_graphics, self.free_regions.items[i + 1].safe_graphics);
-                self.free_regions.items[i].length += self.free_regions.items[i + 1].length;
-                _ = self.free_regions.orderedRemove(i + 1);
+        while (merge_index + 1 < self.free_regions.items.len) {
+            if (self.free_regions.items[merge_index].offset + self.free_regions.items[merge_index].length == self.free_regions.items[merge_index + 1].offset) {
+                self.free_regions.items[merge_index].safe_graphics = @max(self.free_regions.items[merge_index].safe_graphics, self.free_regions.items[merge_index + 1].safe_graphics);
+                self.free_regions.items[merge_index].length += self.free_regions.items[merge_index + 1].length;
+                _ = self.free_regions.orderedRemove(merge_index + 1);
             } else break;
         }
     }
@@ -505,7 +488,6 @@ pub const MeshUploader = struct {
     dev: DeviceProxy,
     memory: *GpuMemory,
     single_time: *core.SingleTime,
-    num_in_flight: u32 = VulkanContext.max_frames_in_flight,
 
     staging_ring: StagingRing,
     region_allocator: GpuRegionAllocator,
@@ -588,7 +570,7 @@ pub const MeshUploader = struct {
     }
 
     fn flush(self: *MeshUploader, io: std.Io) !void {
-        if (self.flush_fn) |f| try f(self.flush_ctx, io);
+        if (self.flush_fn) |flush_callback| try flush_callback(self.flush_ctx, io);
     }
 
     /// Everything an upload needs, acquired all-or-nothing by reserveUpload. Slot 0
@@ -629,10 +611,10 @@ pub const MeshUploader = struct {
     /// Cancels in reverse order so the tail entry retracts the ring head first,
     /// letting the earlier entry become the tail and retract it further.
     fn cancelStagingSlices(self: *MeshUploader, io: std.Io, staging: [2]?[]u8) void {
-        var i: usize = staging.len;
-        while (i > 0) {
-            i -= 1;
-            if (staging[i]) |slice| self.staging_ring.cancel(io, slice);
+        var reverse_index: usize = staging.len;
+        while (reverse_index > 0) {
+            reverse_index -= 1;
+            if (staging[reverse_index]) |slice| self.staging_ring.cancel(io, slice);
         }
     }
 
@@ -645,7 +627,7 @@ pub const MeshUploader = struct {
 
     fn borrowPool(self: *MeshUploader, io: std.Io) !CommandPoolReservoir.Borrowed {
         while (true) {
-            if (self.pool_reservoir.tryBorrowPool()) |b| return b;
+            if (self.pool_reservoir.tryBorrowPool()) |borrowed_pool| return borrowed_pool;
             try self.flush(io);
             // Every pool is held by an upload whose transfer batch is still on the
             // GPU, so blocking on the transfer timeline is bounded and frees pools
@@ -773,7 +755,7 @@ pub const MeshUploader = struct {
 
             self.retired_face_buffers.append(self.allocator, .{
                 .slice = grow_info.old_slice,
-                .graphics_timeline_value = self.vk_ctx.frame_number.load(.acquire) + self.num_in_flight,
+                .graphics_timeline_value = self.vk_ctx.frame_number.load(.acquire) + VulkanContext.max_frames_in_flight,
             }) catch |err| {
                 // The copy above completed, but a frame recorded before the swap may still bind the
                 // old buffer; freeing it now would be a use-after-free, so leak it instead.
@@ -782,10 +764,6 @@ pub const MeshUploader = struct {
 
             std.log.info("face data buffer grown", .{});
         }
-    }
-
-    pub fn freeRegion(self: *MeshUploader, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize, current_graphics_val: u64) void {
-        self.region_allocator.freeRegion(io, offset, length, current_graphics_val);
     }
 
     pub fn freeMesh(self: *MeshUploader, io: std.Io, mesh: MeshBuffer, current_graphics_val: u64) void {
@@ -939,10 +917,15 @@ pub const MeshCandidate = extern struct {
     scale: f32,
     face_count: u32,
     is_transparent: u32,
+
+    /// The all-zero candidate draws nothing (face_count == 0 gates the cull shader).
+    pub fn zeroed() MeshCandidate {
+        return .{ .absolute_position = @splat(0), .face_offset = 0, .scale = 0, .face_count = 0, .is_transparent = 0 };
+    }
 };
 
 comptime {
-    if (@sizeOf(MeshCandidate) != 32) @compileError("MeshCandidate size mismatch with GLSL layout (expected 32, got " ++ @typeName(@TypeOf(@sizeOf(MeshCandidate))) ++ ")");
+    if (@sizeOf(MeshCandidate) != 32) @compileError("MeshCandidate size mismatch with GLSL layout (expected 32, got " ++ std.fmt.comptimePrint("{d}", .{@sizeOf(MeshCandidate)}) ++ ")");
 }
 
 /// Per-cascade shadow cull slots. The shadow raster draws up to `cascades_per_frame`
@@ -969,6 +952,23 @@ pub const CullCount = extern struct {
     aabb_min_ord: [3]u32,
     /// Player-relative opaque-scene AABB, per-axis ordered-uint encoded f32 maximum.
     aabb_max_ord: [3]u32,
+
+    pub fn zeroed() CullCount {
+        return .{
+            .opaque_count = 0,
+            .opaque_late_count = 0,
+            .transparent_count = 0,
+            .opaque_face_count = 0,
+            .opaque_late_face_count = 0,
+            .transparent_face_count = 0,
+            .occluded_count = 0,
+            .frustum_culled_count = 0,
+            .shadow_count = @splat(0),
+            .shadow_face_count = @splat(0),
+            .aabb_min_ord = @splat(0),
+            .aabb_max_ord = @splat(0),
+        };
+    }
 };
 
 comptime {
@@ -1069,8 +1069,8 @@ const PerFrameBuffers = struct {
 
     fn deinit(self: *PerFrameBuffers, allocator: std.mem.Allocator, cpu_to_gpu_gpa: std.mem.Allocator, gpu_only_gpa: std.mem.Allocator, draw_capacity: u32) void {
         for (self.items) |*item| {
-            if (item.indirect_draw_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * slot_count]);
-            if (item.mesh_data_mapped) |p| cpu_to_gpu_gpa.free(p[0 .. draw_capacity * slot_count]);
+            if (item.indirect_draw_mapped) |mapped| cpu_to_gpu_gpa.free(mapped[0 .. draw_capacity * slot_count]);
+            if (item.mesh_data_mapped) |mapped| cpu_to_gpu_gpa.free(mapped[0 .. draw_capacity * slot_count]);
             if (item.count_slice.len > 0) gpu_only_gpa.free(item.count_slice);
             if (item.stats_slice.len > 0) cpu_to_gpu_gpa.free(item.stats_slice);
         }
@@ -1087,7 +1087,6 @@ pub const IndirectScene = struct {
     allocator: std.mem.Allocator,
     dev: DeviceProxy,
     memory: *GpuMemory,
-    num_in_flight: u32 = VulkanContext.max_frames_in_flight,
 
     persistent: PersistentCandidates = .{},
     index_pool: IndexPool = undefined,
@@ -1124,12 +1123,11 @@ pub const IndirectScene = struct {
             .memory = memory,
         };
 
-        self.max_draw_indirect_count = if (vk_ctx.props.limits.max_draw_indirect_count > 0) vk_ctx.props.limits.max_draw_indirect_count else fallback_max_draw_indirect_count;
         self.draw_capacity = initial_draw_capacity;
 
         const persistent_candidates_slice = try memory.cpuToGpu().alloc(MeshCandidate, initial_candidates);
         errdefer memory.cpuToGpu().free(persistent_candidates_slice);
-        @memset(persistent_candidates_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
+        @memset(persistent_candidates_slice, MeshCandidate.zeroed());
         const cand_info = memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, persistent_candidates_slice.ptr);
         self.persistent.buffer = cand_info.buffer;
         self.persistent.mapped = persistent_candidates_slice.ptr;
@@ -1222,9 +1220,9 @@ pub const IndirectScene = struct {
         const pos_arr: [3]f64 = @bitCast(pos);
         var min: [3]f64 = undefined;
         var max: [3]f64 = undefined;
-        for (0..3) |i| {
-            min[i] = pos_arr[i] + @as(f64, orderedDecode(stats.aabb_min_ord[i]));
-            max[i] = pos_arr[i] + @as(f64, orderedDecode(stats.aabb_max_ord[i]));
+        for (&min, &max, pos_arr, stats.aabb_min_ord, stats.aabb_max_ord) |*min_value, *max_value, position, min_ord, max_ord| {
+            min_value.* = position + @as(f64, orderedDecode(min_ord));
+            max_value.* = position + @as(f64, orderedDecode(max_ord));
         }
         // Untouched sentinels (no opaque candidates) decode to min=+inf/max=-inf, and a
         // never-dispatched frame slot reads zeroes that decode to NaN. Both violate
@@ -1268,7 +1266,7 @@ pub const IndirectScene = struct {
         count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
         stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
     ) void {
-        stats_slice[0] = std.mem.zeroes(CullCount);
+        stats_slice[0] = CullCount.zeroed();
 
         const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
         const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
@@ -1356,7 +1354,7 @@ pub const IndirectScene = struct {
             errdefer self.memory.gpuOnly().free(count_slice);
             const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.cpuToGpu().free(stats_slice);
-            stats_slice[0] = std.mem.zeroes(CullCount);
+            stats_slice[0] = CullCount.zeroed();
 
             mesh_dst.* = mesh_data_slice.ptr;
             indirect_dst.* = indirect_draw_slice.ptr;
@@ -1401,7 +1399,7 @@ pub const IndirectScene = struct {
         try self.vk_ctx.deviceWaitIdleLocked(io);
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
-        @memset(new_slice, .{ .absolute_position = .{ 0, 0, 0, 0 }, .scale = 0, .face_count = 0, .is_transparent = 0, .face_offset = 0 });
+        @memset(new_slice, MeshCandidate.zeroed());
 
         const new_visibility = self.memory.gpuOnly().alignedAlloc(u32, cull_buffer_alignment, new_capacity) catch |err| {
             self.memory.cpuToGpu().free(new_slice);
@@ -1418,11 +1416,11 @@ pub const IndirectScene = struct {
         // the render thread still reads them, and deferring the free closes that window.
         self.retired_visibility_slices.appendAssumeCapacity(.{
             .slice = self.visibility_slice,
-            .graphics_timeline_value = current_frame_num + self.num_in_flight,
+            .graphics_timeline_value = current_frame_num + VulkanContext.max_frames_in_flight,
         });
         self.retired_candidate_slices.appendAssumeCapacity(.{
             .slice = self.persistent.slice,
-            .graphics_timeline_value = current_frame_num + self.num_in_flight,
+            .graphics_timeline_value = current_frame_num + VulkanContext.max_frames_in_flight,
         });
 
         const current_vis_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, new_visibility.ptr);
@@ -1520,19 +1518,19 @@ test "MeshData size" {
 }
 
 test "orderedEncode/orderedDecode round-trip preserves float ordering" {
-    const samples = [_]f32{ -std.math.inf(f32), -1000.0, -1.5, -0.0, 0.0, 1.5, 1000.0, std.math.inf(f32) };
+    const samples: [8]f32 = .{ -std.math.inf(f32), -1000.0, -1.5, -0.0, 0.0, 1.5, 1000.0, std.math.inf(f32) };
     var encoded: [samples.len]u32 = undefined;
-    for (samples, 0..) |s, i| encoded[i] = orderedEncode(s);
+    for (samples, 0..) |sample, sample_index| encoded[sample_index] = orderedEncode(sample);
 
     // Encoding preserves order: sorted samples map to sorted u32s.
     for (1..samples.len) |i| try std.testing.expect(encoded[i - 1] < encoded[i]);
 
-    for (samples, 0..) |s, i| {
-        const back = orderedDecode(encoded[i]);
-        if (std.math.isNan(s)) {
+    for (samples, 0..) |sample, sample_index| {
+        const back = orderedDecode(encoded[sample_index]);
+        if (std.math.isNan(sample)) {
             try std.testing.expect(std.math.isNan(back));
         } else {
-            try std.testing.expectEqual(s, back);
+            try std.testing.expectEqual(sample, back);
         }
     }
 

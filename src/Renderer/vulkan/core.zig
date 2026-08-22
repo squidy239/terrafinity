@@ -514,30 +514,36 @@ pub const null_image_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, 
 pub const null_buffer_info: vk.DescriptorBufferInfo = .{ .buffer = .null_handle, .offset = 0, .range = 0 };
 pub const null_buffer_view: vk.BufferView = .null_handle;
 
-pub fn bufferWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descriptor_type: vk.DescriptorType, buffer_info: *const vk.DescriptorBufferInfo) vk.WriteDescriptorSet {
+/// Common WriteDescriptorSet builder over a single image or buffer info pointer.
+fn writeDescriptorSet(
+    dst_set: vk.DescriptorSet,
+    dst_binding: u32,
+    descriptor_type: vk.DescriptorType,
+    image_info: ?*const vk.DescriptorImageInfo,
+    buffer_info: ?*const vk.DescriptorBufferInfo,
+) vk.WriteDescriptorSet {
     return .{
         .dst_set = dst_set,
         .dst_binding = dst_binding,
         .dst_array_element = 0,
         .descriptor_count = 1,
         .descriptor_type = descriptor_type,
-        .p_image_info = (&null_image_info)[0..1],
-        .p_buffer_info = (&buffer_info.*)[0..1],
+        .p_image_info = if (image_info) |info| (&info.*)[0..1] else (&null_image_info)[0..1],
+        .p_buffer_info = if (buffer_info) |info| (&info.*)[0..1] else (&null_buffer_info)[0..1],
         .p_texel_buffer_view = (&null_buffer_view)[0..1],
     };
 }
 
+pub fn bufferWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, descriptor_type: vk.DescriptorType, buffer_info: *const vk.DescriptorBufferInfo) vk.WriteDescriptorSet {
+    return writeDescriptorSet(dst_set, dst_binding, descriptor_type, null, buffer_info);
+}
+
 pub fn imageWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, image_info: *const vk.DescriptorImageInfo) vk.WriteDescriptorSet {
-    return .{
-        .dst_set = dst_set,
-        .dst_binding = dst_binding,
-        .dst_array_element = 0,
-        .descriptor_count = 1,
-        .descriptor_type = .combined_image_sampler,
-        .p_image_info = (&image_info.*)[0..1],
-        .p_buffer_info = (&null_buffer_info)[0..1],
-        .p_texel_buffer_view = (&null_buffer_view)[0..1],
-    };
+    return writeDescriptorSet(dst_set, dst_binding, .combined_image_sampler, image_info, null);
+}
+
+pub fn storageImageWriteDescriptorSet(dst_set: vk.DescriptorSet, dst_binding: u32, image_info: *const vk.DescriptorImageInfo) vk.WriteDescriptorSet {
+    return writeDescriptorSet(dst_set, dst_binding, .storage_image, image_info, null);
 }
 
 pub fn renderingAttachmentColor(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
@@ -683,10 +689,9 @@ pub const SingleTime = struct {
     }
 
     pub fn destroyFence(self: *SingleTime) void {
-        if (self.fence != .null_handle) {
-            self.dev.destroyFence(self.fence, &self.vkalloc);
-            self.fence = .null_handle;
-        }
+        if (self.fence == .null_handle) return;
+        self.dev.destroyFence(self.fence, &self.vkalloc);
+        self.fence = .null_handle;
     }
 };
 
@@ -840,7 +845,7 @@ fn createGraphicsPipeline(
     const dyn: vk.PipelineDynamicStateCreateInfo = .{ .flags = .{}, .dynamic_state_count = @intCast(dyn_states.items.len), .p_dynamic_states = dyn_states.items.ptr };
 
     var pssci: [num_stages]vk.PipelineShaderStageCreateInfo = undefined;
-    for (stages, 0..) |stage, i| pssci[i] = shaderStageCreateInfo(stage.flags, stage.module);
+    for (&pssci, stages) |*stage_info, stage| stage_info.* = shaderStageCreateInfo(stage.flags, stage.module);
 
     var pipeline_feedback: vk.PipelineCreationFeedback = .{ .flags = .{}, .duration = 0 };
     var stage_feedbacks: [num_stages]vk.PipelineCreationFeedback = @splat(.{ .flags = .{}, .duration = 0 });
@@ -855,9 +860,7 @@ fn createGraphicsPipeline(
         .depth_attachment_format = depth_format,
         .stencil_attachment_format = stencil_format,
     };
-    if (pipeline_creation_feedback) {
-        rendering_info.p_next = @ptrCast(&feedback_info);
-    }
+    rendering_info.p_next = if (pipeline_creation_feedback) @ptrCast(&feedback_info) else null;
     const ds_ptr: ?*const vk.PipelineDepthStencilStateCreateInfo = if (depth_stencil_state) |*ds| ds else null;
     const gpci: vk.GraphicsPipelineCreateInfo = .{
         .flags = .{},
@@ -880,9 +883,8 @@ fn createGraphicsPipeline(
         .base_pipeline_index = -1,
     };
     var pipeline: vk.Pipeline = undefined;
-    if (dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], vkalloc, (&pipeline)[0..1])) |res| {
-        if (res != .success) return error.PipelineCreationFailed;
-    } else |err| return err;
+    const result = try dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], vkalloc, (&pipeline)[0..1]);
+    if (result != .success) return error.PipelineCreationFailed;
 
     if (pipeline_creation_feedback and pipeline_feedback.flags.valid_bit) {
         std.log.debug("Vulkan: Pipeline compilation took {d:.3} ms (cached: {})", .{
@@ -988,11 +990,8 @@ pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator,
         sets.* = &.{};
     }
 
-    const layouts = try allocator.alloc(vk.DescriptorSetLayout, num_frames);
-    defer allocator.free(layouts);
-    @memset(layouts, layout);
-
-    try dev.allocateDescriptorSets(&.{ .descriptor_pool = pool.*, .descriptor_set_count = @intCast(num_frames), .p_set_layouts = layouts.ptr }, sets.*.ptr);
+    const layouts: [VulkanContext.max_frames_in_flight]vk.DescriptorSetLayout = @splat(layout);
+    try dev.allocateDescriptorSets(&.{ .descriptor_pool = pool.*, .descriptor_set_count = @intCast(num_frames), .p_set_layouts = &layouts }, sets.*.ptr);
 }
 
 test "findMemoryType" {

@@ -14,11 +14,11 @@ const visible_block_count = Block.visible_count;
 /// Visible block names in Block declaration order (filtered by isVisible); the order is a contract for BlockMaterialsZon's materials.zon schema.
 pub const visible_block_names: [visible_block_count][]const u8 = blk: {
     var names: [visible_block_count][]const u8 = undefined;
-    var i: usize = 0;
+    var count: usize = 0;
     for (std.meta.fields(Block)) |field| {
         if (!@field(Block, field.name).isVisible()) continue;
-        names[i] = field.name;
-        i += 1;
+        names[count] = field.name;
+        count += 1;
     }
     break :blk names;
 };
@@ -47,23 +47,23 @@ const Transition = struct {
 };
 
 fn transitionFor(old: vk.ImageLayout, new: vk.ImageLayout) Transition {
-    switch (old) {
+    return switch (old) {
         .undefined => switch (new) {
-            .transfer_dst_optimal => return .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } } },
-            .transfer_src_optimal => return .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
+            .transfer_dst_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } } },
+            .transfer_src_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
             else => unreachable,
         },
         .transfer_dst_optimal => switch (new) {
-            .transfer_src_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
-            .shader_read_only_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            .transfer_src_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
+            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
             else => unreachable,
         },
         .transfer_src_optimal => switch (new) {
-            .shader_read_only_optimal => return .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
             else => unreachable,
         },
         else => unreachable,
-    }
+    };
 }
 
 pub const Services = struct {
@@ -114,16 +114,14 @@ pub const TextureManager = struct {
         if (pack.is_default) {
             const default_textures = @import("textures").default;
             for (visible_block_names, default_textures) |name, data| {
-                {
-                    const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
-                    defer allocator.free(filename);
+                const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
+                defer allocator.free(filename);
 
-                    if (pack.dir.openFile(io, filename, .{})) |f| {
-                        f.close(io);
-                    } else |err| switch (err) {
-                        error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
-                        else => |e| return e,
-                    }
+                if (pack.dir.openFile(io, filename, .{})) |f| {
+                    f.close(io);
+                } else |err| switch (err) {
+                    error.FileNotFound => try pack.dir.writeFile(io, .{ .data = data, .sub_path = filename }),
+                    else => |e| return e,
                 }
             }
         }
@@ -176,7 +174,7 @@ pub const TextureManager = struct {
         var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
         try staging_slices.ensureTotalCapacity(allocator, entries.items.len + 1);
         defer {
-            for (staging_slices.items) |s| self.services.memory.cpuToGpu().free(s);
+            for (staging_slices.items) |staging_slice| self.services.memory.cpuToGpu().free(staging_slice);
             staging_slices.deinit(allocator);
         }
 
@@ -424,16 +422,16 @@ pub const TextureManager = struct {
         base_mip: u32,
         mip_count: u32,
     ) void {
-        const t = transitionFor(old_layout, new_layout);
+        const transition = transitionFor(old_layout, new_layout);
         core.pipelineBarrier(cmd, self.services.dev, vk.ImageMemoryBarrier2, (&core.imageBarrier2Range(
             image,
             .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
             old_layout,
             new_layout,
-            t.src.stage,
-            t.src.access,
-            t.dst.stage,
-            t.dst.access,
+            transition.src.stage,
+            transition.src.access,
+            transition.dst.stage,
+            transition.dst.access,
         ))[0..1]);
     }
 

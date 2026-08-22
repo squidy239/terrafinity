@@ -66,8 +66,8 @@ pub const OitCompositor = struct {
         const oit_targets: [3]*RenderTarget = .{ &self.accum, &self.reveal, &self.volume_weight };
         const oit_formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
         errdefer self.destroyTransientResources();
-        for (oit_targets, oit_formats) |target, fmt| {
-            target.* = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, fmt, oit_usage, oit_aspect);
+        for (oit_targets, oit_formats) |target, format| {
+            target.* = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, format, oit_usage, oit_aspect);
         }
 
         if (self.descriptor_set_layout == .null_handle) {
@@ -122,40 +122,39 @@ pub const OitCompositor = struct {
         }
     }
 
-    pub fn recordCompositionPass(
-        self: *OitCompositor,
+    /// Inputs for one fullscreen composition into the swapchain image.
+    pub const CompositionContext = struct {
         cmd_buffer: vk.CommandBuffer,
         extent: vk.Extent2D,
         output_image: vk.Image,
         output_view: vk.ImageView,
-        current_frame: u32,
+        frame_idx: u32,
+        /// Scatter term from the transparent pass is skipped when the camera sits
+        /// inside a transparent volume.
         scatter_enabled: u32,
         swapchain_old_layout: vk.ImageLayout,
+        /// Written with the final present layout when non-null.
         swapchain_layout_ptr: ?*vk.ImageLayout,
-        color_image: vk.Image,
-    ) void {
+    };
+
+    pub fn recordCompositionPass(self: *OitCompositor, ctx: CompositionContext, color_image: vk.Image) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
         defer zone.end();
         const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
 
         var pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = undefined;
         const read_images: [4]vk.Image = .{ color_image, self.accum.image, self.reveal.image, self.volume_weight.image };
-        for (read_images, 0..) |image, i| {
-            pre_comp_barriers[i] = core.makeImageBarrier2(image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect);
+        for (pre_comp_barriers[0..4], read_images) |*barrier, image| {
+            barrier.* = core.makeImageBarrier2(image, .color_attachment_optimal, .shader_read_only_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, color_aspect);
         }
-        const src_stage: vk.PipelineStageFlags2 = switch (swapchain_old_layout) {
-            .undefined => .{ .top_of_pipe_bit = true },
-            .present_src_khr => .{ .color_attachment_output_bit = true },
-            else => .{ .all_commands_bit = true },
-        };
-        const src_access: vk.AccessFlags2 = switch (swapchain_old_layout) {
-            .undefined => .{},
-            .present_src_khr => .{},
-            else => .{ .memory_write_bit = true },
+        const src_stage, const src_access = switch (ctx.swapchain_old_layout) {
+            .undefined => .{ @as(vk.PipelineStageFlags2, .{ .top_of_pipe_bit = true }), @as(vk.AccessFlags2, .{}) },
+            .present_src_khr => .{ @as(vk.PipelineStageFlags2, .{ .color_attachment_output_bit = true }), @as(vk.AccessFlags2, .{}) },
+            else => .{ @as(vk.PipelineStageFlags2, .{ .all_commands_bit = true }), @as(vk.AccessFlags2, .{ .memory_write_bit = true }) },
         };
         pre_comp_barriers[4] = core.makeImageBarrier2(
-            output_image,
-            swapchain_old_layout,
+            ctx.output_image,
+            ctx.swapchain_old_layout,
             .color_attachment_optimal,
             src_stage,
             src_access,
@@ -163,23 +162,23 @@ pub const OitCompositor = struct {
             .{ .color_attachment_write_bit = true, .color_attachment_read_bit = true },
             color_aspect,
         );
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_comp_barriers);
+        core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_comp_barriers);
 
-        const swapchain_attachment = core.renderingAttachmentColor(output_view, .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
-        self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(extent, &.{swapchain_attachment}, null));
+        const swapchain_attachment = core.renderingAttachmentColor(ctx.output_view, .dont_care, .{ 0.0, 0.0, 0.0, 0.0 });
+        self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{swapchain_attachment}, null));
 
-        self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.composition_pipeline);
-        core.setViewportAndScissor(self.dev, cmd_buffer, extent);
+        self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.composition_pipeline);
+        core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
 
-        self.dev.cmdPushConstants(cmd_buffer, self.composition_layout, .{ .fragment_bit = true }, 0, @sizeOf(u32), &scatter_enabled);
+        self.dev.cmdPushConstants(ctx.cmd_buffer, self.composition_layout, .{ .fragment_bit = true }, 0, @sizeOf(u32), &ctx.scatter_enabled);
 
-        const oit_desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[current_frame];
-        self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.composition_layout, 0, (&oit_desc_set)[0..1], null);
-        self.dev.cmdDraw(cmd_buffer, core.fullscreen_triangle_vertices, 1, 0, 0);
+        const oit_desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[ctx.frame_idx];
+        self.dev.cmdBindDescriptorSets(ctx.cmd_buffer, .graphics, self.composition_layout, 0, (&oit_desc_set)[0..1], null);
+        self.dev.cmdDraw(ctx.cmd_buffer, core.fullscreen_triangle_vertices, 1, 0, 0);
 
-        self.dev.cmdEndRendering(cmd_buffer);
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{}, color_aspect))[0..1]);
+        self.dev.cmdEndRendering(ctx.cmd_buffer);
+        core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(ctx.output_image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{}, color_aspect))[0..1]);
 
-        if (swapchain_layout_ptr) |ptr| ptr.* = .present_src_khr;
+        if (ctx.swapchain_layout_ptr) |ptr| ptr.* = .present_src_khr;
     }
 };

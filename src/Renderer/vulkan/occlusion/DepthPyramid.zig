@@ -21,11 +21,11 @@ const BuildPushConstants = extern struct {
 
 /// Mirrors the HizParamsBuffer std430 block in occlusion.glsl.
 pub const Params = extern struct {
-    projview: [16]f32,
-    occlusion_player_pos: [4]f32,
-    pyramid_size: [2]f32,
-    mip_count: u32,
-    enabled: u32,
+    projview: [16]f32 = @splat(0),
+    occlusion_player_pos: [4]f32 = @splat(0),
+    pyramid_size: [2]f32 = @splat(0),
+    mip_count: u32 = 0,
+    enabled: u32 = 0,
 };
 
 comptime {
@@ -127,7 +127,7 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
     }
     for (frame_params) |*fp| {
         const slice = try memory.cpuToGpu().alignedAlloc(Params, gpu.cull_buffer_alignment, 1);
-        slice[0] = std.mem.zeroes(Params);
+        slice[0] = .{};
         const info = memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slice.ptr);
         fp.* = .{ .slice = slice, .buffer = info.buffer, .offset = info.offset };
         allocated += 1;
@@ -326,16 +326,7 @@ fn pushBuildSet(self: *DepthPyramid, cmd: vk.CommandBuffer, src_view: vk.ImageVi
     const dst_info: vk.DescriptorImageInfo = .{ .sampler = .null_handle, .image_view = dst_view, .image_layout = .general };
     var writes: [2]vk.WriteDescriptorSet = .{
         core.imageWriteDescriptorSet(.null_handle, 0, &src_info),
-        .{
-            .dst_set = .null_handle,
-            .dst_binding = 1,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = .storage_image,
-            .p_image_info = (&dst_info)[0..1],
-            .p_buffer_info = (&core.null_buffer_info)[0..1],
-            .p_texel_buffer_view = (&core.null_buffer_view)[0..1],
-        },
+        core.storageImageWriteDescriptorSet(.null_handle, 1, &dst_info),
     };
     self.dev.cmdPushDescriptorSetKHR(cmd, .compute, self.build_pipeline_layout, 0, &writes);
 }
