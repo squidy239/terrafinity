@@ -209,7 +209,7 @@ pub fn main(init: std.process.Init) !void {
 
         try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
-        const submit_game = is_ingame and ui.menu_state.ingame;
+        const submit_game = is_ingame;
         try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {

@@ -673,7 +673,9 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
 
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
 
-    _ = self.dev.deviceWaitIdle() catch {};
+    _ = self.dev.deviceWaitIdle() catch |err| {
+        std.log.err("deviceWaitIdle failed during swapchain creation: {}", .{err});
+    };
     self.dev.resetCommandPool(self.command_pool, .{}) catch {};
     if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
 

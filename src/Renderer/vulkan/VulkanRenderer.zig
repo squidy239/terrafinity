@@ -335,7 +335,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
 
-    const scene_aabb = self.scene.getSceneAABB();
+    const scene_aabb = self.scene.getSceneAABB(current_frame);
     self.shadow.prepareFrame(
         current_frame,
         view_pos,

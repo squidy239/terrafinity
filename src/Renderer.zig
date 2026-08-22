@@ -34,9 +34,6 @@ pub const FrameDrawContext = struct {
     output_image: vk.Image,
     output_view: vk.ImageView,
     swapchain_image_layout: *vk.ImageLayout,
-    /// Current player speed in blocks/frame-second; the shadow staleness padding reads
-    /// it live so a speed change cannot pop shadow boundaries.
-    player_speed: f32 = 0,
 };
 
 pub const VTable = struct {

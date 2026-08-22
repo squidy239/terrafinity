@@ -40,6 +40,10 @@ bool hizOccluded(vec3 aabb_min, vec3 aabb_max) {
     // Closer than the near plane: trivially visible.
     if (nearest_depth >= 1.0) return false;
 
+    // Footprint entirely outside the previous frame's viewport: the screen-edge depths
+    // do not bound it, so treat the box as visible rather than clamping into edge texels.
+    if (uv_max.x < 0.0 || uv_min.x > 1.0 || uv_max.y < 0.0 || uv_min.y > 1.0) return false;
+
     uv_min = clamp(uv_min, vec2(0.0), vec2(1.0));
     uv_max = clamp(uv_max, vec2(0.0), vec2(1.0));
 

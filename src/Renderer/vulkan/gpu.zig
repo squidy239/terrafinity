@@ -872,11 +872,34 @@ pub const CullCount = extern struct {
     frustum_culled_count: u32,
     shadow_count: [shadow_slot_count]u32,
     shadow_face_count: [shadow_slot_count]u32,
+    /// Player-relative opaque-scene AABB, per-axis ordered-uint encoded f32 minimum.
+    /// Reduced by the early cull dispatch; decoded on the render thread.
+    aabb_min_ord: [3]u32,
+    /// Player-relative opaque-scene AABB, per-axis ordered-uint encoded f32 maximum.
+    aabb_max_ord: [3]u32,
 };
 
 comptime {
-    if (@sizeOf(CullCount) != 96) @compileError("CullCount size mismatch");
+    if (@sizeOf(CullCount) != 120) @compileError("CullCount size mismatch");
 }
+
+/// Encodes a float as a u32 whose unsigned ordering matches the float's value ordering,
+/// so `atomicMin`/`atomicMax` on the encoded form reduce the true float min/max.
+/// -inf encodes to the smallest u32; +inf to the largest.
+fn orderedEncode(f: f32) u32 {
+    const u: u32 = @bitCast(f);
+    return if (u & 0x8000_0000 != 0) ~u else u | 0x8000_0000;
+}
+
+/// Inverse of `orderedEncode`.
+fn orderedDecode(o: u32) f32 {
+    return if (o & 0x8000_0000 != 0) @bitCast(o & 0x7FFF_FFFF) else @bitCast(~o);
+}
+
+/// Ordered-uint encoding of +inf; the initial value for a min reduction.
+pub const aabb_min_inf_ord: u32 = 0xFF80_0000;
+/// Ordered-uint encoding of -inf; the initial value for a max reduction.
+pub const aabb_max_inf_ord: u32 = 0x007F_FFFF;
 
 pub const MeshData = extern struct {
     absolute_position: [4]f32 align(@sizeOf([4]f32)),
@@ -944,6 +967,9 @@ const PerFrameData = struct {
     stats_mapped: ?[*]align(cull_buffer_alignment.toByteUnits()) CullCount = null,
     stats_offset: vk.DeviceSize = 0,
     stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
+    /// Player position pushed to the cull shader that wrote this slot's stats buffer.
+    /// `getSceneAABB` adds it back to the player-relative reduction result.
+    last_cull_player_pos: @Vector(3, f64) = @splat(0),
 };
 
 const PerFrameBuffers = struct {
@@ -983,14 +1009,6 @@ pub const IndirectScene = struct {
 
     draw_capacity: u32 = 4096,
     max_draw_indirect_count: u32 = 65_535,
-
-    /// Version bumped on every candidate slot write/release; the render thread rescans
-    /// the live candidate AABB only when it changes. Written by streaming threads.
-    aabb_version: std.atomic.Value(u64) = .init(0),
-    /// Render-thread cache of the scan; never touched by writers.
-    aabb_min: [3]f64 = .{ 0, 0, 0 },
-    aabb_max: [3]f64 = .{ 0, 0, 0 },
-    aabb_scanned_version: u64 = std.math.maxInt(u64),
 
     /// One u32 per candidate slot: nonzero when the mesh passed last frame's late cull.
     /// Written by the late cull, read by the early cull; wrong bits only cost perf
@@ -1078,11 +1096,6 @@ pub const IndirectScene = struct {
         }
     }
 
-    /// Marks the candidate buffer as changed so render-side AABB caches rescan.
-    fn bumpAabbVersion(self: *IndirectScene) void {
-        _ = self.aabb_version.fetchAdd(1, .monotonic);
-    }
-
     pub fn writeCandidate(self: *IndirectScene, gpu_index: u32, mesh: MeshBuffer, is_transparent: bool, transform: CandidateTransform) void {
         self.persistent.mapped[gpu_index] = .{
             .absolute_position = transform.absolute_position,
@@ -1091,44 +1104,40 @@ pub const IndirectScene = struct {
             .is_transparent = if (is_transparent) 1 else 0,
             .face_offset = mesh.face_offset,
         };
-        self.bumpAabbVersion();
     }
 
     /// Deactivates a slot without freeing its index (retirement happens later).
     pub fn markInactive(self: *IndirectScene, gpu_index: u32) void {
         self.persistent.mapped[gpu_index].face_count = 0;
-        self.bumpAabbVersion();
     }
 
     pub fn releaseCandidate(self: *IndirectScene, io: std.Io, gpu_index: u32) void {
         self.persistent.mapped[gpu_index].face_count = 0;
         self.index_pool.freeIndex(io, gpu_index);
         self.tryShrinkMaxAllocatedIndex(gpu_index);
-        self.bumpAabbVersion();
     }
 
-    /// World-space AABB of live opaque candidates, in absolute blocks. Lazily rescanned
-    /// on the render thread when the slot version changed. Transparent candidates are
-    /// excluded: the shadow cull skips them, so including them only inflates the AABB.
-    pub fn getSceneAABB(self: *IndirectScene) struct { min: [3]f64, max: [3]f64 } {
-        const version = self.aabb_version.load(.acquire);
-        if (version == self.aabb_scanned_version) return .{ .min = self.aabb_min, .max = self.aabb_max };
-
-        var min_v: @Vector(3, f64) = @splat(std.math.inf(f64));
-        var max_v: @Vector(3, f64) = @splat(-std.math.inf(f64));
-        const count = self.max_allocated_index.load(.monotonic);
-        for (self.persistent.mapped[0..count]) |candidate| {
-            if (candidate.face_count == 0 or candidate.is_transparent != 0) continue;
-            const pos: @Vector(3, f64) = .{ candidate.absolute_position[0], candidate.absolute_position[1], candidate.absolute_position[2] };
-            const size: f64 = @as(f64, candidate.scale) * chunk_size_blocks;
-            min_v = @min(min_v, pos);
-            max_v = @max(max_v, pos + @as(@Vector(3, f64), @splat(size)));
+    /// World-space AABB of live opaque candidates, in absolute blocks. Read from the
+    /// cull shader's per-frame player-relative reduction; the CPU never scans the
+    /// candidate buffer. Transparent candidates are excluded (the shadow cull skips
+    /// them). The value lags one frame: the CPU needs it before this frame's cull runs,
+    /// so it reflects the last dispatch that wrote this frame slot's stats buffer.
+    pub fn getSceneAABB(self: *IndirectScene, current_frame: u32) struct { min: [3]f64, max: [3]f64 } {
+        const frame = &self.frame_buffers.items[current_frame];
+        const counts = frame.stats_mapped orelse return .{ .min = .{ 0, 0, 0 }, .max = .{ 0, 0, 0 } };
+        const stats = counts[0];
+        const pos = frame.last_cull_player_pos;
+        const pos_arr: [3]f64 = @bitCast(pos);
+        var min: [3]f64 = undefined;
+        var max: [3]f64 = undefined;
+        for (0..3) |i| {
+            min[i] = pos_arr[i] + @as(f64, orderedDecode(stats.aabb_min_ord[i]));
+            max[i] = pos_arr[i] + @as(f64, orderedDecode(stats.aabb_max_ord[i]));
         }
-        const min: [3]f64 = if (count == 0) @splat(0) else @bitCast(min_v);
-        const max: [3]f64 = if (count == 0) @splat(0) else @bitCast(max_v);
-        self.aabb_min = min;
-        self.aabb_max = max;
-        self.aabb_scanned_version = version;
+        // Untouched sentinels (no opaque candidates) decode to min=+inf/max=-inf, and a
+        // never-dispatched frame slot reads zeroes that decode to NaN. Both violate
+        // min <= max; fall back to a degenerate box rather than poisoning the shadow fit.
+        if (!(min[0] <= max[0])) return .{ .min = .{ 0, 0, 0 }, .max = .{ 0, 0, 0 } };
         return .{ .min = min, .max = max };
     }
 
@@ -1306,36 +1315,37 @@ pub const IndirectScene = struct {
             self.memory.cpuToGpu().free(new_slice);
             return err;
         };
+        // Reserve both retirement slots before touching any live state: the render
+        // thread reads these fields without a shared lock, so a failure after partial
+        // mutation would strand an old slice or pair a slice length with a stale buffer.
+        try self.retired_visibility_slices.ensureTotalCapacity(self.allocator, self.retired_visibility_slices.items.len + 1);
+        try self.retired_candidate_slices.ensureTotalCapacity(self.allocator, self.retired_candidate_slices.items.len + 1);
+
         const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
-        // The old visibility slice is NOT freed here: a worker thread may grow the
-        // scene while the render thread reads `visibility_slice`, and the render thread
-        // does not share the retirement mutex. Deferring the free closes the window.
-        const old_visibility_slice = self.visibility_slice;
-        self.visibility_slice = new_visibility;
-        try self.retired_visibility_slices.append(self.allocator, .{
-            .slice = old_visibility_slice,
+        // The old slices are NOT freed here: a worker thread may grow the scene while
+        // the render thread still reads them, and deferring the free closes that window.
+        self.retired_visibility_slices.appendAssumeCapacity(.{
+            .slice = self.visibility_slice,
+            .graphics_timeline_value = current_frame_num + self.num_in_flight,
+        });
+        self.retired_candidate_slices.appendAssumeCapacity(.{
+            .slice = self.persistent.slice,
             .graphics_timeline_value = current_frame_num + self.num_in_flight,
         });
 
         const current_vis_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, new_visibility.ptr);
         self.visibility_buffer = current_vis_info.buffer;
         self.visibility_offset = current_vis_info.offset;
+        self.visibility_slice = new_visibility;
         self.visibility_needs_clear.store(true, .release);
 
         @memcpy(new_slice[0..old_capacity], self.persistent.slice[0..old_capacity]);
 
         const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_slice.ptr);
-        const old_slice = self.persistent.slice;
-
         self.persistent.buffer = info.buffer;
         self.persistent.mapped = new_slice.ptr;
         self.persistent.offset = info.offset;
         self.persistent.slice = new_slice;
-
-        try self.retired_candidate_slices.append(self.allocator, .{
-            .slice = old_slice,
-            .graphics_timeline_value = current_frame_num + self.num_in_flight,
-        });
 
         try self.index_pool.grow(io, self.allocator, @intCast(new_capacity));
 
@@ -1415,4 +1425,25 @@ test "GpuRegionAllocator safe_graphics propagation" {
 test "MeshData size" {
     try std.testing.expectEqual(@as(usize, 16), @alignOf(MeshData));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(MeshData));
+}
+
+test "orderedEncode/orderedDecode round-trip preserves float ordering" {
+    const samples = [_]f32{ -std.math.inf(f32), -1000.0, -1.5, -0.0, 0.0, 1.5, 1000.0, std.math.inf(f32) };
+    var encoded: [samples.len]u32 = undefined;
+    for (samples, 0..) |s, i| encoded[i] = orderedEncode(s);
+
+    // Encoding preserves order: sorted samples map to sorted u32s.
+    for (1..samples.len) |i| try std.testing.expect(encoded[i - 1] < encoded[i]);
+
+    for (samples, 0..) |s, i| {
+        const back = orderedDecode(encoded[i]);
+        if (std.math.isNan(s)) {
+            try std.testing.expect(std.math.isNan(back));
+        } else {
+            try std.testing.expectEqual(s, back);
+        }
+    }
+
+    try std.testing.expectEqual(aabb_min_inf_ord, orderedEncode(std.math.inf(f32)));
+    try std.testing.expectEqual(aabb_max_inf_ord, orderedEncode(-std.math.inf(f32)));
 }

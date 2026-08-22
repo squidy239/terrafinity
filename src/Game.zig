@@ -523,9 +523,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     asyncs.end();
     const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
 
-    var frame_ctx_mut = frame_ctx;
-    frame_ctx_mut.player_speed = self.player.fly_speed.load(.unordered);
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx_mut, player_pos);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
 
     self.debug_menu.opaque_drawn.store(self.vulkan_renderer.frame_stats.opaque_drawn, .unordered);
     self.debug_menu.transparent_drawn.store(self.vulkan_renderer.frame_stats.transparent_drawn, .unordered);

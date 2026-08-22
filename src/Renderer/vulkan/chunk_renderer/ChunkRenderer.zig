@@ -756,6 +756,10 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
     const frame = &scene.frame_buffers.items[current_frame];
     if (reset_count) {
         self.dev.cmdFillBuffer(cmd_buffer, frame.count, frame.count_offset, @sizeOf(gpu.CullCount), 0);
+        const min_off = frame.count_offset + @as(vk.DeviceSize, @offsetOf(gpu.CullCount, "aabb_min_ord"));
+        const max_off = frame.count_offset + @as(vk.DeviceSize, @offsetOf(gpu.CullCount, "aabb_max_ord"));
+        self.dev.cmdFillBuffer(cmd_buffer, frame.count, min_off, @sizeOf([3]u32), gpu.aabb_min_inf_ord);
+        self.dev.cmdFillBuffer(cmd_buffer, frame.count, max_off, @sizeOf([3]u32), gpu.aabb_max_inf_ord);
         core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
     }
 
@@ -770,11 +774,32 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
     push_consts.draw_capacity = scene.draw_capacity;
     push_consts.mode = mode;
     push_consts.min_chunk_size = min_chunk_size;
+    frame.last_cull_player_pos = view_pos;
 
     self.dev.cmdPushConstants(cmd_buffer, self.cull.pipeline_layout, .{ .compute_bit = true }, 0, @sizeOf(@TypeOf(push_consts)), &push_consts);
 
     const group_count = (total_candidates + (cull_workgroup_size - 1)) / cull_workgroup_size;
     self.dev.cmdDispatch(cmd_buffer, group_count, 1, 1);
+}
+
+/// Makes the previous frames' draw-side and transfer accesses of the shared cull
+/// buffers visible again before this frame's cull dispatches rewrite them. Queue
+/// submissions order execution but provide no memory dependency by themselves, so
+/// without this the reset fill and cull writes race the prior stats copy (transfer
+/// read of the count buffer) and the opaque passes' vertex reads of mesh data.
+fn preCullFrameBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
+    const scene = self.scene;
+    const frame = &scene.frame_buffers.items[current_frame];
+    const src_stage: vk.PipelineStageFlags2 = .{ .draw_indirect_bit = true, .vertex_shader_bit = true, .all_transfer_bit = true };
+    const src_access: vk.AccessFlags2 = .{ .indirect_command_read_bit = true, .shader_read_bit = true, .transfer_read_bit = true, .transfer_write_bit = true };
+    const dst_stage: vk.PipelineStageFlags2 = .{ .compute_shader_bit = true, .all_transfer_bit = true };
+    const dst_access: vk.AccessFlags2 = .{ .shader_read_bit = true, .shader_write_bit = true, .transfer_read_bit = true, .transfer_write_bit = true };
+    const buffer_barriers: [3]vk.BufferMemoryBarrier2 = .{
+        core.makeBufferBarrier2(frame.indirect_draw, frame.indirect_draw_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand), src_stage, src_access, dst_stage, dst_access),
+        core.makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(gpu.MeshData), src_stage, src_access, dst_stage, dst_access),
+        core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), src_stage, src_access, dst_stage, dst_access),
+    };
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &buffer_barriers);
 }
 
 /// Zero-fills the visibility buffer when it is fresh, or makes last frame's late-cull
@@ -832,7 +857,9 @@ fn cullBarrierAndCopyStats(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, c
 
     self.dev.cmdCopyBuffer(cmd_buffer, frame.count, frame.stats, (&vk.BufferCopy{ .src_offset = frame.count_offset, .dst_offset = frame.stats_offset, .size = @sizeOf(gpu.CullCount) })[0..1]);
 
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true }, .{ .host_read_bit = true }))[0..1]);
+    // The copy's write must also be available to later submissions' transfer ops
+    // (the next stats copy into this ring slot), not just the host read.
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true, .all_transfer_bit = true }, .{ .host_read_bit = true, .transfer_read_bit = true, .transfer_write_bit = true }))[0..1]);
 }
 
 pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format) !void {
@@ -1005,6 +1032,7 @@ fn pushShadowSet2(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, pipeline_l
 /// The reset-less cascade and late culls are safe only because the early cull just zeroed
 /// the whole CullCount, and the shadow raster never draws a count that was not reset.
 fn dispatchFrameCulling(self: *ChunkRenderer, ctx: *const PassContext) void {
+    self.preCullFrameBarrier(ctx.cmd_buffer, ctx.frame_idx);
     self.prepareVisibility(ctx.cmd_buffer, ctx.total_candidates);
     self.dispatchCulling(ctx.cmd_buffer, ctx.frame_idx, ctx.frustum.planes, ctx.total_candidates, ctx.view_pos, cull_mode_early, 0.0, true);
     if (shadowActive(ctx)) |shadow| {

@@ -199,6 +199,7 @@ pub fn recreate(self: *DepthPyramid, io: std.Io, depth_extent: vk.Extent2D) !voi
     self.mip_views = mip_views;
 
     try self.transitionToSampled(io);
+    std.log.info("DepthPyramid.recreate: pyramid image {any}", .{self.image});
 }
 
 /// Writes the per-frame occlusion params. `projview` must be the exact matrix layout
