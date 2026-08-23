@@ -25,8 +25,8 @@
             .hash = "rocksdb-11.1.1-z_CUTiF7AQBNJ8dXAFmcfp90gyu29NRJDmP5xcp-9dPm",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#07d510db8e9310172bb4a91a13309ff82e322a06",
-            .hash = "dvui-0.5.0-dev-AQFJmYXU9gD-ISak0ThV_OscVn4tn7gz95iBolDEqQQD",
+            .url = "git+https://github.com/david-vanderson/dvui#c60c7e77a86e0296ae97f9e214a0fbebb32ce6ae",
+            .hash = "dvui-0.5.0-dev-AQFJmT15AAGINPu3mbIW9rUg9Ivqw3SAaZ9bFDC5EAr6",
         },
         .tracy = .{
             .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
@@ -40,10 +40,7 @@
             .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
             .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
         },
-        .dvui_vk = .{
-            .url = "git+https://github.com/Deins/dvui_vk#b5dfd5f9a4430390853e4552d1c677aa40a7370d",
-            .hash = "dvui_vk-0.0.0-HWdnmTwbAwB70kbQ-0yWZoxIGhDwiN91Z3bl8WQSeVlQ",
-        },
+
         .zignal = .{
             .url = "git+https://github.com/arrufat/zignal#9c824ba7a600e611fb6e3a708fc243be9f5b7693",
             .hash = "zignal-0.11.0-dev-OrZ3s58cKADge6xp3X_XwEFOC07xk_WyoxaMf3Su5a5w",

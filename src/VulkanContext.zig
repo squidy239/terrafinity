@@ -11,8 +11,8 @@ const InstanceProxy = vk.InstanceProxy;
 const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 
-const Mesher = @import("Renderer/Mesher.zig");
 const Renderer = @import("Renderer.zig");
+const Mesher = @import("Renderer/Mesher.zig");
 const core = @import("Renderer/vulkan/core.zig");
 const gpu = @import("Renderer/vulkan/gpu.zig");
 const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
@@ -942,11 +942,7 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
     return acquire_result.image_index;
 }
 
-pub fn submitFrame(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
-    try self.submitFrameWithExtra(io, ctx, .null_handle, true);
-}
-
-pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext, extra_cmd_buffer: vk.CommandBuffer, include_game: bool) !void {
+pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext, prepass_cmd_buffer: vk.CommandBuffer, ui_cmd_buffer: vk.CommandBuffer, include_game: bool) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitFrame" });
     defer zone.end();
 
@@ -979,14 +975,18 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
         .{ .semaphore = self.graphics_timeline_semaphore, .value = current_graphics_val, .stage_mask = .{ .all_commands_bit = true }, .device_index = 0 },
     };
 
-    var cmd_buffer_infos: [2]vk.CommandBufferSubmitInfo = undefined;
+    var cmd_buffer_infos: [3]vk.CommandBufferSubmitInfo = undefined;
     var cmd_buffer_count: u32 = 0;
     if (include_game) {
         cmd_buffer_infos[0] = .{ .command_buffer = ctx.cmd_buffer, .device_mask = 0 };
         cmd_buffer_count += 1;
     }
-    if (extra_cmd_buffer != .null_handle) {
-        cmd_buffer_infos[cmd_buffer_count] = .{ .command_buffer = extra_cmd_buffer, .device_mask = 0 };
+    if (prepass_cmd_buffer != .null_handle) {
+        cmd_buffer_infos[cmd_buffer_count] = .{ .command_buffer = prepass_cmd_buffer, .device_mask = 0 };
+        cmd_buffer_count += 1;
+    }
+    if (ui_cmd_buffer != .null_handle) {
+        cmd_buffer_infos[cmd_buffer_count] = .{ .command_buffer = ui_cmd_buffer, .device_mask = 0 };
         cmd_buffer_count += 1;
     }
 

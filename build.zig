@@ -1,5 +1,7 @@
 const std = @import("std");
+
 const dvui = @import("dvui");
+
 const Block = @import("src/world/Block.zig").Block;
 
 const ThreadSanitizeMode = enum {
@@ -206,7 +208,7 @@ const Deps = struct {
     tracy_impl: *std.Build.Module,
     wio: *std.Build.Module,
     dvui: *std.Build.Module,
-    dvui_vk_renderer: *std.Build.Module,
+    dvui_vulkan_renderer: *std.Build.Module,
     vk: *std.Build.Module,
     zignal: *std.Build.Module,
     zm: *std.Build.Module,
@@ -271,18 +273,7 @@ fn createDependencies(
     });
     const dvui_mod = dvui_dep.module("dvui");
 
-    // dvui_vk renderer (for Vulkan UI drawing)
-    const dvui_vk_dep = b.dependency("dvui_vk", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const dvui_vk_renderer_mod = b.addModule("dvui_vk_renderer", .{
-        .root_source_file = dvui_vk_dep.path("src/dvui_vk_renderer.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Vulkan bindings
+    // Vulkan bindings shared by the game and DVUI renderer.
     const vulkan_headers = b.dependency("vulkan_headers", .{});
     const registry = vulkan_headers.path("registry/vk.xml");
     const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
@@ -291,21 +282,25 @@ fn createDependencies(
     const vulkan_zig_mod = b.addModule("vk", .{
         .root_source_file = vk_generate_cmd.addOutputFileArg("vk.zig"),
     });
-    dvui_vk_renderer_mod.addImport("vk", vulkan_zig_mod);
-    dvui_vk_renderer_mod.addImport("dvui", dvui_mod);
-
-    // Our custom dvui backend (windowing via wio + rendering via dvui_vk_renderer)
+    const dvui_vulkan_renderer_mod = b.addModule("dvui_vulkan_renderer", .{
+        .root_source_file = dvui_dep.path("src/backends/render/vulkan/renderer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dvui_vulkan_renderer_mod.addImport("vk", vulkan_zig_mod);
+    dvui_vulkan_renderer_mod.addImport("dvui", dvui_mod);
+    // DVUI platform backend: windowing and input via WIO, rendering via the upstream Vulkan renderer.
     const our_backend_mod = b.addModule("dvui_backend", .{
-        .root_source_file = b.path("src/dvui_backend_vk.zig"),
+        .root_source_file = b.path("src/dvui_backend_wio.zig"),
         .target = target,
         .optimize = optimize,
     });
     our_backend_mod.addImport("wio", wio_mod);
     our_backend_mod.addImport("dvui", dvui_mod);
     our_backend_mod.addImport("vk", vulkan_zig_mod);
-    our_backend_mod.addImport("dvui_vk_renderer", dvui_vk_renderer_mod);
+    our_backend_mod.addImport("dvui_vulkan_renderer", dvui_vulkan_renderer_mod);
 
-    // Link custom backend with dvui
+    // Link the custom platform backend with DVUI.
     dvui.linkBackend(dvui_mod, our_backend_mod);
 
     const zignal_mod = b.dependency("zignal", .{
@@ -331,7 +326,7 @@ fn createDependencies(
         .tracy_impl = tracy_impl_mod,
         .wio = wio_mod,
         .dvui = dvui_mod,
-        .dvui_vk_renderer = dvui_vk_renderer_mod,
+        .dvui_vulkan_renderer = dvui_vulkan_renderer_mod,
         .vk = vulkan_zig_mod,
         .zignal = zignal_mod,
         .zm = zm_mod,
@@ -346,7 +341,7 @@ fn configureModule(deps: *const Deps, mod: *std.Build.Module) void {
     mod.addImport("tracy_impl", deps.tracy_impl);
     mod.addImport("wio", deps.wio);
     mod.addImport("dvui", deps.dvui);
-    mod.addImport("dvui_vk_renderer", deps.dvui_vk_renderer);
+    mod.addImport("dvui_vulkan_renderer", deps.dvui_vulkan_renderer);
     mod.addImport("vk", deps.vk);
     mod.addImport("zignal", deps.zignal);
     mod.addImport("zm", deps.zm);

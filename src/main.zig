@@ -1,13 +1,12 @@
 const std = @import("std");
+
 const dvui = @import("dvui");
+const dvui_vulkan_renderer = @import("dvui_vulkan_renderer");
 const options = @import("options");
 pub const tracy = @import("tracy");
 pub const tracy_impl = @import("tracy_impl");
-const wio = @import("wio");
 const vk = @import("vulkan");
-const Renderer = @import("Renderer.zig");
-const VulkanContext = @import("VulkanContext.zig").VulkanContext;
-const dvui_vk_renderer = @import("dvui_vk_renderer");
+const wio = @import("wio");
 
 pub const Entity = @import("entity/Entity.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
@@ -16,7 +15,9 @@ const Key = @import("Key.zig");
 pub const Cache = @import("libs/Cache.zig").Cache;
 pub const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const utils = @import("libs/utils.zig");
+const Renderer = @import("Renderer.zig");
 const Ui = @import("Ui.zig");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 pub const Block = @import("world/Block.zig").Block;
 pub const Chunk = @import("world/Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
@@ -67,17 +68,17 @@ pub fn main(init: std.process.Init) !void {
     var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
     defer backend.deinit();
 
-    const vk_memory = dvui_vk_renderer.VkMemory.init(vk_ctx.mem_props) orelse return error.NoSuitableMemory;
+    const vk_memory = dvui_vulkan_renderer.VkMemory.init(
+        vk_ctx.mem_props,
+        vk_ctx.props.limits.non_coherent_atom_size,
+    ) orelse return error.NoSuitableMemory;
     try backend.initVulkan(
         vk_ctx.dev,
-        vk_ctx.pdev,
         vk_memory,
-        vk_ctx.graphics_queue,
-        vk_ctx.ui_command_pool,
         gpa,
         VulkanContext.max_frames_in_flight,
         vk_ctx.swapchain_format,
-        &vk_ctx.queue_mutex,
+        vk_ctx.queue_family_index,
     );
 
     const dvui_backend = dvui.Backend.init(&backend);
@@ -210,7 +211,8 @@ pub fn main(init: std.process.Init) !void {
         try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
         const submit_game = is_ingame;
-        try vk_ctx.submitFrameWithExtra(io, frame_ctx, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
+        const prepass_cmd = backend.takePrepass();
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, prepass_cmd, ui_cmd_buffers[frame_ctx.frame_index], submit_game);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
             error.OutOfDate => {

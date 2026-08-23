@@ -1,18 +1,18 @@
 const std = @import("std");
 
 const dvui = @import("dvui");
-const wio = @import("wio");
-const zignal = @import("zignal");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-const VulkanContext = @import("VulkanContext.zig").VulkanContext;
+const wio = @import("wio");
+const zignal = @import("zignal");
 
 const Config = @import("main.zig").Config;
 const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
-const generator_api = @import("world/generators/generator_api.zig");
-const generator_loader = @import("world/generator_loader.zig");
 const utils = @import("libs/utils.zig");
+const VulkanContext = @import("VulkanContext.zig").VulkanContext;
+const generator_loader = @import("world/generator_loader.zig");
+const generator_api = @import("world/generators/generator_api.zig");
 const World = @import("world/World.zig");
 
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
@@ -44,7 +44,7 @@ pub const main_theme: dvui.Theme = blk: {
         .fill = fill,
         .text = text,
         .border = border,
-        .max_default_corner_radius = 5.0,
+        .corner = .round(5),
         .control = .{
             .fill = control_fill,
             .fill_hover = control_hover,
@@ -222,7 +222,7 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
         .min_size_content = .all(256),
         .color_fill = .{ .r = 48, .g = 48, .b = 48, .a = 255 },
         .background = true,
-        .corner_radius = .all(0),
+        .corners = .all(0),
         .border = .all(8),
         .margin = .all(16),
         .gravity_y = 0.5,
@@ -640,7 +640,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         const bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 1.0, .expand = .horizontal });
         defer bottom.deinit();
 
-        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.0, .expand = .horizontal, .margin = .{ .x = 8, .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .blue, .corner_radius = .all(2) })) {
+        if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.0, .expand = .horizontal, .margin = .{ .x = 8, .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .blue, .corners = .all(2) })) {
             std.log.info("Joining game: {s}", .{item.name});
             const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
@@ -650,7 +650,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             return true;
         }
 
-        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corner_radius = .all(2) })) {
+        if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corners = .all(2) })) {
             if (self.delete_world_name) |old| allocator.free(old);
             self.delete_world_name = try allocator.dupe(u8, item.name);
         }
