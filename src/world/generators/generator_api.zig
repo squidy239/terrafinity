@@ -5,7 +5,7 @@ const World = @import("../World.zig");
 /// Shared interface between the terrafinity host and generator shared
 /// libraries. Both sides are compiled by the same `zig build` with the same
 /// compiler, so every type here has identical layout across the DLL boundary.
-pub const ApiVersion: u32 = 2;
+pub const ApiVersion: u32 = 3;
 
 pub const GeneratorInfo = struct {
     name: []const u8,
@@ -22,9 +22,9 @@ pub const CreateOptions = struct {
 };
 
 /// The value of a single config parameter. Config trees are plain data: all
-/// strings are allocated with the allocator that created the tree, so the
-/// host can free, clone, and serialize them without knowing the generator's
-/// concrete config type.
+/// Config keys, values, and choice entries are allocated with the allocator
+/// that created the tree. Presentation metadata in `Spec` is borrowed from the
+/// generator library, so it remains valid while that library is loaded.
 pub const Value = union(enum) {
     group: Group,
     array: Array,
@@ -41,6 +41,10 @@ pub const Value = union(enum) {
 /// Rendering hints for a param. `entries` doubles as the dropdown options for
 /// `.choice` values and as preset names for struct-valued params.
 pub const Spec = struct {
+    /// Optional user-facing label. The host derives one from the field name when empty.
+    label: []const u8 = "",
+    /// Optional explanation shown by the host UI.
+    description: []const u8 = "",
     min: ?f64 = null,
     max: ?f64 = null,
     step: ?f64 = null,
@@ -49,6 +53,8 @@ pub const Spec = struct {
     is_seed: bool = false,
     /// Excludes the field from the config tree entirely.
     skip: bool = false,
+    /// Hides the field until the host's advanced settings are enabled.
+    advanced: bool = false,
 };
 
 pub const Param = struct {
@@ -131,6 +137,7 @@ fn paramEql(a: *const Param, b: *const Param) bool {
     if (!std.mem.eql(u8, a.name, b.name)) return false;
     if (a.spec.min != b.spec.min or a.spec.max != b.spec.max) return false;
     if (a.spec.step != b.spec.step or a.spec.is_seed != b.spec.is_seed) return false;
+    if (a.spec.advanced != b.spec.advanced) return false;
     if (!entriesEql(a.spec.entries, b.spec.entries)) return false;
     return valueEql(&a.value, &b.value);
 }
@@ -254,21 +261,26 @@ fn emitString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 }
 
 /// Looks up a field's spec entry. The spec map is flat: entries apply to
-/// every struct at any nesting depth that has a field with that name.
+/// every struct at any nesting depth that has a field with the same name.
 fn fieldSpec(comptime field_specs: anytype, comptime name: []const u8) Spec {
     if (!@hasField(@TypeOf(field_specs), name)) return .{};
     const s = @field(field_specs, name);
-    const is_spec = @hasField(@TypeOf(s), "min") or @hasField(@TypeOf(s), "max") or
+    const is_spec = @hasField(@TypeOf(s), "label") or @hasField(@TypeOf(s), "description") or
+        @hasField(@TypeOf(s), "min") or @hasField(@TypeOf(s), "max") or
         @hasField(@TypeOf(s), "step") or @hasField(@TypeOf(s), "entries") or
-        @hasField(@TypeOf(s), "is_seed") or @hasField(@TypeOf(s), "skip");
+        @hasField(@TypeOf(s), "is_seed") or @hasField(@TypeOf(s), "skip") or
+        @hasField(@TypeOf(s), "advanced");
     if (!is_spec) return .{};
     return .{
+        .label = if (@hasField(@TypeOf(s), "label")) s.label else "",
+        .description = if (@hasField(@TypeOf(s), "description")) s.description else "",
         .min = if (@hasField(@TypeOf(s), "min")) s.min else null,
         .max = if (@hasField(@TypeOf(s), "max")) s.max else null,
         .step = if (@hasField(@TypeOf(s), "step")) s.step else null,
         .entries = if (@hasField(@TypeOf(s), "entries")) s.entries else &.{},
         .is_seed = if (@hasField(@TypeOf(s), "is_seed")) s.is_seed else false,
         .skip = if (@hasField(@TypeOf(s), "skip")) s.skip else false,
+        .advanced = if (@hasField(@TypeOf(s), "advanced")) s.advanced else false,
     };
 }
 

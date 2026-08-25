@@ -1,14 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const tracy = @import("tracy");
 
 const Block = @import("../Block.zig").Block;
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
-const generator_api = @import("generator_api.zig");
 const JitteredGrid = @import("../structures/JitteredGrid.zig").JitteredGrid;
 const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
+const generator_api = @import("generator_api.zig");
 
 /// Planet placement grid. One grid unit is one level-0 chunk (ChunkSize blocks).
 const Grid = JitteredGrid(3, i32);
@@ -410,14 +411,27 @@ comptime {
 }
 
 const field_specs = .{
-    .seed = .{ .is_seed = true },
-    .density = .{ .min = 1, .max = 100 },
-    .box_size = .{ .min = 1024, .max = 16384 },
-    .max_radius = .{ .min = 128, .max = 1024 },
-    .frequency = .{ .min = 0, .max = 0.5 },
-    .octaves = .{ .min = 1, .max = 16 },
-    .lacunarity = .{ .min = 1, .max = 4 },
-    .gain = .{ .min = 0, .max = 1 },
+    .seed = .{ .is_seed = true, .advanced = true },
+    .density = .{ .label = "Planet Density", .min = 1, .max = 100 },
+    .box_size = .{ .label = "Planet Cell Size", .min = 1024, .max = 16384 },
+    .max_radius = .{ .label = "Maximum Radius", .min = 128, .max = 1024 },
+    .spawn_planet = .{ .label = "Spawn Planet", .description = "Guarantees a planet near the starting position." },
+    .water = .{ .label = "Water" },
+    .stars = .{ .label = "Stars" },
+    .noise_type = .{ .advanced = true },
+    .rotation_type = .{ .advanced = true },
+    .fractal_type = .{ .advanced = true },
+    .cellular_distance = .{ .advanced = true },
+    .cellular_return = .{ .advanced = true },
+    .domain_warp_type = .{ .advanced = true },
+    .frequency = .{ .min = 0, .max = 0.5, .advanced = true },
+    .octaves = .{ .min = 1, .max = 16, .advanced = true },
+    .lacunarity = .{ .min = 1, .max = 4, .advanced = true },
+    .gain = .{ .min = 0, .max = 1, .advanced = true },
+    .weighted_strength = .{ .min = 0, .max = 1, .advanced = true },
+    .ping_pong_strength = .{ .min = 0, .max = 8, .advanced = true },
+    .cellular_jitter_mod = .{ .min = 0, .max = 1, .advanced = true },
+    .domain_warp_amp = .{ .min = 0, .max = 2000, .advanced = true },
 };
 
 const PlanetInstance = struct {

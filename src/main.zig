@@ -117,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
         .config_path = config_path,
         .worlds_path = worlds_path,
         .running = &running,
+        .config_section_states = .init(gpa),
         .ui_window = &ui_window,
         .menu_background = undefined,
     };

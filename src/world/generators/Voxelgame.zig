@@ -1,13 +1,14 @@
 const std = @import("std");
+
 const tracy = @import("tracy");
 
 const Cache = @import("../../libs/Cache.zig").Cache;
 const Block = @import("../Block.zig").Block;
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
-const generator_api = @import("generator_api.zig");
 const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
+const generator_api = @import("generator_api.zig");
 
 pub const Generator = struct {
     pub const Noise = @import("fastnoise");
@@ -333,14 +334,27 @@ pub const Generator = struct {
 };
 
 const field_specs = .{
-    .frequency = .{ .min = 0, .max = 0.5 },
-    .octaves = .{ .min = 1, .max = 16 },
-    .lacunarity = .{ .min = 1, .max = 4 },
-    .gain = .{ .min = 0, .max = 1 },
-    .terrain_min = .{ .min = -100000, .max = 0 },
-    .terrain_max = .{ .min = 0, .max = 100000 },
-    .caveness = .{ .min = -1, .max = 1 },
-    .scale = .{ .min = 0.1, .max = 4 },
+    .seed = .{ .is_seed = true, .advanced = true },
+    .noise_type = .{ .advanced = true },
+    .rotation_type = .{ .advanced = true },
+    .fractal_type = .{ .advanced = true },
+    .cellular_distance = .{ .advanced = true },
+    .cellular_return = .{ .advanced = true },
+    .domain_warp_type = .{ .advanced = true },
+    .frequency = .{ .min = 0, .max = 0.5, .advanced = true },
+    .octaves = .{ .min = 1, .max = 16, .advanced = true },
+    .lacunarity = .{ .min = 1, .max = 4, .advanced = true },
+    .gain = .{ .min = 0, .max = 1, .advanced = true },
+    .weighted_strength = .{ .min = 0, .max = 1, .advanced = true },
+    .ping_pong_strength = .{ .min = 0, .max = 8, .advanced = true },
+    .cellular_jitter_mod = .{ .min = 0, .max = 1, .advanced = true },
+    .domain_warp_amp = .{ .min = 0, .max = 2000, .advanced = true },
+    .terrain_min = .{ .label = "Minimum Height", .min = -100000, .max = 0 },
+    .terrain_max = .{ .label = "Maximum Height", .min = 0, .max = 100000 },
+    .caveness = .{ .label = "Cave Density", .min = -1, .max = 1 },
+    .scale = .{ .label = "Terrain Scale", .min = 0.1, .max = 4 },
+    .caves = .{ .label = "Generate Caves" },
+    .trees = .{ .label = "Generate Trees" },
 };
 
 const generator_info_data: generator_api.GeneratorInfo = .{

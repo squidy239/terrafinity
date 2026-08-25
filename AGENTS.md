@@ -739,7 +739,13 @@ Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen
 
 - `std.zon.parse.free` crashes on values holding comptime-backed defaults (e.g. slices pointing at `@embedFile` data). Parse into a throwaway `std.heap.ArenaAllocator` and discard the arena instead of freeing field-by-field.
 
-### JitteredGrid placement gotchas (Planet generator)
+### Generator config UI metadata
+
+`generator_api.Spec` presentation fields such as `label` and `description` are borrowed from the loaded generator library, while config keys, values, and choice entries are owned by the config allocator. Keep the generator library loaded for as long as its config tree is used. Changes to shared config-tree layouts require incrementing `generator_api.ApiVersion` and rebuilding every generator plugin.
+
+Config widget IDs should be derived from the stable parameter path, not from traversal order. Traversal-order IDs change when an array is edited and can make widget state move to a different field.
+
+## JitteredGrid placement gotchas (Planet generator)
 
 - `JitteredGrid.getStructure` only finds a structure from positions **at or below** it (`structure_pos >= pos_in_box`), and for negative cells the structure position itself goes negative, so the in-range check always fails. Querying cells at negative coordinates silently returns null. If a structure grid must cover the whole world (e.g. planets near spawn on all sides), shift the grid by a large positive constant so every used cell index is positive.
 - The `level` parameter scales the query position by `2^level` internally (`real_position = scale * position`). Querying at position = `cell` with `scale == box_size` lands exactly on the cell origin, where `pos_in_box == 0` and the in-range check reduces to `jitter < scale` — always true when `inner_box_size < box_size`. This is the trick for O(1) "which structure owns this cell" lookups.
