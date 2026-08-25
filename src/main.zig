@@ -236,6 +236,28 @@ pub fn main(init: std.process.Init) !void {
             vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
         }
 
+        if (ui.menu_state.pending_world_recreate) {
+            ui.menu_state.pending_world_recreate = false;
+            if (vk_ctx.deviceWaitIdleLocked(io)) |_| {
+                game.recreateWorld(io, gpa, vk_ctx, &generators) catch |err| {
+                    std.log.err("terrain world recreation failed: {any}", .{err});
+                    ui.terrain_recreate_error = @errorName(err);
+                    const game_closed = switch (err) {
+                        error.RecreatePathAllocationFailed,
+                        error.RecreateConfigSaveFailed,
+                        error.RecreateChunkSaveFailed,
+                        error.RecreateStorageClearFailed,
+                        => false,
+                        else => true,
+                    };
+                    if (game_closed) ui.menu_state = .{ .main = true };
+                };
+            } else |err| {
+                std.log.err("could not wait for the GPU before terrain recreation: {any}", .{err});
+                ui.terrain_recreate_error = @errorName(err);
+            }
+        }
+
         tracy.frameMark(null);
     }
     window.disableRelativeMouse();

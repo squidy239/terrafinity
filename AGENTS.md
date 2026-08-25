@@ -788,4 +788,8 @@ frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
 
 `addFileInput` tracks the dependency without appending it to the glslc argv (unlike `addFileArg`). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` and cross-check against the Zig `@offsetOf` asserts.
 
+### Clearing RocksDB chunk storage
+
+Clear persisted chunks through RocksDB while the database is open, using a `WriteBatch` range tombstone for each chunk column family and flushing both families afterward. Stop background saves and finish the final save before clearing; do not remove the database directory from the filesystem while RocksDB owns it.
+
 ## Almost never use std.mem.zeroes, it can mask bugs and is less explicit

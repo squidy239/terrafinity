@@ -15,15 +15,18 @@ const utils = @import("libs/utils.zig");
 pub const Renderer = @import("Renderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const Chunk = @import("world/Chunk.zig");
+const generator_loader = @import("world/generator_loader.zig");
+const generator_api = @import("world/generators/generator_api.zig");
 const Cone = @import("world/structures/Cone.zig").Cone;
 const Sphere = @import("world/structures/Sphere.zig").Sphere;
 const TexturedSphere = @import("world/structures/TexturedSphere.zig");
-const generator_api = @import("world/generators/generator_api.zig");
-const generator_loader = @import("world/generator_loader.zig");
 const World = @import("world/World.zig");
+
 const Game = @This();
 
 allocator: std.mem.Allocator,
+/// Path to this world's directory, retained so the world can be recreated in place.
+world_path: []const u8,
 world: World,
 player: *EntityTypes.Player,
 vulkan_renderer: Renderer.Vulkan,
@@ -384,10 +387,12 @@ pub fn init(
     vk_ctx: *VulkanContext,
     generators: *generator_loader.Registry,
 ) !void {
+    const owned_world_path = try allocator.dupe(u8, folder);
     game.* = .{
         .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
         .options = game_options,
+        .world_path = owned_world_path,
         .options_lock = game_options_lock,
         .running = .init(true),
         .allocator = undefined,
@@ -401,6 +406,7 @@ pub fn init(
         .entity_registry = .init(),
     };
 
+    errdefer allocator.free(game.world_path);
     try Renderer.Vulkan.init(&game.vulkan_renderer, io, allocator, vk_ctx, &game.options.render_options, game.options_lock);
     errdefer game.vulkan_renderer.deinit(io);
 
@@ -478,7 +484,7 @@ pub fn init(
     try game.spawnPlayer(io, allocator);
 }
 
-pub fn deinit(self: *@This(), io: std.Io) void {
+fn stopBackgroundWork(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
     cancelFuture(io, &self.mesh_unload_future);
@@ -486,21 +492,73 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     cancelFuture(io, &self.load_future);
     self.group.cancel(io);
     self.group.await(io) catch {};
+}
+
+pub fn deinit(self: *@This(), io: std.Io) void {
+    self.stopBackgroundWork(io);
 
     self.vulkan_renderer.deinit(io);
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
     if (self.generator) |*generator| generator.deinit();
     self.loaded_or_meshed.deinit(io, self.allocator);
+    self.allocator.free(self.world_path);
 
     self.game_arena.deinit();
     self.* = undefined;
+}
+
+/// Discards all generated and edited chunks, then opens a fresh world using the
+/// current generator configuration. The caller must wait for the GPU before
+/// calling this because the renderer is fully recreated.
+pub fn recreateWorld(
+    self: *@This(),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    vk_ctx: *VulkanContext,
+    generators: *generator_loader.Registry,
+) !void {
+    const game_options = self.options;
+    const options_lock = self.options_lock;
+    const player_pos = self.getPlayerPos(io);
+    self.player.view_direction_mutex.lockUncancelable(io);
+    const view_direction = self.player.view_direction;
+    self.player.view_direction_mutex.unlock(io);
+    const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
+    defer allocator.free(world_path);
+
+    if (self.generator) |*generator| {
+        generator.generator.api.config_set_seeds(&io, generator.config);
+        generator.saveConfig(io) catch return error.RecreateConfigSaveFailed;
+    }
+
+    self.stopBackgroundWork(io);
+    self.world.trySaveAll(io) catch {
+        self.running.store(true, .unordered);
+        return error.RecreateChunkSaveFailed;
+    };
+    self.world_storage.clear() catch {
+        self.running.store(true, .unordered);
+        return error.RecreateStorageClearFailed;
+    };
+
+    self.deinit(io);
+    try self.init(io, allocator, game_options, options_lock, world_path, vk_ctx, generators);
+
+    self.player.physics.mutex.lockUncancelable(io);
+    self.player.physics.pos = player_pos;
+    self.player.physics.mutex.unlock(io);
+    self.player.view_direction_mutex.lockUncancelable(io);
+    self.player.view_direction = view_direction;
+    self.player.view_direction_mutex.unlock(io);
+    self.renderer.updateCameraDirection(view_direction);
 }
 
 fn cancelFuture(io: std.Io, future: anytype) void {
     if (future.*) |*f| {
         f.cancel(io) catch {};
         _ = f.await(io) catch {};
+        future.* = null;
     }
 }
 

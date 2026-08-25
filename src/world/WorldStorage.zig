@@ -92,7 +92,24 @@ fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chu
 
 const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 
-///saves a chunk to the database according to the configured save mode
+/// Removes every persisted chunk from both storage column families using RocksDB range tombstones.
+pub fn clear(self: *@This()) !void {
+    var write: rocksdb.WriteBatch = .init();
+    defer write.deinit();
+
+    const start_key: []const u8 = &.{};
+    var limit_key: [@sizeOf(ChunkKey) + 1]u8 = @splat(std.math.maxInt(u8));
+    write.deleteRange(self.chunk_grid_column.handle, start_key, &limit_key);
+    write.deleteRange(self.chunkdata_column.handle, start_key, &limit_key);
+
+    var err_str: ?rocksdb.Data = null;
+    defer if (err_str) |s| s.deinit();
+    try self.database.write(write, &err_str);
+    try self.database.flush(self.chunk_grid_column.handle, &err_str);
+    try self.database.flush(self.chunkdata_column.handle, &err_str);
+}
+
+/// Saves a chunk to the database according to the configured save mode.
 pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.ChunkPos) !void {
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();

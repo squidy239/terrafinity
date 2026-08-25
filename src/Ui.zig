@@ -92,6 +92,7 @@ new_game: NewGameState = .{},
 
 /// World awaiting deletion confirmation, owned by the Ui allocator.
 delete_world_name: ?[]const u8 = null,
+terrain_recreate_error: ?[]const u8 = null,
 
 menu_state: struct {
     ingame: bool = false,
@@ -103,6 +104,8 @@ menu_state: struct {
     crosshair: bool = true,
 
     pending_game_deinit: bool = false,
+    pending_world_recreate: bool = false,
+    terrain_developer_settings: bool = false,
 
     /// Returns true if the player is ingame without a menu open
     pub fn is_playing_game(self: @This()) bool {
@@ -162,6 +165,14 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
         const ov = dvui.overlay(@src(), .{ .expand = .both });
         defer ov.deinit();
 
+        if (self.terrain_recreate_error) |message| {
+            dvui.dialog(@src(), frame_time, .{
+                .message = message,
+                .title = "Terrain recreation failed",
+            });
+            self.terrain_recreate_error = null;
+        }
+
         if (self.menu_state.debug_info and self.menu_state.ingame and !menu_changed) self.debugInfo(io) catch |err| {
             std.log.err("debugInfo failed: {}", .{err});
         };
@@ -176,6 +187,7 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
             showWorldError(frame_time, err);
             break :blk false;
         };
+        if (self.menu_state.ingame and self.menu_state.terrain_developer_settings) self.drawTerrainDeveloperSettings(gpa);
     }
     _ = try self.ui_window.end(.{});
 }
@@ -388,6 +400,17 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     drawGeneralSettings(self, options);
     drawRenderSettings(self, allocator, options);
 
+    if (self.menu_state.ingame and dvui.button(@src(), "Terrain Developer Settings", .{}, .{
+        .gravity_x = 0.5,
+        .expand = .none,
+        .padding = .{ .x = 6, .w = 6, .y = 4, .h = 4 },
+        .margin = .{ .y = 8 },
+        .font = .{ .size = 10 },
+        .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
+    })) {
+        self.menu_state.terrain_developer_settings = true;
+    }
+
     normalizeSettings(options);
 
     const config_changed = !std.meta.eql(first_config, self.config.*);
@@ -547,6 +570,71 @@ fn drawAdvancedShadowSettings(shadow: *ShadowConfig, root_id: u64) void {
     _ = configSlider("Minimum Sun Elevation (degrees)", &shadow.min_sun_elevation_deg, .{}, 0, 45, configId(root_id, "min_sun_elevation_deg"));
     _ = configSlider("Maximum Depth Range", &shadow.max_depth_range, .{}, 1, 131072, configId(root_id, "max_depth_range"));
     _ = configSlider("Minimum Chunk Size (texels)", &shadow.min_chunk_texels, .{}, 0, 16, configId(root_id, "min_chunk_texels"));
+}
+
+fn drawTerrainDeveloperSettings(self: *@This(), allocator: std.mem.Allocator) void {
+    var open = true;
+    const window = dvui.floatingWindow(
+        @src(),
+        .{ .modal = false, .resize = .none, .open_flag = &open },
+        .{ .max_size_content = .{ .w = 760, .h = 720 } },
+    );
+    defer window.deinit();
+
+    window.dragAreaSet(dvui.windowHeader("Terrain Developer Settings", "", &open));
+    if (!open) {
+        self.menu_state.terrain_developer_settings = false;
+        return;
+    }
+
+    const contents = dvui.scrollArea(@src(), .{ .vertical_bar = .auto }, .{ .expand = .both });
+    defer contents.deinit();
+
+    {
+        const warning = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .r = 96, .g = 24, .b = 24, .a = 255 },
+            .border = .all(4),
+            .color_border = .red,
+            .padding = .{ .x = 16, .w = 16, .y = 12, .h = 12 },
+            .margin = .{ .y = 8 },
+        });
+        defer warning.deinit();
+
+        dvui.labelNoFmt(@src(), "WARNING: THIS WILL DELETE THE WORLD", .{}, .{
+            .font = .{ .size = 18 },
+            .color_fill = .white,
+            .gravity_x = 0.5,
+        });
+        dvui.labelNoFmt(@src(), "Recreating the terrain permanently deletes this world's saved chunks and regenerates them from the settings below.", .{}, .{
+            .color_fill = .white,
+            .gravity_x = 0.5,
+            .padding = .{ .y = 8, .h = 8 },
+        });
+    }
+
+    if (self.game.generator) |*generator| {
+        dvui.labelNoFmt(@src(), generator.generator.info.name, .{}, .{ .font = .{ .size = 20 }, .gravity_x = 0.5 });
+        if (generator.generator.info.description.len > 0) {
+            dvui.labelNoFmt(@src(), generator.generator.info.description, .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 8 } });
+        }
+        _ = drawConfigTree(self, allocator, generator.config);
+    } else {
+        dvui.labelNoFmt(@src(), "No generator is loaded.", .{}, .{ .gravity_x = 0.5 });
+    }
+
+    if (dvui.button(@src(), "Recreate World", .{}, .{
+        .expand = .horizontal,
+        .color_fill = .red,
+        .margin = .{ .y = 12 },
+        .padding = .{ .y = 12, .h = 12 },
+    })) {
+        self.menu_state.pending_world_recreate = true;
+    }
+    if (dvui.button(@src(), "Close", .{}, .{ .gravity_x = 0.5, .margin = .{ .y = 8 } })) {
+        self.menu_state.terrain_developer_settings = false;
+    }
 }
 
 fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
