@@ -40,14 +40,6 @@ const RenderBufferKey = union(enum) {
 
 const batch_size = 64;
 const pending_queue_size = 512;
-/// Main-thread draw work (processPendingUploads/processRetired) stops retiring
-/// after this long and defers the rest to later frames, so a loading burst can
-/// never stall a frame past the ~0.5ms main-thread budget.
-const retire_drain_budget_ns = 400 * std.time.ns_per_us;
-/// Deadline for drains that must run to completion. Worker threads draining to release
-/// upload resources have no frame to protect, and truncating them there only forces more
-/// GPU waits, or spins when the pass ends without freeing a queue slot.
-const unbounded_drain_deadline: std.Io.Timestamp = .fromNanoseconds(std.math.maxInt(i96));
 /// Stack scratch for one chunk's meshing; larger meshes spill to the fallback allocator.
 const mesh_scratch_bytes = 64 * 1024;
 
@@ -77,6 +69,22 @@ const RetiredMeshEntry = struct {
     mesh: gpu.MeshBuffer,
     graphics_timeline_value: u64,
     free_index: bool,
+};
+
+/// Scene-side effect of a completed upload, applied by publishPending inside the
+/// frame's GPU-idle window. Recording is cheap so the drain task can defer every
+/// candidate-buffer write until the cull cannot be reading it.
+const Publication = union(enum) {
+    /// Uploaded mesh to publish at the key.
+    retire: struct {
+        mesh: gpu.MeshBuffer,
+        key: RenderBufferKey,
+        chunk_pos: ChunkPos,
+    },
+    /// No mesh arrived for the key: drop whatever sits there.
+    remove: RenderBufferKey,
+    /// A retired mesh's candidate slot is safe to free now.
+    free_index: u32,
 };
 
 const PushConstants = extern struct {
@@ -194,7 +202,13 @@ pending_uploads_queue_buffer: [pending_queue_size]PendingMeshUpload = undefined,
 peeked_upload: ?PendingMeshUpload = null,
 submission_batch: SubmissionBatch = .{},
 retire_mutex: std.Io.Mutex = .init,
+retired_meshes_mutex: std.Io.Mutex = .init,
 retired_meshes: std.ArrayList(RetiredMeshEntry) = undefined,
+pending_publications: std.ArrayList(Publication) = undefined,
+/// Frame-thread-only scratch that receives the stolen publication list each publish.
+publish_scratch: std.ArrayList(Publication) = undefined,
+drain_is_running: std.atomic.Value(bool) = .init(false),
+drain_future: ?std.Io.Future(@typeInfo(@TypeOf(drainOnce)).@"fn".return_type.?) = null,
 
 pub fn init(
     self: *ChunkRenderer,
@@ -229,6 +243,8 @@ pub fn init(
         .block_materials = undefined,
     };
     self.retired_meshes = .empty;
+    self.pending_publications = .empty;
+    self.publish_scratch = .empty;
 
     self.pending_uploads_queue = std.Io.Queue(PendingMeshUpload).init(&self.pending_uploads_queue_buffer);
     self.peeked_upload = null;
@@ -257,6 +273,12 @@ pub fn init(
 }
 
 pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
+    // Stop the background drain before touching any state it shares with the queues.
+    if (self.drain_future) |*future| {
+        future.cancel(io) catch {};
+        _ = future.await(io) catch {};
+        self.drain_future = null;
+    }
     if (self.peeked_upload) |pending| self.destroyPendingUpload(io, pending);
     while (true) {
         var buf: PendingMeshUpload = undefined;
@@ -266,6 +288,13 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
     }
     for (self.retired_meshes.items) |entry| self.uploader.freeMesh(io, entry.mesh, 0);
     self.retired_meshes.deinit(self.allocator);
+    for (self.pending_publications.items) |publication| switch (publication) {
+        .retire => |r| self.uploader.freeMesh(io, r.mesh, 0),
+        .remove => {},
+        .free_index => {},
+    };
+    self.pending_publications.deinit(self.allocator);
+    self.publish_scratch.deinit(self.allocator);
 
     var it = self.meshes.iterator();
     defer it.deinit(io);
@@ -288,7 +317,7 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
 
 fn flushUploads(ctx: *anyopaque, io: std.Io) !void {
     const self: *ChunkRenderer = @ptrCast(@alignCast(ctx));
-    try self.processPendingUploads(io, unbounded_drain_deadline);
+    try self.processPendingUploads(io);
 }
 
 pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
@@ -502,9 +531,8 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
         if (try self.pending_uploads_queue.put(io, &.{pending}, 0) == 1) return;
         // The queue is full. A retire pass either frees a slot (something retired)
         // or holds the front item out as the peek; in both cases the next put
-        // succeeds against the freed slot. The pass must not be budgeted: ending it
-        // early can do neither, leaving no peek to wait on and spinning this loop.
-        try self.retireCompletedUploads(io, unbounded_drain_deadline);
+        // succeeds against the freed slot.
+        try self.retireCompletedUploads(io);
         if (self.peeked_upload) |front| {
             // The front item's batch is the oldest pending transfer, so waiting on
             // its timeline value is satisfied by already-submitted work; the next
@@ -529,16 +557,6 @@ fn requeuePendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUp
     _ = self.pending_uploads_queue.putUncancelable(io, (&pending)[0..1], 1) catch unreachable;
 }
 
-/// Retires one half of a pending upload; on failure re-queues the item so a
-/// persistent error cannot wedge the queue.
-fn retireOrRequeue(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUpload, mesh: ?gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
-    self.retireOnePendingItem(io, mesh, key, chunk_pos) catch |err| {
-        self.requeuePendingUpload(io, pending);
-        self.peeked_upload = null;
-        return err;
-    };
-}
-
 fn destroyMeshBuffer(self: *ChunkRenderer, io: std.Io, mesh: gpu.MeshBuffer) void {
     self.uploader.freeMesh(io, mesh, self.vk_ctx.frame_number.load(.acquire));
 }
@@ -554,8 +572,12 @@ fn destroyPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUp
     if (pending.pool != .null_handle) self.uploader.returnPool(pending.pool);
 }
 
-fn enqueueRetiredMesh(self: *ChunkRenderer, gpu_index: u32, mesh: gpu.MeshBuffer, free_index: bool) !void {
+fn enqueueRetiredMesh(self: *ChunkRenderer, io: std.Io, gpu_index: u32, mesh: gpu.MeshBuffer, free_index: bool) !void {
     const retire_frame = self.vk_ctx.frame_number.load(.acquire);
+    // The frame publishes while the drain task frees due entries, so the list needs
+    // its own lock: publishPending never holds retire_mutex across an apply.
+    self.retired_meshes_mutex.lockUncancelable(io);
+    defer self.retired_meshes_mutex.unlock(io);
     try self.retired_meshes.append(self.allocator, .{
         .gpu_index = gpu_index,
         .mesh = mesh,
@@ -564,19 +586,29 @@ fn enqueueRetiredMesh(self: *ChunkRenderer, gpu_index: u32, mesh: gpu.MeshBuffer
     });
 }
 
-fn retireOnePendingItem(self: *ChunkRenderer, io: std.Io, mesh: ?gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
+/// Records one half of a completed upload for publishPending. Callers reserve before
+/// appending; on failure the whole item is requeued because its pool is still held.
+fn recordHalf(self: *ChunkRenderer, pending: PendingMeshUpload, key: RenderBufferKey, mesh: ?gpu.MeshBuffer) void {
     if (mesh) |uploaded_mesh| {
-        try self.retireUploadedMesh(io, uploaded_mesh, key, chunk_pos);
+        self.pending_publications.appendAssumeCapacity(.{ .retire = .{
+            .mesh = uploaded_mesh,
+            .key = key,
+            .chunk_pos = pending.chunk_pos,
+        } });
     } else {
-        const existing = self.meshes.fetchRemove(io, key);
-        if (existing) |old_mesh| {
-            self.scene.markInactive(old_mesh.gpu_index);
-            try self.enqueueRetiredMesh(old_mesh.gpu_index, old_mesh, true);
-        }
+        self.pending_publications.appendAssumeCapacity(.{ .remove = key });
     }
 }
 
-fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
+fn applyRemoveUpload(self: *ChunkRenderer, io: std.Io, key: RenderBufferKey) !void {
+    const existing = self.meshes.fetchRemove(io, key);
+    if (existing) |old_mesh| {
+        self.scene.markInactive(old_mesh.gpu_index);
+        try self.enqueueRetiredMesh(io, old_mesh.gpu_index, old_mesh, true);
+    }
+}
+
+fn applyRetireUpload(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuffer, key: RenderBufferKey, chunk_pos: ChunkPos) !void {
     var new_mesh = new_mesh_in;
 
     const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
@@ -601,7 +633,7 @@ fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuf
         new_mesh.gpu_index = old_mesh.gpu_index;
         self.scene.writeCandidate(old_mesh.gpu_index, new_mesh, is_transparent, transform);
         const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
-        if (removed) |old| try self.enqueueRetiredMesh(old.gpu_index, old, false);
+        if (removed) |old| try self.enqueueRetiredMesh(io, old.gpu_index, old, false);
     } else {
         const gpu_idx = try self.scene.allocIndex(io);
         new_mesh.gpu_index = gpu_idx;
@@ -609,7 +641,7 @@ fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuf
         self.scene.updateMaxAllocatedIndex(gpu_idx);
 
         const removed = self.meshes.fetchPut(io, self.allocator, key, new_mesh) catch |err| {
-            // Roll back so a retry of this pending item starts from a clean slate:
+            // Roll back so a retry of this publish starts from a clean slate:
             // without this the slot would keep drawing an unregistered mesh and the
             // index would be permanently consumed.
             self.scene.releaseCandidate(io, gpu_idx);
@@ -617,12 +649,12 @@ fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuf
         };
         if (removed) |old| {
             self.scene.markInactive(old.gpu_index);
-            try self.enqueueRetiredMesh(old.gpu_index, old, true);
+            try self.enqueueRetiredMesh(io, old.gpu_index, old, true);
         }
     }
 }
 
-fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
+fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "retireCompletedUploads" });
     defer zone.end();
 
@@ -633,8 +665,6 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Tim
     self.uploader.retireStaging(io, current_transfer_val);
 
     while (true) {
-        if (pastDeadline(io, deadline)) break;
-
         const pending = if (self.peeked_upload) |pending_upload| pending_upload else blk: {
             var pending_buffer: PendingMeshUpload = undefined;
             const got = try self.pending_uploads_queue.get(io, (&pending_buffer)[0..1], 0);
@@ -643,8 +673,15 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Tim
         };
 
         if (current_transfer_val >= pending.timeline_value) {
-            try self.retireOrRequeue(io, pending, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
-            try self.retireOrRequeue(io, pending, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
+            // Two records per item; reserve first so the appends cannot fail, and a
+            // failed reserve requeues the untouched item for the next pass.
+            self.pending_publications.ensureUnusedCapacity(self.allocator, 2) catch |err| {
+                self.requeuePendingUpload(io, pending);
+                self.peeked_upload = null;
+                return err;
+            };
+            self.recordHalf(pending, .{ .@"opaque" = pending.chunk_pos }, pending.opaque_mesh);
+            self.recordHalf(pending, .{ .transparent = pending.chunk_pos }, pending.transparent_mesh);
 
             if (pending.pool != .null_handle) self.uploader.returnPool(pending.pool);
             self.peeked_upload = null;
@@ -655,30 +692,84 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Tim
     }
 }
 
-/// Deadline for all main-thread drain work combined, so the frame budget
-/// covers processPendingUploads and processRetired together.
-pub fn newDrainDeadline(io: std.Io) std.Io.Timestamp {
-    return std.Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(retire_drain_budget_ns));
+/// Applies completed uploads in the frame's GPU-idle window; never waits on the drain.
+/// A failed apply is refunded and retried next frame instead of failing the frame.
+pub fn publishPending(self: *ChunkRenderer, io: std.Io) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "publishPending" });
+    defer zone.end();
+
+    // Swap the whole list out rather than stealing a slice: the drain task appends to
+    // the same backing buffer, so a stolen slice would be clobbered mid-iteration.
+    self.retire_mutex.lockUncancelable(io);
+    std.mem.swap(std.ArrayList(Publication), &self.publish_scratch, &self.pending_publications);
+    self.retire_mutex.unlock(io);
+    defer self.publish_scratch.clearRetainingCapacity();
+
+    const pending = self.publish_scratch.items;
+    for (pending, 0..) |publication, i| {
+        self.applyPublication(io, publication) catch |err| {
+            std.log.err("ChunkRenderer: publication failed (error {s}); retrying next frame", .{@errorName(err)});
+            self.requeuePublications(io, pending[i..]);
+            return;
+        };
+    }
 }
 
-fn pastDeadline(io: std.Io, deadline: std.Io.Timestamp) bool {
-    return std.Io.Timestamp.now(io, .awake).nanoseconds > deadline.nanoseconds;
+fn applyPublication(self: *ChunkRenderer, io: std.Io, publication: Publication) !void {
+    switch (publication) {
+        .retire => |r| try self.applyRetireUpload(io, r.mesh, r.key, r.chunk_pos),
+        .remove => |key| try self.applyRemoveUpload(io, key),
+        .free_index => |gpu_index| self.scene.releaseCandidate(io, gpu_index),
+    }
 }
 
-pub fn processPendingUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
+/// Returns unapplied publications to the list, in order, for the next frame.
+fn requeuePublications(self: *ChunkRenderer, io: std.Io, tail: []const Publication) void {
+    self.retire_mutex.lockUncancelable(io);
+    defer self.retire_mutex.unlock(io);
+    self.pending_publications.appendSlice(self.allocator, tail) catch |err| {
+        std.log.warn("ChunkRenderer: dropping publications (error {s})", .{@errorName(err)});
+    };
+}
+
+/// Submits the pending upload batch and retires completed transfers. Called by the
+/// drain task and by the uploader's flush backpressure; never runs on the frame path.
+fn processPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processPendingUploads" });
     defer zone.end();
 
     try self.submitBatch(io);
-    try self.retireCompletedUploads(io, deadline);
+    try self.retireCompletedUploads(io);
 }
 
 pub fn flushPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
     try self.submitBatch(io);
 }
 
+/// One full drain pass: flush the submission batch, retire completed uploads and
+/// free retired GPU resources. Runs to completion on a background task without any
+/// frame time budget; scene-side writes go through publishPending's idle window.
+fn drainOnce(self: *ChunkRenderer, io: std.Io) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "drainOnce" });
+    defer zone.end();
+    defer self.drain_is_running.store(false, .seq_cst);
+
+    try self.processPendingUploads(io);
+    try self.processRetired(io);
+}
+
+/// Mirrors the loader's restartFuture: when the previous pass finished, reap it and
+/// dispatch the next one. The frame never waits on a pass that is still running.
+pub fn restartDrain(self: *ChunkRenderer, io: std.Io) !void {
+    if (self.drain_is_running.load(.seq_cst)) return;
+    if (self.drain_future) |*future| try future.await(io);
+
+    self.drain_is_running.store(true, .seq_cst);
+    self.drain_future = io.concurrent(drainOnce, .{ self, io }) catch io.async(drainOnce, .{ self, io });
+}
+
 /// Retires GPU resources once the graphics timeline passes their recorded frame.
-pub fn processRetired(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
+fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processRetired" });
     defer zone.end();
 
@@ -691,16 +782,24 @@ pub fn processRetired(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timesta
     self.scene.processRetired(current_graphics_val);
 
     const items = &self.retired_meshes;
+    self.retired_meshes_mutex.lockUncancelable(io);
+    defer self.retired_meshes_mutex.unlock(io);
     var i: usize = items.items.len;
     while (i > 0) {
         i -= 1;
         const entry = items.items[i];
         if (current_graphics_val >= entry.graphics_timeline_value) {
-            if (entry.free_index) self.scene.releaseCandidate(io, entry.gpu_index);
+            if (entry.free_index) {
+                // Freeing a candidate slot writes the candidate buffer, so it is routed
+                // through publishPending's idle window like every other scene write.
+                self.pending_publications.append(self.allocator, .{ .free_index = entry.gpu_index }) catch |err| {
+                    std.log.warn("ChunkRenderer: deferring candidate slot free (error {s}); retrying next pass", .{@errorName(err)});
+                    continue; // entry stays queued; retry on the next pass
+                };
+            }
             self.uploader.freeMesh(io, entry.mesh, current_graphics_val);
             _ = items.swapRemove(i);
         }
-        if (pastDeadline(io, deadline)) break;
     }
 }
 

@@ -282,9 +282,10 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     const current_frame = frame_ctx.frame_index;
 
-    const drain_deadline = ChunkRenderer.newDrainDeadline(io);
-    try self.chunk.processPendingUploads(io, drain_deadline);
-    try self.chunk.processRetired(io, drain_deadline);
+    // The drain runs on a background task; the frame reaps a finished pass and
+    // publishes its scene effects now that beginFrame has proven the GPU idle.
+    try self.chunk.restartDrain(io);
+    self.chunk.publishPending(io);
 
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
