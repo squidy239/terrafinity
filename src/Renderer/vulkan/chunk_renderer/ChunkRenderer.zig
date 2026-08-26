@@ -1,26 +1,25 @@
 const std = @import("std");
+
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-
 const DeviceProxy = vk.DeviceProxy;
 
 const ConcurrentHashMap = @import("../../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
-const Mesher = @import("../../Mesher.zig");
-const BFA = @import("../../../world/BufferFirstAllocator.zig");
-const Chunk = @import("../../../world/Chunk.zig");
 const Renderer = @import("../../../Renderer.zig");
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
+const BFA = @import("../../../world/BufferFirstAllocator.zig");
+const Chunk = @import("../../../world/Chunk.zig");
 const World = @import("../../../world/World.zig");
-const Frustum = @import("../Frustum.zig").Frustum;
-const core = @import("../core.zig");
-const gpu = @import("../gpu.zig");
-const OitCompositor = @import("../OitCompositor.zig").OitCompositor;
-const textures = @import("textures.zig");
-const BlockMaterials = @import("BlockMaterials.zig").BlockMaterials;
-const ShadowRenderer = @import("../shadow/ShadowRenderer.zig").ShadowRenderer;
-const DepthPyramid = @import("../occlusion/DepthPyramid.zig").DepthPyramid;
-
 const ChunkPos = World.ChunkPos;
+const Mesher = @import("../../Mesher.zig");
+const core = @import("../core.zig");
+const Frustum = @import("../Frustum.zig").Frustum;
+const gpu = @import("../gpu.zig");
+const DepthPyramid = @import("../occlusion/DepthPyramid.zig").DepthPyramid;
+const OitCompositor = @import("../OitCompositor.zig").OitCompositor;
+const ShadowRenderer = @import("../shadow/ShadowRenderer.zig").ShadowRenderer;
+const BlockMaterials = @import("BlockMaterials.zig").BlockMaterials;
+const textures = @import("textures.zig");
 
 const vertex_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("vert_spv")));
 const fragment_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embedFile("frag_spv")));
@@ -703,13 +702,18 @@ pub fn publishPending(self: *ChunkRenderer, io: std.Io) void {
     self.retire_mutex.lockUncancelable(io);
     std.mem.swap(std.ArrayList(Publication), &self.publish_scratch, &self.pending_publications);
     self.retire_mutex.unlock(io);
-    defer self.publish_scratch.clearRetainingCapacity();
+    var clear_scratch = true;
+    defer if (clear_scratch) self.publish_scratch.clearRetainingCapacity();
 
     const pending = self.publish_scratch.items;
     for (pending, 0..) |publication, i| {
         self.applyPublication(io, publication) catch |err| {
             std.log.err("ChunkRenderer: publication failed (error {s}); retrying next frame", .{@errorName(err)});
-            self.requeuePublications(io, pending[i..]);
+            // Keep the unapplied tail in the scratch list. The next call swaps it
+            // back into pending_publications without needing another allocation.
+            @memmove(self.publish_scratch.items, self.publish_scratch.items[i..]);
+            self.publish_scratch.items.len -= i;
+            clear_scratch = false;
             return;
         };
     }
@@ -721,15 +725,6 @@ fn applyPublication(self: *ChunkRenderer, io: std.Io, publication: Publication) 
         .remove => |key| try self.applyRemoveUpload(io, key),
         .free_index => |gpu_index| self.scene.releaseCandidate(io, gpu_index),
     }
-}
-
-/// Returns unapplied publications to the list, in order, for the next frame.
-fn requeuePublications(self: *ChunkRenderer, io: std.Io, tail: []const Publication) void {
-    self.retire_mutex.lockUncancelable(io);
-    defer self.retire_mutex.unlock(io);
-    self.pending_publications.appendSlice(self.allocator, tail) catch |err| {
-        std.log.warn("ChunkRenderer: dropping publications (error {s})", .{@errorName(err)});
-    };
 }
 
 /// Submits the pending upload batch and retires completed transfers. Called by the

@@ -1,8 +1,9 @@
 const std = @import("std");
+
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-
 const DeviceProxy = vk.DeviceProxy;
+
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 const core = @import("core.zig");
 
@@ -113,16 +114,22 @@ pub const StagingRing = struct {
         // caller's retry loop; fail loudly instead.
         if (total > self.mapping.len) return error.StagingTooLarge;
 
-        if (self.head + total > self.mapping.len) {
-            if (self.entries.items.len > 0) return null;
-            self.head = 0;
+        const wraps = self.head + total > self.mapping.len;
+        if (wraps and self.entries.items.len > 0) return null;
+
+        var entry_count: usize = 0;
+        for (sizes) |size| {
+            if (size != 0) entry_count += 1;
         }
+        try self.entries.ensureUnusedCapacity(self.allocator, entry_count);
+
+        if (wraps) self.head = 0;
 
         var result: [2]?[]u8 = .{ null, null };
         for (sizes, &result) |size, *slot| {
             if (size == 0) continue;
             const slice = self.mapping[self.head..][0..@intCast(size)];
-            self.entries.append(self.allocator, .{ .ptr = slice.ptr, .timeline_value = null }) catch |err| return err;
+            self.entries.appendAssumeCapacity(.{ .ptr = slice.ptr, .timeline_value = null });
             self.head += std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
             slot.* = slice;
         }
@@ -1099,7 +1106,7 @@ pub const IndirectScene = struct {
     buffers_version: u32 = 0,
 
     draw_capacity: u32 = 4096,
-    max_draw_indirect_count: u32 = 65_535,
+    max_draw_indirect_count: u32 = fallback_max_draw_indirect_count,
 
     /// One u32 per candidate slot: nonzero when the mesh passed last frame's late cull.
     /// Written by the late cull, read by the early cull; wrong bits only cost perf
@@ -1123,6 +1130,10 @@ pub const IndirectScene = struct {
             .memory = memory,
         };
 
+        self.max_draw_indirect_count = if (vk_ctx.props.limits.max_draw_indirect_count > 0)
+            vk_ctx.props.limits.max_draw_indirect_count
+        else
+            fallback_max_draw_indirect_count;
         self.draw_capacity = initial_draw_capacity;
 
         const persistent_candidates_slice = try memory.cpuToGpu().alloc(MeshCandidate, initial_candidates);
@@ -1310,7 +1321,7 @@ pub const IndirectScene = struct {
         // panicking (e.g. splitting the draw into multiple dispatches).
         if (new_capacity > self.max_draw_indirect_count) {
             std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, self.max_draw_indirect_count });
-            @panic("IndirectScene: draw capacity exceeds device max indirect count");
+            return error.MaxDrawCapacityExceeded;
         }
         return new_capacity;
     }

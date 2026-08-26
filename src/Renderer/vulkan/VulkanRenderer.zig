@@ -2,24 +2,23 @@ const std = @import("std");
 
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-const zm = @import("zm");
-
 const DeviceProxy = vk.DeviceProxy;
+const zm = @import("zm");
 
 const Renderer = @import("../../Renderer.zig");
 const FrameDrawContext = Renderer.FrameDrawContext;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
-const Mesher = @import("../Mesher.zig");
 const Chunk = @import("../../world/Chunk.zig");
 const World = @import("../../world/World.zig");
 const ChunkPos = World.ChunkPos;
+const Mesher = @import("../Mesher.zig");
+const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
 const core = @import("core.zig");
 const gpu = @import("gpu.zig");
-const OitCompositor = @import("OitCompositor.zig").OitCompositor;
-const ChunkRenderer = @import("chunk_renderer/ChunkRenderer.zig").ChunkRenderer;
-const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
-const ShadowRenderer = @import("shadow/ShadowRenderer.zig").ShadowRenderer;
 const DepthPyramid = @import("occlusion/DepthPyramid.zig").DepthPyramid;
+const OitCompositor = @import("OitCompositor.zig").OitCompositor;
+const ShadowRenderer = @import("shadow/ShadowRenderer.zig").ShadowRenderer;
+const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
 
 /// Starting sizes of the indirect scene's candidate and draw-slot buffers; both grow on
 /// demand, so these only set how many chunks fit before the first reallocation.
@@ -375,6 +374,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
 
     try self.dev.endCommandBuffer(frame_ctx.cmd_buffer);
+    self.frame_sequence += 1;
 }
 
 /// Copies the previous frame's GPU cull counters, which the compute pass wrote into the
