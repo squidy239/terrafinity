@@ -1306,9 +1306,11 @@ pub const IndirectScene = struct {
         while (new_capacity < min_capacity) {
             new_capacity = std.math.mul(u32, new_capacity, 2) catch return error.MaxDrawCapacityExceeded;
         }
+        // TODO: handle scenes that outgrow the device's max indirect count instead of
+        // panicking (e.g. splitting the draw into multiple dispatches).
         if (new_capacity > self.max_draw_indirect_count) {
             std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, self.max_draw_indirect_count });
-            return error.MaxDrawCapacityExceeded;
+            @panic("IndirectScene: draw capacity exceeds device max indirect count");
         }
         return new_capacity;
     }

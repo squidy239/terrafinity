@@ -43,6 +43,9 @@ pub const VTable = struct {
     /// Removes the chunk mesh for the given position.
     /// May be called from any thread.
     removeChunk: *const fn (*Implementation, std.Io, ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void,
+    /// Returns true when any mesh currently exists for the given position.
+    /// May be called from any thread.
+    hasMesh: *const fn (*Implementation, std.Io, ChunkPos) bool,
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     recreateSwapchain: *const fn (*Implementation, io: std.Io) anyerror!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
@@ -58,6 +61,11 @@ pub fn addChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos, encoding: Chunk
 /// Removes the chunk mesh for the given position, this function may be called on any thread.
 pub fn removeChunk(self: *@This(), io: std.Io, chunk_pos: ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void {
     return self.vtable.removeChunk(self.userdata, io, chunk_pos);
+}
+
+/// Returns true when any mesh currently exists for the given position.
+pub fn hasMesh(self: *@This(), io: std.Io, chunk_pos: ChunkPos) bool {
+    return self.vtable.hasMesh(self.userdata, io, chunk_pos);
 }
 
 /// Draws all loaded chunk meshes to the screen. Only call on the main thread.

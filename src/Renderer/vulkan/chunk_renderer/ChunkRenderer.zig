@@ -38,8 +38,16 @@ const RenderBufferKey = union(enum) {
     }
 };
 
-const batch_size = 512;
+const batch_size = 64;
 const pending_queue_size = 512;
+/// Main-thread draw work (processPendingUploads/processRetired) stops retiring
+/// after this long and defers the rest to later frames, so a loading burst can
+/// never stall a frame past the ~0.5ms main-thread budget.
+const retire_drain_budget_ns = 400 * std.time.ns_per_us;
+/// Deadline for drains that must run to completion. Worker threads draining to release
+/// upload resources have no frame to protect, and truncating them there only forces more
+/// GPU waits, or spins when the pass ends without freeing a queue slot.
+const unbounded_drain_deadline: std.Io.Timestamp = .fromNanoseconds(std.math.maxInt(i96));
 /// Stack scratch for one chunk's meshing; larger meshes spill to the fallback allocator.
 const mesh_scratch_bytes = 64 * 1024;
 
@@ -280,7 +288,7 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
 
 fn flushUploads(ctx: *anyopaque, io: std.Io) !void {
     const self: *ChunkRenderer = @ptrCast(@alignCast(ctx));
-    try self.processPendingUploads(io);
+    try self.processPendingUploads(io, unbounded_drain_deadline);
 }
 
 pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
@@ -293,7 +301,11 @@ pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding:
     defer opaque_faces.deinit(bfa.allocator());
     var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
     defer transparent_faces.deinit(bfa.allocator());
-    try Mesher.mesh(bfa.allocator(), encoding, neighbor_faces, &opaque_faces, &transparent_faces);
+    {
+        const zone_mesh = tracy.Zone.begin(.{ .src = @src(), .name = "mesh" });
+        defer zone_mesh.end();
+        try Mesher.mesh(bfa.allocator(), encoding, neighbor_faces, &opaque_faces, &transparent_faces);
+    }
 
     try self.addMesh(io, chunk_pos, opaque_faces.items, transparent_faces.items);
 }
@@ -302,17 +314,45 @@ pub fn removeChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos) !void 
     try self.addMesh(io, chunk_pos, &.{}, &.{});
 }
 
+/// Returns true when an opaque or transparent mesh currently exists at the position.
+pub fn hasMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos) bool {
+    return self.meshes.get(io, .{ .@"opaque" = chunk_pos }) != null or
+        self.meshes.get(io, .{ .transparent = chunk_pos }) != null;
+}
+
 pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mesh: []const Mesher.Face, transparent_mesh: []const Mesher.Face) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh" });
     defer zone.end();
 
+    // Nothing to upload: skip command resource acquisition entirely. The clear
+    // still flows through the pending queue so it stays ordered after any
+    // earlier upload of this position; timeline_value 0 retires without
+    // waiting on a transfer because it owns no GPU resources.
+    if (opaque_mesh.len == 0 and transparent_mesh.len == 0) {
+        try self.pushPendingUpload(io, .{
+            .chunk_pos = chunk_pos,
+            .timeline_value = 0,
+            .pool = .null_handle,
+            .opaque_mesh = null,
+            .transparent_mesh = null,
+        });
+        return;
+    }
+
     // Acquire every bounded resource up front, all or nothing: past this point the
     // upload never blocks on acquisition, so whatever it holds is on a bounded path
     // to submission and the uploader's backpressure loops can always make progress.
-    const reservation = try self.uploader.reserveUpload(io, .{
-        @intCast(opaque_mesh.len * @sizeOf(Mesher.Face)),
-        @intCast(transparent_mesh.len * @sizeOf(Mesher.Face)),
-    });
+    const reservation = blk: {
+        const zone_reserve = tracy.Zone.begin(.{ .src = @src(), .name = "reserve_upload" });
+        defer zone_reserve.end();
+        break :blk try self.uploader.reserveUpload(io, .{
+            @intCast(opaque_mesh.len * @sizeOf(Mesher.Face)),
+            @intCast(transparent_mesh.len * @sizeOf(Mesher.Face)),
+        });
+    };
+    // Until the reservation is handed to the submission batch, this call owns the pool,
+    // both staging slices and both face regions. Leaking them on an error path strands
+    // an unbound staging entry, which wedges the FIFO ring permanently.
     errdefer self.uploader.cancelReservation(io, reservation);
 
     const pool = reservation.borrowed.pool;
@@ -462,8 +502,9 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
         if (try self.pending_uploads_queue.put(io, &.{pending}, 0) == 1) return;
         // The queue is full. A retire pass either frees a slot (something retired)
         // or holds the front item out as the peek; in both cases the next put
-        // succeeds against the freed slot.
-        try self.retireCompletedUploads(io);
+        // succeeds against the freed slot. The pass must not be budgeted: ending it
+        // early can do neither, leaving no peek to wait on and spinning this loop.
+        try self.retireCompletedUploads(io, unbounded_drain_deadline);
         if (self.peeked_upload) |front| {
             // The front item's batch is the oldest pending transfer, so waiting on
             // its timeline value is satisfied by already-submitted work; the next
@@ -581,7 +622,7 @@ fn retireUploadedMesh(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuf
     }
 }
 
-fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
+fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "retireCompletedUploads" });
     defer zone.end();
 
@@ -592,6 +633,8 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
     self.uploader.retireStaging(io, current_transfer_val);
 
     while (true) {
+        if (pastDeadline(io, deadline)) break;
+
         const pending = if (self.peeked_upload) |pending_upload| pending_upload else blk: {
             var pending_buffer: PendingMeshUpload = undefined;
             const got = try self.pending_uploads_queue.get(io, (&pending_buffer)[0..1], 0);
@@ -603,7 +646,7 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
             try self.retireOrRequeue(io, pending, pending.opaque_mesh, .{ .@"opaque" = pending.chunk_pos }, pending.chunk_pos);
             try self.retireOrRequeue(io, pending, pending.transparent_mesh, .{ .transparent = pending.chunk_pos }, pending.chunk_pos);
 
-            self.uploader.returnPool(pending.pool);
+            if (pending.pool != .null_handle) self.uploader.returnPool(pending.pool);
             self.peeked_upload = null;
         } else {
             self.peeked_upload = pending;
@@ -612,12 +655,22 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
     }
 }
 
-pub fn processPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
+/// Deadline for all main-thread drain work combined, so the frame budget
+/// covers processPendingUploads and processRetired together.
+pub fn newDrainDeadline(io: std.Io) std.Io.Timestamp {
+    return std.Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(retire_drain_budget_ns));
+}
+
+fn pastDeadline(io: std.Io, deadline: std.Io.Timestamp) bool {
+    return std.Io.Timestamp.now(io, .awake).nanoseconds > deadline.nanoseconds;
+}
+
+pub fn processPendingUploads(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processPendingUploads" });
     defer zone.end();
 
     try self.submitBatch(io);
-    try self.retireCompletedUploads(io);
+    try self.retireCompletedUploads(io, deadline);
 }
 
 pub fn flushPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
@@ -625,7 +678,7 @@ pub fn flushPendingUploads(self: *ChunkRenderer, io: std.Io) !void {
 }
 
 /// Retires GPU resources once the graphics timeline passes their recorded frame.
-pub fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
+pub fn processRetired(self: *ChunkRenderer, io: std.Io, deadline: std.Io.Timestamp) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "processRetired" });
     defer zone.end();
 
@@ -647,6 +700,7 @@ pub fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
             self.uploader.freeMesh(io, entry.mesh, current_graphics_val);
             _ = items.swapRemove(i);
         }
+        if (pastDeadline(io, deadline)) break;
     }
 }
 

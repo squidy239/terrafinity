@@ -176,14 +176,15 @@ fn markSubtree(
 }
 
 fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
+    return self.canUnloadMeshView(io, self.snapshotView(io), chunk_pos);
+}
+
+fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: World.ChunkPos) bool {
     var parent = chunk_pos;
-    _, const highest_level = self.getLevels(io);
-    if (parent.level > highest_level) return true;
-    const player_pos = self.getPlayerPos(io);
-    const render_distance = self.getRenderDistance(io);
-    while (parent.level < highest_level) {
+    if (parent.level > view.highest_level) return true;
+    while (parent.level < view.highest_level) {
         parent = parent.parent();
-        std.debug.assert(parent.level <= highest_level);
+        std.debug.assert(parent.level <= view.highest_level);
         if (self.loaded_or_meshed.get(io, parent)) |par| {
             if (par.is_active) {
                 const state = self.loaded_or_meshed.get(io, chunk_pos) orelse return true;
@@ -193,18 +194,16 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
                 // not flash before the higher-res chunks land. The check is
                 // geometric only, so it cannot race the loader or leak if the
                 // loader stalls.
-                const refine_radius = render_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-                return !keepLoaded(null, null, player_pos, chunk_pos, null, refine_radius);
+                const refine_radius = view.render_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+                return !keepLoaded(null, null, view.player_pos, chunk_pos, null, refine_radius);
             }
         }
     }
-    std.debug.assert(parent.level == highest_level);
+    std.debug.assert(parent.level == view.highest_level);
 
-    {
-        // Check if the highest level parent is out of render distance.
-        const inside_range = keepLoaded(null, null, player_pos, parent, null, render_distance);
-        if (!inside_range) return true;
-    }
+    // Check if the highest level parent is out of render distance.
+    if (!keepLoaded(null, null, view.player_pos, parent, null, view.render_distance)) return true;
+
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     bucket.lock.lockSharedUncancelable(io);
     defer bucket.lock.unlockShared(io);
@@ -822,12 +821,46 @@ fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
     return .{ self.options.render_distance_x, self.options.render_distance_y };
 }
 
+/// Consistent snapshot of everything geometry culling depends on. Taken once
+/// per bulk pass so per-entry checks are lock-free pure functions.
+const ViewSnapshot = struct {
+    lowest_level: i32,
+    highest_level: i32,
+    player_pos: @Vector(3, f64),
+    render_distance: @Vector(2, u32),
+
+    fn innerGenRadius(self: @This(), level: i32) @Vector(2, u32) {
+        return innerRadiusFor(self.lowest_level, self.render_distance, level);
+    }
+
+    fn keepChunkLoaded(self: @This(), chunk_pos: World.ChunkPos) bool {
+        return keepLoaded(self.lowest_level, self.highest_level, self.player_pos, chunk_pos, self.innerGenRadius(chunk_pos.level), self.render_distance);
+    }
+};
+
+/// Levels above the lowest are refined by their children, so their generation ring
+/// stops one chunk short of the child ring it feeds.
+fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
+    if (level <= lowest_level) return @splat(0);
+    const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
+    return inner_radius -| @Vector(2, u32){ 1, 1 };
+}
+
+fn snapshotView(self: *@This(), io: std.Io) ViewSnapshot {
+    const lowest_level, const highest_level = self.getLevels(io);
+    return .{
+        .lowest_level = lowest_level,
+        .highest_level = highest_level,
+        .player_pos = self.getPlayerPos(io),
+        .render_distance = self.getRenderDistance(io),
+    };
+}
+
 fn getInnerGenRadius(self: *@This(), io: std.Io, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "getInnerGenRadius" });
     defer z.end();
-    if (level <= (self.getLevels(io))[0]) return @splat(0);
-    const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-    return inner_radius -| @Vector(2, u32){ 1, 1 };
+    const lowest_level, _ = self.getLevels(io);
+    return innerRadiusFor(lowest_level, gen_distance, level);
 }
 
 fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
@@ -838,13 +871,24 @@ fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
+fn isUniformAir(io: std.Io, chunk: *Chunk) !bool {
+    try chunk.lockShared(io);
+    defer chunk.unlockShared(io);
+    return switch (chunk.encoding) {
+        .uniform => |block| block == .air,
+        .grid => false,
+    };
+}
+
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer GenMeshAndAdd.end();
 
-    // Prevent an old version of the chunk from staying loaded
-    if (!self.keepChunkLoaded(io, chunk_pos) and self.canUnloadMesh(io, chunk_pos)) {
+    // Prevent an old version of the chunk from staying loaded. One snapshot keeps both
+    // halves of the decision consistent.
+    const view = self.snapshotView(io);
+    if (!view.keepChunkLoaded(chunk_pos) and self.canUnloadMeshView(io, view, chunk_pos)) {
         try self.renderer.removeChunk(io, chunk_pos);
         try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
         return;
@@ -852,11 +896,20 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
-    var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
-    inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
-        face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
 
-    {
+    // Uniform air produces no faces against any neighbor, so the extraction and
+    // renderer round-trip are pure overhead unless an old mesh must be cleared.
+    // A concurrent edit that turns this chunk non-air queues its own pass, so
+    // reading the encoding outside the meshing lock cannot strand a missing mesh.
+    if (!try isUniformAir(io, chunk) or self.renderer.hasMesh(io, chunk_pos)) {
+        var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
+        {
+            const zone_faces = tracy.Zone.begin(.{ .src = @src(), .name = "extract_faces" });
+            defer zone_faces.end();
+            inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
+                face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
+        }
+
         const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
         defer chunk_add.end();
         try chunk.lockShared(io);
@@ -912,12 +965,7 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
 }
 
 fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
-    const lowest_level, const highest_level = self.getLevels(io);
-    const player_pos = self.getPlayerPos(io);
-    const gen_distance = self.getRenderDistance(io);
-    const inner_gen_radius = self.getInnerGenRadius(io, gen_distance, chunk_pos.level);
-    const inside_range = keepLoaded(lowest_level, highest_level, player_pos, chunk_pos, inner_gen_radius, gen_distance);
-    return inside_range;
+    return self.snapshotView(io).keepChunkLoaded(chunk_pos);
 }
 
 fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
@@ -1047,9 +1095,12 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     defer unload.end();
     defer self.mesh_unload_is_running.store(false, .seq_cst);
 
+    const view = self.snapshotView(io);
+
     const ChunkCollector = struct {
         game: *Game,
         io: std.Io,
+        view: ViewSnapshot,
         chunks: u64 = 0,
         unloaded: u64 = 0,
         err: ?anyerror = null,
@@ -1057,8 +1108,8 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
         pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) error{Failed}!void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
             ctx.chunks += 1;
-            if (ctx.game.keepChunkLoaded(ctx.io, chunk_pos)) return;
-            if (!ctx.game.canUnloadMesh(ctx.io, chunk_pos)) return; // children not ready
+            if (ctx.view.keepChunkLoaded(chunk_pos)) return;
+            if (!ctx.game.canUnloadMeshView(ctx.io, ctx.view, chunk_pos)) return; // children not ready
 
             ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| {
                 ctx.err = err;
@@ -1075,6 +1126,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     var ctx = ChunkCollector{
         .game = self,
         .io = io,
+        .view = view,
     };
 
     self.renderer.forEachMesh(io, &ctx, ChunkCollector.callback) catch |err| switch (err) {
@@ -1087,7 +1139,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     defer it.deinit(io);
     while (try it.next(io)) |entry| {
         const key = entry.key_ptr.*;
-        if (self.keepChunkLoaded(io, key)) continue;
+        if (view.keepChunkLoaded(key)) continue;
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);

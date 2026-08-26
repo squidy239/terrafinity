@@ -23,8 +23,8 @@ const DepthPyramid = @import("occlusion/DepthPyramid.zig").DepthPyramid;
 
 /// Starting sizes of the indirect scene's candidate and draw-slot buffers; both grow on
 /// demand, so these only set how many chunks fit before the first reallocation.
-const initial_scene_candidates: u32 = 4096;
-const initial_draw_capacity: u32 = 4096;
+const initial_scene_candidates: u32 = 32768;
+const initial_draw_capacity: u32 = 32768;
 const initial_staging_bytes = 64 * 1024 * 1024;
 const uploader_face_quota = 64;
 
@@ -158,6 +158,7 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
         .vtable = &.{
             .addChunk = vtableAddChunk,
             .removeChunk = vtableRemoveChunk,
+            .hasMesh = vtableHasMesh,
             .draw = vtableDraw,
             .recreateSwapchain = vtableRecreateSwapchain,
             .updateCameraDirection = vtableUpdateCameraDirection,
@@ -271,14 +272,19 @@ pub fn removeChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) !void
     try self.chunk.removeChunk(io, chunk_pos);
 }
 
+pub fn hasMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) bool {
+    return self.chunk.hasMesh(io, chunk_pos);
+}
+
 fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
     const current_frame = frame_ctx.frame_index;
 
-    try self.chunk.processPendingUploads(io);
-    try self.chunk.processRetired(io);
+    const drain_deadline = ChunkRenderer.newDrainDeadline(io);
+    try self.chunk.processPendingUploads(io, drain_deadline);
+    try self.chunk.processRetired(io, drain_deadline);
 
     const extent: vk.Extent2D = .{ .width = target.width, .height = target.height };
 
@@ -414,6 +420,11 @@ fn vtableRemoveChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos:
         error.Canceled => return error.Canceled,
         else => return error.RemoveChunkFailed,
     };
+}
+
+fn vtableHasMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos) bool {
+    const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
+    return self.hasMesh(io, chunk_pos);
 }
 
 fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
