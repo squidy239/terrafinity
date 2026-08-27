@@ -373,6 +373,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_end_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
     self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
 
+    self.frame_sequence +%= 1;
+
     try self.dev.endCommandBuffer(frame_ctx.cmd_buffer);
     self.frame_sequence += 1;
 }

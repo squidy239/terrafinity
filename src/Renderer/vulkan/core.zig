@@ -569,7 +569,7 @@ pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load
         .resolve_image_view = .null_handle,
         .resolve_image_layout = .undefined,
         .load_op = load_op,
-        .store_op = if (load_op == .load) .none else .store,
+        .store_op = .store,
         .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
     };
 }

@@ -800,4 +800,8 @@ The upload drain (submitBatch + retireCompletedUploads + processRetired) runs on
 
 `publishPending` must NOT hold `retire_mutex` while applying: the drain task can hold it for the whole pass, so the frame would stall behind it (this caused visible lag). Swap the entire `ArrayList` out under the mutex (`std.mem.swap(std.ArrayList(Publication), &publish_scratch, &pending_publications)`) and apply lock-free from the frame-private scratch. Stealing a _slice_ of the list instead is a memory-safety bug: `clearRetainingCapacity` keeps the backing buffer, so the drain task's next appends overwrite the slice mid-iteration (triggered a `switch on corrupt value` panic). Appends into `retired_meshes` from the apply step race the drain task's `processRetired` sweep, so that list needs its own `retired_meshes_mutex` (lock order: `retire_mutex` → `retired_meshes_mutex`, never reversed).
 
+## Handling persistent VK_SUBOPTIMAL_KHR results
+
+`VK_SUBOPTIMAL_KHR` is a usable result, but applications may recreate to improve surface compatibility. Some variable-extent platforms continue returning it after a valid replacement is installed, so guard against an infinite loop: allow the first suboptimal result to request recreation, then suppress duplicate requests until an explicit physical-size/configuration change resets the guard. Continue handling `VK_ERROR_OUT_OF_DATE_KHR` unconditionally.
+
 ## Almost never use std.mem.zeroes, it can mask bugs and is less explicit

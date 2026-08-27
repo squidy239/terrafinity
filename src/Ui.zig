@@ -419,7 +419,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     self.config_lock.unlock(io);
 
     if (gamma_changed or present_mode_changed) {
-        self.vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+        self.vk_ctx.requestSwapchainRecreate();
     }
 
     if (config_changed) try self.config.save(io, self.config_path, self.config_lock);

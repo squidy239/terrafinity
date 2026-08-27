@@ -75,6 +75,8 @@ swapchain_views: []vk.ImageView = &.{},
 swapchain_image_layouts: []vk.ImageLayout = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
 swapchain_needs_recreate: std.atomic.Value(bool) = .init(false),
+suboptimal_recreate_requested: std.atomic.Value(bool) = .init(false),
+
 present_mode: PresentMode = .mailbox,
 last_present_mode_requested: PresentMode = .mailbox,
 
@@ -884,6 +886,11 @@ pub fn currentFrame(self: *VulkanContext) u32 {
     return self.current_frame_idx.load(.monotonic);
 }
 
+pub fn requestSwapchainRecreate(self: *VulkanContext) void {
+    self.suboptimal_recreate_requested.store(false, .release);
+    self.swapchain_needs_recreate.store(true, .release);
+}
+
 pub const FrameContext = struct {
     frame_index: u32,
     image_index: u32,
@@ -935,8 +942,10 @@ pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 
         };
     };
 
-    if (acquire_result.result == .suboptimal_khr) {
-        self.swapchain_needs_recreate.store(true, .monotonic);
+    if (acquire_result.result == .suboptimal_khr and
+        !self.suboptimal_recreate_requested.swap(true, .acq_rel))
+    {
+        self.swapchain_needs_recreate.store(true, .release);
     }
 
     return acquire_result.image_index;
@@ -1041,7 +1050,11 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         };
     };
     if (present_result == .success or present_result == .suboptimal_khr) {
-        if (present_result == .suboptimal_khr) self.swapchain_needs_recreate.store(true, .monotonic);
+        if (present_result == .suboptimal_khr and
+            !self.suboptimal_recreate_requested.swap(true, .acq_rel))
+        {
+            self.swapchain_needs_recreate.store(true, .release);
+        }
         self.current_frame_idx.store(next_frame, .monotonic);
     }
 }

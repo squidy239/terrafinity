@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui);
+        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
@@ -155,13 +155,13 @@ pub fn main(init: std.process.Init) !void {
                 current_window_mode = .fullscreen;
                 window.setMode(current_window_mode);
             }
-            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+            vk_ctx.requestSwapchainRecreate();
         }
         frame_time = .now(io, .awake);
 
         if (prev_window_size.width != window_size.width or prev_window_size.height != window_size.height) {
             vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
-            vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
+            vk_ctx.requestSwapchainRecreate();
             prev_window_size = window_size;
         }
 
@@ -310,6 +310,8 @@ pub const Config = struct {
 };
 
 var window_size: wio.Size = .{ .height = 480, .width = 640 };
+var window_logical_size: wio.Size = .{ .height = 480, .width = 640 };
+var window_scale: f32 = 1.0;
 
 const embedded_generators = [_]struct { file_name: []const u8, bytes: []const u8 }{
     .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
@@ -409,6 +411,7 @@ fn handleEvents(
     events: *wio.EventQueue,
     ui_window: *dvui.Window,
     ui: *Ui,
+    vk_ctx: *VulkanContext,
 ) !void {
     backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.is_playing_game()) {
@@ -442,7 +445,13 @@ fn handleEvents(
                 const mouse_moved = (mouse.x != 0 or mouse.y != 0);
                 if (ui.menu_state.is_playing_game() and mouse_moved) ui.game.handleMouseMotion(io, mouse);
             },
+            .size_logical => |size| window_logical_size = size,
             .size_physical => |size| window_size = size,
+            .scale => |scale| {
+                window_scale = scale;
+                window_size = window_logical_size.multiply(scale);
+                vk_ctx.requestSwapchainRecreate();
+            },
             else => {},
         }
     }
