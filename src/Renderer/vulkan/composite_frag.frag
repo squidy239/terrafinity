@@ -9,6 +9,7 @@ layout(binding = 3) uniform sampler2D s_volume_weight;
 
 layout(push_constant) uniform CompParams {
     uint scatter_enabled;
+    float scatter_light;
 } pc;
 
 void main() {
@@ -23,10 +24,14 @@ void main() {
 
     if (pc.scatter_enabled != 0u) {
         float td_scalar = texelFetch(s_volume_weight, texel_coord, 0).r;
-        if (td_scalar > 0.0) {
+        // Stacked saturated faces can overflow the f16 volume sum to Inf;
+        // Inf/Inf here would turn pixels into NaN.
+        if (td_scalar > 0.0 && td_scalar < 65504.0) {
             vec3 avg_volume_color = vec3(1.0) - accum.rgb / td_scalar;
             avg_volume_color = clamp(avg_volume_color, 0.01, 1.0);
-            background += avg_volume_color * (vec3(1.0) - transmission);
+            // The volume's absorption stays position-independent so entry/exit
+            // pairs cancel exactly, so day/night light is applied here.
+            background += avg_volume_color * pc.scatter_light * (vec3(1.0) - transmission);
         }
     }
 

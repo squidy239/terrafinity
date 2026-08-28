@@ -1140,6 +1140,7 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         .output_view = ctx.output_view,
         .frame_idx = ctx.frame_idx,
         .scatter_enabled = @intFromBool(!ctx.inside_transparent),
+        .scatter_light = OitCompositor.volumeScatterLight(ctx.sun_dir),
         .swapchain_old_layout = ctx.swapchain_old_layout,
         .swapchain_layout_ptr = ctx.swapchain_layout_ptr,
     }, ctx.color_image);

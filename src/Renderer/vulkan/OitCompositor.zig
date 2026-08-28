@@ -12,6 +12,20 @@ const composite_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @em
 
 const RenderTarget = core.RenderTarget;
 
+// Must match ambient_min / ambient_max in transparent_frag.frag.
+const scatter_ambient_min = 0.3;
+const scatter_ambient_max = 0.5;
+
+const CompositionPushConstants = extern struct {
+    scatter_enabled: u32,
+    scatter_light: f32,
+};
+
+fn smoothstep(e0: f32, e1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 /// Weighted-blended order-independent transparency (accumulate / reveal / volume weight)
 /// render targets plus the fullscreen composition pass that blends them with the opaque
 /// color target and writes to the swapchain. Reusable by any renderer needing transparency.
@@ -81,7 +95,7 @@ pub const OitCompositor = struct {
         }
 
         if (self.composition_layout == .null_handle) {
-            const pc_range: vk.PushConstantRange = .{ .stage_flags = .{ .fragment_bit = true }, .offset = 0, .size = @sizeOf(u32) };
+            const pc_range: vk.PushConstantRange = .{ .stage_flags = .{ .fragment_bit = true }, .offset = 0, .size = @sizeOf(CompositionPushConstants) };
             self.composition_layout = try self.dev.createPipelineLayout(&.{
                 .flags = .{},
                 .set_layout_count = 1,
@@ -122,6 +136,17 @@ pub const OitCompositor = struct {
         }
     }
 
+    /// Day/night light for the volume scatter term. Mirrors transparent_frag.frag's
+    /// unshadowed light for an upward-facing water surface, mix(ambient, sun_day) +
+    /// ndl * sun_day with ndl = max(sun_dir.y, 0); the constants must match the
+    /// shader's. The absorption itself must stay position-independent for
+    /// entry/exit pair cancellation, so this is where day/night enters the volume.
+    pub fn volumeScatterLight(sun_dir: @Vector(3, f32)) f32 {
+        const sun_day = smoothstep(-0.1, 0.25, sun_dir[1]);
+        const ndl_top = @max(sun_dir[1], 0);
+        return scatter_ambient_min + (scatter_ambient_max - scatter_ambient_min) * sun_day + ndl_top * sun_day;
+    }
+
     /// Inputs for one fullscreen composition into the swapchain image.
     pub const CompositionContext = struct {
         cmd_buffer: vk.CommandBuffer,
@@ -132,6 +157,8 @@ pub const OitCompositor = struct {
         /// Scatter term from the transparent pass is skipped when the camera sits
         /// inside a transparent volume.
         scatter_enabled: u32,
+        /// Day/night light factor for the scatter color; see volumeScatterLight.
+        scatter_light: f32,
         swapchain_old_layout: vk.ImageLayout,
         /// Written with the final present layout when non-null.
         swapchain_layout_ptr: ?*vk.ImageLayout,
@@ -172,7 +199,8 @@ pub const OitCompositor = struct {
         self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.composition_pipeline);
         core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
 
-        self.dev.cmdPushConstants(ctx.cmd_buffer, self.composition_layout, .{ .fragment_bit = true }, 0, @sizeOf(u32), &ctx.scatter_enabled);
+        const push: CompositionPushConstants = .{ .scatter_enabled = ctx.scatter_enabled, .scatter_light = ctx.scatter_light };
+        self.dev.cmdPushConstants(ctx.cmd_buffer, self.composition_layout, .{ .fragment_bit = true }, 0, @sizeOf(CompositionPushConstants), &push);
 
         const oit_desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[ctx.frame_idx];
         self.dev.cmdBindDescriptorSets(ctx.cmd_buffer, .graphics, self.composition_layout, 0, (&oit_desc_set)[0..1], null);

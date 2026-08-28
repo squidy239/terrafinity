@@ -52,6 +52,15 @@ const float near_plane = 0.01;
 const float absorption_floor = 0.01;
 const float ambient_min = 0.3;
 const float ambient_max = 0.5;
+// Reference distance for sky pixels, which hold the cleared depth 0.0 and
+// linearize to infinity. A finite shared reference lets an entry/exit pair
+// cancel to their true thickness instead of both saturating to zero. Real
+// backgrounds are never clamped: volumes can sit far beyond this (planet
+// scale) and must integrate against their true distance. Sky-referenced
+// distances beyond sky_dist_max clamp symmetrically so distant pairs cancel
+// cleanly to zero instead of leaving f16 quantization noise.
+const float sky_dist = 256.0;
+const float sky_dist_max = 2048.0;
 
 float calculateWeight(float screen_z, float alpha) {
     float depth_weight = max_weight * (screen_z * screen_z * screen_z);
@@ -69,8 +78,8 @@ void main() {
     float ndl = max(dot(normal, -sun_dir_norm), 0.0);
     float light = mix(ambient_min, ambient_max, sun_day) + ndl * sun_day;
     if (shadow_params.cascade_count != 0u) {
-        // Volume term inherits via `light`, using the face normal from `side`; a surface
-        // approximation for the interior of the volume.
+        // The shadowed light applies to the surface term only; the volume's
+        // absorption must stay position-independent (see below).
         if (shadow_params.debug_colors != 0u) {
             unlit_color.rgb *= cascadeDebugColor(shadowCascadeIndex(frag_pos));
         } else {
@@ -82,20 +91,34 @@ void main() {
 
     float fragment_depth = 1.0 / gl_FragCoord.w;
     float bg_depth_raw = texelFetch(opaque_depth_texture, ivec2(gl_FragCoord.xy), 0).r;
-    float bg_depth_linear = near_plane / bg_depth_raw;
+    float bg_depth_linear_raw = near_plane / bg_depth_raw;
+    bool bg_is_sky = bg_depth_raw == 0.0;
+    // Only the sky is infinite; every real background keeps its true distance
+    // no matter how far, or volumes beyond the reference lose their depth.
+    float bg_depth_linear = bg_is_sky ? sky_dist : bg_depth_linear_raw;
 
-    float dist_to_bg = min(bg_depth_linear - fragment_depth, max_optical_depth);
+    // The depths above are eye-Z projections; scaling by the ray slant turns
+    // them into true path length so off-axis pixels stop undercounting.
+    float slant = length(frag_pos) / fragment_depth;
+    float dist_to_bg = (bg_depth_linear - fragment_depth) * slant;
+    if (bg_is_sky) dist_to_bg = clamp(dist_to_bg, -sky_dist_max, sky_dist_max);
     float sign = gl_FrontFacing ? 1.0 : -1.0;
 
     MaterialGpu mat = materials[nonuniformEXT(block_array_layer)];
-    vec3 absorption = max(vec3(1.0) - mat.volume_color * light, vec3(absorption_floor));
+    // Absorption is a material property, not a lighting term: entry and exit
+    // faces sample light at different points, and only a position-independent
+    // absorption cancels exactly. Day/night is applied to the scatter color in
+    // the composite pass instead.
+    vec3 absorption = max(vec3(1.0) - mat.volume_color, vec3(absorption_floor));
     float td = clamp(dist_to_bg * mat.density * sign, -max_optical_depth, max_optical_depth);
     vec3 optical_depth = td * absorption;
 
     float surface_revealage = 0.0;
     vec4 surface_accum = vec4(0.0);
 
-    if (bg_depth_linear >= fragment_depth && gl_FrontFacing && draw_surface) {
+    // The unclamped reference keeps the surface term for water farther than
+    // sky_dist; the clamp exists only for the volume integral's f16 range.
+    if (bg_depth_linear_raw >= fragment_depth && gl_FrontFacing && draw_surface) {
         vec3 view_dir = normalize(-frag_pos);
         float n_dot_v = abs(dot(normal, view_dir));
         float fresnel = pow(1.0 - n_dot_v, mat.fresnel_power);

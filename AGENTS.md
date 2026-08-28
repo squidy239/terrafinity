@@ -810,4 +810,17 @@ The upload drain (submitBatch + retireCompletedUploads + processRetired) runs on
 
 `VK_SUBOPTIMAL_KHR` is a usable result, but applications may recreate to improve surface compatibility. Some variable-extent platforms continue returning it after a valid replacement is installed, so guard against an infinite loop: allow the first suboptimal result to request recreation, then suppress duplicate requests until an explicit physical-size/configuration change resets the guard. Continue handling `VK_ERROR_OUT_OF_DATE_KHR` unconditionally.
 
+## OIT volume term invariants (transparent_frag.frag / composite_frag.frag)
+
+The water volume is integrated in a reference frame: each face adds `density * absorption * (bg - frag)` entering and subtracts it exiting, so a volume's thickness only survives if the entry and exit faces integrate against the same background distance. Three rules follow:
+
+- Sky pixels hold the cleared depth 0.0, whose linearization `near / depth` is infinite. Both faces of a pair then saturate the same clamp and cancel to zero, so water against the sky showed no volume at all. `sky_dist` (256) substitutes the reference only for those pixels. Real backgrounds must never be clamped: volumes sit up to ~100,000 blocks away (planet scale), and clamping their background erases every volume past the clamp. `sky_dist_max` (2048) clamps sky-referenced distances symmetrically so distant sky pairs cancel cleanly to zero rather than leaving f16 quantization noise. The surface term's gate uses the unclamped value so water farther than `sky_dist` keeps its fresnel surface.
+- Pair precision is bounded by f16 quantization of each face's write: a thickness signal survives only when it exceeds ~1/1024 of the write magnitude. Finite backgrounds write ~the local segment, so far oceans stay correct at any distance; the sky reference writes ~max(sky_dist, z), so sky-backed volumes stay exact to roughly a thousand blocks and render clean zero beyond (subvisual there). Stacked saturated faces can still overflow the f16 volume sum to Inf, so the composite gates the scatter on `td_scalar < 65504`.
+- Absorption must stay position-independent (`1 - volume_color`, no light term). Entry and exit faces sample light at different points, so a light-dependent absorption leaves a residue when the pair cancels. Day/night for the scatter color is applied in the composite pass via `OitCompositor.volumeScatterLight` instead.
+- Thickness is ray length, not eye-Z difference: multiply by the slant `length(frag_pos) / fragment_depth`. Off-axis pixels at 90° FOV otherwise undercount by up to ~0.58x.
+
+`near_plane` in the shader must match core.zig's projection near (0.01); the `near / depth` linearization assumes the infinite reverse-Z projection where depth = near / eye_dist.
+
+Known remaining gap: when the camera is inside water, rays have an exit face but no entry face, so the net optical depth is negative and clamps to zero (no underwater tint). Fixing it needs a virtual entry term in the composite or raymarched volumes.
+
 ## Almost never use std.mem.zeroes, it can mask bugs and is less explicit
