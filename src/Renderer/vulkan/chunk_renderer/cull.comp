@@ -172,9 +172,10 @@ void main() {
         return;
     }
 
-    // Late pass: test against the depth pyramid built from the previous frame, drawn
-    // from that frame's camera, so the box must be expressed in that camera's space.
-    // This lets meshes occluded by geometry drawn last frame finally get culled.
+    // Late pass: test against the depth pyramid built from this frame's early opaque
+    // pass, so the box is expressed in the current camera's space. Chunks the early
+    // pass drew protect themselves through their own pixels; chunks it skipped are
+    // judged with the current view, so camera disocclusions draw this frame.
     vec3 occlusion_relative_pos = candidate.absolute_position.xyz - hiz.occlusion_player_pos.xyz;
     uint was_visible = visible_last_frame[g_idx];
     bool occluded = occlusion_on && hizOccluded(occlusion_relative_pos, occlusion_relative_pos + vec3(size));

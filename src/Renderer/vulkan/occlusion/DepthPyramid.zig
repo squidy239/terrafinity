@@ -39,9 +39,10 @@ const FrameParams = struct {
 };
 
 /// Reversed-Z hierarchical depth (Hi-Z) pyramid for GPU occlusion culling. Built each
-/// frame from the opaque depth buffer with a MIN-reduce mip chain; culling shaders add
-/// `occlusion_set_layout` to their pipeline layout, include occlusion.glsl, and call
-/// hizOccluded. Renderer-agnostic: any culling pipeline may consume it.
+/// frame from the early opaque pass's depth with a MIN-reduce mip chain, between the
+/// early and late culls; culling shaders add `occlusion_set_layout` to their pipeline
+/// layout, include occlusion.glsl, and call hizOccluded. Renderer-agnostic: any culling
+/// pipeline may consume it.
 pub const DepthPyramid = @This();
 
 vk_ctx: *VulkanContext,
@@ -231,9 +232,10 @@ pub fn pushOcclusionSet(self: *DepthPyramid, cmd: vk.CommandBuffer, pipeline_lay
 
 /// Records the full pyramid build from the depth buffer, which must be in
 /// depth_stencil_read_only_optimal with its writes visible to compute sampling.
-/// Deferred to the end of the frame: the cull dispatches consume the previous
-/// frame's build, so a mesh's own pixels cannot keep it visible. Ends with every
-/// mip in shader_read_only_optimal, visible to compute reads.
+/// Built between the early and late culls of the same frame: the late cull then
+/// judges skipped chunks with the current view, and chunks the early pass drew
+/// protect themselves through their own pixels. Ends with every mip in
+/// shader_read_only_optimal, visible to compute reads.
 pub fn recordBuild(self: *DepthPyramid, cmd: vk.CommandBuffer, depth_sampled_view: vk.ImageView) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "DepthPyramid.recordBuild" });
     defer zone.end();
@@ -286,8 +288,9 @@ fn destroyImageResources(self: *DepthPyramid) void {
 }
 
 /// Clears every mip to the far plane (0.0) and puts them in shader_read_only_optimal,
-/// so the first frame's cull (which consumes the previous build) sees nothing occluded.
-/// Called on (re)creation, when the device is idle.
+/// the layout every build starts from and leaves behind, so the first build's mip
+/// transitions have a valid source layout. Called on (re)creation, when the device is
+/// idle.
 fn transitionToSampled(self: *DepthPyramid, io: std.Io) !void {
     const cmd = try self.single_time.begin();
     const range = vk.ImageSubresourceRange{

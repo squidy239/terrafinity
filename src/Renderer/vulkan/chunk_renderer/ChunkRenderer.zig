@@ -184,11 +184,6 @@ render_options: *const Renderer.RenderOptions,
 render_options_lock: *std.Io.RwLock,
 shadow: *ShadowRenderer,
 pyramid: *DepthPyramid,
-/// GLSL-transposed view-projection and camera position the current pyramid was built
-/// with; the cull tests with these (one frame stale) so boxes project onto the view
-/// that rendered the depth.
-last_cull_projview: [16]f32 = @splat(0),
-last_cull_player_pos: [4]f32 = .{ 0, 0, 0, 1 },
 
 texture_manager: textures.TextureManager,
 block_materials: BlockMaterials,
@@ -1089,11 +1084,10 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         const col = i % 4;
         dst.* = projview_array[col * 4 + row];
     }
-    // The cull tests against the pyramid built last frame, so it must project with the
-    // matrix and camera that frame's depth was rendered with, not this frame's.
-    self.pyramid.writeParams(ctx.frame_idx, self.last_cull_projview, self.last_cull_player_pos, ctx.occlusion_culling);
-    self.last_cull_projview = pc.projview;
-    self.last_cull_player_pos = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
+    // The late cull projects with this frame's matrix and camera: the pyramid it
+    // tests against is built from this frame's early opaque depth below.
+    const occlusion_player_pos: [4]f32 = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
+    self.pyramid.writeParams(ctx.frame_idx, pc.projview, occlusion_player_pos, ctx.occlusion_culling);
 
     if (ctx.total_candidates > 0) {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "cull" });
@@ -1105,32 +1099,33 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         defer gpu_zone.end();
         self.recordOpaquePass(ctx, pc, .early);
     }
+    // Build the occlusion pyramid from the early pass's depth so the late cull judges
+    // skipped chunks with the current view: camera disocclusions draw this frame, in the
+    // late pass, instead of vanishing for a frame. Late-pass geometry is not in it; that
+    // only costs a wasted draw for chunks it newly revealed, never a hole.
+    self.depthToSampledBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
+        defer gpu_zone.end();
+        self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
+    }
+    self.depthToAttachmentBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_late_cull" });
         defer gpu_zone.end();
-        self.recordPyramidAndLateCull(ctx);
+        self.recordLateCull(ctx);
     }
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "opaque_late" });
         defer gpu_zone.end();
         self.recordOpaquePass(ctx, pc, .late);
     }
-    // Depth is final now; transparent tests against it, samples it in the shader, and
-    // the end-of-frame pyramid build reduces it for next frame's cull.
-    self.depthToSampledBarrier(ctx, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true, .compute_shader_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true });
+    // Depth is final now; transparent tests against it and samples it in the shader.
+    self.depthToSampledBarrier(ctx, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true });
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "transparent" });
         defer gpu_zone.end();
         self.recordTransparentPass(ctx, pc);
-    }
-
-    // Build next frame's occlusion pyramid from this frame's completed opaque depth.
-    // The late cull consumed the pyramid built last frame (double-buffered), so newly
-    // built occluders cull previously visible meshes within one frame.
-    {
-        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
-        defer gpu_zone.end();
-        self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
     }
 
     self.oit.recordCompositionPass(.{
@@ -1196,11 +1191,11 @@ fn dispatchFrameCulling(self: *ChunkRenderer, ctx: *const PassContext) void {
     self.cullDrawBarrier(ctx.cmd_buffer, ctx.frame_idx);
 }
 
-/// Runs the late cull: re-tests every candidate against the previous frame's occlusion
-/// pyramid, draws newly disoccluded opaque meshes and all visible transparent meshes,
-/// and records the visibility bits the next frame's early cull reads.
-fn recordPyramidAndLateCull(self: *ChunkRenderer, ctx: *const PassContext) void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordPyramidAndLateCull" });
+/// Runs the late cull: re-tests every candidate against this frame's early-pass
+/// occlusion pyramid, draws newly disoccluded opaque meshes and all visible transparent
+/// meshes, and records the visibility bits the next frame's early cull reads.
+fn recordLateCull(self: *ChunkRenderer, ctx: *const PassContext) void {
+    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordLateCull" });
     defer zone.end();
 
     if (ctx.total_candidates == 0) return;
@@ -1219,6 +1214,21 @@ fn depthToSampledBarrier(self: *ChunkRenderer, ctx: *const PassContext, dst_stag
         .{ .depth_stencil_attachment_write_bit = true },
         dst_stage,
         dst_access,
+        ctx.depth_aspect_mask,
+    ))[0..1]);
+}
+
+/// Transitions depth back from read-only to attachment after the given sampled readers,
+/// so the following pass can depth-test and write again.
+fn depthToAttachmentBarrier(self: *ChunkRenderer, ctx: *const PassContext, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2) void {
+    core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&core.makeImageBarrier2(
+        ctx.depth_image,
+        .depth_stencil_read_only_optimal,
+        .depth_stencil_attachment_optimal,
+        src_stage,
+        src_access,
+        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+        .{ .depth_stencil_attachment_read_bit = true, .depth_stencil_attachment_write_bit = true },
         ctx.depth_aspect_mask,
     ))[0..1]);
 }
