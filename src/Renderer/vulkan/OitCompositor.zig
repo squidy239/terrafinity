@@ -140,6 +140,8 @@ pub const OitCompositor = struct {
     pub fn recordCompositionPass(self: *OitCompositor, ctx: CompositionContext, color_image: vk.Image) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCompositionPass" });
         defer zone.end();
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "oit_composition" });
+        defer gpu_zone.end();
         const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
 
         var pre_comp_barriers: [5]vk.ImageMemoryBarrier2 = undefined;

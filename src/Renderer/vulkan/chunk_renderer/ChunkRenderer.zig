@@ -1095,19 +1095,43 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     self.last_cull_projview = pc.projview;
     self.last_cull_player_pos = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
 
-    if (ctx.total_candidates > 0) self.dispatchFrameCulling(ctx);
-    self.recordOpaquePass(ctx, pc, .early);
-    self.recordPyramidAndLateCull(ctx);
-    self.recordOpaquePass(ctx, pc, .late);
+    if (ctx.total_candidates > 0) {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "cull" });
+        defer gpu_zone.end();
+        self.dispatchFrameCulling(ctx);
+    }
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "opaque_early" });
+        defer gpu_zone.end();
+        self.recordOpaquePass(ctx, pc, .early);
+    }
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_late_cull" });
+        defer gpu_zone.end();
+        self.recordPyramidAndLateCull(ctx);
+    }
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "opaque_late" });
+        defer gpu_zone.end();
+        self.recordOpaquePass(ctx, pc, .late);
+    }
     // Depth is final now; transparent tests against it, samples it in the shader, and
     // the end-of-frame pyramid build reduces it for next frame's cull.
     self.depthToSampledBarrier(ctx, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true, .compute_shader_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true });
-    self.recordTransparentPass(ctx, pc);
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "transparent" });
+        defer gpu_zone.end();
+        self.recordTransparentPass(ctx, pc);
+    }
 
     // Build next frame's occlusion pyramid from this frame's completed opaque depth.
     // The late cull consumed the pyramid built last frame (double-buffered), so newly
     // built occluders cull previously visible meshes within one frame.
-    self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
+    {
+        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
+        defer gpu_zone.end();
+        self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
+    }
 
     self.oit.recordCompositionPass(.{
         .cmd_buffer = ctx.cmd_buffer,

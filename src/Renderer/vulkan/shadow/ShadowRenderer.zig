@@ -713,6 +713,8 @@ pub fn recordShadowPass(
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordShadowPass" });
     defer zone.end();
+    const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(cmd_buffer, frame_idx, .{ .src = @src(), .name = "shadow" });
+    defer gpu_zone.end();
     // Match the main passes: while allocRegion grows the face buffer it is momentarily
     // null, and the draw would be skipped. Skipping the whole pass keeps the previous
     // depth; running the layout transitions and the clear would wipe a layer to lit.

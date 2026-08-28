@@ -312,6 +312,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
     errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch {};
+    self.vk_ctx.gpu_profiler.resetFrame(frame_ctx.cmd_buffer, current_frame);
 
     const depth_aspect_mask = self.depthAspectMask();
     const frame_start_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);

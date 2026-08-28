@@ -16,6 +16,7 @@ const Mesher = @import("Renderer/Mesher.zig");
 const core = @import("Renderer/vulkan/core.zig");
 const gpu = @import("Renderer/vulkan/gpu.zig");
 const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
+const GpuProfiler = @import("Renderer/vulkan/tracy_gpu.zig").GpuProfiler;
 const Block = @import("world/Block.zig").Block;
 const Chunk = @import("world/Chunk.zig");
 const World = @import("world/World.zig");
@@ -86,6 +87,7 @@ ui_command_pool: vk.CommandPool = .null_handle,
 transfer_semaphore: vk.Semaphore = .null_handle,
 transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
+gpu_profiler: GpuProfiler = .{},
 // Cross-thread frame counter: read with .acquire by submitBatch / drainInFlightFrames and
 // advanced with .release by submitFrameWithExtra; the pair orders the two submit paths.
 frame_number: std.atomic.Value(u64) = .init(0),
@@ -530,6 +532,15 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.upload_command_pool = try self.dev.createCommandPool(&upload_pool_info, &self.vkalloc);
     errdefer self.dev.destroyCommandPool(self.upload_command_pool, &self.vkalloc);
 
+    self.gpu_profiler = try GpuProfiler.init(
+        self.dev,
+        self.graphics_queue,
+        self.upload_command_pool,
+        &self.vkalloc,
+        self.props.limits.timestamp_period,
+    );
+    errdefer self.gpu_profiler.deinit();
+
     self.ui_command_pool = try self.dev.createCommandPool(&pool_info, &self.vkalloc);
     errdefer self.dev.destroyCommandPool(self.ui_command_pool, &self.vkalloc);
 
@@ -611,6 +622,8 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     for (self.render_complete_semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
     self.allocator.free(self.render_complete_semaphores);
     self.render_complete_semaphores = &.{};
+
+    self.gpu_profiler.deinit();
 
     self.dev.destroyCommandPool(self.command_pool, &self.vkalloc);
     if (self.upload_command_pool != .null_handle) self.dev.destroyCommandPool(self.upload_command_pool, &self.vkalloc);
@@ -912,6 +925,7 @@ pub fn beginFrame(self: *VulkanContext) !FrameContext {
             if (wait_result != .success) return error.DrawFailed;
         }
     }
+    self.gpu_profiler.prepareFrame(current_frame);
     const image_index = try self.acquireSwapchainImage(current_frame);
     return .{
         .frame_index = current_frame,
@@ -1012,6 +1026,7 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     const zone_submit = tracy.Zone.begin(.{ .src = @src(), .name = "queueSubmit2" });
     defer zone_submit.end();
     try self.dev.queueSubmit2(self.graphics_queue, (&submit_info)[0..1], .null_handle);
+    self.gpu_profiler.markSubmitted(ctx.frame_index);
     self.frame_number.store(current_graphics_val, .release);
 }
 

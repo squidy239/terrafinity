@@ -31,8 +31,8 @@ pub const tracy_options: tracy.Options = .{
 
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
-    var tracy_allocator: tracy.Allocator = .{ .parent = init.gpa, .secure = true };
-    const gpa = tracy_allocator.allocator();
+    //var tracy_allocator: tracy.Allocator = .{ .parent = init.gpa };
+    const gpa = init.gpa;
     const io = init.io;
 
     const config_path: []const u8 = "Config.zon";

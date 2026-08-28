@@ -396,6 +396,8 @@ pub fn uploadParams(self: *SkyRenderer, frame_idx: u32, params: *const SkyParams
 pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordSky" });
     defer zone.end();
+    const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "sky" });
+    defer gpu_zone.end();
     const cmd_buffer = ctx.cmd_buffer;
     const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
     const first_frame = ctx.frame_sequence == 0;
