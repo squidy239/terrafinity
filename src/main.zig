@@ -94,8 +94,9 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
     single_press.insert(.escape_menu);
     single_press.insert(.fullscreen);
+    single_press.insert(.spawn_explosive);
 
-    inline for (.{ .{ .key = .w, .action = .forward }, .{ .key = .s, .action = .backward }, .{ .key = .a, .action = .left }, .{ .key = .d, .action = .right }, .{ .key = .space, .action = .up }, .{ .key = .left_shift, .action = .down }, .{ .key = .mouse_left, .action = .use_item_primary }, .{ .key = .mouse_right, .action = .use_item_secondary }, .{ .key = .f, .action = .use_item_tertiary } }) |bind| {
+    inline for (.{ .{ .key = .w, .action = .forward }, .{ .key = .s, .action = .backward }, .{ .key = .a, .action = .left }, .{ .key = .d, .action = .right }, .{ .key = .space, .action = .up }, .{ .key = .left_shift, .action = .down }, .{ .key = .mouse_left, .action = .use_item_primary }, .{ .key = .mouse_right, .action = .use_item_secondary }, .{ .key = .f, .action = .use_item_tertiary }, .{ .key = .t, .action = .spawn_explosive } }) |bind| {
         try keymap.setActionKey(io, .{ .key = bind.key }, bind.action);
     }
 

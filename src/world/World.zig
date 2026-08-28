@@ -384,7 +384,7 @@ pub const Reader = struct {
         const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
 
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-        chunk.lockShared(io);
+        try chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
 
         return readBlockFromEncoding(chunk.encoding, local_pos);

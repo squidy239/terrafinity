@@ -25,6 +25,7 @@ pub const Action = enum {
     use_item_secondary,
     use_item_tertiary,
     use_item_quaternary,
+    spawn_explosive,
     fullscreen,
 };
 

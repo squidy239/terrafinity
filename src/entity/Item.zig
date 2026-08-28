@@ -17,29 +17,30 @@ pub const Inventory = struct {
     }
 
     /// Gets an item at the given position in the inventory.
-    pub fn get(self: *Inventory, row: u32, col: u32) ?Item {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
+    pub fn get(self: *Inventory, io: std.Io, row: u32, col: u32) ?Item {
+        self.lock.lockSharedUncancelable(io);
+        defer self.lock.unlockShared(io);
         std.debug.assert(row < self.height and col < self.width);
         const index = (row * self.width) + col;
         return self.items[index];
     }
 
-    /// Sets an item at the given position in the inventory.
-    /// Returns the old item if it was not null.
+    /// Sets an item at the given position in the inventory and returns the
+    /// old item, or null if the slot was empty.
     pub fn set(self: *Inventory, io: std.Io, row: u32, col: u32, item: Item) ?Item {
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
         std.debug.assert(row < self.height and col < self.width);
         const index = (row * self.width) + col;
-        defer self.items[index] = item;
-        return self.items[index];
+        const previous = self.items[index];
+        self.items[index] = item;
+        return previous;
     }
 
-    ///swaps 2 items in the inventory, can be used as move if one item is null
-    pub fn swap(self: *Inventory, row1: u32, col1: u32, row2: u32, col2: u32) void {
-        self.lock.lock();
-        defer self.lock.unlock();
+    /// Swaps 2 items in the inventory, can be used as move if one item is null.
+    pub fn swap(self: *Inventory, io: std.Io, row1: u32, col1: u32, row2: u32, col2: u32) void {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
         std.debug.assert(row1 < self.height and col1 < self.width);
         std.debug.assert(row2 < self.height and col2 < self.width);
         const index1 = (row1 * self.width) + col1;

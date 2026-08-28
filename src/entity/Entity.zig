@@ -1,120 +1,63 @@
 const std = @import("std");
 
-const EntityTypes = @import("EntityTypes");
-const tracy = @import("tracy");
-
 const World = @import("../world/World.zig");
 
 const Entity = @This();
 
 pub const Implementation = opaque {};
 
+pub const UpdateError = error{ Canceled, Unrecoverable, OutOfMemory };
+
 type: Type,
+uuid: u128,
 ptr: *Implementation,
 ref_count: std.atomic.Value(u32),
+/// Set to true when the entity should stop updating and be unloaded as soon
+/// as its ref count settles to the cache owned ref. Safe to call from any
+/// thread at any time.
+deleted: std.atomic.Value(bool) = .init(false),
 vtable: Interface,
 
 pub const Interface = struct {
-    /// Updates the entity, returns true if the entity was unloaded.
-    update: ?*const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool = null,
-    /// Unloads the entity and frees all resources allocated by it.
-    /// The entity ptr is not valid after this.
-    unload: *const fn (self: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
-    getPos: ?*const fn (self: *Implementation, io: std.Io) @Vector(3, f64) = null,
+    /// Updates the entity. Returns true when the entity requests deletion.
+    update: ?*const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) UpdateError!bool = null,
+    /// Frees the implementation and everything it allocated.
+    /// The ptr is not valid after this. Implementations must not acquire locks
+    /// that are held anywhere the entity system is called into.
+    unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
+    getPos: ?*const fn (ptr: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
-/// Removes a ref from entity when it returns.
-/// The entity may be unloaded by this function.
-pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World, uuid: u128) !void {
-    if (self.vtable.update) |updateFn| {
-        errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
-        const unloaded = try updateFn(self, io, world, uuid, allocator);
-        if (!unloaded) _ = self.ref_count.fetchSub(1, .seq_cst);
-    } else _ = self.ref_count.fetchSub(1, .seq_cst);
+pub inline fn keyFromValue(self: *const @This()) u128 {
+    return self.uuid;
 }
 
-pub fn getPos(self: *@This()) ?@Vector(3, f64) {
-    if (self.vtable.getPos) |getPosFn| {
-        return getPosFn(self.ptr);
-    }
-    return null;
-}
-
-/// Unloads the entity and frees all resources allocated by it.
-/// The entity ptr is not valid after this.
-pub fn unload(self: *@This(), io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, comptime save: bool) !void {
-    const z = tracy.Zone.begin(.{ .src = @src() });
-    defer z.end();
-    std.debug.assert(try self.waitForRefAmount(io, 1, 10 * std.time.us_per_s));
-    return self.vtable.unload(self, io, world, uuid, allocator, save);
-}
-
-// TODO: better timeout with Io
-pub fn waitForRefAmount(self: *const @This(), io: std.Io, amount: u32, maxMicroTime: ?u64) error{Canceled}!bool {
-    if (self.ref_count.load(.seq_cst) == amount) return true;
-    const st = std.Io.Timestamp.now(io, .awake);
-    while (self.ref_count.load(.seq_cst) != amount) {
-        @branchHint(.unlikely);
-        if (maxMicroTime != null and st.untilNow(io, .awake).toMicroseconds() > maxMicroTime.?) return false;
-        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
-    }
-    return true;
-}
-
-pub fn make(temp_entity: anytype, allocator: std.mem.Allocator) !*Entity {
-    const mem = try allocator.create(@TypeOf(temp_entity));
-    errdefer allocator.destroy(mem);
-    mem.* = temp_entity;
-
-    const en = Entity{
-        .type = @TypeOf(temp_entity).Type,
-        .ptr = @ptrCast(mem),
-        .ref_count = .init(1),
-        .vtable = mem.getInterface(),
-    };
-
-    const entity = try allocator.create(Entity);
-    entity.* = en;
-    return entity;
+pub fn addRef(self: *@This()) void {
+    _ = self.ref_count.fetchAdd(1, .seq_cst);
 }
 
 pub fn release(self: *@This()) void {
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
+/// Marks the entity for deletion. It stops being updated and is unloaded,
+/// deleting any saved state, once no other references remain.
+pub fn markDeleted(self: *@This()) void {
+    self.deleted.store(true, .seq_cst);
+}
+
+pub fn isDeleted(self: *const @This()) bool {
+    return self.deleted.load(.seq_cst);
+}
+
+pub fn getPos(self: *@This(), io: std.Io) ?@Vector(3, f64) {
+    if (self.vtable.getPos) |getPosFn| {
+        return getPosFn(self.ptr, io);
+    }
+    return null;
+}
+
 pub const Type = enum(u32) {
     Player = 0,
     Explosive = 2,
 };
-
-test "Entity.make allocation failure" {
-    const DummyEntity = struct {
-        pub const Type = Entity.Type.Player;
-        pos: @Vector(3, f64) = .{ 0, 0, 0 },
-        pub fn getInterface(self: *@This()) Entity.Interface {
-            _ = self;
-            return .{
-                .unload = unloadFn,
-            };
-        }
-        fn unloadFn(entity: *Entity, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
-            _ = io;
-            _ = world;
-            _ = uuid;
-            _ = save;
-            allocator.destroy(@as(*@This(), @ptrCast(@alignCast(entity.ptr))));
-            allocator.destroy(entity);
-        }
-    };
-
-    const test_fn = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            const dummy = DummyEntity{};
-            const entity = try Entity.make(dummy, allocator);
-            allocator.destroy(@as(*DummyEntity, @ptrCast(@alignCast(entity.ptr))));
-            allocator.destroy(entity);
-        }
-    }.run;
-
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_fn, .{});
-}

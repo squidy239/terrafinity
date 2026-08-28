@@ -328,6 +328,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         \\pos: {d}, {d}, {d}
         \\chunks cached: {d}
         \\grids cached: {d}
+        \\entities cached: {d}
         \\chunk hit ratio: {d:.2}
     ,
         .{
@@ -344,6 +345,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
             pos[2],
             chunk_count,
             grid_count,
+            self.game.debug_menu.entities.load(.unordered),
             chunk_hit_ratio,
         },
     );
@@ -660,6 +662,7 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
         configTextU64("Terrain Height Cache (bytes)", &options.terrain_height_cache_bytes, settingsId("storage.terrain_height_cache_bytes"));
         configTextU64("Chunk Cache (bytes)", &options.chunk_cache_bytes, settingsId("storage.chunk_cache_bytes"));
         configTextU64("Grid Cache (bytes)", &options.grid_cache_bytes, settingsId("storage.grid_cache_bytes"));
+        configTextU64("Entity Cache (bytes)", &options.entity_cache_bytes, settingsId("storage.entity_cache_bytes"));
         settingsSlider("Sphere Size (blocks)", &options.sphere_size, 1, 512, settingsId("storage.sphere_size"));
         settingsEnum("Sphere Block", World.Block, &options.sphere_block, settingsId("storage.sphere_block"));
         settingsEnum("Save Mode", World.WorldStorage.SaveMode, &options.save_mode, settingsId("storage.save_mode"));

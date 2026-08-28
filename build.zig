@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = if(tracy_enabled) true else null,
+        .use_llvm = if (tracy_enabled) true else null,
     });
 
     exe.step.dependOn(&vert_cmd.step);
@@ -126,7 +126,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .sanitize_thread = sanitize != .None,
             }),
-            .use_llvm = if(tracy_enabled) true else null,
+            .use_llvm = if (tracy_enabled) true else null,
         });
         const generator_options = b.addOptions();
         generator_options.addOption(GeneratorKind, "generator", generator_source.kind);
@@ -183,7 +183,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = root_module,
-        .use_llvm = if(tracy_enabled) true else null,
+        .use_llvm = if (tracy_enabled) true else null,
         .filters = b.option([]const []const u8, "test_filter", "Only run tests whose name contains the given substrings") orelse &.{},
     });
 

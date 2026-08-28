@@ -433,6 +433,12 @@ When using `mangohud` combined with Vulkan Synchronization Validation (`VK_VALID
 
 Mixing `vkDeviceWaitIdle` with timeline semaphore synchronization (e.g. during buffer capacity reallocations) can confuse the synchronization validation layer, resulting in false positive `SYNC-HAZARD-WRITE-RACING-WRITE` errors on `vkQueueSubmit2`. The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait stage and the device idle state. You can safely ignore validation messages containing `0x743c6069` when a timeline semaphore and `deviceWaitIdle` are involved.
 
+## `std.atomic.Value(i128)` Fails Codegen in Debug
+
+On this toolchain (Zig 0.16.0, x86_64), any analyzed function containing a `std.atomic.Value(i128)` load or store fails with a backend error: `genSetReg called with a value larger than dst_reg`. A minimal `fn f(x: *std.atomic.Value(i128)) void { x.store(1, .seq_cst); }` reproduces it in Debug builds. Non-power-of-2 atomics (i96 timestamps) must not be padded to i128 atomics; guard the field with a lock and store the plain integer instead, or truncate to i64.
+
+This stayed hidden because the old `Explosive.update` was never instantiated: dead entity code that nothing spawns is not analyzed at all, so `if (true or ...)` short-circuits and malformed calls inside it never compile.
+
 ## Avoid `@splat` of Runtime Bools into Bool Vectors
 
 On this toolchain, `@splat` of a runtime-computed `bool` into `@Vector(N, bool)` can miscompile (observed on `@Vector(32, bool)` in Debug): some lanes receive garbage, producing lane-dependent values from a uniform splat. The result is silently wrong — this was caught only by comparing vectorized output against a scalar reference.

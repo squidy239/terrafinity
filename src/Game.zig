@@ -28,7 +28,11 @@ allocator: std.mem.Allocator,
 /// Path to this world's directory, retained so the world can be recreated in place.
 world_path: []const u8,
 world: World,
+/// View into the player implementation. Only valid while player_entity holds
+/// its reference.
 player: *EntityTypes.Player,
+/// Holds the reference that keeps the player entity pinned in the cache.
+player_entity: *Entity,
 vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
 generator: ?generator_loader.GeneratorInstance,
@@ -66,6 +70,7 @@ last_frametime: std.Io.Timestamp,
 debug_menu: struct {
     fps: std.atomic.Value(f32) = .init(0),
     meshes: std.atomic.Value(u64) = .init(0),
+    entities: std.atomic.Value(u64) = .init(0),
     opaque_drawn: std.atomic.Value(u32) = .init(0),
     transparent_drawn: std.atomic.Value(u32) = .init(0),
     occluded: std.atomic.Value(u32) = .init(0),
@@ -273,6 +278,7 @@ pub const Options = struct {
     terrain_height_cache_bytes: u64 = 268435456,
     chunk_cache_bytes: u64 = 1073741824,
     grid_cache_bytes: u64 = 1073741824,
+    entity_cache_bytes: u64 = 67108864,
 
     sphere_size: u32 = 100,
     sphere_block: World.Block = .air,
@@ -402,7 +408,8 @@ pub fn init(
         .world_storage = undefined,
         .world = undefined,
         .player = undefined,
-        .entity_registry = .init(),
+        .player_entity = undefined,
+        .entity_registry = undefined,
     };
 
     errdefer allocator.free(game.world_path);
@@ -460,8 +467,8 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue)), @TypeOf(game.world.chunks).value_count_min);
-    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, game.options.grid_cache_bytes / @sizeOf(World.GridValue)), @TypeOf(game.world.grids).value_count_min);
+    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue))), @TypeOf(game.world.chunks).value_count_min);
+    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.grid_cache_bytes / @sizeOf(World.GridValue))), @TypeOf(game.world.grids).value_count_min);
     game.options_lock.unlockShared(io);
     std.log.info("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
     std.log.info("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
@@ -480,6 +487,14 @@ pub fn init(
     errdefer game.world.deinit(io, allocator);
     source_deinited = true;
 
+    game.options_lock.lockSharedUncancelable(io);
+    const entity_cache_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.entity_cache_bytes / @sizeOf(EntityRegistry.Entity))), @TypeOf(game.entity_registry.map).value_count_min);
+    game.options_lock.unlockShared(io);
+    std.log.info("Creating entity cache with size {d} ({d} bytes)", .{ entity_cache_capacity, entity_cache_capacity * @sizeOf(EntityRegistry.Entity) });
+
+    game.entity_registry = try .init(game.allocator, entity_cache_capacity);
+    errdefer game.entity_registry.deinit(io, game.allocator, &game.world);
+
     try game.spawnPlayer(io, allocator);
 }
 
@@ -497,6 +512,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.stopBackgroundWork(io);
 
     self.vulkan_renderer.deinit(io);
+    self.player_entity.release();
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
     if (self.generator) |*generator| generator.deinit();
@@ -578,6 +594,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     try restartFutures(self, io, allocator);
     try entities_future.await(io);
     asyncs.end();
+    self.debug_menu.entities.store(self.entity_registry.count(), .unordered);
     const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
 
     try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
@@ -693,6 +710,8 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
         .Survival => try self.walkMove(io, actions),
     }
     self.setSelectedSlot(actions);
+    if (actions.contains(.spawn_explosive)) self.spawnExplosive(io) catch |err|
+        std.log.err("error spawning explosive: {any}", .{err});
     groupAsync(self, io, itemAction, .{ self, io, actions.* });
 }
 
@@ -703,6 +722,20 @@ fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     }
     if (actions.contains(.hotbar_scroll_up)) _ = self.selected_inventory_row.fetchAdd(1, .seq_cst);
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
+}
+
+fn spawnExplosive(self: *@This(), io: std.Io) !void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnExplosive" });
+    defer z.end();
+    const player_pos = self.getPlayerPos(io);
+    const looking = self.getCameraFront(io);
+    const pos = player_pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(2));
+    const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive{
+        .pos = pos,
+        .dir = looking,
+        .timestamp = std.Io.Timestamp.now(io, .awake).toNanoseconds(),
+    });
+    entity.release();
 }
 
 fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
@@ -1151,7 +1184,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
-    const player_entity = try game.entity_registry.spawn(io, allocator, EntityTypes.Player{
+    const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
             .elements = .{
@@ -1174,14 +1207,13 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
         .view_direction = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
     });
-    player_entity.release();
+    game.player_entity = player_entity;
     game.player = @ptrCast(@alignCast(player_entity.ptr));
     game.player.main_inventory = .initBuffer(
         10,
         16,
         &game.player.inventory_buffer,
     );
-    _ = game.player.main_inventory.set(io, 0, 0, .{ .item_type = .Explosive, .amount = 65536 });
     game.player.view_direction_mutex.lockUncancelable(io);
     const view_direction = game.player.view_direction;
     game.player.view_direction_mutex.unlock(io);
