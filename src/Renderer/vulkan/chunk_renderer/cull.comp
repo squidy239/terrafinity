@@ -116,23 +116,30 @@ void main() {
     MeshCandidate candidate = candidate_meshes[g_idx];
     if (candidate.face_count == 0u) return;
 
+    // Faces are built around block centers (cube_faces spans +/-0.5 of the block
+    // index), so the rendered mesh spans [absolute - 0.5*scale, absolute + 31.5*scale].
+    // Every cull box below must use that exact span: a box anchored at the chunk
+    // origin leaves the min-side half block outside it and boundary faces get
+    // culled while still visible.
+    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
+    float size = candidate.scale * chunk_size;
+    vec3 half_block = vec3(0.5 * candidate.scale);
+    vec3 box_min = relative_pos - half_block;
+    vec3 box_max = relative_pos + vec3(size) - half_block;
+
     // Early pass: fold every opaque candidate's player-relative box into the scene
     // AABB, including frustum-culled ones (the shadow fit wants the whole live scene).
     // Transparent candidates are excluded to match the shadow cull's own scope.
     if (pc.mode == 0u && candidate.is_transparent == 0u) {
-        vec3 lo = candidate.absolute_position.xyz - pc.player_pos.xyz;
-        float size = candidate.scale * chunk_size;
-        atomicMin(aabb_min_ord[0], ord_encode(lo.x));
-        atomicMin(aabb_min_ord[1], ord_encode(lo.y));
-        atomicMin(aabb_min_ord[2], ord_encode(lo.z));
-        atomicMax(aabb_max_ord[0], ord_encode(lo.x + size));
-        atomicMax(aabb_max_ord[1], ord_encode(lo.y + size));
-        atomicMax(aabb_max_ord[2], ord_encode(lo.z + size));
+        atomicMin(aabb_min_ord[0], ord_encode(box_min.x));
+        atomicMin(aabb_min_ord[1], ord_encode(box_min.y));
+        atomicMin(aabb_min_ord[2], ord_encode(box_min.z));
+        atomicMax(aabb_max_ord[0], ord_encode(box_max.x));
+        atomicMax(aabb_max_ord[1], ord_encode(box_max.y));
+        atomicMax(aabb_max_ord[2], ord_encode(box_max.z));
     }
 
-    vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
-    float size = candidate.scale * chunk_size;
-    if (!boxInFrustum(relative_pos, relative_pos + vec3(size))) {
+    if (!boxInFrustum(box_min, box_max)) {
         // Count once per frame from the early (main-view) cull only.
         if (pc.mode == 0u) atomicAdd(frustum_culled_count, 1u);
         return;
@@ -178,7 +185,7 @@ void main() {
     // judged with the current view, so camera disocclusions draw this frame.
     vec3 occlusion_relative_pos = candidate.absolute_position.xyz - hiz.occlusion_player_pos.xyz;
     uint was_visible = visible_last_frame[g_idx];
-    bool occluded = occlusion_on && hizOccluded(occlusion_relative_pos, occlusion_relative_pos + vec3(size));
+    bool occluded = occlusion_on && hizOccluded(occlusion_relative_pos - half_block, occlusion_relative_pos + vec3(size) - half_block);
     if (occlusion_on) visible_last_frame[g_idx] = occluded ? 0u : 1u;
     if (occluded) {
         atomicAdd(occluded_count, 1u);

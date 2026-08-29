@@ -53,8 +53,12 @@ bool hizOccluded(vec3 aabb_min, vec3 aabb_max) {
     level = min(level, float(hiz.mip_count - 1u));
 
     ivec2 mip_size = max(ivec2(hiz.pyramid_size) >> int(level), ivec2(1));
-    ivec2 texel_min = clamp(ivec2(uv_min * vec2(mip_size)), ivec2(0), mip_size - 1);
-    ivec2 texel_max = clamp(ivec2(uv_max * vec2(mip_size)), ivec2(0), mip_size - 1);
+    // The mip chain's odd reductions give the last texel of each level extra source
+    // rows, so texels do not span uv space uniformly. Map through the uniform mip-0
+    // grid instead: texel k covers mip-0 rows [k << level, (k+1) << level), with the
+    // last texel absorbing the remainder (handled by the clamp).
+    ivec2 texel_min = clamp(ivec2(uv_min * hiz.pyramid_size) >> int(level), ivec2(0), mip_size - 1);
+    ivec2 texel_max = clamp(ivec2(uv_max * hiz.pyramid_size) >> int(level), ivec2(0), mip_size - 1);
 
     float farthest = texelFetch(hiz_pyramid, texel_min, int(level)).r;
     farthest = min(farthest, texelFetch(hiz_pyramid, ivec2(texel_max.x, texel_min.y), int(level)).r);
