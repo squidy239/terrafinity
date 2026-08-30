@@ -92,12 +92,15 @@ const NodeData = struct {
 
     structures_generated: bool,
 
+    const empty_coverage = @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false))));
+    const full_coverage = @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(true))));
+
     pub fn noCoveredChildren(state: NodeData) bool {
-        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false)))));
+        return std.meta.eql(state.covered_children, empty_coverage);
     }
 
     pub fn allCoveredChildren(state: NodeData) bool {
-        return std.meta.eql(state.covered_children, @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(true)))));
+        return std.meta.eql(state.covered_children, full_coverage);
     }
 
     pub fn isCovering(state: NodeData) bool {
@@ -583,7 +586,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     const now: std.Io.Timestamp = .now(io, .awake);
     const frame_time = self.last_frametime.durationTo(now);
     self.last_frametime = now;
-    const current_fps: f32 = std.time.ns_per_s / @as(f32, @floatFromInt(frame_time.nanoseconds));
+    const frame_ns = @max(frame_time.nanoseconds, 1);
+    const current_fps: f32 = std.time.ns_per_s / @as(f32, @floatFromInt(frame_ns));
     const fps = self.debug_menu.fps.load(.unordered);
     self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
 
@@ -647,7 +651,7 @@ fn saveFuture(self: *@This(), io: std.Io) !void {
 
 fn handleErrors(self: *@This()) !void {
     const err = @errorFromInt(self.deferred_error.swap(@intFromError(error.NoError), .seq_cst));
-    if (err == error.Canceled) unreachable; // This should not be here
+    std.debug.assert(err != error.Canceled);
     if (err != error.NoError) return err;
 }
 
@@ -760,28 +764,35 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     try editor.flush(io, self.allocator);
 }
 
+fn strafeDirection(camera_front: @Vector(3, f32)) ?zm.Vec3f {
+    const cross = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
+    if (std.meta.eql(cross.data, @Vector(3, f64){ 0, 0, 0 })) return null;
+    return cross.norm();
+}
+
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "flyMove" });
     defer z.end();
     const camera_front = self.getCameraFront(io);
-    const vel_diff: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
-    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
-    const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
+    const speed: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
+    const right_dir = strafeDirection(camera_front);
 
-    {
-        self.player.physics.mutex.lockUncancelable(io);
-        defer self.player.physics.mutex.unlock(io);
-        // Reset velocity so fly input is frame-independent and doesn't accumulate.
-        // Mover.zero_velocity (active in Spectator mode) already does this after
-        // physics.update, but Creative mode leaves velocity intact between frames.
-        self.player.physics.velocity = .{ 0, 0, 0 };
-        if (actions.contains(.forward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * camera_front));
-        if (actions.contains(.backward)) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * camera_front));
-        if (actions.contains(.up)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(vel_diff[1]), 0 };
-        if (actions.contains(.down)) self.player.physics.velocity += @Vector(3, f64){ 0, @floatCast(-vel_diff[1]), 0 };
-        if (actions.contains(.right) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(vel_diff * cross_norm.?.data));
-        if (actions.contains(.left) and cross_norm != null) self.player.physics.velocity += @as(@Vector(3, f64), @floatCast(-vel_diff * cross_norm.?.data));
+    self.player.physics.mutex.lockUncancelable(io);
+    defer self.player.physics.mutex.unlock(io);
+
+    // Reset velocity so fly input is frame-independent.
+    self.player.physics.velocity = .{ 0, 0, 0 };
+
+    var vel: @Vector(3, f64) = .{ 0, 0, 0 };
+    if (actions.contains(.forward)) vel += @as(@Vector(3, f64), @floatCast(speed * camera_front));
+    if (actions.contains(.backward)) vel += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
+    if (actions.contains(.up)) vel += .{ 0, speed[1], 0 };
+    if (actions.contains(.down)) vel += .{ 0, -speed[1], 0 };
+    if (right_dir) |r| {
+        if (actions.contains(.right)) vel += @as(@Vector(3, f64), @floatCast(speed * r.data));
+        if (actions.contains(.left)) vel += @as(@Vector(3, f64), @floatCast(-speed * r.data));
     }
+    self.player.physics.velocity = vel;
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
@@ -792,33 +803,39 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const delta_time_seconds = @as(f32, @floatFromInt(dt_ns)) / std.time.ns_per_s;
     const camera_front = self.getCameraFront(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
-    const cross_product = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
-    const cross_norm = if (std.meta.eql(cross_product.data, @Vector(3, f64){ 0, 0, 0 })) null else cross_product.norm();
+    const right_dir = strafeDirection(camera_front);
+
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
 
     const player_pos = self.getPlayerPos(io);
-
     const ground_dist = try self.player.physics.elements.mover.getShortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
     const on_ground = ground_dist <= 0;
     const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.35);
-    {
-        self.player.physics.mutex.lockUncancelable(io);
-        defer self.player.physics.mutex.unlock(io);
-        if (actions.contains(.up) and on_ground) self.player.physics.velocity[1] = self.player.jump_strength.load(.unordered);
-        var vel_diff: @Vector(3, f64) = @splat(0.0);
-        if (actions.contains(.forward)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * camera_front));
-        if (actions.contains(.backward)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
-        if (actions.contains(.right) and cross_norm != null) vel_diff += @as(@Vector(3, f64), @floatCast(speed * cross_norm.?.data));
-        if (actions.contains(.left) and cross_norm != null) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * cross_norm.?.data));
-        vel_diff = vel_diff * speed_multiplier;
-        if (on_ground) {
-            self.player.physics.velocity[0] = vel_diff[0];
-            self.player.physics.velocity[2] = vel_diff[2];
-        } else {
-            self.player.physics.velocity[0] += vel_diff[0] * @as(f64, @floatCast(delta_time_seconds));
-            self.player.physics.velocity[2] += vel_diff[2] * @as(f64, @floatCast(delta_time_seconds));
-        }
+
+    self.player.physics.mutex.lockUncancelable(io);
+    defer self.player.physics.mutex.unlock(io);
+
+    if (actions.contains(.up) and on_ground) {
+        self.player.physics.velocity[1] = self.player.jump_strength.load(.unordered);
+    }
+
+    var vel_diff: @Vector(3, f64) = @splat(0.0);
+    if (actions.contains(.forward)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * camera_front));
+    if (actions.contains(.backward)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
+    if (right_dir) |r| {
+        if (actions.contains(.right)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * r.data));
+        if (actions.contains(.left)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * r.data));
+    }
+    vel_diff = vel_diff * speed_multiplier;
+
+    if (on_ground) {
+        self.player.physics.velocity[0] = vel_diff[0];
+        self.player.physics.velocity[2] = vel_diff[2];
+    } else {
+        const dt_f64 = @as(f64, @floatCast(delta_time_seconds));
+        self.player.physics.velocity[0] += vel_diff[0] * dt_f64;
+        self.player.physics.velocity[2] += vel_diff[2] * dt_f64;
     }
 }
 
@@ -1005,25 +1022,27 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f6
     if (lowest_level) |l| if (chunk_pos.level < l) return false;
     if (highest_level) |h| if (chunk_pos.level > h) return false;
 
-    const player_chunk_pos = @trunc(player_pos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioFloat(chunk_pos.level))));
+    const player_chunk_pos = @trunc(player_pos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioF64(chunk_pos.level))));
     const chunk_center: @Vector(3, f64) = chunk_pos.position;
 
     if (inner_chunk_range) |icr| {
         const inner: @Vector(3, f64) = .{ icr[0], icr[1], icr[0] };
-        const inside_inner =
-            @reduce(.And, player_chunk_pos > (chunk_center - inner)) and
-            @reduce(.And, player_chunk_pos < chunk_center + inner);
-        if (inside_inner) return false;
+        if (isInside(player_chunk_pos, chunk_center, inner)) return false;
     }
 
     if (outer_chunk_range) |ocr| {
         const outer: @Vector(3, f64) = .{ ocr[0], ocr[1], ocr[0] };
-        const outside_outer =
-            @reduce(.Or, player_chunk_pos < chunk_center - outer) or
-            @reduce(.Or, player_chunk_pos > chunk_center + outer);
-        if (outside_outer) return false;
+        if (isOutside(player_chunk_pos, chunk_center, outer)) return false;
     }
     return true;
+}
+
+fn isInside(point: @Vector(3, f64), center: @Vector(3, f64), radius: @Vector(3, f64)) bool {
+    return @reduce(.And, point > (center - radius)) and @reduce(.And, point < center + radius);
+}
+
+fn isOutside(point: @Vector(3, f64), center: @Vector(3, f64), radius: @Vector(3, f64)) bool {
+    return @reduce(.Or, point < center - radius) or @reduce(.Or, point > center + radius);
 }
 
 ///Loads all chunks in render distance
@@ -1042,12 +1061,10 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     }
     try group.await(io);
 
-    // group.async swallows task errors, so the spirals record them in error_int;
-    // surface the first recorded error instead of dropping it.
     const load_error = @errorFromInt(error_int.swap(@intFromError(error.NoError), .seq_cst));
     switch (load_error) {
         error.NoError => {},
-        error.Canceled => unreachable, // loadChunksSpiral re-raises cancelations instead of recording them
+        error.Canceled => unreachable,
         else => |e| return e,
     }
 }
@@ -1072,9 +1089,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
 
     while (true) {
         if (!game.running.load(.unordered)) return;
-        if (amount_tested >= 4 * outer_radius[0] * outer_radius[0]) {
-            break;
-        }
+        if (amount_tested >= 4 * outer_radius[0] * outer_radius[0]) break;
 
         if (game.player.physics.mutex.tryLock()) {
             defer game.player.physics.mutex.unlock(io);
@@ -1090,7 +1105,6 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
         }
 
         try io.checkCancel();
-        //update radiuses more frequently incase they are set way too high
         outer_radius = game.getRenderDistance(io);
         inner_radius = game.getInnerGenRadius(io, outer_radius, level);
 
@@ -1101,17 +1115,17 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
-            while (y < outer_radius[1]) {
-                defer y += 1;
+            while (y < outer_radius[1]) : (y += 1) {
                 const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
 
-                const in_range = keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius);
-                if (!in_range)
-                    continue;
+                if (!keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius)) continue;
 
-                const node_data = game.loaded_or_meshed.get(io, chunk_pos);
+                const needs_load = if (game.loaded_or_meshed.get(io, chunk_pos)) |node_data|
+                    (!node_data.is_active and !node_data.is_queued) or !node_data.structures_generated
+                else
+                    true;
 
-                if (node_data == null or (!node_data.?.is_active and !node_data.?.is_queued) or !node_data.?.structures_generated) {
+                if (needs_load) {
                     amount_loaded += 1;
                     game.addChunkToRenderAsync(io, allocator, chunk_pos, true) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
@@ -1142,7 +1156,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
             ctx.chunks += 1;
             if (ctx.view.keepChunkLoaded(chunk_pos)) return;
-            if (!ctx.game.canUnloadMeshView(ctx.io, ctx.view, chunk_pos)) return; // children not ready
+            if (!ctx.game.canUnloadMeshView(ctx.io, ctx.view, chunk_pos)) return;
 
             ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| {
                 ctx.err = err;
@@ -1221,18 +1235,11 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn move(xz_in: [2]i32, c: *usize) [2]i32 {
-    const mov_f: f32 = (@as(f32, @floatFromInt(c.*)) / 2.0);
-    const mov: i32 = @ceil(mov_f + 0.01);
-    var xz = xz_in;
-    switch (@mod(c.*, 4)) {
-        0 => xz[1] += mov,
-        1 => xz[0] += mov,
-        2 => xz[1] -= mov,
-        3 => xz[0] -= mov,
-        else => unreachable,
-    }
+    const directions = [_][2]i32{ .{ 0, 1 }, .{ 1, 0 }, .{ 0, -1 }, .{ -1, 0 } };
+    const mov: i32 = @intCast(c.* / 2 + 1);
+    const dir = directions[c.* % 4];
     c.* += 1;
-    return xz;
+    return .{ xz_in[0] + dir[0] * mov, xz_in[1] + dir[1] * mov };
 }
 
 fn line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
@@ -1241,20 +1248,11 @@ fn line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
     if (xz[0] == end[0] and xz[1] == end[1]) return false;
     std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
     if (xz[0] == end[0]) {
-        if (xz[1] < end[1]) {
-            xz[1] += 1;
-        } else {
-            xz[1] -= 1;
-        }
+        xz[1] += if (xz[1] < end[1]) 1 else -1;
     } else {
-        if (xz[0] < end[0]) {
-            xz[0] += 1;
-        } else {
-            xz[0] -= 1;
-        }
+        xz[0] += if (xz[0] < end[0]) 1 else -1;
     }
-    if (xz[0] == end[0] and xz[1] == end[1]) return false;
-    return true;
+    return !(xz[0] == end[0] and xz[1] == end[1]);
 }
 
 test {

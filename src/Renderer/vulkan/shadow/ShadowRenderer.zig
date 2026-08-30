@@ -786,7 +786,7 @@ fn recordCascadePass(
     self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buffer)[0..1], (&face_buffer_offset)[0..1]);
 
     const frame = &self.scene.frame_buffers.items[frame_idx];
-    const indirect_offset = frame.indirect_draw_offset + @as(vk.DeviceSize, @intCast((gpu.shadow_slot_base + slot) * self.scene.draw_capacity * @sizeOf(vk.DrawIndirectCommand)));
+    const indirect_offset = frame.indirect_draw_offset + @as(vk.DeviceSize, @intCast(gpu.shadow_slot_base + slot)) * self.scene.draw_capacity * @sizeOf(vk.DrawIndirectCommand);
     const count_offset = frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "shadow_count") + slot * @sizeOf(u32)));
     self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, indirect_offset, frame.count, count_offset, self.scene.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
 

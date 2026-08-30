@@ -161,7 +161,9 @@ fn cross3f(a: Vec3f, b: Vec3f) Vec3f {
 }
 
 pub fn normalize3f(v: Vec3f) Vec3f {
-    return v / @as(Vec3f, @splat(@sqrt(dot3f(v, v))));
+    const length_squared = dot3f(v, v);
+    if (length_squared <= degenerate_horizon_eps * degenerate_horizon_eps) return .{ 0, -1, 0 };
+    return v / @as(Vec3f, @splat(@sqrt(length_squared)));
 }
 
 /// Returns true when the live light direction has rotated past `step_cos` from the

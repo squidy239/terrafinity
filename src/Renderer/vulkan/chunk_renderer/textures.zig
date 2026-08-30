@@ -319,7 +319,10 @@ pub const TextureManager = struct {
         rgba_data: []const u8,
         format: vk.Format,
     ) ![]u8 {
-        const image_size: vk.DeviceSize = @intCast(width * height * 4);
+        if (width == 0 or height == 0) return error.InvalidImageDimensions;
+        const pixel_count = std.math.mul(vk.DeviceSize, width, height) catch return error.InvalidImageDimensions;
+        const image_size = std.math.mul(vk.DeviceSize, pixel_count, 4) catch return error.InvalidImageDimensions;
+        if (image_size != @as(vk.DeviceSize, @intCast(rgba_data.len))) return error.InvalidImageData;
         const num_mip_levels: u16 = @intCast(std.math.log2(@max(width, height)) + 1);
         const image_info = vk.ImageCreateInfo{
             .image_type = .@"2d",

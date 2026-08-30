@@ -706,8 +706,9 @@ pub fn publishPending(self: *ChunkRenderer, io: std.Io) void {
             std.log.err("ChunkRenderer: publication failed (error {s}); retrying next frame", .{@errorName(err)});
             // Keep the unapplied tail in the scratch list. The next call swaps it
             // back into pending_publications without needing another allocation.
-            @memmove(self.publish_scratch.items, self.publish_scratch.items[i..]);
-            self.publish_scratch.items.len -= i;
+            const tail_len = pending.len - i;
+            @memmove(self.publish_scratch.items[0..tail_len], pending[i..]);
+            self.publish_scratch.items.len = tail_len;
             clear_scratch = false;
             return;
         };

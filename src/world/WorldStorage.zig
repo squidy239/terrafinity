@@ -127,6 +127,9 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
         .only_modified => if (!modified) return,
     }
 
+    const was_modified = chunk.modified.swap(false, .acq_rel);
+    errdefer if (was_modified) chunk.modified.store(true, .release);
+
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     const data: ChunkData = .{
         .encoding = chunk.encoding,
@@ -150,7 +153,6 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
             try self.database.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data), &err_str);
         },
     }
-    chunk.modified.store(false, .seq_cst);
     chunk.saved.store(true, .unordered);
 }
 
@@ -170,20 +172,29 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
     const data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
 
+    if (data_bytes.data.len != @sizeOf(ChunkData)) {
+        data_bytes.deinit();
+        return error.Unrecoverable;
+    }
     var data = std.mem.bytesToValue(ChunkData, data_bytes.data);
     data_bytes.deinit();
 
+    var retried_missing_grid = false;
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
     get: switch (data.encoding) {
         .grid => gr: {
             grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse {
-                // Retry since the grid was removed between the time we loaded the chunk data and now
+                if (retried_missing_grid) return error.Unrecoverable;
+                retried_missing_grid = true;
+                // The encoding may have changed while the old grid row was removed.
                 const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+                defer new_data_bytes.deinit();
+                if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
                 data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
-                new_data_bytes.deinit();
                 continue :get data.encoding;
             };
+            if (grid_bytes.?.data.len != @sizeOf([ChunkSize][ChunkSize][ChunkSize]World.Block)) return error.Unrecoverable;
             blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
             break :gr;
         },

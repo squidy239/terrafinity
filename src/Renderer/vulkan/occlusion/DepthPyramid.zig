@@ -237,6 +237,7 @@ pub fn pushOcclusionSet(self: *DepthPyramid, cmd: vk.CommandBuffer, pipeline_lay
 /// protect themselves through their own pixels. Ends with every mip in
 /// shader_read_only_optimal, visible to compute reads.
 pub fn recordBuild(self: *DepthPyramid, cmd: vk.CommandBuffer, depth_sampled_view: vk.ImageView) void {
+    if (self.image == .null_handle or self.mip_views.len == 0) return;
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "DepthPyramid.recordBuild" });
     defer zone.end();
 

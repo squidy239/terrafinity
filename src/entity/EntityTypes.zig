@@ -19,9 +19,7 @@ pub const Player = struct {
     jump_strength: std.atomic.Value(f32) = .init(8),
     fly_speed_linear: std.atomic.Value(f32) = .init(10),
     inventory_buffer: [10 * 16]?Item.Item = @splat(null),
-    /// Main inventory and hotbar.
     main_inventory: Item.Inventory,
-    /// Pitch, yaw, roll, in degrees.
     view_direction: @Vector(3, f32),
     view_direction_mutex: std.Io.Mutex = .init,
 
@@ -36,11 +34,8 @@ pub const Player = struct {
         len: u8,
 
         pub fn fromString(str: anytype) @This() {
-            var name = @This(){
-                .data = undefined,
-                .len = str.len,
-            };
-            std.debug.assert(str.len < name.data.len);
+            std.debug.assert(str.len < 64);
+            var name: @This() = .{ .data = undefined, .len = @intCast(str.len) };
             @memcpy(name.data[0..str.len], str);
             return name;
         }
@@ -69,36 +64,20 @@ pub const Player = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.physics.mutex.lockUncancelable(io);
         defer self.physics.mutex.unlock(io);
-
         return self.physics.pos;
     }
 
     pub fn switchGameMode(self: *@This(), game_mode: GameMode) void {
         self.game_mode.store(game_mode, .monotonic);
+        self.physics.elements.mover.enabled.store(true, .monotonic);
 
-        switch (game_mode) {
-            .Spectator => {
-                self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zero_velocity.store(true, .monotonic);
-                self.physics.elements.mover.collisions.store(false, .monotonic);
-                self.physics.elements.gravity.enabled.store(false, .monotonic);
-                self.physics.elements.resistance.enabled.store(false, .monotonic);
-            },
-            .Survival => {
-                self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zero_velocity.store(false, .monotonic);
-                self.physics.elements.mover.collisions.store(true, .monotonic);
-                self.physics.elements.gravity.enabled.store(true, .monotonic);
-                self.physics.elements.resistance.enabled.store(true, .monotonic);
-            },
-            .Creative => {
-                self.physics.elements.mover.enabled.store(true, .monotonic);
-                self.physics.elements.mover.zero_velocity.store(false, .monotonic);
-                self.physics.elements.mover.collisions.store(true, .monotonic);
-                self.physics.elements.gravity.enabled.store(false, .monotonic);
-                self.physics.elements.resistance.enabled.store(true, .monotonic);
-            },
-        }
+        const is_spectator = game_mode == .Spectator;
+        const is_survival = game_mode == .Survival;
+
+        self.physics.elements.mover.zero_velocity.store(is_spectator, .monotonic);
+        self.physics.elements.mover.collisions.store(!is_spectator, .monotonic);
+        self.physics.elements.gravity.enabled.store(is_survival, .monotonic);
+        self.physics.elements.resistance.enabled.store(!is_spectator, .monotonic);
     }
 
     pub fn update(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable }!bool {
@@ -113,11 +92,7 @@ pub const Player = struct {
 
     pub fn getInterface(self: *const @This()) Entity.Interface {
         _ = self;
-        return .{
-            .getPos = getPos,
-            .unload = unload,
-            .update = update,
-        };
+        return .{ .getPos = getPos, .unload = unload, .update = update };
     }
 };
 
@@ -125,8 +100,6 @@ pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
     pos: @Vector(3, f64),
     dir: @Vector(3, f32),
-    /// Nanoseconds at last update. Guarded by lock, must be initialized to
-    /// spawn time so the first delta is small.
     timestamp: i96,
     lock: std.Io.RwLock = .init,
 
@@ -139,24 +112,23 @@ pub const Explosive = struct {
         defer self.lock.unlock(io);
 
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-        const prev_ns = self.timestamp;
+        const dt = @as(f32, @floatFromInt(now_ns - self.timestamp)) * 1e-9;
         self.timestamp = now_ns;
-        const dt = @as(f32, @floatFromInt(now_ns - prev_ns)) * 1e-9;
 
-        var dir = self.dir;
-        if (!std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 })) dir = zm.Vec3f.norm(.{ .data = dir }).data;
-        dir *= @splat(10 * dt);
-        self.dir = dir;
-        self.pos += dir;
+        if (!std.meta.eql(self.dir, @Vector(3, f32){ 0, 0, 0 })) {
+            self.dir = zm.Vec3f.norm(.{ .data = self.dir }).data;
+        }
+        const move = self.dir * @as(@Vector(3, f32), @splat(10 * dt));
+        self.dir = move;
+        self.pos += @as(@Vector(3, f64), @floatCast(move));
 
-        var worldReader = World.Reader{ .world = world };
-        defer worldReader.clear(io);
+        var world_reader = World.Reader{ .world = world };
+        defer world_reader.clear(io);
 
-        if ((try worldReader.getBlockUncached(io, allocator, @trunc(self.pos), World.standard_level)) != .air) {
-            var worldEditor = World.Editor{ .world = world, .temp_allocator = allocator };
-            const sphere = Sphere(f32).init(@floatCast(self.pos), 8);
-            try worldEditor.placeSamplerShape(.grass, sphere, World.standard_level);
-            worldEditor.flush(io, allocator) catch |err| switch (err) {
+        if ((try world_reader.getBlockUncached(io, allocator, @trunc(self.pos), World.standard_level)) != .air) {
+            var editor = World.Editor{ .world = world, .temp_allocator = allocator };
+            try editor.placeSamplerShape(.grass, Sphere(f32).init(@floatCast(self.pos), 8), World.standard_level);
+            editor.flush(io, allocator) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.Unrecoverable,
@@ -184,10 +156,6 @@ pub const Explosive = struct {
 
     pub fn getInterface(self: *const @This()) Entity.Interface {
         _ = self;
-        return .{
-            .getPos = getPos,
-            .unload = unload,
-            .update = update,
-        };
+        return .{ .getPos = getPos, .unload = unload, .update = update };
     }
 };

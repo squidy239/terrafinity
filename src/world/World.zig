@@ -130,7 +130,6 @@ pub const ChunkSource = struct {
         grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
     ) error{ Unrecoverable, OutOfMemory, Canceled }!?GetBlocksMetadata,
 
-    /// May be called on the same chunk multiple times and must result in the same state each time
     placeStructures: ?*const fn (
         self: ChunkSource,
         io: std.Io,
@@ -140,7 +139,6 @@ pub const ChunkSource = struct {
         chunk_pos: ChunkPos,
     ) error{ OutOfMemory, Canceled, Unrecoverable }!void,
 
-    /// Idempotent, caller must hold at least a shared lock on the chunk
     save: ?*const fn (
         self: ChunkSource,
         io: std.Io,
@@ -215,7 +213,6 @@ config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
 
-/// This function is not threadsafe
 pub fn deinit(self: *World, io: std.Io, allocator: std.mem.Allocator) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -271,7 +268,6 @@ pub fn loadChunk(
     return chunk;
 }
 
-/// Ensure all chunks are saved to disk. This function is not threadsafe.
 fn saveAll(self: *World, io: std.Io) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -330,7 +326,6 @@ fn saveShard(
         while (window.items.len < window.capacity) {
             const c = it.next() orelse break;
             if (!c.chunk.modified.load(.seq_cst)) continue;
-
             c.chunk.addRef();
             window.appendAssumeCapacity(.{ .chunk = &c.chunk, .pos = c.keyFromValue() });
         }
@@ -341,19 +336,22 @@ fn saveShard(
         var save_failed = false;
         var chunk_contended = false;
         for (window.items) |item| {
-            if (blocking) {
+            const locked = if (blocking) blk: {
                 item.chunk.encoding_lock.lockSharedUncancelable(io);
-            } else if (!item.chunk.encoding_lock.tryLockShared(io)) {
+                break :blk true;
+            } else item.chunk.encoding_lock.tryLockShared(io);
+
+            if (!locked) {
                 chunk_contended = true;
                 item.chunk.release();
                 continue;
             }
+            defer item.chunk.encoding_lock.unlockShared(io);
 
             self.save(io, item.chunk, item.pos) catch |err| {
                 save_failed = true;
                 std.log.err("error saving chunk: {any}, {any}\n", .{ item.pos, err });
             };
-            item.chunk.encoding_lock.unlockShared(io);
             item.chunk.release();
         }
 
@@ -369,14 +367,15 @@ pub const Reader = struct {
         const chunk_pos: ChunkPos = .fromLocalBlockPos(block_pos, level);
         const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
 
-        if (self.last_chunk_read_cache == null or !std.meta.eql(self.last_chunk_read_cache.?.chunk_pos, chunk_pos)) {
-            self.clear(io);
-            const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-            try chunk.lockShared(io);
-            self.last_chunk_read_cache = .{ .chunk_pos = chunk_pos, .chunk = chunk };
+        if (self.last_chunk_read_cache) |cache| {
+            if (std.meta.eql(cache.chunk_pos, chunk_pos)) return readBlockFromEncoding(cache.chunk.encoding, local_pos);
         }
 
-        return readBlockFromEncoding(self.last_chunk_read_cache.?.chunk.encoding, local_pos);
+        self.clear(io);
+        const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
+        try chunk.lockShared(io);
+        self.last_chunk_read_cache = .{ .chunk_pos = chunk_pos, .chunk = chunk };
+        return readBlockFromEncoding(chunk.encoding, local_pos);
     }
 
     pub fn getBlockUncached(self: *Reader, io: std.Io, allocator: std.mem.Allocator, block_pos: BlockPos, level: i32) !Block {
@@ -386,7 +385,6 @@ pub const Reader = struct {
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
         try chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
-
         return readBlockFromEncoding(chunk.encoding, local_pos);
     }
 
@@ -444,15 +442,20 @@ pub const Editor = struct {
         const chunk_pos: ChunkPos = .fromLocalBlockPos(pos, level);
         const local_pos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
 
-        if (self.last_chunk_cache == null or !std.meta.eql(self.last_chunk_cache.?.chunk_pos, chunk_pos)) {
-            const entry = try self.edit_buffer.getOrPut(self.temp_allocator, chunk_pos);
-            if (!entry.found_existing) {
-                const ptr: *[ChunkSize * ChunkSize][ChunkSize]Block = @ptrCast(entry.value_ptr);
-                for (ptr) |*row| row.* = @splat(.null);
+        if (self.last_chunk_cache) |cache| {
+            if (std.meta.eql(cache.chunk_pos, chunk_pos)) {
+                cache.grid[local_pos[0]][local_pos[1]][local_pos[2]] = block;
+                return;
             }
-            self.last_chunk_cache = .{ .chunk_pos = chunk_pos, .grid = &entry.value_ptr.grid };
         }
-        self.last_chunk_cache.?.grid[local_pos[0]][local_pos[1]][local_pos[2]] = block;
+
+        const entry = try self.edit_buffer.getOrPut(self.temp_allocator, chunk_pos);
+        if (!entry.found_existing) {
+            const ptr: *[ChunkSize * ChunkSize][ChunkSize]Block = @ptrCast(entry.value_ptr);
+            for (ptr) |*row| row.* = @splat(.null);
+        }
+        self.last_chunk_cache = .{ .chunk_pos = chunk_pos, .grid = &entry.value_ptr.grid };
+        entry.value_ptr.grid[local_pos[0]][local_pos[1]][local_pos[2]] = block;
     }
 
     pub fn placeSamplerShape(self: *Editor, block: Block, shape: anytype, level: i32) !void {
@@ -557,8 +560,7 @@ pub const Editor = struct {
         try parent.lockShared(io);
         defer parent.unlockShared(io);
 
-        if (is_uniform and parent.encoding == .uniform and
-            parent.encoding.uniform == simplified[0][0][0]) return false;
+        if (is_uniform and parent.encoding == .uniform and parent.encoding.uniform == simplified[0][0][0]) return false;
 
         var changed_parent = false;
         for (0..simplified_size) |x| {
@@ -721,6 +723,12 @@ fn fetchChunk(self: *World, io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     return null;
 }
 
+fn canEvict(chunk: *Chunk, io: std.Io) bool {
+    if (chunk.ref_count.load(.seq_cst) != 1) return false;
+    if (!chunk.encoding_lock.tryLockShared(io)) return false;
+    return true;
+}
+
 fn putChunk(
     self: *World,
     io: std.Io,
@@ -742,12 +750,11 @@ fn putChunk(
         }
 
         if (shard.peek_victim(chunk_pos)) |victim| {
-            if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+            if (!canEvict(&victim.chunk, io)) {
                 shard.skip_victim(chunk_pos);
                 continue;
             }
-            std.debug.assert(victim.chunk.encoding_lock.tryLockShared(io));
-            victim.chunk.encoding_lock.unlockShared(io);
+            defer victim.chunk.encoding_lock.unlockShared(io);
             try self.save(io, &victim.chunk, victim.pos);
             if (victim.chunk.encoding == .grid) self.freeGrid(io, victim.pos);
             victim.* = undefined;
@@ -779,12 +786,11 @@ fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chu
 
     while (grid_shard.peek_victim(chunk_pos)) |victim| {
         std.debug.assert(victim.chunk != chunk_ptr);
-        if (victim.chunk.ref_count.load(.seq_cst) != 1) {
+        if (!canEvict(victim.chunk, io)) {
             grid_shard.skip_victim(chunk_pos);
             continue;
         }
-        std.debug.assert(victim.chunk.encoding_lock.tryLockShared(io));
-        victim.chunk.encoding_lock.unlockShared(io);
+        defer victim.chunk.encoding_lock.unlockShared(io);
         std.debug.assert(victim.chunk.encoding == .grid);
         save(self, io, victim.chunk, victim.pos) catch |err|
             std.log.err("Failed to save chunk: {}", .{err});
@@ -806,13 +812,11 @@ fn getBlocks(
 ) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .uniform = .null };
     for (self.chunk_sources) |source| {
-        if (source) |s| {
-            if (s.getBlocks) |getBlocksFn| {
-                if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
-                    return .{ encoding, metadata };
-                }
+        if (source) |s| if (s.getBlocks) |getBlocksFn| {
+            if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
+                return .{ encoding, metadata };
             }
-        }
+        };
     }
     @panic("at least one ChunkSource must be able to generate a chunk");
 }
@@ -825,11 +829,9 @@ fn runPlaceStructures(
     chunk_pos: ChunkPos,
 ) !void {
     for (self.chunk_sources) |source| {
-        if (source) |s| {
-            if (s.placeStructures) |placeStructuresFn| {
-                try placeStructuresFn(s, io, allocator, self, chunk, chunk_pos);
-            }
-        }
+        if (source) |s| if (s.placeStructures) |placeStructuresFn| {
+            try placeStructuresFn(s, io, allocator, self, chunk, chunk_pos);
+        };
     }
 }
 
@@ -854,11 +856,9 @@ fn save(self: *World, io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     defer zone.end();
 
     for (self.chunk_sources) |source| {
-        if (source) |s| {
-            if (s.save) |saveFn| {
-                try saveFn(s, io, self, chunk, chunk_pos);
-            }
-        }
+        if (source) |s| if (s.save) |saveFn| {
+            try saveFn(s, io, self, chunk, chunk_pos);
+        };
     }
 }
 
