@@ -247,7 +247,7 @@ fn createPipeline(self: *ShadowRenderer) !void {
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
 
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
-    self.pipeline = try core.buildDepthOnlyPipeline(
+    self.pipeline = try core.buildDepthOnlyPipelineWithTopology(
         self.dev,
         &self.vk_ctx.vkalloc,
         self.vk_ctx.pipeline_creation_feedback,
@@ -259,6 +259,7 @@ fn createPipeline(self: *ShadowRenderer) !void {
         self.config_applied.depth_bias_slope,
         if (self.vk_ctx.depth_bias_clamp) self.config_applied.depth_bias_clamp else 0.0,
         self.vk_ctx.depth_clamp,
+        .triangle_strip,
     );
 }
 

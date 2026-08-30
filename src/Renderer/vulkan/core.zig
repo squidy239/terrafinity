@@ -810,10 +810,11 @@ fn createGraphicsPipeline(
     prsci: vk.PipelineRasterizationStateCreateInfo,
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    topology: vk.PrimitiveTopology,
 ) !vk.Pipeline {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipeline" });
     defer zone.end();
-    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = .triangle_list, .primitive_restart_enable = .false };
+    const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = topology, .primitive_restart_enable = .false };
     const pvsci: vk.PipelineViewportStateCreateInfo = .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
     const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
         .rasterization_samples = .{ .@"1_bit" = true },
@@ -911,6 +912,23 @@ pub fn buildGraphicsPipeline(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
+    return buildGraphicsPipelineWithTopology(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list);
+}
+
+pub fn buildGraphicsPipelineWithTopology(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    frag_module: vk.ShaderModule,
+    color_formats: []const vk.Format,
+    depth_format: vk.Format,
+    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
+    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    topology: vk.PrimitiveTopology,
+) !vk.Pipeline {
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = .false,
         .rasterizer_discard_enable = .false,
@@ -926,7 +944,7 @@ pub fn buildGraphicsPipeline(
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 2, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
         .{ .flags = .{ .fragment_bit = true }, .module = frag_module },
-    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info);
+    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info, topology);
 }
 
 /// Depth-only pipeline: a single vertex stage, no colour attachments, standard (not
@@ -945,6 +963,23 @@ pub fn buildDepthOnlyPipeline(
     depth_bias_clamp: f32,
     depth_clamp: bool,
 ) !vk.Pipeline {
+    return buildDepthOnlyPipelineWithTopology(dev, vkalloc, pipeline_creation_feedback, vert_module, depth_format, layout, vertex_input_info, depth_bias_constant, depth_bias_slope, depth_bias_clamp, depth_clamp, .triangle_list);
+}
+
+pub fn buildDepthOnlyPipelineWithTopology(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    depth_format: vk.Format,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    depth_bias_constant: f32,
+    depth_bias_slope: f32,
+    depth_bias_clamp: f32,
+    depth_clamp: bool,
+    topology: vk.PrimitiveTopology,
+) !vk.Pipeline {
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = if (depth_clamp) .true else .false,
         .rasterizer_discard_enable = .false,
@@ -960,7 +995,7 @@ pub fn buildDepthOnlyPipeline(
     const depth_stencil = depthStencilState(true, .less_or_equal, true);
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
-    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info);
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology);
 }
 
 pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {

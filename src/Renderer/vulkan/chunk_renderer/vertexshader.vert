@@ -46,34 +46,53 @@ void main() {
 
     vec3 relative_position = mesh.relative_position.xyz;
     float scale = mesh.scale;
-    const uint quad_indices[6] = uint[6](0u, 1u, 2u, 0u, 2u, 3u);
-    uint local_vertex = quad_indices[gl_VertexIndex];
     vec3 absolute_position = mesh.absolute_position.xyz;
 
     uvec3 local_pos = decodePosition(val);
     uvec3 lengths   = decodeLengths(val);
     uint block_type_local = decodeBlockType(val);
-    side          = decodeSide(val);
+    side = decodeSide(val);
     block_array_layer = block_type_local;
 
-    vec3 coords = cube_faces[side][local_vertex];
-    coords += ceil(coords) * lengths;
+    // 4-vertex triangle strip per quad: 0=(-0.5,-0.5), 1=(+W,-0.5), 2=(-0.5,+H), 3=(+W,+H)
+    // No overdraw, no clip distance, no index buffer.
+    uint a0 = face_axes[side][0];
+    uint a1 = face_axes[side][1];
+    uint a2 = 3u - a0 - a1;
+    bool swapped = face_swap[side];
+    uint u_axis = swapped ? a1 : a0;
+    uint v_axis = swapped ? a0 : a1;
+
+    float u_len = float(lengths[u_axis]);
+    float v_len = float(lengths[v_axis]);
+
+    vec3 anchor = vec3(0.0);
+    anchor[a0] = -0.5;
+    anchor[a1] = -0.5;
+    anchor[a2] = face_sign[side];
+
+    vec3 coords = anchor;
+    if (gl_VertexIndex == 1u) coords[u_axis] += 1.0 + u_len;
+    else if (gl_VertexIndex == 2u) coords[v_axis] += 1.0 + v_len;
+    else if (gl_VertexIndex == 3u) {
+        coords[u_axis] += 1.0 + u_len;
+        coords[v_axis] += 1.0 + v_len;
+    }
     coords *= scale;
+
     vec3 local_frag_coords = vec3(local_pos) * scale + coords;
     frag_pos = local_frag_coords + relative_position;
     vec3 absolute_frag_pos = local_frag_coords + absolute_position;
-    sun_dir_norm  = normalize(push_consts.pc.sun_dir);
-    // Matches the sky's day factor so terrain darkens with the sun like the sky does.
+    sun_dir_norm = normalize(push_consts.pc.sun_dir);
     sun_day = smoothstep(-0.1, 0.25, sun_dir_norm.y);
 
-    // TODO: Replace hardcoded surface animation with the block material system and a better block surface system
     const uint water_block_type = 2u;
     if ((local_pos + absolute_position).y == 0.0 && block_type_local == water_block_type) {
         float speed = 0.1;
-        float t     = 1.0 + push_consts.pc.time;
+        float t = 1.0 + push_consts.pc.time;
         float safe_y = max(abs(absolute_frag_pos.y), 1e-10);
         float safe_z = max(abs(absolute_frag_pos.z), 1e-10);
-        float p     = 1.0 + bouncingMod(
+        float p = 1.0 + bouncingMod(
             absolute_frag_pos.x * absolute_frag_pos.y * absolute_frag_pos.z * (absolute_frag_pos.x / (safe_y * safe_z)) *
             (sin(absolute_frag_pos.x) * sin(absolute_frag_pos.y) * sin(absolute_frag_pos.z)),
             400.0) / 400.0;

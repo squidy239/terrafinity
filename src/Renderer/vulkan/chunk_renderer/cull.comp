@@ -97,7 +97,7 @@ uint ord_encode(float f) {
 
 void writeDraw(uint out_idx, MeshCandidate candidate, vec3 relative_pos) {
     out_indirect[out_idx] = DrawIndirectCommand(
-        6u,
+        4u,
         candidate.face_count,
         0u,
         candidate.face_offset

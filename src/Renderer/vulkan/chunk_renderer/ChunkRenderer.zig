@@ -1064,7 +1064,7 @@ fn buildChunkPipeline(
     const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, frag_spv);
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-    pipeline.* = try core.buildGraphicsPipeline(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState());
+    pipeline.* = try core.buildGraphicsPipelineWithTopology(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip);
 }
 
 pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
