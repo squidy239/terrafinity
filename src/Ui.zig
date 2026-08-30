@@ -13,6 +13,7 @@ const utils = @import("libs/utils.zig");
 const ShadowConfig = @import("Renderer/vulkan/shadow/Csm.zig").ShadowConfig;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
+const Screenshot = @import("Screenshot.zig");
 const generator_loader = @import("world/generator_loader.zig");
 const generator_api = @import("world/generators/generator_api.zig");
 const World = @import("world/World.zig");
@@ -235,8 +236,25 @@ pub fn recordCommandBuffer(
     try self.drawFrame(io, gpa, frame_time);
     self.vk_ctx.dev.cmdEndRendering(cmd);
 
-    VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
-    self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+    // Check if screenshot requested - if so, copy before transitioning to present
+    if (self.vk_ctx.screenshot_requested.load(.acquire)) {
+        // Clear the request flag - we are handling it now
+        self.vk_ctx.screenshot_requested.store(false, .release);
+        // Record copy from color_attachment_optimal to staging buffer, then to present_src
+        self.vk_ctx.recordScreenshotCopyFromColorAttachment(cmd, image, extent) catch |err| {
+            std.log.err("Screenshot copy recording failed: {any}", .{err});
+            // Fallback: just transition to present
+            VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
+            self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+        };
+        // If recording succeeded, layout is already present_src_khr
+        if (self.vk_ctx.screenshot_pending_save) {
+            self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+        }
+    } else {
+        VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
+        self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+    }
     try self.vk_ctx.dev.endCommandBuffer(cmd);
 }
 
@@ -713,6 +731,12 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
             defer advanced.deinit();
             drawAdvancedShadowSettings(&render_options.shadow, settingsId("shadows.advanced"));
         }
+    }
+
+    if (self.settingsSection(@src(), "Screenshots", settingsId("screenshots"), true)) |section| {
+        defer section.deinit();
+        settingsEnum("Screenshot Resolution", Screenshot.Resolution, &render_options.screenshot_resolution, settingsId("screenshots.resolution"));
+        dvui.labelNoFmt(@src(), "Press F2 to take screenshot. Saved to screenshots/ folder as PNG", .{}, .{ .padding = .{ .y = 4, .h = 4 } });
     }
 }
 

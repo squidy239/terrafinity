@@ -27,6 +27,7 @@ pub const Action = enum {
     use_item_quaternary,
     spawn_explosive,
     fullscreen,
+    screenshot,
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);

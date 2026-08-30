@@ -17,15 +17,15 @@ pub fn build(b: *std.Build) void {
 
     const sanitize = b.option(ThreadSanitizeMode, "sanitize_thread", "Enable thread sanitizer") orelse .None;
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
+    const screenshot_after = b.option(u32, "screenshot_after", "Automatically take a screenshot after N seconds (like test_play)") orelse null;
 
     const shader_include = b.path("src/Renderer/vulkan/shadow").getPath(b);
     const occlusion_include = b.path("src/Renderer/vulkan/occlusion").getPath(b);
-    const shader_cmd = .{
+    const shader_base_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
         if (optimize == .Debug) "-g" else "-Werror",
-        "-Werror",
         "-I",
         shader_include,
         "-I",
@@ -33,50 +33,37 @@ pub fn build(b: *std.Build) void {
         "-o",
     };
 
-    const vert_cmd = b.addSystemCommand(&shader_cmd);
-    const vert_spv = vert_cmd.addOutputFileArg("vertexshader.spv");
-    vert_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/vertexshader.vert"));
-    vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
+    const ShaderDef = struct {
+        name: []const u8,
+        out: []const u8,
+        src: []const u8,
+        deps: []const []const u8 = &.{},
+    };
 
-    const frag_cmd = b.addSystemCommand(&shader_cmd);
-    const frag_spv = frag_cmd.addOutputFileArg("fragshader.spv");
-    frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
-    frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
+    const shaders = [_]ShaderDef{
+        .{ .name = "vert", .out = "vertexshader.spv", .src = "src/Renderer/vulkan/chunk_renderer/vertexshader.vert", .deps = &.{"src/Renderer/vulkan/shadow/face_decode.glsl"} },
+        .{ .name = "frag", .out = "fragshader.spv", .src = "src/Renderer/vulkan/chunk_renderer/fragshader.frag", .deps = &.{"src/Renderer/vulkan/shadow/shadow.glsl"} },
+        .{ .name = "trans_frag", .out = "transparent_frag.spv", .src = "src/Renderer/vulkan/chunk_renderer/transparent_frag.frag", .deps = &.{"src/Renderer/vulkan/shadow/shadow.glsl"} },
+        .{ .name = "comp_vert", .out = "composite_vert.spv", .src = "src/Renderer/vulkan/composite_vert.vert" },
+        .{ .name = "comp_frag", .out = "composite_frag.spv", .src = "src/Renderer/vulkan/composite_frag.frag" },
+        .{ .name = "cull", .out = "cull.spv", .src = "src/Renderer/vulkan/chunk_renderer/cull.comp", .deps = &.{"src/Renderer/vulkan/occlusion/occlusion.glsl"} },
+        .{ .name = "pyramid", .out = "depth_pyramid.spv", .src = "src/Renderer/vulkan/occlusion/depth_pyramid.comp" },
+        .{ .name = "sky_vert", .out = "sky_vert.spv", .src = "src/Renderer/vulkan/sky/sky.vert" },
+        .{ .name = "sky_frag", .out = "sky_frag.spv", .src = "src/Renderer/vulkan/sky/sky.frag" },
+        .{ .name = "shadow_vert", .out = "shadow_vert.spv", .src = "src/Renderer/vulkan/shadow/shadow.vert", .deps = &.{"src/Renderer/vulkan/shadow/face_decode.glsl"} },
+    };
 
-    const trans_frag_cmd = b.addSystemCommand(&shader_cmd);
-    const trans_frag_spv = trans_frag_cmd.addOutputFileArg("transparent_frag.spv");
-    trans_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/transparent_frag.frag"));
-    trans_frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
+    var shader_cmds: [shaders.len]*std.Build.Step.Run = undefined;
+    var shader_outs: [shaders.len]std.Build.LazyPath = undefined;
 
-    const comp_vert_cmd = b.addSystemCommand(&shader_cmd);
-    const comp_vert_spv = comp_vert_cmd.addOutputFileArg("composite_vert.spv");
-    comp_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/composite_vert.vert"));
-
-    const comp_frag_cmd = b.addSystemCommand(&shader_cmd);
-    const comp_frag_spv = comp_frag_cmd.addOutputFileArg("composite_frag.spv");
-    comp_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/composite_frag.frag"));
-
-    const cull_cmd = b.addSystemCommand(&shader_cmd);
-    const cull_spv = cull_cmd.addOutputFileArg("cull.spv");
-    cull_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/cull.comp"));
-    cull_cmd.addFileInput(b.path("src/Renderer/vulkan/occlusion/occlusion.glsl"));
-
-    const pyramid_cmd = b.addSystemCommand(&shader_cmd);
-    const pyramid_spv = pyramid_cmd.addOutputFileArg("depth_pyramid.spv");
-    pyramid_cmd.addFileArg(b.path("src/Renderer/vulkan/occlusion/depth_pyramid.comp"));
-
-    const sky_vert_cmd = b.addSystemCommand(&shader_cmd);
-    const sky_vert_spv = sky_vert_cmd.addOutputFileArg("sky_vert.spv");
-    sky_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.vert"));
-
-    const sky_frag_cmd = b.addSystemCommand(&shader_cmd);
-    const sky_frag_spv = sky_frag_cmd.addOutputFileArg("sky_frag.spv");
-    sky_frag_cmd.addFileArg(b.path("src/Renderer/vulkan/sky/sky.frag"));
-
-    const shadow_vert_cmd = b.addSystemCommand(&shader_cmd);
-    const shadow_vert_spv = shadow_vert_cmd.addOutputFileArg("shadow_vert.spv");
-    shadow_vert_cmd.addFileArg(b.path("src/Renderer/vulkan/shadow/shadow.vert"));
-    shadow_vert_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/face_decode.glsl"));
+    for (shaders, 0..) |def, i| {
+        const cmd = b.addSystemCommand(&shader_base_cmd);
+        const out = cmd.addOutputFileArg(def.out);
+        cmd.addFileArg(b.path(def.src));
+        for (def.deps) |dep| cmd.addFileInput(b.path(dep));
+        shader_cmds[i] = cmd;
+        shader_outs[i] = out;
+    }
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -94,27 +81,15 @@ pub fn build(b: *std.Build) void {
         .use_llvm = if (tracy_enabled) true else null,
     });
 
-    exe.step.dependOn(&vert_cmd.step);
-    exe.step.dependOn(&frag_cmd.step);
-    exe.step.dependOn(&trans_frag_cmd.step);
-    exe.step.dependOn(&comp_vert_cmd.step);
-    exe.step.dependOn(&comp_frag_cmd.step);
-    exe.step.dependOn(&cull_cmd.step);
-    exe.step.dependOn(&pyramid_cmd.step);
-    exe.step.dependOn(&sky_vert_cmd.step);
-    exe.step.dependOn(&sky_frag_cmd.step);
-    exe.step.dependOn(&shadow_vert_cmd.step);
+    for (shader_cmds) |cmd| exe.step.dependOn(&cmd.step);
 
-    exe.root_module.addAnonymousImport("vert_spv", .{ .root_source_file = vert_spv });
-    exe.root_module.addAnonymousImport("frag_spv", .{ .root_source_file = frag_spv });
-    exe.root_module.addAnonymousImport("trans_frag_spv", .{ .root_source_file = trans_frag_spv });
-    exe.root_module.addAnonymousImport("comp_vert_spv", .{ .root_source_file = comp_vert_spv });
-    exe.root_module.addAnonymousImport("comp_frag_spv", .{ .root_source_file = comp_frag_spv });
-    exe.root_module.addAnonymousImport("cull_spv", .{ .root_source_file = cull_spv });
-    exe.root_module.addAnonymousImport("depth_pyramid_spv", .{ .root_source_file = pyramid_spv });
-    exe.root_module.addAnonymousImport("sky_vert_spv", .{ .root_source_file = sky_vert_spv });
-    exe.root_module.addAnonymousImport("sky_frag_spv", .{ .root_source_file = sky_frag_spv });
-    exe.root_module.addAnonymousImport("shadow_vert_spv", .{ .root_source_file = shadow_vert_spv });
+    const shader_import_names = [_][]const u8{
+        "vert_spv", "frag_spv", "trans_frag_spv", "comp_vert_spv", "comp_frag_spv",
+        "cull_spv", "depth_pyramid_spv", "sky_vert_spv", "sky_frag_spv", "shadow_vert_spv",
+    };
+    for (shader_import_names, shader_outs) |import_name, out| {
+        exe.root_module.addAnonymousImport(import_name, .{ .root_source_file = out });
+    }
 
     for (generator_sources) |generator_source| {
         const generator = b.addLibrary(.{
@@ -137,8 +112,6 @@ pub fn build(b: *std.Build) void {
             .{ .custom = "generators" },
             generator_source.file_name,
         ).step);
-        // Embed the built library so the executable can write it into the
-        // generators directory at startup, like the config and textures.
         exe.root_module.addAnonymousImport(generator_source.embed_name, .{
             .root_source_file = generator.getEmittedBin(),
         });
@@ -168,10 +141,11 @@ pub fn build(b: *std.Build) void {
     materials_options.addOption([]const u8, "default", @embedFile("packs/default/blocks/materials.zon"));
     exe.root_module.addOptions("materials", materials_options);
 
-    var options: *std.Build.Step.Options = .create(b);
-    options.addOption(?u32, "test_play", test_play);
-    options.addOption(bool, "sanitize_thread", sanitize != .None);
-    exe.root_module.addOptions("options", options);
+    var build_options: *std.Build.Step.Options = .create(b);
+    build_options.addOption(?u32, "test_play", test_play);
+    build_options.addOption(?u32, "screenshot_after", screenshot_after);
+    build_options.addOption(bool, "sanitize_thread", sanitize != .None);
+    exe.root_module.addOptions("options", build_options);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -260,7 +234,6 @@ fn createDependencies(
         .win32_manifest = false,
     }).module("wio");
 
-    // dvui
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
@@ -272,7 +245,6 @@ fn createDependencies(
     });
     const dvui_mod = dvui_dep.module("dvui");
 
-    // Vulkan bindings shared by the game and DVUI renderer.
     const vulkan_headers = b.dependency("vulkan_headers", .{});
     const registry = vulkan_headers.path("registry/vk.xml");
     const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
@@ -288,7 +260,7 @@ fn createDependencies(
     });
     dvui_vulkan_renderer_mod.addImport("vk", vulkan_zig_mod);
     dvui_vulkan_renderer_mod.addImport("dvui", dvui_mod);
-    // DVUI platform backend: windowing and input via WIO, rendering via the upstream Vulkan renderer.
+
     const our_backend_mod = b.addModule("dvui_backend", .{
         .root_source_file = b.path("src/dvui_backend_wio.zig"),
         .target = target,
@@ -299,7 +271,6 @@ fn createDependencies(
     our_backend_mod.addImport("vk", vulkan_zig_mod);
     our_backend_mod.addImport("dvui_vulkan_renderer", dvui_vulkan_renderer_mod);
 
-    // Link the custom platform backend with DVUI.
     dvui.linkBackend(dvui_mod, our_backend_mod);
 
     const zignal_mod = b.dependency("zignal", .{
@@ -345,7 +316,5 @@ fn configureModule(deps: *const Deps, mod: *std.Build.Module) void {
     mod.addImport("zignal", deps.zignal);
     mod.addImport("zm", deps.zm);
     mod.addImport("fastnoise", deps.fastnoise);
-
-    // Vulkan bindings (for our game renderer - imported as "vulkan")
     mod.addImport("vulkan", deps.vk);
 }

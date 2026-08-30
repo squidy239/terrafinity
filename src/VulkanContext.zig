@@ -12,6 +12,8 @@ const DeviceProxy = vk.DeviceProxy;
 const wio = @import("wio");
 
 const Renderer = @import("Renderer.zig");
+const Screenshot = @import("Screenshot.zig");
+const zignal = @import("zignal");
 const Mesher = @import("Renderer/Mesher.zig");
 const core = @import("Renderer/vulkan/core.zig");
 const gpu = @import("Renderer/vulkan/gpu.zig");
@@ -98,6 +100,18 @@ transfer_queue_mutex: std.Io.Mutex = .init,
 
 vulkan_host_allocator: VulkanHostAllocator = undefined,
 vkalloc: vk.AllocationCallbacks = undefined,
+
+    // Screenshot staging buffer (host-visible) for copy + save
+    screenshot_buffer: vk.Buffer = .null_handle,
+    screenshot_memory: vk.DeviceMemory = .null_handle,
+    screenshot_mapped: ?[*]u8 = null,
+    screenshot_buffer_size: vk.DeviceSize = 0,
+    screenshot_pending_save: bool = false,
+    screenshot_requested: std.atomic.Value(bool) = .init(false),
+    screenshot_resolution: Screenshot.Resolution = .native,
+    screenshot_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+    screenshot_counter: u32 = 0,
+
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
     return @ptrCast(wio.vkGetInstanceProcAddr(@intFromEnum(instance), procname));
@@ -631,6 +645,13 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
 
     self.dev.destroySemaphore(self.transfer_semaphore, &self.vkalloc);
     self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
+    if (self.screenshot_mapped) |_| {
+        self.dev.unmapMemory(self.screenshot_memory);
+        self.screenshot_mapped = null;
+    }
+    if (self.screenshot_buffer != .null_handle) self.dev.destroyBuffer(self.screenshot_buffer, &self.vkalloc);
+    if (self.screenshot_memory != .null_handle) self.dev.freeMemory(self.screenshot_memory, &self.vkalloc);
+
 
     self.dev.destroyDevice(&self.vkalloc);
     if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, &self.vkalloc);
@@ -768,7 +789,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         .image_color_space = surface_format.color_space,
         .image_extent = actual_extent,
         .image_array_layers = 1,
-        .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
+        .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true, .transfer_src_bit = true },
         .image_sharing_mode = if (self.queue_family_index == self.present_queue_family_index) .exclusive else .concurrent,
         .queue_family_index_count = if (self.queue_family_index == self.present_queue_family_index) 0 else 2,
         .p_queue_family_indices = if (self.queue_family_index == self.present_queue_family_index) null else queue_family_indices[0..queue_family_indices.len],
@@ -1105,7 +1126,83 @@ fn debugCallback(
     return .false;
 }
 
-pub const VulkanHostAllocator = struct {
+
+    pub fn requestScreenshot(self: *VulkanContext, resolution: Screenshot.Resolution) void {
+        self.screenshot_resolution = resolution;
+        self.screenshot_requested.store(true, .release);
+    }
+
+    pub fn ensureScreenshotBuffer(self: *VulkanContext, width: u32, height: u32) !void {
+        const needed: vk.DeviceSize = @as(vk.DeviceSize, width) * @as(vk.DeviceSize, height) * 4;
+        if (self.screenshot_buffer_size >= needed and self.screenshot_buffer != .null_handle) return;
+        if (self.screenshot_mapped) |_| {
+            self.dev.unmapMemory(self.screenshot_memory);
+            self.screenshot_mapped = null;
+        }
+        if (self.screenshot_buffer != .null_handle) self.dev.destroyBuffer(self.screenshot_buffer, &self.vkalloc);
+        if (self.screenshot_memory != .null_handle) self.dev.freeMemory(self.screenshot_memory, &self.vkalloc);
+        self.screenshot_buffer = try self.dev.createBuffer(&.{ .size = needed, .usage = .{ .transfer_dst_bit = true }, .sharing_mode = .exclusive }, &self.vkalloc);
+        const reqs = self.dev.getBufferMemoryRequirements(self.screenshot_buffer);
+        const mem_type = try core.findMemoryType(self.mem_props, reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
+        self.screenshot_memory = try self.dev.allocateMemory(&.{ .allocation_size = reqs.size, .memory_type_index = mem_type }, &self.vkalloc);
+        try self.dev.bindBufferMemory(self.screenshot_buffer, self.screenshot_memory, 0);
+        self.screenshot_mapped = @ptrCast(try self.dev.mapMemory(self.screenshot_memory, 0, reqs.size, .{}));
+        self.screenshot_buffer_size = reqs.size;
+    }
+
+    pub fn recordScreenshotCopyFromColorAttachment(self: *VulkanContext, cmd: vk.CommandBuffer, image: vk.Image, extent: vk.Extent2D) !void {
+        try self.ensureScreenshotBuffer(extent.width, extent.height);
+        const to_transfer = core.makeImageBarrier2(image, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, .{ .copy_bit = true }, .{ .transfer_read_bit = true }, .{ .color_bit = true });
+        core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&to_transfer)[0..1]);
+        const region: vk.BufferImageCopy = .{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = extent.width, .height = extent.height, .depth = 1 } };
+        self.dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, self.screenshot_buffer, (&region)[0..1]);
+        const to_present = core.makeImageBarrier2(image, .transfer_src_optimal, .present_src_khr, .{ .copy_bit = true }, .{ .transfer_read_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, .{ .color_bit = true });
+        core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&to_present)[0..1]);
+        self.screenshot_extent = extent;
+        self.screenshot_pending_save = true;
+    }
+
+    pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
+        if (!self.screenshot_pending_save) return error.NoPendingScreenshot;
+        const native_w = self.screenshot_extent.width;
+        const native_h = self.screenshot_extent.height;
+        const target = self.screenshot_resolution.targetExtent(self.screenshot_extent);
+        var cwd = std.Io.Dir.cwd();
+        cwd.createDirPath(io, "screenshots") catch |err| switch (err) { error.PathAlreadyExists => {}, else => return err };
+        const pixel_count = @as(usize, native_w) * @as(usize, native_h);
+        const src_bytes = self.screenshot_mapped.?[0 .. pixel_count * 4];
+        var rgba = try allocator.alloc(u8, pixel_count * 4);
+        defer allocator.free(rgba);
+        var i: usize = 0;
+        while (i < pixel_count) : (i += 1) {
+            const o = i * 4;
+            rgba[o + 0] = src_bytes[o + 2];
+            rgba[o + 1] = src_bytes[o + 1];
+            rgba[o + 2] = src_bytes[o + 0];
+            rgba[o + 3] = src_bytes[o + 3];
+        }
+        var src_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(native_h, native_w, rgba);
+        var final_img: zignal.Image(zignal.Rgba(u8)) = undefined;
+        var needs_deinit = false;
+        defer if (needs_deinit) final_img.deinit(allocator);
+        var to_save = src_img;
+        if (target.width != native_w or target.height != native_h) {
+            final_img = try zignal.Image(zignal.Rgba(u8)).init(allocator, target.height, target.width);
+            needs_deinit = true;
+            src_img.resize(allocator, final_img, .bilinear);
+            to_save = final_img;
+        }
+        const ts = std.Io.Timestamp.now(io, .real).toSeconds();
+        var buf: [256]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
+        try to_save.save(io, allocator, path);
+        self.screenshot_pending_save = false;
+        self.screenshot_counter += 1;
+        return try allocator.dupe(u8, path);
+    }
+
+    pub const VulkanHostAllocator = struct {
+
     allocator: std.mem.Allocator,
 
     const Header = struct {

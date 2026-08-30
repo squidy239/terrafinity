@@ -7,6 +7,7 @@ const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const ChunkPos = @import("world/World.zig").ChunkPos;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 pub const Csm = @import("Renderer/vulkan/shadow/Csm.zig");
+const Screenshot = @import("Screenshot.zig");
 
 pub const cameraUp = @Vector(3, f64){ 0, 1, 0 };
 
@@ -96,4 +97,5 @@ pub const RenderOptions = struct {
     occlusion_culling: bool = true,
     sky: SkyConfig = .default(),
     shadow: Csm.ShadowConfig = .{},
+    screenshot_resolution: Screenshot.Resolution = .native,
 };

@@ -91,9 +91,11 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
+    try keymap.setActionKey(io, .{ .key = .f2 }, .screenshot);
     single_press.insert(.escape_menu);
     single_press.insert(.fullscreen);
     single_press.insert(.spawn_explosive);
+    single_press.insert(.screenshot);
 
     inline for (.{
         .{ .key = .w, .action = .forward },
@@ -152,6 +154,11 @@ pub fn main(init: std.process.Init) !void {
     }, &ui_cmd_buffers);
     defer vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
 
+    // Screenshot auto handling
+    var screenshot_after_triggered: bool = false;
+    var screenshot_after_should_exit: bool = false;
+    var screenshot_after_saved: bool = false;
+
     while (running.load(.unordered)) {
         wio.update();
         try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
@@ -167,6 +174,11 @@ pub fn main(init: std.process.Init) !void {
             }
             vk_ctx.requestSwapchainRecreate();
         }
+        if (action_set.contains(.screenshot)) {
+            const res = config.game_config.render_options.screenshot_resolution;
+            vk_ctx.requestScreenshot(res);
+            std.log.info("Screenshot requested via F2 with resolution {s}", .{res.label()});
+        }
         frame_time = .now(io, .awake);
 
         if (!std.meta.eql(prev_window_size, window_size)) {
@@ -180,6 +192,21 @@ pub fn main(init: std.process.Init) !void {
                 std.log.info("Test play timeout reached", .{});
                 running.store(false, .unordered);
                 break;
+            }
+        }
+
+        // Auto screenshot after N seconds (similar to test_play)
+        if (options.screenshot_after) |screenshot_timeout| {
+            if (!screenshot_after_triggered and start_time.untilNow(io, .awake).toSeconds() >= screenshot_timeout) {
+                std.log.info("Screenshot after timeout reached ({d}s), requesting screenshot", .{screenshot_timeout});
+                // Use current resolution setting
+                const res = config.game_config.render_options.screenshot_resolution;
+                vk_ctx.requestScreenshot(res);
+                screenshot_after_triggered = true;
+                // If test_play is not set, we will exit after screenshot is saved
+                if (options.test_play == null) {
+                    screenshot_after_should_exit = true;
+                }
             }
         }
 
@@ -227,6 +254,35 @@ pub fn main(init: std.process.Init) !void {
             },
             else => std.log.err("present failed: {}", .{err}),
         };
+
+        // Handle screenshot saving after GPU work completes
+        if (vk_ctx.screenshot_pending_save) {
+            // Wait for the frame to finish (timeline semaphore)
+            const current_frame_val = vk_ctx.frame_number.load(.acquire);
+            const wait_info: vk.SemaphoreWaitInfo = .{
+                .semaphore_count = 1,
+                .p_semaphores = (&vk_ctx.graphics_timeline_semaphore)[0..1],
+                .p_values = (&current_frame_val)[0..1],
+            };
+            _ = vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch |err| {
+                std.log.err("Failed to wait for screenshot frame: {any}", .{err});
+            };
+
+            // Save screenshot
+            if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
+                defer gpa.free(saved_path);
+                std.log.info("Screenshot saved: {s}", .{saved_path});
+                if (screenshot_after_should_exit and !screenshot_after_saved) {
+                    screenshot_after_saved = true;
+                    std.log.info("Auto screenshot completed, exiting", .{});
+                    running.store(false, .unordered);
+                    break;
+                }
+            } else |err| {
+                std.log.err("Failed to save screenshot: {any}", .{err});
+                vk_ctx.screenshot_pending_save = false;
+            }
+        }
 
         if (ui.menu_state.pending_game_deinit) {
             ui.menu_state.pending_game_deinit = false;
