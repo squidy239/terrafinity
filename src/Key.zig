@@ -28,6 +28,7 @@ pub const Action = enum {
     spawn_explosive,
     fullscreen,
     screenshot,
+    debug_menu,
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);

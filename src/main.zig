@@ -92,10 +92,12 @@ pub fn main(init: std.process.Init) !void {
     try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
     try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
     try keymap.setActionKey(io, .{ .key = .f2 }, .screenshot);
+    try keymap.setActionKey(io, .{ .key = .f3 }, .debug_menu);
     single_press.insert(.escape_menu);
     single_press.insert(.fullscreen);
     single_press.insert(.spawn_explosive);
     single_press.insert(.screenshot);
+    single_press.insert(.debug_menu);
 
     inline for (.{
         .{ .key = .w, .action = .forward },
@@ -152,7 +154,10 @@ pub fn main(init: std.process.Init) !void {
         .level = .primary,
         .command_buffer_count = VulkanContext.max_frames_in_flight,
     }, &ui_cmd_buffers);
-    defer vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
+    defer {
+        vk_ctx.deviceWaitIdleLocked(io) catch {};
+        vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
+    }
 
     // Screenshot auto handling
     var screenshot_after_triggered: bool = false;
@@ -178,6 +183,10 @@ pub fn main(init: std.process.Init) !void {
             const res = config.game_config.render_options.screenshot_resolution;
             vk_ctx.requestScreenshot(res);
             std.log.info("Screenshot requested via F2 with resolution {s}", .{res.label()});
+        }
+        if (action_set.contains(.debug_menu)) {
+            ui.menu_state.debug_info = !ui.menu_state.debug_info;
+            std.log.info("Debug menu toggled via F3: {any}", .{ui.menu_state.debug_info});
         }
         frame_time = .now(io, .awake);
 
@@ -231,7 +240,8 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
 
-        if (ui.menu_state.ingame) {
+        const was_ingame = ui.menu_state.ingame;
+        if (was_ingame) {
             try game.frame(io, gpa, .{
                 .frame_index = frame_ctx.frame_index,
                 .cmd_buffer = frame_ctx.cmd_buffer,
@@ -244,7 +254,7 @@ pub fn main(init: std.process.Init) !void {
         try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
         const prepass_cmd = backend.takePrepass();
-        try vk_ctx.submitFrameWithExtra(io, frame_ctx, prepass_cmd, ui_cmd_buffers[frame_ctx.frame_index], ui.menu_state.ingame);
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, prepass_cmd, ui_cmd_buffers[frame_ctx.frame_index], was_ingame);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
             error.OutOfDate => vk_ctx.swapchain_needs_recreate.store(true, .monotonic),

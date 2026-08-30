@@ -310,6 +310,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const total_candidates = self.scene.max_allocated_index.load(.monotonic);
     try self.scene.ensureCapacity(io, total_candidates);
 
+    try self.dev.resetCommandBuffer(frame_ctx.cmd_buffer, .{});
     try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
     errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch {};
     self.vk_ctx.gpu_profiler.resetFrame(frame_ctx.cmd_buffer, current_frame);
@@ -374,10 +375,8 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_end_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
     self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
 
-    self.frame_sequence +%= 1;
-
     try self.dev.endCommandBuffer(frame_ctx.cmd_buffer);
-    self.frame_sequence += 1;
+    self.frame_sequence +%= 1;
 }
 
 /// Copies the previous frame's GPU cull counters, which the compute pass wrote into the
