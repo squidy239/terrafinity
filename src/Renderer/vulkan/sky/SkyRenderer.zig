@@ -261,6 +261,14 @@ pub const RecordContext = struct {
     depth_view: vk.ImageView,
     depth_aspect_mask: vk.ImageAspectFlags,
     frame_sequence: u64,
+    msaa_color_image: ?vk.Image = null,
+    msaa_color_view: ?vk.ImageView = null,
+    color_resolve_view: ?vk.ImageView = null,
+    msaa_depth_image: ?vk.Image = null,
+    msaa_depth_view: ?vk.ImageView = null,
+    depth_resolve_view: ?vk.ImageView = null,
+    depth_resolve_mode: vk.ResolveModeFlags = .{},
+    msaa_sample_count: u32 = 1,
 };
 
 /// Renders a fully procedural sky (atmosphere gradient, sun, moon, planets, hash-based
@@ -362,7 +370,7 @@ fn updateParamDescriptors(self: *SkyRenderer) void {
 }
 
 /// Recreates the pipeline for the current depth format. Called on init and swapchain recreate.
-pub fn createPipelines(self: *SkyRenderer, depth_format: vk.Format) !void {
+pub fn createPipelines(self: *SkyRenderer, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
 
     const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, sky_vert_spv);
@@ -373,19 +381,36 @@ pub fn createPipelines(self: *SkyRenderer, depth_format: vk.Format) !void {
     const depth_stencil = core.depthStencilState(false, .always, false);
     const blend = core.opaqueBlendAttachment();
     const no_vertex_input = core.emptyVertexInput();
-    self.pipeline = try core.buildGraphicsPipeline(
-        self.dev,
-        &self.vk_ctx.vkalloc,
-        self.vk_ctx.pipeline_creation_feedback,
-        vert_module,
-        frag_module,
-        &.{self.vk_ctx.swapchain_format},
-        depth_format,
-        depth_stencil,
-        &.{blend},
-        self.pipeline_layout,
-        no_vertex_input,
-    );
+    if (samples.@"1_bit") {
+        self.pipeline = try core.buildGraphicsPipeline(
+            self.dev,
+            &self.vk_ctx.vkalloc,
+            self.vk_ctx.pipeline_creation_feedback,
+            vert_module,
+            frag_module,
+            &.{self.vk_ctx.swapchain_format},
+            depth_format,
+            depth_stencil,
+            &.{blend},
+            self.pipeline_layout,
+            no_vertex_input,
+        );
+    } else {
+        self.pipeline = try core.buildGraphicsPipelineWithSamples(
+            self.dev,
+            &self.vk_ctx.vkalloc,
+            self.vk_ctx.pipeline_creation_feedback,
+            vert_module,
+            frag_module,
+            &.{self.vk_ctx.swapchain_format},
+            depth_format,
+            depth_stencil,
+            &.{blend},
+            self.pipeline_layout,
+            no_vertex_input,
+            samples,
+        );
+    }
 }
 
 /// Copies the given params into the current frame's uniform buffer. Call before `record`.
@@ -403,38 +428,123 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
     const first_frame = ctx.frame_sequence == 0;
     const color_old_layout: vk.ImageLayout = if (first_frame) .undefined else .shader_read_only_optimal;
     const depth_old_layout: vk.ImageLayout = if (first_frame) .undefined else .depth_stencil_read_only_optimal;
-    // compute covers the previous frame's pyramid build, which read the depth before
-    // this frame's sky clear overwrites it.
     const src_stage: vk.PipelineStageFlags2 = if (first_frame) .{ .top_of_pipe_bit = true } else .{ .fragment_shader_bit = true, .compute_shader_bit = true };
     const color_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .shader_read_bit = true };
     const depth_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true };
 
-    const pre_barriers: [2]vk.ImageMemoryBarrier2 = .{
-        core.makeImageBarrier2(
-            ctx.color_image,
-            color_old_layout,
-            .color_attachment_optimal,
-            src_stage,
-            color_src_access,
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            color_aspect,
-        ),
-        core.makeImageBarrier2(
-            ctx.depth_image,
-            depth_old_layout,
-            .depth_stencil_attachment_optimal,
-            src_stage,
-            depth_src_access,
-            .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-            .{ .depth_stencil_attachment_write_bit = true },
-            ctx.depth_aspect_mask,
-        ),
-    };
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_barriers);
+    const msaa_color_enabled = ctx.msaa_color_image != null;
+    const msaa_depth_enabled = ctx.msaa_depth_image != null;
+    const color_count: usize = if (msaa_color_enabled) 2 else 1;
+    const depth_count: usize = if (msaa_depth_enabled) 2 else 1;
+    const total_barriers = color_count + depth_count;
+    if (total_barriers == 4) {
+        const pre_barriers: [4]vk.ImageMemoryBarrier2 = .{
+            core.makeImageBarrier2(
+                ctx.color_image,
+                color_old_layout,
+                .color_attachment_optimal,
+                src_stage,
+                color_src_access,
+                .{ .color_attachment_output_bit = true },
+                .{ .color_attachment_write_bit = true },
+                color_aspect,
+            ),
+            core.makeImageBarrier2(
+                ctx.msaa_color_image.?,
+                if (first_frame) .undefined else .color_attachment_optimal,
+                .color_attachment_optimal,
+                if (first_frame) .{ .top_of_pipe_bit = true } else .{ .color_attachment_output_bit = true },
+                if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .color_attachment_write_bit = true },
+                .{ .color_attachment_output_bit = true },
+                .{ .color_attachment_write_bit = true },
+                color_aspect,
+            ),
+            core.makeImageBarrier2(
+                ctx.depth_image,
+                depth_old_layout,
+                .depth_stencil_attachment_optimal,
+                src_stage,
+                depth_src_access,
+                .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+                .{ .depth_stencil_attachment_write_bit = true },
+                ctx.depth_aspect_mask,
+            ),
+            core.makeImageBarrier2(
+                ctx.msaa_depth_image.?,
+                if (first_frame) .undefined else .depth_stencil_attachment_optimal,
+                .depth_stencil_attachment_optimal,
+                if (first_frame) .{ .top_of_pipe_bit = true } else .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+                if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .depth_stencil_attachment_write_bit = true },
+                .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+                .{ .depth_stencil_attachment_write_bit = true },
+                ctx.depth_aspect_mask,
+            ),
+        };
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_barriers);
+    } else if (msaa_color_enabled) {
+        const pre_barriers: [3]vk.ImageMemoryBarrier2 = .{
+            core.makeImageBarrier2(
+                ctx.color_image,
+                color_old_layout,
+                .color_attachment_optimal,
+                src_stage,
+                color_src_access,
+                .{ .color_attachment_output_bit = true },
+                .{ .color_attachment_write_bit = true },
+                color_aspect,
+            ),
+            core.makeImageBarrier2(
+                ctx.msaa_color_image.?,
+                if (first_frame) .undefined else .color_attachment_optimal,
+                .color_attachment_optimal,
+                if (first_frame) .{ .top_of_pipe_bit = true } else .{ .color_attachment_output_bit = true },
+                if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .color_attachment_write_bit = true },
+                .{ .color_attachment_output_bit = true },
+                .{ .color_attachment_write_bit = true },
+                color_aspect,
+            ),
+            core.makeImageBarrier2(
+                ctx.depth_image,
+                depth_old_layout,
+                .depth_stencil_attachment_optimal,
+                src_stage,
+                depth_src_access,
+                .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+                .{ .depth_stencil_attachment_write_bit = true },
+                ctx.depth_aspect_mask,
+            ),
+        };
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_barriers);
+    } else {
+        const pre_barriers: [2]vk.ImageMemoryBarrier2 = .{
+            core.makeImageBarrier2(
+                ctx.color_image,
+                color_old_layout,
+                .color_attachment_optimal,
+                src_stage,
+                color_src_access,
+                .{ .color_attachment_output_bit = true },
+                .{ .color_attachment_write_bit = true },
+                color_aspect,
+            ),
+            core.makeImageBarrier2(
+                ctx.depth_image,
+                depth_old_layout,
+                .depth_stencil_attachment_optimal,
+                src_stage,
+                depth_src_access,
+                .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
+                .{ .depth_stencil_attachment_write_bit = true },
+                ctx.depth_aspect_mask,
+            ),
+        };
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &pre_barriers);
+    }
 
-    const color_attachment = core.renderingAttachmentColor(ctx.color_view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
-    const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .clear);
+    const use_msaa = ctx.msaa_color_view != null and ctx.color_resolve_view != null and ctx.msaa_sample_count > 1;
+    const use_msaa_depth = ctx.msaa_depth_view != null and ctx.depth_resolve_view != null and ctx.msaa_sample_count > 1;
+    const color_attachment = if (use_msaa) core.renderingAttachmentColorResolve(ctx.msaa_color_view.?, ctx.color_resolve_view.?, .clear, .{ 0.0, 0.0, 0.0, 1.0 }) else core.renderingAttachmentColor(ctx.color_view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
+    const depth_attachment = if (use_msaa_depth) core.renderingAttachmentDepthClearResolve(ctx.msaa_depth_view.?, ctx.depth_resolve_view.?, .depth_stencil_attachment_optimal, 0.0, ctx.depth_resolve_mode) else core.renderingAttachmentDepthClear(ctx.depth_view, .depth_stencil_attachment_optimal, 0.0);
     self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(ctx.extent, &.{color_attachment}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);

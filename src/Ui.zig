@@ -12,6 +12,7 @@ const Game = @import("Game.zig");
 const utils = @import("libs/utils.zig");
 const ShadowConfig = @import("Renderer/vulkan/shadow/Csm.zig").ShadowConfig;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
+const Renderer = @import("Renderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const Screenshot = @import("Screenshot.zig");
 const generator_loader = @import("world/generator_loader.zig");
@@ -436,9 +437,10 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     const config_changed = !std.meta.eql(first_config, self.config.*);
     const gamma_changed = first_config.game_config.render_options.gamma_correction != options.render_options.gamma_correction;
     const present_mode_changed = first_config.game_config.render_options.present_mode != options.render_options.present_mode;
+    const aa_changed = first_config.game_config.render_options.anti_aliasing != options.render_options.anti_aliasing;
     self.config_lock.unlock(io);
 
-    if (gamma_changed or present_mode_changed) {
+    if (gamma_changed or present_mode_changed or aa_changed) {
         self.vk_ctx.requestSwapchainRecreate();
     }
 
@@ -695,6 +697,7 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
         _ = configSlider("Day/Night Cycle Length (seconds)", &render_options.day_length_sec, .{}, 1, 3600, settingsId("rendering.day_length_sec"));
         settingsCheckbox("Gamma Correction", &render_options.gamma_correction, settingsId("rendering.gamma_correction"));
         settingsEnum("Presentation Mode", VulkanContext.PresentMode, &render_options.present_mode, settingsId("rendering.present_mode"));
+        settingsEnum("Anti Aliasing", Renderer.AntiAliasing, &render_options.anti_aliasing, settingsId("rendering.anti_aliasing"));
         configTextString(allocator, "Texture Pack", &render_options.selected_pack, settingsId("rendering.selected_pack"));
         settingsCheckbox("See Through Transparent Blocks", &render_options.inside_transparent, settingsId("rendering.inside_transparent"));
         settingsCheckbox("Occlusion Culling", &render_options.occlusion_culling, settingsId("rendering.occlusion_culling"));

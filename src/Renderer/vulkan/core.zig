@@ -135,7 +135,20 @@ pub fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageA
     };
 }
 
-pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !RenderTarget {
+pub fn sampleCountToFlags(count: u32) vk.SampleCountFlags {
+    return switch (count) {
+        1 => .{ .@"1_bit" = true },
+        2 => .{ .@"2_bit" = true },
+        4 => .{ .@"4_bit" = true },
+        8 => .{ .@"8_bit" = true },
+        16 => .{ .@"16_bit" = true },
+        32 => .{ .@"32_bit" = true },
+        64 => .{ .@"64_bit" = true },
+        else => .{ .@"1_bit" = true },
+    };
+}
+
+pub fn createImageWithMemorySamples(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags, samples: vk.SampleCountFlags) !RenderTarget {
     const image_info: vk.ImageCreateInfo = .{
         .image_type = .@"2d",
         .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
@@ -146,7 +159,7 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
         .initial_layout = .undefined,
         .usage = usage,
         .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
+        .samples = samples,
     };
     var target: RenderTarget = .{};
     errdefer destroyRenderTarget(dev, &target, vkalloc);
@@ -156,6 +169,10 @@ pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemor
     target.image = alloc.image;
     target.view = try dev.createImageView(&imageViewCreateInfo(target.image, format, aspect), vkalloc);
     return target;
+}
+
+pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !RenderTarget {
+    return createImageWithMemorySamples(dev, mem_props, vkalloc, extent, format, usage, aspect, .{ .@"1_bit" = true });
 }
 
 /// Represents a single VkBuffer allocation and its associated resources.
@@ -560,6 +577,24 @@ pub fn renderingAttachmentColor(view: vk.ImageView, load_op: vk.AttachmentLoadOp
     };
 }
 
+pub fn renderingAttachmentColorResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = msaa_view,
+        .image_layout = .color_attachment_optimal,
+        .resolve_mode = .{ .average_bit = true },
+        .resolve_image_view = resolve_view,
+        .resolve_image_layout = .color_attachment_optimal,
+        .load_op = load_op,
+        .store_op = .store,
+        .clear_value = .{ .color = .{ .float_32 = clear_color } },
+    };
+}
+
+pub fn renderingAttachmentColorMsaa(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
+    return renderingAttachmentColor(view, load_op, clear_color);
+}
+
 pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp) vk.RenderingAttachmentInfo {
     return .{
         .s_type = .rendering_attachment_info,
@@ -571,6 +606,34 @@ pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load
         .load_op = load_op,
         .store_op = .store,
         .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
+    };
+}
+
+pub fn renderingAttachmentDepthResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp, resolve_mode: vk.ResolveModeFlags) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = msaa_view,
+        .image_layout = layout,
+        .resolve_mode = resolve_mode,
+        .resolve_image_view = resolve_view,
+        .resolve_image_layout = .depth_stencil_attachment_optimal,
+        .load_op = load_op,
+        .store_op = .store,
+        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
+    };
+}
+
+pub fn renderingAttachmentDepthClearResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, layout: vk.ImageLayout, clear_depth: f32, resolve_mode: vk.ResolveModeFlags) vk.RenderingAttachmentInfo {
+    return .{
+        .s_type = .rendering_attachment_info,
+        .image_view = msaa_view,
+        .image_layout = layout,
+        .resolve_mode = resolve_mode,
+        .resolve_image_view = resolve_view,
+        .resolve_image_layout = .depth_stencil_attachment_optimal,
+        .load_op = .clear,
+        .store_op = .store,
+        .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
     };
 }
 
@@ -811,13 +874,14 @@ fn createGraphicsPipeline(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
     topology: vk.PrimitiveTopology,
+    samples: vk.SampleCountFlags,
 ) !vk.Pipeline {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipeline" });
     defer zone.end();
     const piasci: vk.PipelineInputAssemblyStateCreateInfo = .{ .topology = topology, .primitive_restart_enable = .false };
     const pvsci: vk.PipelineViewportStateCreateInfo = .{ .viewport_count = 1, .p_viewports = null, .scissor_count = 1, .p_scissors = null };
     const pmsci: vk.PipelineMultisampleStateCreateInfo = .{
-        .rasterization_samples = .{ .@"1_bit" = true },
+        .rasterization_samples = samples,
         .sample_shading_enable = .false,
         .min_sample_shading = 1,
         .alpha_to_coverage_enable = .false,
@@ -915,6 +979,23 @@ pub fn buildGraphicsPipeline(
     return buildGraphicsPipelineWithTopology(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list);
 }
 
+pub fn buildGraphicsPipelineWithSamples(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    frag_module: vk.ShaderModule,
+    color_formats: []const vk.Format,
+    depth_format: vk.Format,
+    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
+    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    samples: vk.SampleCountFlags,
+) !vk.Pipeline {
+    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list, samples);
+}
+
 pub fn buildGraphicsPipelineWithTopology(
     dev: DeviceProxy,
     vkalloc: *const vk.AllocationCallbacks,
@@ -928,6 +1009,24 @@ pub fn buildGraphicsPipelineWithTopology(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
     topology: vk.PrimitiveTopology,
+) !vk.Pipeline {
+    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, topology, .{ .@"1_bit" = true });
+}
+
+pub fn buildGraphicsPipelineWithTopologyAndSamples(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    frag_module: vk.ShaderModule,
+    color_formats: []const vk.Format,
+    depth_format: vk.Format,
+    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
+    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    topology: vk.PrimitiveTopology,
+    samples: vk.SampleCountFlags,
 ) !vk.Pipeline {
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = .false,
@@ -944,7 +1043,7 @@ pub fn buildGraphicsPipelineWithTopology(
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 2, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
         .{ .flags = .{ .fragment_bit = true }, .module = frag_module },
-    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info, topology);
+    }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info, topology, samples);
 }
 
 /// Depth-only pipeline: a single vertex stage, no colour attachments, standard (not
@@ -980,6 +1079,24 @@ pub fn buildDepthOnlyPipelineWithTopology(
     depth_clamp: bool,
     topology: vk.PrimitiveTopology,
 ) !vk.Pipeline {
+    return buildDepthOnlyPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, depth_format, layout, vertex_input_info, depth_bias_constant, depth_bias_slope, depth_bias_clamp, depth_clamp, topology, .{ .@"1_bit" = true });
+}
+
+pub fn buildDepthOnlyPipelineWithTopologyAndSamples(
+    dev: DeviceProxy,
+    vkalloc: *const vk.AllocationCallbacks,
+    pipeline_creation_feedback: bool,
+    vert_module: vk.ShaderModule,
+    depth_format: vk.Format,
+    layout: vk.PipelineLayout,
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
+    depth_bias_constant: f32,
+    depth_bias_slope: f32,
+    depth_bias_clamp: f32,
+    depth_clamp: bool,
+    topology: vk.PrimitiveTopology,
+    samples: vk.SampleCountFlags,
+) !vk.Pipeline {
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = if (depth_clamp) .true else .false,
         .rasterizer_discard_enable = .false,
@@ -995,7 +1112,7 @@ pub fn buildDepthOnlyPipelineWithTopology(
     const depth_stencil = depthStencilState(true, .less_or_equal, true);
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
-    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology);
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology, samples);
 }
 
 pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {

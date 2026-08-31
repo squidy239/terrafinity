@@ -166,6 +166,14 @@ pub const PassContext = struct {
     frame_sequence: u64,
     /// Shared shadow state; null until VulkanRenderer wires it in.
     shadow: ?*ShadowRenderer,
+    msaa_color_image: ?vk.Image = null,
+    msaa_color_view: ?vk.ImageView = null,
+    color_resolve_view: ?vk.ImageView = null,
+    msaa_depth_image: ?vk.Image = null,
+    msaa_depth_view: ?vk.ImageView = null,
+    depth_resolve_view: ?vk.ImageView = null,
+    depth_resolve_mode: vk.ResolveModeFlags = .{},
+    msaa_sample_count: u32 = 1,
 };
 
 /// Renders the voxel chunk scene: opaque + weighted-blended transparent passes driven
@@ -977,7 +985,7 @@ fn cullBarrierAndCopyStats(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, c
     core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true, .all_transfer_bit = true }, .{ .host_read_bit = true, .transfer_read_bit = true, .transfer_write_bit = true }))[0..1]);
 }
 
-pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format) !void {
+pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
     defer zone.end();
 
@@ -991,7 +999,7 @@ pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format) !void {
     const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, vertex_shader_spv);
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
 
-    try self.createOpaquePipeline(vert_module, depth_format);
+    try self.createOpaquePipeline(vert_module, depth_format, samples);
     try self.createTransparentPipeline(vert_module, depth_format);
 }
 
@@ -1003,7 +1011,7 @@ fn graphicsPushConstantRange() vk.PushConstantRange {
     };
 }
 
-fn createOpaquePipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format) !void {
+fn createOpaquePipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
     const set_layouts: [3]vk.DescriptorSetLayout = .{
         self.texture_manager.descriptor_set_layout,
         self.scene.mesh_data_descriptor_set_layout,
@@ -1019,7 +1027,7 @@ fn createOpaquePipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, dept
         .alpha_blend_op = .add,
         .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
     };
-    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{blend}, core.depthStencilState(true, .greater, true), &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline);
+    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{blend}, core.depthStencilState(true, .greater, true), &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline, samples);
 }
 
 fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format) !void {
@@ -1035,7 +1043,7 @@ fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule,
         .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = false, .b_bit = false, .a_bit = false } },
     };
     const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
-    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, core.depthStencilState(true, .greater_or_equal, false), &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline);
+    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, core.depthStencilState(true, .greater_or_equal, false), &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline, .{ .@"1_bit" = true });
 }
 
 /// Builds a chunk pipeline layout (shared push constant range) and pipeline from the
@@ -1051,6 +1059,7 @@ fn buildChunkPipeline(
     depth_stencil: vk.PipelineDepthStencilStateCreateInfo,
     pipeline_layout: *vk.PipelineLayout,
     pipeline: *vk.Pipeline,
+    samples: vk.SampleCountFlags,
 ) !void {
     const pc_range = graphicsPushConstantRange();
     pipeline_layout.* = try self.dev.createPipelineLayout(&.{
@@ -1064,7 +1073,11 @@ fn buildChunkPipeline(
     const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, frag_spv);
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-    pipeline.* = try core.buildGraphicsPipelineWithTopology(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip);
+    if (samples.@"1_bit") {
+        pipeline.* = try core.buildGraphicsPipelineWithTopology(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip);
+    } else {
+        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, samples);
+    }
 }
 
 pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
@@ -1248,8 +1261,10 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordOpaquePass" });
     defer zone.end();
 
-    const color_attachment = core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
-    const depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);
+    const use_msaa = ctx.msaa_color_view != null and ctx.color_resolve_view != null and ctx.msaa_sample_count > 1;
+    const use_msaa_depth = ctx.msaa_depth_view != null and ctx.depth_resolve_view != null and ctx.msaa_sample_count > 1;
+    const color_attachment = if (use_msaa) core.renderingAttachmentColorResolve(ctx.msaa_color_view.?, ctx.color_resolve_view.?, .load, .{ 0.0, 0.0, 0.0, 1.0 }) else core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
+    const depth_attachment = if (use_msaa_depth) core.renderingAttachmentDepthResolve(ctx.msaa_depth_view.?, ctx.depth_resolve_view.?, .depth_stencil_attachment_optimal, .load, ctx.depth_resolve_mode) else core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);
 
     self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{color_attachment}, &depth_attachment));
 

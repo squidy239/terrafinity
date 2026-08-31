@@ -71,6 +71,11 @@ dev: DeviceProxy,
 render_color: core.RenderTarget = .{},
 render_depth: core.RenderTarget = .{},
 render_depth_sampled_view: vk.ImageView = .null_handle,
+msaa_color: core.RenderTarget = .{},
+msaa_depth: core.RenderTarget = .{},
+msaa_samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
+msaa_sample_count: u32 = 1,
+depth_resolve_mode: vk.ResolveModeFlags = .{},
 depth_format: vk.Format = .undefined,
 
 camera: core.Camera = .{},
@@ -204,6 +209,7 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     self.render_options_lock.lockSharedUncancelable(io);
     const gamma_correction = self.render_options.gamma_correction;
     const present_mode = self.render_options.present_mode;
+    const anti_aliasing = self.render_options.anti_aliasing;
     self.render_options_lock.unlockShared(io);
     self.vk_ctx.present_mode = present_mode;
 
@@ -219,22 +225,31 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 
     const actual_extent = self.vk_ctx.swapchain_extent;
 
-    try self.createRenderTargets(io, actual_extent);
+    try self.createRenderTargets(io, actual_extent, anti_aliasing);
 
-    try self.chunk.createPipelines(self.depth_format);
-    try self.sky.createPipelines(self.depth_format);
+    const samples = core.sampleCountToFlags(self.msaa_sample_count);
+    try self.chunk.createPipelines(self.depth_format, samples);
+    try self.sky.createPipelines(self.depth_format, samples);
 }
 
 fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
     core.destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
     core.destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
+    core.destroyRenderTarget(self.dev, &self.msaa_color, &self.vk_ctx.vkalloc);
+    core.destroyRenderTarget(self.dev, &self.msaa_depth, &self.vk_ctx.vkalloc);
 }
 
-fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !void {
+fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, anti_aliasing: Renderer.AntiAliasing) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createRenderTargets" });
     defer zone.end();
     errdefer self.destroyRendererSwapchainResources();
+
+    const desired = sampleCountFromAA(anti_aliasing);
+    const resolved = self.resolveSampleCount(desired);
+    self.msaa_sample_count = resolved;
+    self.msaa_samples = core.sampleCountToFlags(resolved);
+    const use_msaa = resolved > 1;
 
     self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });
 
@@ -248,11 +263,23 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D) !
     self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, self.depthAspectMask());
     self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
 
+    if (use_msaa) {
+        self.msaa_color = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true }, .{ .color_bit = true }, self.msaa_samples);
+        self.msaa_depth = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true }, self.depthAspectMask(), self.msaa_samples);
+        self.depth_resolve_mode = self.getDepthResolveMode();
+        std.log.info("VulkanRenderer: MSAA enabled {d}x (samples={any}) depth_resolve={any}", .{ resolved, self.msaa_samples, self.depth_resolve_mode });
+    } else {
+        self.msaa_color = .{};
+        self.msaa_depth = .{};
+        self.depth_resolve_mode = .{};
+        std.log.info("VulkanRenderer: MSAA disabled", .{});
+    }
+
     try self.pyramid.recreate(io, extent);
 
     try self.oit.recreate(extent, self.render_color.view);
 
-    std.log.info("VulkanRenderer.createRenderTargets: SUCCESS - Created render targets: color {any}, depth {any}, accum {any}, reveal {any}\n", .{ self.render_color.image, self.render_depth.image, self.oit.accum.image, self.oit.reveal.image });
+    std.log.info("VulkanRenderer.createRenderTargets: SUCCESS - Created render targets: color {any}, depth {any}, msaa {any}, accum {any}, reveal {any}\n", .{ self.render_color.image, self.render_depth.image, self.msaa_color.image, self.oit.accum.image, self.oit.reveal.image });
     self.frame_sequence = 0;
 }
 
@@ -261,6 +288,69 @@ fn depthAspectMask(self: *const VulkanRenderer) vk.ImageAspectFlags {
         .{ .depth_bit = true, .stencil_bit = true }
     else
         .{ .depth_bit = true };
+}
+
+fn sampleCountFromAA(aa: Renderer.AntiAliasing) u32 {
+    return switch (aa) {
+        .none => 1,
+        .msaa2x => 2,
+        .msaa4x => 4,
+        .msaa8x => 8,
+    };
+}
+
+fn getMaxUsableSampleCount(self: *const VulkanRenderer) u32 {
+    const props = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev);
+    const counts = props.limits.framebuffer_color_sample_counts;
+    if (counts.@"64_bit") return 64;
+    if (counts.@"32_bit") return 32;
+    if (counts.@"16_bit") return 16;
+    if (counts.@"8_bit") return 8;
+    if (counts.@"4_bit") return 4;
+    if (counts.@"2_bit") return 2;
+    return 1;
+}
+
+fn resolveSampleCount(self: *const VulkanRenderer, desired: u32) u32 {
+    const max = self.getMaxUsableSampleCount();
+    var target = desired;
+    if (target > max) target = max;
+    const props = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev);
+    const counts = props.limits.framebuffer_color_sample_counts;
+    while (target > 1) {
+        const supported = switch (target) {
+            2 => counts.@"2_bit",
+            4 => counts.@"4_bit",
+            8 => counts.@"8_bit",
+            16 => counts.@"16_bit",
+            32 => counts.@"32_bit",
+            64 => counts.@"64_bit",
+            else => false,
+        };
+        if (supported) break;
+        target /= 2;
+    }
+    if (target < 1) target = 1;
+    return target;
+}
+
+fn getDepthResolveMode(self: *const VulkanRenderer) vk.ResolveModeFlags {
+    var props2: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
+    var depth_resolve_props: vk.PhysicalDeviceDepthStencilResolveProperties = .{
+        .s_type = .physical_device_depth_stencil_resolve_properties,
+        .p_next = null,
+        .supported_depth_resolve_modes = .{},
+        .supported_stencil_resolve_modes = .{},
+        .independent_resolve_none = .false,
+        .independent_resolve = .false,
+    };
+    props2.p_next = @ptrCast(&depth_resolve_props);
+    self.vk_ctx.instance.getPhysicalDeviceProperties2(self.vk_ctx.pdev, &props2);
+    if (depth_resolve_props.supported_depth_resolve_modes.average_bit) {
+        return .{ .average_bit = true };
+    } else {
+        return .{ .sample_zero_bit = true };
+    }
 }
 
 pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
@@ -332,6 +422,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         std.log.err("VulkanRenderer: shadow prepare failed: {any}", .{err});
     };
 
+    const msaa_enabled = self.msaa_sample_count > 1 and self.msaa_color.image != .null_handle;
     const pass_ctx: ChunkRenderer.PassContext = .{
         .cmd_buffer = frame_ctx.cmd_buffer,
         .frame_idx = current_frame,
@@ -356,6 +447,14 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
         .shadow = &self.shadow,
+        .msaa_color_image = if (msaa_enabled) self.msaa_color.image else null,
+        .msaa_color_view = if (msaa_enabled) self.msaa_color.view else null,
+        .color_resolve_view = if (msaa_enabled) self.render_color.view else null,
+        .msaa_depth_image = if (msaa_enabled) self.msaa_depth.image else null,
+        .msaa_depth_view = if (msaa_enabled) self.msaa_depth.view else null,
+        .depth_resolve_view = if (msaa_enabled) self.render_depth.view else null,
+        .depth_resolve_mode = self.depth_resolve_mode,
+        .msaa_sample_count = self.msaa_sample_count,
     };
     self.sky.uploadParams(current_frame, &frame_sky.params);
     self.sky.record(&.{
@@ -368,6 +467,14 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_view = self.render_depth.view,
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
+        .msaa_color_image = if (msaa_enabled) self.msaa_color.image else null,
+        .msaa_color_view = if (msaa_enabled) self.msaa_color.view else null,
+        .color_resolve_view = if (msaa_enabled) self.render_color.view else null,
+        .msaa_depth_image = if (msaa_enabled) self.msaa_depth.image else null,
+        .msaa_depth_view = if (msaa_enabled) self.msaa_depth.view else null,
+        .depth_resolve_view = if (msaa_enabled) self.render_depth.view else null,
+        .depth_resolve_mode = self.depth_resolve_mode,
+        .msaa_sample_count = self.msaa_sample_count,
     });
 
     self.chunk.recordPasses(&pass_ctx);

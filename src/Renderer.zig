@@ -87,6 +87,13 @@ pub fn forEachMesh(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *
     return self.vtable.forEachMesh(self.userdata, io, userdata, callback);
 }
 
+pub const AntiAliasing = enum {
+    none,
+    msaa2x,
+    msaa4x,
+    msaa8x,
+};
+
 pub const RenderOptions = struct {
     fov: f32 = 90.0,
     day_length_sec: f32 = 60 * 5,
@@ -98,4 +105,5 @@ pub const RenderOptions = struct {
     sky: SkyConfig = .default(),
     shadow: Csm.ShadowConfig = .{},
     screenshot_resolution: Screenshot.Resolution = .native,
+    anti_aliasing: AntiAliasing = .msaa4x,
 };
