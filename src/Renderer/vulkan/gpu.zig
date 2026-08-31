@@ -249,13 +249,15 @@ pub const GpuRegionAllocator = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.buffer.load(.monotonic) == .null_handle) return null;
+        const buffer = self.buffer.load(.monotonic);
+        if (buffer == .null_handle) return null;
+        const buffer_offset = self.buffer_offset.load(.monotonic);
 
         if (self.findFreeRegion(length)) |found| {
             return .{
                 .offset = found.offset,
-                .buffer = self.buffer.load(.monotonic),
-                .buffer_offset = self.buffer_offset.load(.monotonic),
+                .buffer = buffer,
+                .buffer_offset = buffer_offset,
                 .safe_graphics = found.safe_graphics,
             };
         }
@@ -267,8 +269,8 @@ pub const GpuRegionAllocator = struct {
             self.used.store(new_used, .monotonic);
             return .{
                 .offset = offset,
-                .buffer = self.buffer.load(.monotonic),
-                .buffer_offset = self.buffer_offset.load(.monotonic),
+                .buffer = buffer,
+                .buffer_offset = buffer_offset,
                 .safe_graphics = 0,
             };
         }
@@ -1016,8 +1018,6 @@ pub const CandidateTransform = struct {
 };
 
 pub const cull_buffer_alignment: std.mem.Alignment = .fromByteUnits(256);
-/// World blocks along one edge of a level-0 chunk; candidate AABB size = scale * this.
-pub const chunk_size_blocks: f32 = 32.0;
 /// Main-pass draw slots (opaque early + opaque late + transparent).
 pub const draw_type_count = 3;
 /// Opaque meshes that were visible last frame, drawn before the Hi-Z pyramid builds.
@@ -1247,24 +1247,19 @@ pub const IndirectScene = struct {
     }
 
     pub fn processRetired(self: *IndirectScene, current_graphics_val: u64) void {
-        const items = &self.retired_candidate_slices;
+        self.sweepRetired(self.memory.cpuToGpu(), &self.retired_candidate_slices, current_graphics_val);
+        self.sweepRetired(self.memory.gpuOnly(), &self.retired_visibility_slices, current_graphics_val);
+    }
+
+    fn sweepRetired(self: *IndirectScene, alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
+        _ = self;
         var i: usize = items.items.len;
         while (i > 0) {
             i -= 1;
             const entry = items.items[i];
-            if (current_graphics_val >= entry.graphics_timeline_value) {
-                self.memory.cpuToGpu().free(entry.slice);
+            if (frontier >= entry.graphics_timeline_value) {
+                alloc.free(entry.slice);
                 _ = items.swapRemove(i);
-            }
-        }
-        const vis_items = &self.retired_visibility_slices;
-        i = vis_items.items.len;
-        while (i > 0) {
-            i -= 1;
-            const entry = vis_items.items[i];
-            if (current_graphics_val >= entry.graphics_timeline_value) {
-                self.memory.gpuOnly().free(entry.slice);
-                _ = vis_items.swapRemove(i);
             }
         }
     }
@@ -1367,7 +1362,6 @@ pub const IndirectScene = struct {
             errdefer self.memory.gpuOnly().free(count_slice);
             const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
             errdefer self.memory.cpuToGpu().free(stats_slice);
-            stats_slice[0] = CullCount.zeroed();
 
             mesh_dst.* = mesh_data_slice.ptr;
             indirect_dst.* = indirect_draw_slice.ptr;

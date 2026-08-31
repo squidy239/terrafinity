@@ -591,11 +591,9 @@ pub fn renderingAttachmentColorResolve(msaa_view: vk.ImageView, resolve_view: vk
     };
 }
 
-pub fn renderingAttachmentColorMsaa(view: vk.ImageView, load_op: vk.AttachmentLoadOp, clear_color: [4]f32) vk.RenderingAttachmentInfo {
-    return renderingAttachmentColor(view, load_op, clear_color);
-}
-
-pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp) vk.RenderingAttachmentInfo {
+/// Depth attachment builder. `clear_depth` applies when `load_op` is `.clear`
+/// (the shadow pass clears to far = 1.0 in standard depth; the main passes use 0.0).
+pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp, clear_depth: f32) vk.RenderingAttachmentInfo {
     return .{
         .s_type = .rendering_attachment_info,
         .image_view = view,
@@ -604,50 +602,20 @@ pub fn renderingAttachmentDepth(view: vk.ImageView, layout: vk.ImageLayout, load
         .resolve_image_view = .null_handle,
         .resolve_image_layout = .undefined,
         .load_op = load_op,
-        .store_op = .store,
-        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
-    };
-}
-
-pub fn renderingAttachmentDepthResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp, resolve_mode: vk.ResolveModeFlags) vk.RenderingAttachmentInfo {
-    return .{
-        .s_type = .rendering_attachment_info,
-        .image_view = msaa_view,
-        .image_layout = layout,
-        .resolve_mode = resolve_mode,
-        .resolve_image_view = resolve_view,
-        .resolve_image_layout = .depth_stencil_attachment_optimal,
-        .load_op = load_op,
-        .store_op = .store,
-        .clear_value = .{ .depth_stencil = .{ .depth = 0.0, .stencil = 0 } },
-    };
-}
-
-pub fn renderingAttachmentDepthClearResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, layout: vk.ImageLayout, clear_depth: f32, resolve_mode: vk.ResolveModeFlags) vk.RenderingAttachmentInfo {
-    return .{
-        .s_type = .rendering_attachment_info,
-        .image_view = msaa_view,
-        .image_layout = layout,
-        .resolve_mode = resolve_mode,
-        .resolve_image_view = resolve_view,
-        .resolve_image_layout = .depth_stencil_attachment_optimal,
-        .load_op = .clear,
         .store_op = .store,
         .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
     };
 }
 
-/// Depth attachment cleared to an explicit depth; used by the shadow pass (standard
-/// depth clears to far = 1.0, unlike the main reversed-Z targets).
-pub fn renderingAttachmentDepthClear(view: vk.ImageView, layout: vk.ImageLayout, clear_depth: f32) vk.RenderingAttachmentInfo {
+pub fn renderingAttachmentDepthResolve(msaa_view: vk.ImageView, resolve_view: vk.ImageView, layout: vk.ImageLayout, load_op: vk.AttachmentLoadOp, clear_depth: f32, resolve_mode: vk.ResolveModeFlags) vk.RenderingAttachmentInfo {
     return .{
         .s_type = .rendering_attachment_info,
-        .image_view = view,
+        .image_view = msaa_view,
         .image_layout = layout,
-        .resolve_mode = .{},
-        .resolve_image_view = .null_handle,
-        .resolve_image_layout = .undefined,
-        .load_op = .clear,
+        .resolve_mode = resolve_mode,
+        .resolve_image_view = resolve_view,
+        .resolve_image_layout = .depth_stencil_attachment_optimal,
+        .load_op = load_op,
         .store_op = .store,
         .clear_value = .{ .depth_stencil = .{ .depth = clear_depth, .stencil = 0 } },
     };
@@ -1049,22 +1017,6 @@ pub fn buildGraphicsPipelineWithTopologyAndSamples(
 /// Depth-only pipeline: a single vertex stage, no colour attachments, standard (not
 /// reversed-Z) depth with LESS_OR_EQUAL, optional depth clamp and slope bias. Used by
 /// the shadow pass; cull mode is set dynamically via cmdSetCullMode.
-pub fn buildDepthOnlyPipeline(
-    dev: DeviceProxy,
-    vkalloc: *const vk.AllocationCallbacks,
-    pipeline_creation_feedback: bool,
-    vert_module: vk.ShaderModule,
-    depth_format: vk.Format,
-    layout: vk.PipelineLayout,
-    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
-    depth_bias_constant: f32,
-    depth_bias_slope: f32,
-    depth_bias_clamp: f32,
-    depth_clamp: bool,
-) !vk.Pipeline {
-    return buildDepthOnlyPipelineWithTopology(dev, vkalloc, pipeline_creation_feedback, vert_module, depth_format, layout, vertex_input_info, depth_bias_constant, depth_bias_slope, depth_bias_clamp, depth_clamp, .triangle_list);
-}
-
 pub fn buildDepthOnlyPipelineWithTopology(
     dev: DeviceProxy,
     vkalloc: *const vk.AllocationCallbacks,
@@ -1078,24 +1030,6 @@ pub fn buildDepthOnlyPipelineWithTopology(
     depth_bias_clamp: f32,
     depth_clamp: bool,
     topology: vk.PrimitiveTopology,
-) !vk.Pipeline {
-    return buildDepthOnlyPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, depth_format, layout, vertex_input_info, depth_bias_constant, depth_bias_slope, depth_bias_clamp, depth_clamp, topology, .{ .@"1_bit" = true });
-}
-
-pub fn buildDepthOnlyPipelineWithTopologyAndSamples(
-    dev: DeviceProxy,
-    vkalloc: *const vk.AllocationCallbacks,
-    pipeline_creation_feedback: bool,
-    vert_module: vk.ShaderModule,
-    depth_format: vk.Format,
-    layout: vk.PipelineLayout,
-    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
-    depth_bias_constant: f32,
-    depth_bias_slope: f32,
-    depth_bias_clamp: f32,
-    depth_clamp: bool,
-    topology: vk.PrimitiveTopology,
-    samples: vk.SampleCountFlags,
 ) !vk.Pipeline {
     const prsci: vk.PipelineRasterizationStateCreateInfo = .{
         .depth_clamp_enable = if (depth_clamp) .true else .false,
@@ -1112,7 +1046,7 @@ pub fn buildDepthOnlyPipelineWithTopologyAndSamples(
     const depth_stencil = depthStencilState(true, .less_or_equal, true);
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
         .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
-    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology, samples);
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology, .{ .@"1_bit" = true });
 }
 
 pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {

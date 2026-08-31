@@ -303,10 +303,7 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
     while (it.next(io) catch unreachable) |entry| self.uploader.freeMesh(io, entry.value_ptr.*, 0);
     self.meshes.deinit(io, self.allocator);
 
-    core.destroyIfValid(self.dev, &self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
-    core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
-    core.destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
-    core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
+    self.destroyGraphicsState();
 
     core.destroyIfValid(self.dev, &self.cull.pipeline, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.cull.pipeline_layout, &self.vk_ctx.vkalloc);
@@ -315,6 +312,13 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
 
     self.block_materials.deinit();
     self.texture_manager.deinit();
+}
+
+fn destroyGraphicsState(self: *ChunkRenderer) void {
+    core.destroyIfValid(self.dev, &self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
+    core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
+    core.destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
+    core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
 }
 
 fn flushUploads(ctx: *anyopaque, io: std.Io) !void {
@@ -989,12 +993,7 @@ pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format, samples: v
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createGraphicsPipelines" });
     defer zone.end();
 
-    if (self.graphics_state.opaque_pipeline_layout != .null_handle) {
-        core.destroyIfValid(self.dev, &self.graphics_state.pipeline, &self.vk_ctx.vkalloc);
-        core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
-        core.destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
-        core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
-    }
+    if (self.graphics_state.opaque_pipeline_layout != .null_handle) self.destroyGraphicsState();
 
     const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, vertex_shader_spv);
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
@@ -1264,7 +1263,7 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
     const use_msaa = ctx.msaa_color_view != null and ctx.color_resolve_view != null and ctx.msaa_sample_count > 1;
     const use_msaa_depth = ctx.msaa_depth_view != null and ctx.depth_resolve_view != null and ctx.msaa_sample_count > 1;
     const color_attachment = if (use_msaa) core.renderingAttachmentColorResolve(ctx.msaa_color_view.?, ctx.color_resolve_view.?, .load, .{ 0.0, 0.0, 0.0, 1.0 }) else core.renderingAttachmentColor(ctx.color_view, .load, .{ 0.0, 0.0, 0.0, 1.0 });
-    const depth_attachment = if (use_msaa_depth) core.renderingAttachmentDepthResolve(ctx.msaa_depth_view.?, ctx.depth_resolve_view.?, .depth_stencil_attachment_optimal, .load, ctx.depth_resolve_mode) else core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load);
+    const depth_attachment = if (use_msaa_depth) core.renderingAttachmentDepthResolve(ctx.msaa_depth_view.?, ctx.depth_resolve_view.?, .depth_stencil_attachment_optimal, .load, 0.0, ctx.depth_resolve_mode) else core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_attachment_optimal, .load, 0.0);
 
     self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{color_attachment}, &depth_attachment));
 
@@ -1315,7 +1314,7 @@ fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: Push
     const oit_accum_attachment = core.renderingAttachmentColor(self.oit.accum.view, .clear, .{ 0.0, 0.0, 0.0, 1.0 });
     const oit_reveal_attachment = core.renderingAttachmentColor(self.oit.reveal.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
     const oit_volume_attachment = core.renderingAttachmentColor(self.oit.volume_weight.view, .clear, .{ 0.0, 0.0, 0.0, 0.0 });
-    const oit_depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_read_only_optimal, .load);
+    const oit_depth_attachment = core.renderingAttachmentDepth(ctx.depth_view, .depth_stencil_read_only_optimal, .load, 0.0);
     self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{ oit_accum_attachment, oit_reveal_attachment, oit_volume_attachment }, &oit_depth_attachment));
 
     self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);

@@ -84,8 +84,8 @@ pub fn build(b: *std.Build) void {
     for (shader_cmds) |cmd| exe.step.dependOn(&cmd.step);
 
     const shader_import_names = [_][]const u8{
-        "vert_spv", "frag_spv", "trans_frag_spv", "comp_vert_spv", "comp_frag_spv",
-        "cull_spv", "depth_pyramid_spv", "sky_vert_spv", "sky_frag_spv", "shadow_vert_spv",
+        "vert_spv", "frag_spv",          "trans_frag_spv", "comp_vert_spv", "comp_frag_spv",
+        "cull_spv", "depth_pyramid_spv", "sky_vert_spv",   "sky_frag_spv",  "shadow_vert_spv",
     };
     for (shader_import_names, shader_outs) |import_name, out| {
         exe.root_module.addAnonymousImport(import_name, .{ .root_source_file = out });

@@ -759,7 +759,7 @@ fn recordCascadePass(
 
     // Standard depth (not reversed-Z): ortho depth is linear, so clear to far (1.0) and
     // compare LESS_OR_EQUAL. The main pipeline's reversed-Z convention must NOT be used.
-    const depth_attachment = core.renderingAttachmentDepthClear(self.views[cascade], .depth_stencil_attachment_optimal, 1.0);
+    const depth_attachment = core.renderingAttachmentDepth(self.views[cascade], .depth_stencil_attachment_optimal, .clear, 1.0);
     self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(extent, &.{}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);

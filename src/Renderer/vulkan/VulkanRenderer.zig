@@ -187,8 +187,8 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         };
 
         self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
-        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
-        if (self.vk_ctx.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("UI command pool reset failed during deinit: {}", .{err});
+        resetPoolQuiet(self.dev, self.vk_ctx.command_pool, .{ .release_resources_bit = true });
+        if (self.vk_ctx.ui_command_pool != .null_handle) resetPoolQuiet(self.dev, self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true });
         self.single_time.destroyFence();
     }
 
@@ -201,6 +201,10 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.destroyRendererSwapchainResources();
     self.oit.deinit();
     self.memory.deinit();
+}
+
+fn resetPoolQuiet(dev: DeviceProxy, pool: vk.CommandPool, flags: vk.CommandPoolResetFlags) void {
+    dev.resetCommandPool(pool, flags) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
 }
 
 fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
@@ -299,24 +303,11 @@ fn sampleCountFromAA(aa: Renderer.AntiAliasing) u32 {
     };
 }
 
-fn getMaxUsableSampleCount(self: *const VulkanRenderer) u32 {
-    const props = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev);
-    const counts = props.limits.framebuffer_color_sample_counts;
-    if (counts.@"64_bit") return 64;
-    if (counts.@"32_bit") return 32;
-    if (counts.@"16_bit") return 16;
-    if (counts.@"8_bit") return 8;
-    if (counts.@"4_bit") return 4;
-    if (counts.@"2_bit") return 2;
-    return 1;
-}
-
 fn resolveSampleCount(self: *const VulkanRenderer, desired: u32) u32 {
-    const max = self.getMaxUsableSampleCount();
+    // Walk down from the desired count until the device supports it; every intermediate
+    // power of two is visited exactly once, so overshooting the device max lands on it.
+    const counts = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev).limits.framebuffer_color_sample_counts;
     var target = desired;
-    if (target > max) target = max;
-    const props = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev);
-    const counts = props.limits.framebuffer_color_sample_counts;
     while (target > 1) {
         const supported = switch (target) {
             2 => counts.@"2_bit",
@@ -330,7 +321,6 @@ fn resolveSampleCount(self: *const VulkanRenderer, desired: u32) u32 {
         if (supported) break;
         target /= 2;
     }
-    if (target < 1) target = 1;
     return target;
 }
 
@@ -423,6 +413,12 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     };
 
     const msaa_enabled = self.msaa_sample_count > 1 and self.msaa_color.image != .null_handle;
+    const msaa_color_image: ?vk.Image = if (msaa_enabled) self.msaa_color.image else null;
+    const msaa_color_view: ?vk.ImageView = if (msaa_enabled) self.msaa_color.view else null;
+    const color_resolve_view: ?vk.ImageView = if (msaa_enabled) self.render_color.view else null;
+    const msaa_depth_image: ?vk.Image = if (msaa_enabled) self.msaa_depth.image else null;
+    const msaa_depth_view: ?vk.ImageView = if (msaa_enabled) self.msaa_depth.view else null;
+    const depth_resolve_view: ?vk.ImageView = if (msaa_enabled) self.render_depth.view else null;
     const pass_ctx: ChunkRenderer.PassContext = .{
         .cmd_buffer = frame_ctx.cmd_buffer,
         .frame_idx = current_frame,
@@ -447,12 +443,12 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
         .shadow = &self.shadow,
-        .msaa_color_image = if (msaa_enabled) self.msaa_color.image else null,
-        .msaa_color_view = if (msaa_enabled) self.msaa_color.view else null,
-        .color_resolve_view = if (msaa_enabled) self.render_color.view else null,
-        .msaa_depth_image = if (msaa_enabled) self.msaa_depth.image else null,
-        .msaa_depth_view = if (msaa_enabled) self.msaa_depth.view else null,
-        .depth_resolve_view = if (msaa_enabled) self.render_depth.view else null,
+        .msaa_color_image = msaa_color_image,
+        .msaa_color_view = msaa_color_view,
+        .color_resolve_view = color_resolve_view,
+        .msaa_depth_image = msaa_depth_image,
+        .msaa_depth_view = msaa_depth_view,
+        .depth_resolve_view = depth_resolve_view,
         .depth_resolve_mode = self.depth_resolve_mode,
         .msaa_sample_count = self.msaa_sample_count,
     };
@@ -467,12 +463,12 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_view = self.render_depth.view,
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
-        .msaa_color_image = if (msaa_enabled) self.msaa_color.image else null,
-        .msaa_color_view = if (msaa_enabled) self.msaa_color.view else null,
-        .color_resolve_view = if (msaa_enabled) self.render_color.view else null,
-        .msaa_depth_image = if (msaa_enabled) self.msaa_depth.image else null,
-        .msaa_depth_view = if (msaa_enabled) self.msaa_depth.view else null,
-        .depth_resolve_view = if (msaa_enabled) self.render_depth.view else null,
+        .msaa_color_image = msaa_color_image,
+        .msaa_color_view = msaa_color_view,
+        .color_resolve_view = color_resolve_view,
+        .msaa_depth_image = msaa_depth_image,
+        .msaa_depth_view = msaa_depth_view,
+        .depth_resolve_view = depth_resolve_view,
         .depth_resolve_mode = self.depth_resolve_mode,
         .msaa_sample_count = self.msaa_sample_count,
     });
