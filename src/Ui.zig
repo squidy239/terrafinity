@@ -669,9 +669,9 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
     if (self.settingsSection(@src(), "World Streaming", settingsId("streaming"), true)) |section| {
         defer section.deinit();
         settingsSlider("Minimum Detail Level", &options.lowest_level, 0, 24, settingsId("streaming.lowest_level"));
-        settingsSlider("Maximum Detail Level", &options.highest_level, 1, 24, settingsId("streaming.highest_level"));
-        settingsSlider("Horizontal Render Distance", &options.render_distance_x, 6, 32, settingsId("streaming.render_distance_x"));
-        settingsSlider("Vertical Render Distance", &options.render_distance_y, 6, 32, settingsId("streaming.render_distance_y"));
+        settingsSlider("Maximum Detail Level", &options.highest_level, 0, 24, settingsId("streaming.highest_level"));
+        settingsSlider("Horizontal Render Distance", &options.render_distance_x, 6, 64, settingsId("streaming.render_distance_x"));
+        settingsSlider("Vertical Render Distance", &options.render_distance_y, 6, 64, settingsId("streaming.render_distance_y"));
         settingsInterval("Chunk Load Interval (ms)", &options.loader_frequency_ms, settingsId("streaming.loader_frequency_ms"));
         settingsInterval("Mesh Unload Interval (ms)", &options.mesh_unload_frequency_ms, settingsId("streaming.mesh_unload_frequency_ms"));
         settingsInterval("Autosave Interval (ms)", &options.save_frequency_ms, settingsId("streaming.save_frequency_ms"));
@@ -694,7 +694,7 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
     if (self.settingsSection(@src(), "Rendering", settingsId("rendering"), true)) |section| {
         defer section.deinit();
         _ = configSlider("Field of View", &render_options.fov, .{}, 30, 150, settingsId("rendering.fov"));
-        _ = configSlider("Day/Night Cycle Length (seconds)", &render_options.day_length_sec, .{}, 1, 3600, settingsId("rendering.day_length_sec"));
+        _ = configTextf32("Day/Night Cycle Length (seconds)", &render_options.day_length_sec, settingsId("rendering.day_length_sec"));
         settingsCheckbox("Gamma Correction", &render_options.gamma_correction, settingsId("rendering.gamma_correction"));
         settingsEnum("Presentation Mode", VulkanContext.PresentMode, &render_options.present_mode, settingsId("rendering.present_mode"));
         settingsEnum("Anti Aliasing", Renderer.AntiAliasing, &render_options.anti_aliasing, settingsId("rendering.anti_aliasing"));
@@ -1328,6 +1328,19 @@ fn configTextU64(name: []const u8, value: *u64, id: u64) void {
     var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
     defer widget.deinit();
     const parsed = std.fmt.parseUnsigned(u64, widget.textGet(), 10) catch return;
+    value.* = parsed;
+}
+
+fn configTextf32(name: []const u8, value: *f32, id: u64) void {
+    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    defer row.deinit();
+    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
+    var buffer: [24]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
+    buffer[text.len] = 0;
+    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
+    defer widget.deinit();
+    const parsed = std.fmt.parseFloat(f32, widget.textGet()) catch return;
     value.* = parsed;
 }
 
