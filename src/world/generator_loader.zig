@@ -46,8 +46,11 @@ pub const Generator = struct {
         bytes[stat.size] = 0;
 
         if (self.api.config_from_zon(&allocator, bytes[0..stat.size].ptr, stat.size)) |tree| return tree;
-        std.log.warn("generator {s}: invalid config, using default preset", .{self.info.name});
-        return self.defaultConfig(allocator) orelse return error.OutOfMemory;
+        // Fail loudly instead of replacing the user's config with the preset:
+        // a silent fallback here would get re-saved over the file on the next
+        // boot and destroy the user's settings.
+        std.log.err("generator {s}: invalid config {s}", .{ self.info.name, path });
+        return error.InvalidConfig;
     }
 
     /// Number of presets the generator ships with.

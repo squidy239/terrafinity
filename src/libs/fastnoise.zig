@@ -60,6 +60,22 @@ const prime_z_shl1 = std.math.shl(i32, prime_z, 1);
 /// FastNoise2's hash multiplier.
 const hash_multiplier: i32 = @bitCast(@as(u32, 0xB7E0A5F5));
 
+/// Deterministic 2D hash of a lattice coordinate. Exposed for modules that
+/// need cell hashing outside the noise samplers (e.g. the Phacelle noise),
+/// where a fract-based hash would lose precision far from the origin.
+pub fn hash2D(seed: i32, x: i32, y: i32) i32 {
+    return (seed ^ (x *% prime_x) ^ (y *% prime_y)) *% hash_multiplier;
+}
+
+/// Vector form of `hash2D`, hashing a whole block of cells at once.
+pub fn hash2DVec(comptime N: usize, seed: i32, x: @Vector(N, i32), y: @Vector(N, i32)) @Vector(N, i32) {
+    const seed_v: @Vector(N, i32) = @splat(seed);
+    const px: @Vector(N, i32) = @splat(prime_x);
+    const py: @Vector(N, i32) = @splat(prime_y);
+    const mult: @Vector(N, i32) = @splat(hash_multiplier);
+    return (seed_v ^ (x *% px) ^ (y *% py)) *% mult;
+}
+
 /// Describes a noise-generating algorithm.
 pub const NoiseType = enum {
     /// Simplex is the successor of and comparable to Perlin noise, but with fewer
@@ -960,7 +976,7 @@ pub fn Noise(comptime Float: type) type {
         inline fn hash3D(seed: i32, x_primed: i32, y_primed: i32, z_primed: i32) i32 {
             return (seed ^ x_primed ^ y_primed ^ z_primed) *% 0x27D4EB2D;
         }
-        inline fn hash2DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32)) @Vector(N, i32) {
+        inline fn hash2DVecPrimed(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32)) @Vector(N, i32) {
             @setFloatMode(.optimized);
             const seed_v: @Vector(N, i32) = @splat(seed);
             return (seed_v ^ x_primed ^ y_primed) *% splat(@Vector(N, i32), hash_multiplier);
@@ -1009,7 +1025,7 @@ pub fn Noise(comptime Float: type) type {
         }
 
         inline fn gradCoord2DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32), xd: @Vector(N, Float), yd: @Vector(N, Float)) @Vector(N, Float) {
-            return gradCoord2DFromHashVec(N, hash2DVec(N, seed, x_primed, y_primed), xd, yd);
+            return gradCoord2DFromHashVec(N, hash2DVecPrimed(N, seed, x_primed, y_primed), xd, yd);
         }
 
         inline fn gradCoord3DFromHashVec(comptime N: usize, hash_in: @Vector(N, i32), xd: @Vector(N, Float), yd: @Vector(N, Float), zd: @Vector(N, Float)) @Vector(N, Float) {
@@ -1119,8 +1135,8 @@ pub fn Noise(comptime Float: type) type {
             @setFloatMode(.optimized);
             // The gradient table and the random unit vector share the first
             // hash; computing it once saves a full hash per corner.
-            const h1 = hash2DVec(N, seed, x_primed, y_primed);
-            const h2 = hash2DVec(N, seed +% 1293373, x_primed, y_primed);
+            const h1 = hash2DVecPrimed(N, seed, x_primed, y_primed);
+            const h2 = hash2DVecPrimed(N, seed +% 1293373, x_primed, y_primed);
             const grad = gradient2DTableVec(N, h1);
             const value = xd * grad.xg + yd * grad.yg;
             const offset = randomUnit2DFromHashes(N, h1, h2);
@@ -1820,7 +1836,7 @@ pub fn Noise(comptime Float: type) type {
             // primed coordinates and the lattice-origin subtraction are
             // hoisted by the caller (integer multiply distributes exactly, so
             // the hash is bit-identical).
-            const hash = hash2DVec(N, seed, xi_primed, yi_primed);
+            const hash = hash2DVecPrimed(N, seed, xi_primed, yi_primed);
             const hash_u: @Vector(N, u32) = @bitCast(hash);
             const xd: FloatV = floatFromInt(FloatV, @as(IntV, @bitCast(hash_u & splat(@Vector(N, u32), 0x7ff)))) - splat(FloatV, 1023.5);
             const yd: FloatV = floatFromInt(FloatV, @as(IntV, @bitCast(hash_u >> splat(@Vector(N, u32), 21)))) - splat(FloatV, 1023.5);

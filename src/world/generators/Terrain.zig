@@ -8,6 +8,7 @@ const Block = @import("../Block.zig").Block;
 const Bfa = @import("../BufferFirstAllocator.zig");
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
+const erosion = @import("../../libs/erosion.zig");
 const generator_api = @import("generator_api.zig");
 const interpolation = @import("../Interpolation.zig");
 const JitteredGrid = @import("../structures/JitteredGrid.zig").JitteredGrid;
@@ -19,6 +20,8 @@ const ChunkPos = World.ChunkPos;
 pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise");
     const thc_fragments = if (builtin.is_test) 1 else 8;
+    const sample_count = ChunkSize * ChunkSize;
+    const FloatV = @Vector(ChunkSize, f32);
 
     params: Params,
     terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.keyFromValue, ChunkHeightsKey.hash, .{}, thc_fragments),
@@ -84,36 +87,139 @@ pub const DefaultGenerator = struct {
 
     pub const Params = struct {
         /// If null, a random seed will be generated. Will be set after setSeeds is called.
-        seed: ?u64,
-        terrain_scale: f32,
-        terrain_block_randomness: f32,
-        slope_randomness: f32,
-        ground_threshold: f32,
-        dirt_band: f32,
-        erosion_strength: f32,
-        terrain_min: i32,
-        terrain_max: i32,
-        sea_level: i32,
-        height_power: f32,
+        seed: ?u64 = null,
+        terrain_scale: f32 = 1,
+        terrain_block_randomness: f32 = 0.25,
+        slope_randomness: f32 = 0.15,
+        ground_threshold: f32 = 0.3,
+        dirt_band: f32 = 0.2,
+        /// Deprecated: replaced by the erosion filter; kept so saved configs still parse.
+        /// Skipped in the config tree, so it needs a declaration default for
+        /// the parser to fill it back in on load.
+        erosion_strength: f32 = 0.2,
+        /// Applies the Phacelle erosion filter to the shaped height field.
+        erosion_enabled: bool = true,
+        /// Horizontal scale of the erosion pattern relative to the terrain.
+        erosion_scale: f32 = 0.15,
+        /// Total magnitude of the erosion filter across all octaves.
+        erosion_filter_strength: f32 = 0.22,
+        /// Gully magnitude relative to the peak-sharpening effect of the mask.
+        erosion_gully_weight: f32 = 0.5,
+        /// Exponent restricting fine gullies to slopes the coarse octaves carved.
+        erosion_detail: f32 = 1.5,
+        /// Number of gully octaves; coarse LODs drop the finest ones.
+        erosion_octaves: u32 = 4,
+        /// Frequency step between gully octaves.
+        erosion_lacunarity: f32 = 2.0,
+        /// Amplitude step between gully octaves.
+        erosion_gain: f32 = 0.5,
+        /// Phacelle cell size relative to the stripe width.
+        erosion_cell_scale: f32 = 0.7,
+        /// Ridge crispness; 1.0 can create loop artefacts where ridges meet.
+        erosion_normalization: f32 = 0.5,
+        /// Fade-in width of the erosion mask on ridge crests.
+        erosion_ridge_rounding: f32 = 0.1,
+        /// Fade-in width of the erosion mask in creases; 0 cuts in instantly.
+        erosion_crease_rounding: f32 = 0.0,
+        /// Slope magnitude substituted for the terrain gradient.
+        erosion_assumed_slope: f32 = 0.7,
+        /// How much of the gradient magnitude `erosion_assumed_slope` replaces.
+        erosion_assumed_slope_amount: f32 = 1.0,
+        terrain_min: i32 = -4096,
+        terrain_max: i32 = 8196,
+        sea_level: i32 = 0,
+        height_power: f32 = 1,
         /// Power applied to the continental (large) noise before combining.
-        large_power: f32,
+        large_power: f32 = 1,
         /// Power applied to the mountain (small/ridged) noise before combining.
-        small_power: f32,
-        dirt_depth: f32,
-        snow_line: f32,
-        beach_band: f32,
-        sand_slope: f32,
+        small_power: f32 = 1,
+        dirt_depth: f32 = 5,
+        snow_line: f32 = 0.6,
+        beach_band: f32 = 6,
+        sand_slope: f32 = 0.3,
         /// Weight of the mountain (ridged) noise added on top of the continental noise.
-        terrain_noise_balance: f32,
-        terrain_noise: Noise.Noise(f32),
-        large_terrain_noise: Noise.Noise(f32),
-        large_terrain_noise_warp: Noise.Noise(f32),
-        cave_noise: Noise.Noise(f32),
-        cave_threshold: f32,
-        cave_expansion_max: f32,
-        cave_expansion_start: f32,
-        gen_structures: bool,
-        trees: []const TreeConfig,
+        terrain_noise_balance: f32 = 1,
+        terrain_noise: Noise.Noise(f32) = .{
+            .frequency = 0.002,
+            .noise_type = .perlin,
+            .rotation_type = .none,
+            .fractal_type = .ridged,
+            .octaves = 12,
+            .lacunarity = 2,
+            .gain = 0.5,
+            .weighted_strength = 0,
+            .ping_pong_strength = 2,
+            .cellular_distance = .euclidean_sq,
+            .cellular_return = .distance,
+            .cellular_jitter_mod = 1,
+            .domain_warp_type = .simplex,
+            .domain_warp_amp = 10,
+        },
+        large_terrain_noise: Noise.Noise(f32) = .{
+            .frequency = 0.0008,
+            .noise_type = .perlin,
+            .rotation_type = .none,
+            .fractal_type = .none,
+            .octaves = 1,
+            .lacunarity = 2,
+            .gain = 0.5,
+            .weighted_strength = 0,
+            .ping_pong_strength = 2,
+            .cellular_distance = .euclidean_sq,
+            .cellular_return = .distance,
+            .cellular_jitter_mod = 1,
+            .domain_warp_type = .simplex,
+            .domain_warp_amp = 1,
+        },
+        large_terrain_noise_warp: Noise.Noise(f32) = .{
+            .frequency = 0.002,
+            .noise_type = .simplex,
+            .rotation_type = .improve_xy_planes,
+            .fractal_type = .independent,
+            .octaves = 1,
+            .lacunarity = 2,
+            .gain = 0.5,
+            .weighted_strength = 0,
+            .ping_pong_strength = 2,
+            .cellular_distance = .euclidean_sq,
+            .cellular_return = .distance,
+            .cellular_jitter_mod = 1,
+            .domain_warp_type = .simplex,
+            .domain_warp_amp = 400,
+        },
+        cave_noise: Noise.Noise(f32) = .{
+            .frequency = 0.08,
+            .noise_type = .perlin,
+            .rotation_type = .none,
+            .fractal_type = .ping_pong,
+            .octaves = 4,
+            .lacunarity = 2,
+            .gain = 0.5,
+            .weighted_strength = 0,
+            .ping_pong_strength = 2,
+            .cellular_distance = .euclidean_sq,
+            .cellular_return = .distance,
+            .domain_warp_type = .simplex,
+            .domain_warp_amp = 1,
+        },
+        cave_threshold: f32 = -10000.0,
+        cave_expansion_max: f32 = 8192,
+        cave_expansion_start: f32 = 0,
+        gen_structures: bool = true,
+        trees: []const TreeConfig = &.{
+            .{
+                .placer = .{ .box_size = 2048, .inner_box_size = 1800 },
+                .enabled = true,
+                .size_variation = 0.5,
+                .tree = .huge,
+            },
+            .{
+                .placer = .{ .box_size = 32, .inner_box_size = 25 },
+                .enabled = true,
+                .size_variation = 0.5,
+                .tree = .small,
+            },
+        },
 
         pub fn setSeeds(self: *Params, io: std.Io) void {
             const seed = self.seed orelse blk: {
@@ -129,104 +235,9 @@ pub const DefaultGenerator = struct {
             }
         }
 
-        pub const default = Params{
-            .terrain_block_randomness = 0.25,
-            .slope_randomness = 0.15,
-            .ground_threshold = 0.3,
-            .dirt_band = 0.2,
-            .erosion_strength = 0.2,
-            .terrain_noise = .{
-                .frequency = 0.002,
-                .noise_type = .perlin,
-                .rotation_type = .none,
-                .fractal_type = .ridged,
-                .octaves = 12,
-                .lacunarity = 2,
-                .gain = 0.5,
-                .weighted_strength = 0,
-                .ping_pong_strength = 2,
-                .cellular_distance = .euclidean_sq,
-                .cellular_return = .distance,
-                .cellular_jitter_mod = 1,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 10,
-            },
-            .terrain_noise_balance = 1,
-            .large_terrain_noise = .{
-                .frequency = 0.0008,
-                .noise_type = .perlin,
-                .rotation_type = .none,
-                .fractal_type = .none,
-                .octaves = 1,
-                .lacunarity = 2,
-                .gain = 0.5,
-                .weighted_strength = 0,
-                .ping_pong_strength = 2,
-                .cellular_distance = .euclidean_sq,
-                .cellular_return = .distance,
-                .cellular_jitter_mod = 1,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 1,
-            },
-            .large_terrain_noise_warp = .{
-                .frequency = 0.002,
-                .noise_type = .simplex,
-                .rotation_type = .improve_xy_planes,
-                .fractal_type = .independent,
-                .octaves = 1,
-                .lacunarity = 2,
-                .gain = 0.5,
-                .weighted_strength = 0,
-                .ping_pong_strength = 2,
-                .cellular_distance = .euclidean_sq,
-                .cellular_return = .distance,
-                .cellular_jitter_mod = 1,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 400,
-            },
-            .cave_noise = .{
-                .frequency = 0.08,
-                .noise_type = .perlin,
-                .rotation_type = .none,
-                .fractal_type = .ping_pong,
-                .octaves = 4,
-                .lacunarity = 2,
-                .gain = 0.5,
-                .weighted_strength = 0,
-                .ping_pong_strength = 2,
-                .cellular_distance = .euclidean_sq,
-                .cellular_return = .distance,
-                .domain_warp_type = .simplex,
-                .domain_warp_amp = 1,
-            },
-            .terrain_min = -4096,
-            .terrain_max = 8196,
-            .sea_level = 0,
-            .height_power = 1,
-            .large_power = 1,
-            .small_power = 1,
-            .dirt_depth = 5,
-            .snow_line = 0.6,
-            .beach_band = 6,
-            .sand_slope = 0.3,
-            .cave_threshold = -10000.0,
-            .cave_expansion_max = 8192,
-            .cave_expansion_start = 0,
-            .seed = null,
-            .terrain_scale = 1,
-            .gen_structures = true,
-            .trees = &.{ .{
-                .placer = .{ .box_size = 2048, .inner_box_size = 1800 },
-                .enabled = true,
-                .size_variation = 0.5,
-                .tree = .huge,
-            }, .{
-                .placer = .{ .box_size = 32, .inner_box_size = 25 },
-                .enabled = true,
-                .size_variation = 0.5,
-                .tree = .small,
-            } },
-        };
+        /// Default parameter set; every field carries its default value in the
+        /// declaration, so configs missing fields parse back with the defaults.
+        pub const default = Params{};
     };
 
     pub const TreeConfig = struct {
@@ -286,7 +297,6 @@ pub const DefaultGenerator = struct {
         const sea_level: i32 = ctx.params.sea_level;
         const sea_level_f: f32 = @floatFromInt(sea_level);
         const IntV = @Vector(ChunkSize, i32);
-        const FloatV = @Vector(ChunkSize, f32);
         const BoolV = @Vector(ChunkSize, bool);
         const TagV = @Vector(ChunkSize, Block.Tag);
         const zero_v: FloatV = @splat(0);
@@ -421,8 +431,7 @@ pub const DefaultGenerator = struct {
         var height: [ChunkSize][ChunkSize]f32 = undefined;
         const float_bounds: [2]f32 = .{ @floatFromInt(params.terrain_min), @floatFromInt(params.terrain_max) };
         const one_d_terrain_scale: f32 = 1.0 / scale;
-        const sample_count = ChunkSize * ChunkSize;
-        const FloatV = @Vector(ChunkSize, f32);
+        const erosion_on = params.erosion_enabled;
 
         // Domain warp is inherently per-point, so warp the base coordinate grid
         // into two irregular coordinate sets, then sample both in one batched pass.
@@ -455,49 +464,91 @@ pub const DefaultGenerator = struct {
         noise_zone.end();
 
         const heights_zone = tracy.Zone.begin(.{ .src = @src(), .name = "blockHeights" });
-        const zero_v: FloatV = @splat(0);
-        const height_power_v: FloatV = @splat(params.height_power);
-        const large_power_v: FloatV = @splat(params.large_power);
-        const small_power_v: FloatV = @splat(params.small_power);
-        const balance_v: FloatV = @splat(params.terrain_noise_balance);
-        const sum_norm: FloatV = @splat(1.0 / (1.0 + params.terrain_noise_balance));
+        // The filter consumes the pre-envelope shaped value; the envelope is
+        // applied after, so both share the same world-space scale.
+        var shaped_center: [ChunkSize][ChunkSize]f32 = undefined;
         for (0..ChunkSize) |x| {
             const raw: FloatV = @as(FloatV, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize].*);
             const large = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*);
-            // Signed power per noise: steepens (>1) or flattens (<1) each field
-            // before combining, so continents and mountains are shaped independently.
-            const large_shaped = signedPow(large, large_power_v);
-            const raw_shaped = signedPow(raw, small_power_v);
-            // Additive: large = continents, raw = mountains (peaks and valleys).
-            // Normalize by 1 + balance so the sum stays in [-1,1] without hard-clamping
-            // peaks into flat plateaus at the world height cap.
-            const warped = (large_shaped + raw_shaped * balance_v) * sum_norm;
-            // Vertical contrast: a signed power curve sharpens peaks and flattens
-            // lowlands while staying inside the min/max envelope.
-            const shaped = signedPow(warped, height_power_v);
-            const bounds = @select(f32, shaped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
-            const height_row: @Vector(ChunkSize, f32) = shaped * @abs(bounds) * @as(FloatV, @splat(scale));
-            height[x] = height_row;
+            shaped_center[x] = shapedRow(params, large, raw);
+        }
+        if (!erosion_on) {
+            const zero_v: FloatV = @splat(0);
+            for (0..ChunkSize) |x| {
+                const shaped: FloatV = shaped_center[x];
+                const bounds = @select(f32, shaped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
+                height[x] = shaped * @abs(bounds) * @as(FloatV, @splat(scale));
+            }
         }
         heights_zone.end();
 
-        const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosion" });
-        // Erosion: columns steeper than their neighbor shed height, rounding peaks and ridges.
-        // Normalize by the LOD scale so coarse chunks erode the same world-space height as
-        // the fine LOD (a coarse block is `ratio` world blocks tall).
-        const erosion_scale = 1.0 / World.ChunkPos.toScale(level);
-        const erosion_factor = params.erosion_strength * erosion_scale;
-        const differential = getDifferential(&height);
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                height[x][z] -= differential[x][z] * erosion_factor;
+        if (erosion_on) {
+            const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionFilter" });
+            // The terrain gradient comes from central differences of the shaped
+            // field sampled at +/- one sample spacing. Every point is evaluated
+            // from world coordinates alone, so chunk borders cannot distort the
+            // last row or column as the old neighbor-differencing stage did.
+            const grad_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionGradient" });
+            var scratch: GradientScratch = undefined;
+            var grad_x: [sample_count]f32 = @splat(0);
+            var grad_z: [sample_count]f32 = @splat(0);
+            const e = d32 * one_d_terrain_scale;
+            const one_d_2e = 1.0 / (2.0 * e);
+            addGradientSamples(params, &scratch, &base_x, &base_z, &grad_x, .{ e, 0 }, 1.0, one_d_2e);
+            addGradientSamples(params, &scratch, &base_x, &base_z, &grad_x, .{ -e, 0 }, -1.0, one_d_2e);
+            addGradientSamples(params, &scratch, &base_x, &base_z, &grad_z, .{ 0, e }, 1.0, one_d_2e);
+            addGradientSamples(params, &scratch, &base_x, &base_z, &grad_z, .{ 0, -e }, -1.0, one_d_2e);
+            grad_zone.end();
+
+            // Coarser LODs drop the finest octaves, whose wavelength falls
+            // below their sample spacing; the remaining octaves stay absolute
+            // in world space so the gullies match across levels.
+            const lod_octave_drop: u32 = @intCast(@max(level, 0));
+            const erosion_p_scale = @max(params.erosion_scale, 0.001);
+            const erosion_params = erosion.ErosionParams{
+                .filter_strength = params.erosion_filter_strength,
+                .gully_weight = params.erosion_gully_weight,
+                .detail = params.erosion_detail,
+                .octaves = @max(1, params.erosion_octaves -| lod_octave_drop),
+                .lacunarity = params.erosion_lacunarity,
+                .gain = params.erosion_gain,
+                .cell_scale = params.erosion_cell_scale,
+                .normalization = params.erosion_normalization,
+                .ridge_rounding = params.erosion_ridge_rounding,
+                .crease_rounding = params.erosion_crease_rounding,
+                .assumed_slope = params.erosion_assumed_slope,
+                .assumed_slope_amount = params.erosion_assumed_slope_amount,
+            };
+            for (0..ChunkSize) |x| {
+                for (0..ChunkSize) |z| {
+                    const i = x * ChunkSize + z;
+                    const shaped = shaped_center[x][z];
+                    // The filter expects the slope pointing downhill, so the
+                    // gradient is negated. Heights stay in normalized units
+                    // through the filter and get the base envelope on the way
+                    // out, so the gully size tracks terrain_scale automatically.
+                    // Larger erosion_scale means larger gullies; zero is guarded
+                    // against since the filter divides coordinates by it.
+                    const result = erosion.erosionFilter(
+                        // "Tiles" p: the erosion detail sits at 0.15x the terrain
+                        // features, so the scale divides the coordinates; the
+                        // slope scales by the inverse factor to stay a
+                        // derivative of the transformed coordinates.
+                        .{ base_x[i] / erosion_p_scale, base_z[i] / erosion_p_scale },
+                        .{ shaped, -grad_x[i] * erosion_p_scale, -grad_z[i] * erosion_p_scale },
+                        0.0,
+                        erosion_params,
+                    );
+                    const bounds = if (shaped > 0) float_bounds[1] else float_bounds[0];
+                    height[x][z] = (shaped + result.height_delta) * @abs(bounds) * scale;
+                }
             }
+            erosion_zone.end();
         }
-        erosion_zone.end();
         return height;
     }
 
-    /// Signed power curve: sign-preserving |v|^power, steeping (>1) or flattening (<1).
+    /// Signed power curve: sign-preserving |v|^power, steepening (>1) or flattening (<1).
     inline fn signedPow(v: @Vector(ChunkSize, f32), power: @Vector(ChunkSize, f32)) @Vector(ChunkSize, f32) {
         const magnitude = @exp2(power * @log2(@abs(v)));
         return @select(f32, v < @as(@Vector(ChunkSize, f32), @splat(0)), -magnitude, magnitude);
@@ -515,6 +566,67 @@ pub const DefaultGenerator = struct {
             }
         }
         return differential;
+    }
+
+    /// Shaped height row: signed-power continents and mountains combined and
+    /// normalized, then contrast-scaled. Shared by the base grid and the
+    /// gradient sample passes.
+    inline fn shapedRow(params: *const Params, large: FloatV, raw: FloatV) FloatV {
+        const height_power_v: FloatV = @splat(params.height_power);
+        const large_power_v: FloatV = @splat(params.large_power);
+        const small_power_v: FloatV = @splat(params.small_power);
+        const balance_v: FloatV = @splat(params.terrain_noise_balance);
+        const sum_norm: FloatV = @splat(1.0 / (1.0 + params.terrain_noise_balance));
+        // Signed power per noise: steepens (>1) or flattens (<1) each field
+        // before combining, so continents and mountains are shaped independently.
+        const large_shaped = signedPow(large, large_power_v);
+        const raw_shaped = signedPow(raw, small_power_v);
+        // Additive: large = continents, raw = mountains (peaks and valleys).
+        // Normalize by 1 + balance so the sum stays in [-1,1] without hard-clamping
+        // peaks into flat plateaus at the world height cap.
+        const warped = (large_shaped + raw_shaped * balance_v) * sum_norm;
+        // Vertical contrast: a signed power curve sharpens peaks and flattens
+        // lowlands while staying inside the min/max envelope.
+        return signedPow(warped, height_power_v);
+    }
+
+    const GradientScratch = struct {
+        off_x: [sample_count]f32,
+        off_z: [sample_count]f32,
+        warp_x: [sample_count]f32,
+        warp_z: [sample_count]f32,
+        large_warp_x: [sample_count]f32,
+        large_warp_z: [sample_count]f32,
+        noise: [sample_count]f32,
+        large_noise: [sample_count]f32,
+    };
+
+    /// Samples the shaped field at `base + offset` and folds the difference
+    /// into `grad` with the given sign, scaled by the inverse sample distance.
+    fn addGradientSamples(params: *const Params, scratch: *GradientScratch, base_x: []const f32, base_z: []const f32, grad: []f32, offset: [2]f32, sign: f32, one_d_2e: f32) void {
+        const offset_x_v: FloatV = @splat(offset[0]);
+        const offset_z_v: FloatV = @splat(offset[1]);
+        for (0..ChunkSize) |x| {
+            const ox: FloatV = @as(FloatV, base_x[x * ChunkSize ..][0..ChunkSize].*) + offset_x_v;
+            const oz: FloatV = @as(FloatV, base_z[x * ChunkSize ..][0..ChunkSize].*) + offset_z_v;
+            scratch.off_x[x * ChunkSize ..][0..ChunkSize].* = ox;
+            scratch.off_z[x * ChunkSize ..][0..ChunkSize].* = oz;
+        }
+        params.terrain_noise.fillWarp2DGrid(&scratch.warp_x, &scratch.warp_z, &scratch.off_x, &scratch.off_z);
+        params.large_terrain_noise_warp.fillWarp2DGrid(&scratch.large_warp_x, &scratch.large_warp_z, &scratch.off_x, &scratch.off_z);
+        params.terrain_noise.fillNoise2DGrid(&scratch.noise, &scratch.warp_x, &scratch.warp_z);
+        params.large_terrain_noise.fillNoise2DGrid(&scratch.large_noise, &scratch.large_warp_x, &scratch.large_warp_z);
+        for (0..ChunkSize) |x| {
+            const raw: FloatV = @as(FloatV, scratch.noise[x * ChunkSize ..][0..ChunkSize].*);
+            const large = @as(FloatV, scratch.large_noise[x * ChunkSize ..][0..ChunkSize].*);
+            const grad_row: FloatV = @as(FloatV, grad[x * ChunkSize ..][0..ChunkSize].*);
+            // Fused multiply-add keeps the accumulation bit-identical across
+            // build modes: an unfused mul+add contracts into fma only in
+            // optimized builds, and on low-slope terrain those ulps become
+            // entirely different gradient directions.
+            const delta = @mulAdd(FloatV, shapedRow(params, large, raw), @as(FloatV, @splat(sign * one_d_2e)), grad_row);
+            grad[x * ChunkSize ..][0..ChunkSize].* = delta;
+        }
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -634,7 +746,21 @@ const field_specs = .{
     .slope_randomness = .{ .label = "Slope Randomness", .min = 0, .max = 1 },
     .ground_threshold = .{ .min = 0, .max = 1 },
     .dirt_band = .{ .min = 0, .max = 1 },
-    .erosion_strength = .{ .label = "Erosion Strength", .min = 0, .max = 10 },
+    .erosion_strength = .{ .skip = true },
+    .erosion_enabled = .{ .label = "Erosion Enabled", .description = "Applies the Phacelle erosion filter to the terrain." },
+    .erosion_scale = .{ .label = "Erosion Scale", .description = "Horizontal scale of the erosion pattern relative to the terrain.", .min = 0.0, .max = 5.0 },
+    .erosion_filter_strength = .{ .label = "Erosion Filter Strength", .description = "Total magnitude across all erosion octaves.", .min = 0, .max = 1 },
+    .erosion_gully_weight = .{ .label = "Erosion Gully Weight", .description = "Gully magnitude relative to the peak-sharpening effect.", .min = 0, .max = 1 },
+    .erosion_detail = .{ .label = "Erosion Detail", .description = "Lower values restrict fine gullies to the steepest slopes.", .min = 0.1, .max = 4 },
+    .erosion_octaves = .{ .label = "Erosion Octaves", .min = 1, .max = 8 },
+    .erosion_lacunarity = .{ .label = "Erosion Lacunarity", .min = 1, .max = 4 },
+    .erosion_gain = .{ .label = "Erosion Gain", .min = 0, .max = 1 },
+    .erosion_cell_scale = .{ .label = "Erosion Cell Scale", .description = "Phacelle cell size relative to the stripe width; prone to abrupt changes far from the origin.", .min = 0.0, .max = 1, .advanced = true },
+    .erosion_normalization = .{ .label = "Erosion Normalization", .description = "Ridge crispness; 1.0 can create loop artefacts where ridges meet.", .min = 0, .max = 1, .advanced = true },
+    .erosion_ridge_rounding = .{ .label = "Erosion Ridge Rounding", .min = 0, .max = 1, .advanced = true },
+    .erosion_crease_rounding = .{ .label = "Erosion Crease Rounding", .min = 0, .max = 1, .advanced = true },
+    .erosion_assumed_slope = .{ .label = "Erosion Assumed Slope", .description = "Slope magnitude substituted for the terrain gradient.", .min = 0, .max = 2, .advanced = true },
+    .erosion_assumed_slope_amount = .{ .label = "Erosion Assumed Slope Amount", .description = "How much of the gradient magnitude the assumed slope replaces.", .min = 0, .max = 1, .advanced = true },
     .terrain_noise_balance = .{ .label = "Terrain Noise Balance", .min = 0, .max = 1 },
     .height_power = .{ .label = "Height Power", .min = 0.25, .max = 4 },
     .large_power = .{ .label = "Large Shape Power", .min = 0.25, .max = 8 },
@@ -670,50 +796,62 @@ pub fn generatorInfo() callconv(.c) *const generator_api.GeneratorInfo {
     return &generator_info_data;
 }
 
+const continental_preset = blk: {
+    var p = DefaultGenerator.Params.default;
+    // Continental: broad flat landmasses from low-frequency ping-pong noise, no structures.
+    p.terrain_block_randomness = 0.0;
+    p.slope_randomness = 0.0;
+    p.ground_threshold = 0.5;
+    p.dirt_band = 0.7;
+    p.terrain_min = -512;
+    p.terrain_max = 2048;
+    p.large_power = 1.5;
+    p.small_power = 1.5;
+    p.dirt_depth = 2.0;
+    p.terrain_noise_balance = 0.3;
+    p.terrain_noise.frequency = 0.008;
+    p.terrain_noise.fractal_type = .ping_pong;
+    p.terrain_noise.domain_warp_type = .basic_grid;
+    p.terrain_noise.domain_warp_amp = 0.0;
+    p.large_terrain_noise.fractal_type = .ping_pong;
+    p.large_terrain_noise.octaves = 4;
+    p.large_terrain_noise_warp.noise_type = .perlin;
+    p.large_terrain_noise_warp.rotation_type = .improve_xy_planes;
+    p.large_terrain_noise_warp.fractal_type = .none;
+    p.large_terrain_noise_warp.octaves = 0;
+    p.large_terrain_noise_warp.domain_warp_amp = 100.0;
+    p.cave_noise.domain_warp_amp = 827.6712;
+    p.gen_structures = false;
+    break :blk p;
+};
+
 const terrain_presets = [_]DefaultGenerator.Params{
-    blk: {
-        var p = DefaultGenerator.Params.default;
-        // Continental: broad flat landmasses from low-frequency ping-pong noise, no structures.
-        p.terrain_block_randomness = 0.0;
-        p.slope_randomness = 0.0;
-        p.ground_threshold = 0.5;
-        p.dirt_band = 0.7;
-        p.erosion_strength = 1.0;
-        p.terrain_min = -512;
-        p.terrain_max = 2048;
-        p.large_power = 1.5;
-        p.small_power = 1.5;
-        p.dirt_depth = 2.0;
-        p.terrain_noise_balance = 0.3;
-        p.terrain_noise.frequency = 0.008;
-        p.terrain_noise.fractal_type = .ping_pong;
-        p.terrain_noise.domain_warp_type = .basic_grid;
-        p.terrain_noise.domain_warp_amp = 0.0;
-        p.large_terrain_noise.fractal_type = .ping_pong;
-        p.large_terrain_noise.octaves = 4;
-        p.large_terrain_noise_warp.noise_type = .perlin;
-        p.large_terrain_noise_warp.rotation_type = .improve_xy_planes;
-        p.large_terrain_noise_warp.fractal_type = .none;
-        p.large_terrain_noise_warp.octaves = 0;
-        p.large_terrain_noise_warp.domain_warp_amp = 100.0;
-        p.cave_noise.domain_warp_amp = 827.6712;
-        p.gen_structures = false;
-        break :blk p;
-    },
+    continental_preset,
     blk: {
         var p = DefaultGenerator.Params.default;
         // Sculpted: heavy erosion and ping-pong large-scale noise round the
         // terrain into flowing hills.
-        p.erosion_strength = 3.7537832;
         p.large_terrain_noise.fractal_type = .ping_pong;
         p.large_terrain_noise.octaves = 5;
         p.large_terrain_noise_warp.fractal_type = .none;
         p.cave_noise.domain_warp_amp = 827.6712;
         break :blk p;
     },
+    blk: {
+        var p = continental_preset;
+        // Eroded: Continental landmasses carved by the new erosion filter;
+        // heavy gully weight and a finer cell scale emphasize branching gullies.
+        p.erosion_enabled = true;
+        p.erosion_filter_strength = 0.38;
+        p.erosion_gully_weight = 0.75;
+        p.erosion_detail = 2.0;
+        p.erosion_octaves = 5;
+        p.erosion_cell_scale = 0.55;
+        break :blk p;
+    },
     .default,
 };
-const terrain_preset_names = [_][]const u8{ "Continental", "Sculpted", "Plain" };
+const terrain_preset_names = [_][]const u8{ "Continental", "Sculpted", "Plain", "Eroded" };
 const terrain_preset_default: usize = 0;
 
 pub fn generatorPresetCount() callconv(.c) usize {
@@ -845,13 +983,126 @@ test "benchmark genTerrainHeight" {
     var sink: f32 = 0;
     var height: [ChunkSize][ChunkSize]f32 = undefined;
 
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    var start = std.Io.Clock.Timestamp.now(io, .awake);
     for (0..iterations) |i| {
         height = DefaultGenerator.genTerrainHeight(&params, @as(i32, @intCast(@mod(i, 3))) - 1, .{ 3, 5 });
         sink += height[0][0];
     }
-    const end = std.Io.Clock.Timestamp.now(io, .awake);
-    const ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
+    var end = std.Io.Clock.Timestamp.now(io, .awake);
+    const eroded_ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
+    std.debug.print("genTerrainHeight {s} erosion: {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), eroded_ns, sink });
 
-    std.debug.print("genTerrainHeight {s}: {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), ns, sink });
+    var plain_params = params;
+    plain_params.erosion_enabled = false;
+    sink = 0;
+    start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iterations) |i| {
+        height = DefaultGenerator.genTerrainHeight(&plain_params, @as(i32, @intCast(@mod(i, 3))) - 1, .{ 3, 5 });
+        sink += height[0][0];
+    }
+    end = std.Io.Clock.Timestamp.now(io, .awake);
+    const plain_ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
+    std.debug.print("genTerrainHeight {s} base: {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), plain_ns, sink });
+}
+
+test "legacy config with erosion_strength parses" {
+    @setEvalBranchQuota(100000000);
+    // Old saved configs set erosion_strength, which is skipped in the config
+    // tree but must still parse; the new erosion_* fields fall back to their
+    // declaration defaults so no world config migration is needed.
+    const legacy = ".{ .seed = null, .terrain_scale = 2, .erosion_strength = 1.5, .terrain_block_randomness = 0.1 }";
+    var buf: [512]u8 = undefined;
+    @memcpy(buf[0..legacy.len], legacy);
+    buf[legacy.len] = 0;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const params = try std.zon.parse.fromSliceAlloc(DefaultGenerator.Params, arena.allocator(), buf[0..legacy.len :0], null, .{});
+    try std.testing.expectEqual(@as(f32, 1.5), params.erosion_strength);
+    try std.testing.expectEqual(@as(f32, 2), params.terrain_scale);
+    try std.testing.expect(params.erosion_enabled);
+    try std.testing.expectEqual(@as(u32, 4), params.erosion_octaves);
+}
+
+test "config tree round trips through zon" {
+    @setEvalBranchQuota(100000000);
+    // The emitted tree omits skipped fields (erosion_strength); the parser
+    // must fill them back in from the declaration defaults, or every saved
+    // config would fail to load and be replaced by the preset.
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const tree = try generator_api.fromStruct(DefaultGenerator.Params, allocator, &DefaultGenerator.Params.default, field_specs);
+    defer generator_api.free(allocator, tree);
+
+    var buf: [16384]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try generator_api.emitZon(&w, tree);
+    const emitted = w.buffered();
+
+    var source: [16384]u8 = undefined;
+    @memcpy(source[0..emitted.len], emitted);
+    source[emitted.len] = 0;
+    const params = try std.zon.parse.fromSliceAlloc(DefaultGenerator.Params, arena.allocator(), source[0..emitted.len :0], null, .{});
+    try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_strength, params.erosion_strength);
+    try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_octaves, params.erosion_octaves);
+    try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_enabled, params.erosion_enabled);
+    try std.testing.expectEqual(DefaultGenerator.Params.default.terrain_scale, params.terrain_scale);
+}
+
+test "erosion seam continuity between adjacent chunks" {
+    // The erosion filter evaluates every point from world coordinates alone,
+    // so the height field stays continuous across chunk borders. This pins
+    // the fix for the removed getDifferential stage, which reflected the last
+    // row/column and distorted the final row of every chunk.
+    const params = DefaultGenerator.Params.default;
+    const west = DefaultGenerator.genTerrainHeight(&params, 0, .{ 0, 0 });
+    const east = DefaultGenerator.genTerrainHeight(&params, 0, .{ 1, 0 });
+    for (0..ChunkSize) |z| {
+        const jump = @abs(west[ChunkSize - 1][z] - east[0][z]);
+        // Neighboring samples on the same side of the border bound the local
+        // slope, but the gully ripple can double it at a steep phase, so the
+        // jump may reach a few times the local step. A coordinate-space bug
+        // jumps by thousands of blocks instead.
+        const step_w = @abs(west[ChunkSize - 1][z] - west[ChunkSize - 2][z]);
+        const step_e = @abs(east[1][z] - east[0][z]);
+        try std.testing.expect(jump <= (step_w + step_e) * 2.5 + 256.0);
+    }
+}
+
+test "erosion LOD consistency between level 0 and level 1" {
+    // The filter drops its finest octave per LOD level (its wavelength falls
+    // below the coarser sample spacing), so a level-1 chunk must match the
+    // box-filtered level-0 field up to the dropped octave's amplitude.
+    const params = DefaultGenerator.Params.default;
+    const coarse = DefaultGenerator.genTerrainHeight(&params, 1, .{ 1, 1 });
+    var fine: [4][ChunkSize][ChunkSize]f32 = undefined;
+    fine[0] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 2 });
+    fine[1] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 2 });
+    fine[2] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 3 });
+    fine[3] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 3 });
+    const max_abs_bound: f32 = @floatFromInt(@max(@abs(params.terrain_min), @abs(params.terrain_max)));
+    // The dropped octave plus the coarser gradient sampling shift the gullies
+    // slightly; allow about 40% of the filter's total magnitude on top of a
+    // fixed slack, far below what a coordinate or unit bug would produce.
+    const filter_amp: f32 = params.erosion_filter_strength / (1.0 - params.erosion_gain) * params.erosion_gully_weight;
+    const limit = max_abs_bound * filter_amp * 0.4 + 128.0;
+    for (0..ChunkSize) |x| {
+        for (0..ChunkSize) |z| {
+            // A level-1 sample at (x, z) coincides exactly with the level-0
+            // samples (2x, 2z) and (2x+1, 2z) inside the chunk at (x / h), so
+            // the covering four fine samples are box-filtered and compared
+            // against the coarse height at half the fine envelope. h is the
+            // number of coarse samples per fine-chunk edge; the factor 2 is the
+            // level scale.
+            const h = ChunkSize / 2;
+            const cx: usize = @intCast(x / h);
+            const fx: usize = @intCast(2 * (x % h));
+            const cz: usize = @intCast(z / h);
+            const fz: usize = @intCast(2 * (z % h));
+            const avg = (fine[cx + 2 * cz][fx][fz] + fine[cx + 2 * cz][fx + 1][fz] + fine[cx + 2 * cz][fx][fz + 1] + fine[cx + 2 * cz][fx + 1][fz + 1]) * 0.25;
+            const diff = @abs(coarse[x][z] - avg * 0.5);
+            try std.testing.expect(diff <= limit);
+        }
+    }
 }
