@@ -100,39 +100,62 @@ pub const DefaultGenerator = struct {
         /// Applies the Phacelle erosion filter to the shaped height field.
         erosion_enabled: bool = true,
         /// Horizontal scale of the erosion pattern relative to the terrain.
-        erosion_scale: f32 = 0.15,
+        erosion_scale: f32 = 3.2929585,
         /// Total magnitude of the erosion filter across all octaves.
-        erosion_filter_strength: f32 = 0.22,
+        erosion_filter_strength: f32 = 0.11260234,
         /// Gully magnitude relative to the peak-sharpening effect of the mask.
-        erosion_gully_weight: f32 = 0.5,
+        erosion_gully_weight: f32 = 0.057686467,
         /// Exponent restricting fine gullies to slopes the coarse octaves carved.
-        erosion_detail: f32 = 1.5,
+        erosion_detail: f32 = 1.0999031,
         /// Number of gully octaves; coarse LODs drop the finest ones.
-        erosion_octaves: u32 = 4,
+        erosion_octaves: u32 = 5,
         /// Frequency step between gully octaves.
         erosion_lacunarity: f32 = 2.0,
         /// Amplitude step between gully octaves.
-        erosion_gain: f32 = 0.5,
+        erosion_gain: f32 = 0.43301594,
         /// Phacelle cell size relative to the stripe width.
-        erosion_cell_scale: f32 = 0.7,
+        erosion_cell_scale: f32 = 1.0069951,
         /// Ridge crispness; 1.0 can create loop artefacts where ridges meet.
-        erosion_normalization: f32 = 0.5,
+        erosion_normalization: f32 = 0.50142545,
         /// Fade-in width of the erosion mask on ridge crests.
-        erosion_ridge_rounding: f32 = 0.1,
+        erosion_ridge_rounding: f32 = 1.0,
         /// Fade-in width of the erosion mask in creases; 0 cuts in instantly.
-        erosion_crease_rounding: f32 = 0.0,
+        erosion_crease_rounding: f32 = 1.0,
         /// Slope magnitude substituted for the terrain gradient.
-        erosion_assumed_slope: f32 = 0.7,
+        erosion_assumed_slope: f32 = 0.0,
         /// How much of the gradient magnitude `erosion_assumed_slope` replaces.
-        erosion_assumed_slope_amount: f32 = 1.0,
+        erosion_assumed_slope_amount: f32 = 0.0,
         /// Terrain slope magnitude at which the gullies apply in full; flatter
         /// ground's erosion fades out smoothly (inverted-quadratic mask in the
         /// locally averaged steepness) so peaks and stream beds survive
         /// uncarved. Zero disables the fade.
-        erosion_fade_slope: f32 = 0.001,
+        erosion_fade_slope: f32 = 0.093972616,
         /// Deprecated: replaced by the steepness frequency modulation; kept so
         /// saved configs that set it still parse. Skipped in the config tree.
         erosion_fade_altitude: f32 = 0.5,
+        /// Separate high-frequency noise layered on after the erosion filter;
+        /// its amount follows the pre-erosion gradient, so rocky detail
+        /// collects on slopes while flats stay smooth.
+        surface_noise: Noise.Noise(f32) = .{
+            .frequency = 0.04,
+            .noise_type = .simplex,
+            .rotation_type = .improve_xy_planes,
+            .fractal_type = .fbm,
+            .octaves = 3,
+            .lacunarity = 2,
+            .gain = 0.5,
+        },
+        /// Maximum surface noise height delta in normalized height units,
+        /// converted with the symmetric envelope so coasts, peaks, and
+        /// seabed share the same relief.
+        surface_noise_amplitude: f32 = 0.012,
+        /// How much the pre-erosion gradient scales the surface noise amount:
+        /// 0 applies the full amplitude everywhere, 1 scales it by the
+        /// gradient so flat ground gets none.
+        surface_noise_gradient_influence: f32 = 0.8,
+        /// Pre-erosion gradient magnitude at which the surface noise applies
+        /// in full, in shaped units per block.
+        surface_noise_gradient_scale: f32 = 0.01,
         terrain_min: i32 = -4096,
         terrain_max: i32 = 8196,
         sea_level: i32 = 0,
@@ -237,8 +260,8 @@ pub const DefaultGenerator = struct {
                 break :blk random_seed;
             };
             // Salts differentiate the noise streams; the large warp shares salt 4 with the large height noise.
-            const noise_salts = .{ 1, 3, 4, 4 };
-            inline for (.{ &self.cave_noise, &self.terrain_noise, &self.large_terrain_noise, &self.large_terrain_noise_warp }, noise_salts) |noise, salt| {
+            const noise_salts = .{ 1, 3, 4, 4, 6 };
+            inline for (.{ &self.cave_noise, &self.terrain_noise, &self.large_terrain_noise, &self.large_terrain_noise_warp, &self.surface_noise }, noise_salts) |noise, salt| {
                 noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% salt));
             }
         }
@@ -440,6 +463,9 @@ pub const DefaultGenerator = struct {
         const float_bounds: [2]f32 = .{ @floatFromInt(params.terrain_min), @floatFromInt(params.terrain_max) };
         const one_d_terrain_scale: f32 = 1.0 / scale;
         const erosion_on = params.erosion_enabled;
+        const surface_on = params.surface_noise_amplitude > 0;
+        const surface_uses_gradient = surface_on and params.surface_noise_gradient_influence > 0;
+        const need_gradient = erosion_on or surface_uses_gradient;
 
         // Domain warp is inherently per-point, so warp the base coordinate grid
         // into two irregular coordinate sets, then sample both in one batched pass.
@@ -480,35 +506,84 @@ pub const DefaultGenerator = struct {
             const large = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*);
             shaped_center[x] = shapedRow(ChunkSize, params, large, raw);
         }
-        if (!erosion_on) {
-            const zero_v: FloatV = @splat(0);
-            for (0..ChunkSize) |x| {
-                const shaped: FloatV = shaped_center[x];
-                const bounds = @select(f32, shaped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
-                height[x] = shaped * @abs(bounds) * @as(FloatV, @splat(scale));
-            }
-        }
         heights_zone.end();
 
-        if (erosion_on) {
-            const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionFilter" });
-            // The terrain gradient comes from central differences of the shaped
-            // field sampled at +/- one sample spacing. Every point is evaluated
-            // from world coordinates alone, so chunk borders cannot distort the
-            // last row or column as the old neighbor-differencing stage did.
-            const grad_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionGradient" });
+        // The terrain gradient comes from central differences of the shaped
+        // field sampled at +/- one sample spacing. Every point is evaluated
+        // from world coordinates alone, so chunk borders cannot distort the
+        // last row or column as the old neighbor-differencing stage did. The
+        // erosion filter and the gradient-scaled surface noise both consume
+        // this pre-erosion gradient.
+        // Gradient accumulators stay undefined on the fast path: they are only
+        // read when need_gradient is true (surface_uses_gradient or erosion_on).
+        var grad_x: [sample_count]f32 = undefined;
+        var grad_z: [sample_count]f32 = undefined;
+        const e = d32 * one_d_terrain_scale;
+        const one_d_2e = 1.0 / (2.0 * e);
+        if (need_gradient) {
+            grad_x = @splat(0);
+            grad_z = @splat(0);
             var scratch: GradientScratch = undefined;
-            var grad_x: [sample_count]f32 = @splat(0);
-            var grad_z: [sample_count]f32 = @splat(0);
-            const e = d32 * one_d_terrain_scale;
-            const one_d_2e = 1.0 / (2.0 * e);
+            const grad_zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainGradient" });
             addGradientSamples(params, &scratch, &base_x, &base_z, &grad_x, .{ e, 0 }, 1.0, one_d_2e);
             addGradientSamples(params, &scratch, &base_x, &base_z, &grad_x, .{ -e, 0 }, -1.0, one_d_2e);
             addGradientSamples(params, &scratch, &base_x, &base_z, &grad_z, .{ 0, e }, 1.0, one_d_2e);
             addGradientSamples(params, &scratch, &base_x, &base_z, &grad_z, .{ 0, -e }, -1.0, one_d_2e);
             grad_zone.end();
+        }
 
-            const erosion_p_scale = @max(params.erosion_scale, 0.001);
+        // A separate surface noise layered on the final height in normalized
+        // units, converted with the symmetric maximum alongside the erosion
+        // delta. Converted with the local |bounds| it would stretch by
+        // |terrain_max| above the sea and |terrain_min| below, doubling
+        // discontinuously at the shoreline; through composeErodedHeight both
+        // deltas keep the same relief on land and under water. Its amount
+        // per sample is scaled by the pre-erosion gradient magnitude, so
+        // steep relief gains rocky detail while flats stay smooth.
+        const max_bound = @max(@abs(float_bounds[0]), @abs(float_bounds[1]));
+        var surface_norm: [sample_count]f32 = @splat(0);
+        if (surface_on) {
+            const surface_zone = tracy.Zone.begin(.{ .src = @src(), .name = "surfaceNoise" });
+            var surface_noise_raw: [sample_count]f32 = undefined;
+            params.surface_noise.fillNoise2DGrid(&surface_noise_raw, &base_x, &base_z);
+            for (0..sample_count) |i| {
+                const grad_mag = if (surface_uses_gradient)
+                    @sqrt(grad_x[i] * grad_x[i] + grad_z[i] * grad_z[i])
+                else
+                    0.0;
+                surface_norm[i] = surfaceNoiseAmount(grad_mag, params) * surface_noise_raw[i];
+            }
+            surface_zone.end();
+        }
+
+        if (!erosion_on) {
+            if (surface_on) {
+                for (0..ChunkSize) |x| {
+                    for (0..ChunkSize) |z| {
+                        const i = x * ChunkSize + z;
+                        height[x][z] = composeErodedHeight(shaped_center[x][z], surface_norm[i], float_bounds, max_bound, scale);
+                    }
+                }
+            } else {
+                const zero_v: FloatV = @splat(0);
+                for (0..ChunkSize) |x| {
+                    const shaped: FloatV = shaped_center[x];
+                    const bounds = @select(f32, shaped > zero_v, @as(FloatV, @splat(float_bounds[1])), @as(FloatV, @splat(float_bounds[0])));
+                    height[x] = shaped * @abs(bounds) * @as(FloatV, @splat(scale));
+                }
+            }
+        }
+
+        if (erosion_on) {
+            const erosion_zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionFilter" });
+            // Zero and near-zero scales would push the pattern to absurd
+            // frequencies, so clamp to a sane minimum instead of dividing by ~0.
+            const erosion_p_scale = @max(params.erosion_scale, 0.01);
+            // Symmetric envelope for the erosion delta: converting with the
+            // local |bounds| would double every gully at the shoreline (8196
+            // above the sea vs 4096 below with the defaults), ending each
+            // crossing gully in a cliff. Above-sea relief is unchanged.
+            // max_bound is hoisted above the surface block; both deltas share it.
 
             // The fade steepness comes from a coarse central difference of
             // the shaped field at +/- a few grid steps: the fine-gradient
@@ -586,17 +661,17 @@ pub const DefaultGenerator = struct {
                     // Larger erosion_scale means larger gullies; zero is guarded
                     // against since the filter divides coordinates by it.
                     const result = erosion.erosionFilter(
-                        // "Tiles" p: the erosion detail sits at 0.15x the terrain
-                        // features, so the scale divides the coordinates; the
-                        // slope scales by the inverse factor to stay a
-                        // derivative of the transformed coordinates.
+                        // "Tiles" p: the erosion detail sits at a fraction of the
+                        // terrain features set by erosion_scale, so the scale
+                        // divides the coordinates; the slope scales by the
+                        // inverse factor to stay a derivative of the
+                        // transformed coordinates.
                         .{ base_x[i] / erosion_p_scale, base_z[i] / erosion_p_scale },
                         .{ shaped, -grad_x[i] * erosion_p_scale, -grad_z[i] * erosion_p_scale },
                         fade_steepness[i],
                         erosion_params,
                     );
-                    const bounds = if (shaped > 0) float_bounds[1] else float_bounds[0];
-                    height[x][z] = (shaped + result.height_delta) * @abs(bounds) * scale;
+                    height[x][z] = composeErodedHeight(shaped, result.height_delta + surface_norm[i], float_bounds, max_bound, scale);
                 }
             }
             erosion_zone.end();
@@ -609,6 +684,26 @@ pub const DefaultGenerator = struct {
         const V = @Vector(N, f32);
         const magnitude = @exp2(power * @log2(@abs(v)));
         return @select(f32, v < @as(V, @splat(0)), -magnitude, magnitude);
+    }
+
+    /// Final height from the shaped field and a normalized delta (erosion,
+    /// surface noise, or their sum) in shaped units. The base field takes
+    /// the asymmetric envelope, which is continuous through zero by
+    /// construction; the delta converts with the symmetric maximum so
+    /// gullies and surface relief keep the same magnitude on land and under
+    /// water instead of ending in a cliff at the shoreline.
+    inline fn composeErodedHeight(shaped: f32, delta: f32, bounds: [2]f32, max_bound: f32, scale: f32) f32 {
+        const base_bound = if (shaped > 0) bounds[1] else bounds[0];
+        return shaped * @abs(base_bound) * scale + delta * max_bound * scale;
+    }
+
+    /// Scales the surface noise amplitude (in normalized height units) by
+    /// the pre-erosion gradient magnitude: with gradient influence 1 the
+    /// full amount applies only where the gradient reaches `gradient_scale`;
+    /// with influence 0 the amount is uniform.
+    inline fn surfaceNoiseAmount(grad_mag: f32, params: *const Params) f32 {
+        const steepness = std.math.clamp(grad_mag / @max(params.surface_noise_gradient_scale, 1e-6), 0, 1);
+        return params.surface_noise_amplitude * std.math.lerp(1.0, steepness, params.surface_noise_gradient_influence);
     }
 
     fn getDifferential(height: *const [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
@@ -806,7 +901,7 @@ const field_specs = .{
     .dirt_band = .{ .min = 0, .max = 1 },
     .erosion_strength = .{ .skip = true },
     .erosion_enabled = .{ .label = "Erosion Enabled", .description = "Applies the Phacelle erosion filter to the terrain." },
-    .erosion_scale = .{ .label = "Erosion Scale", .description = "Horizontal scale of the erosion pattern relative to the terrain.", .min = 0.0, .max = 5.0 },
+    .erosion_scale = .{ .label = "Erosion Scale", .description = "Horizontal scale of the erosion pattern relative to the terrain.", .min = 0.01, .max = 5.0 },
     .erosion_filter_strength = .{ .label = "Erosion Filter Strength", .description = "Total magnitude across all erosion octaves.", .min = 0, .max = 1 },
     .erosion_gully_weight = .{ .label = "Erosion Gully Weight", .description = "Gully magnitude relative to the peak-sharpening effect.", .min = 0, .max = 1 },
     .erosion_detail = .{ .label = "Erosion Detail", .description = "Lower values restrict fine gullies to the steepest slopes.", .min = 0.1, .max = 4 },
@@ -821,6 +916,9 @@ const field_specs = .{
     .erosion_assumed_slope_amount = .{ .label = "Erosion Assumed Slope Amount", .description = "How much of the gradient magnitude the assumed slope replaces.", .min = 0, .max = 1, .advanced = true },
     .erosion_fade_slope = .{ .label = "Erosion Fade Slope", .description = "Terrain slope magnitude at which the gullies apply in full; flatter ground's erosion fades out so peaks and stream beds are preserved. 0 disables the fade.", .min = 0.0, .max = 0.1, .advanced = true },
     .erosion_fade_altitude = .{ .skip = true },
+    .surface_noise_amplitude = .{ .label = "Surface Noise Amplitude", .description = "Maximum height delta of the surface noise layered on after erosion, in normalized units.", .min = 0.0, .max = 0.5 },
+    .surface_noise_gradient_influence = .{ .label = "Surface Noise Gradient Influence", .description = "How much the pre-erosion terrain gradient scales the applied amount; 0 applies it everywhere, 1 only in proportion to the gradient.", .min = 0, .max = 1 },
+    .surface_noise_gradient_scale = .{ .label = "Surface Noise Gradient Scale", .description = "Pre-erosion gradient magnitude at which the surface noise applies in full.", .min = 0, .max = 1, .advanced = true },
     .terrain_noise_balance = .{ .label = "Terrain Noise Balance", .min = 0, .max = 1 },
     .height_power = .{ .label = "Height Power", .min = 0.25, .max = 4 },
     .large_power = .{ .label = "Large Shape Power", .min = 0.25, .max = 8 },
@@ -897,21 +995,9 @@ const terrain_presets = [_]DefaultGenerator.Params{
         p.cave_noise.domain_warp_amp = 827.6712;
         break :blk p;
     },
-    blk: {
-        var p = continental_preset;
-        // Eroded: Continental landmasses carved by the new erosion filter;
-        // heavy gully weight and a finer cell scale emphasize branching gullies.
-        p.erosion_enabled = true;
-        p.erosion_filter_strength = 0.38;
-        p.erosion_gully_weight = 0.75;
-        p.erosion_detail = 2.0;
-        p.erosion_octaves = 5;
-        p.erosion_cell_scale = 0.55;
-        break :blk p;
-    },
     .default,
 };
-const terrain_preset_names = [_][]const u8{ "Continental", "Sculpted", "Plain", "Eroded" };
+const terrain_preset_names = [_][]const u8{ "Continental", "Sculpted", "Plain" };
 const terrain_preset_default: usize = 0;
 
 pub fn generatorPresetCount() callconv(.c) usize {
@@ -1080,7 +1166,7 @@ test "legacy config with erosion_strength parses" {
     try std.testing.expectEqual(@as(f32, 1.5), params.erosion_strength);
     try std.testing.expectEqual(@as(f32, 2), params.terrain_scale);
     try std.testing.expect(params.erosion_enabled);
-    try std.testing.expectEqual(@as(u32, 4), params.erosion_octaves);
+    try std.testing.expectEqual(@as(u32, 5), params.erosion_octaves);
 }
 
 test "config tree round trips through zon" {
@@ -1130,6 +1216,73 @@ test "erosion seam continuity between adjacent chunks" {
         const step_e = @abs(east[1][z] - east[0][z]);
         try std.testing.expect(jump <= (step_w + step_e) * 2.5 + 256.0);
     }
+}
+
+test "surface noise amount follows the pre-erosion gradient" {
+    // Gradient influence 1 scales the amount by the normalized gradient:
+    // flat ground gets none, a gradient at the scale gets the full amount.
+    var params = DefaultGenerator.Params.default;
+    params.surface_noise_gradient_scale = 0.01;
+    params.surface_noise_amplitude = 0.5;
+    params.surface_noise_gradient_influence = 1.0;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), DefaultGenerator.surfaceNoiseAmount(0.0, &params), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), DefaultGenerator.surfaceNoiseAmount(0.005, &params), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), DefaultGenerator.surfaceNoiseAmount(0.01, &params), 1e-5);
+    // Influence 0 keeps the amount uniform regardless of the gradient.
+    params.surface_noise_gradient_influence = 0.0;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), DefaultGenerator.surfaceNoiseAmount(0.0, &params), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), DefaultGenerator.surfaceNoiseAmount(1.0, &params), 1e-6);
+}
+
+test "surface noise stays seamless across adjacent chunks" {
+    // The surface noise samples world coordinates alone, so the extra
+    // roughness adds the same amount on both sides of a chunk border.
+    var params = DefaultGenerator.Params.default;
+    params.erosion_enabled = false;
+    params.surface_noise_amplitude = 0.05;
+    params.surface_noise_gradient_influence = 1.0;
+    const west = DefaultGenerator.genTerrainHeight(&params, 0, .{ 0, 0 });
+    const east = DefaultGenerator.genTerrainHeight(&params, 0, .{ 1, 0 });
+    for (0..ChunkSize) |z| {
+        const jump = @abs(west[ChunkSize - 1][z] - east[0][z]);
+        const step_w = @abs(west[ChunkSize - 1][z] - west[ChunkSize - 2][z]);
+        const step_e = @abs(east[1][z] - east[0][z]);
+        try std.testing.expect(jump <= (step_w + step_e) * 2.5 + 256.0);
+    }
+}
+
+test "surface noise relief stays within the symmetric bound" {
+    // Surface detail flows through composeErodedHeight with the symmetric
+    // maximum (see "eroded height stays continuous across the shoreline"),
+    // so its relief is identical on land and under water. This pins the
+    // magnitude end to end: no sample may gain more than the normalized
+    // amplitude converted with that envelope.
+    var params = DefaultGenerator.Params.default;
+    params.erosion_enabled = false;
+    params.surface_noise_amplitude = 0.05;
+    params.surface_noise_gradient_influence = 0.0;
+    const scale = params.terrain_scale / World.ChunkPos.toScale(0);
+    const max_bound: f32 = @floatFromInt(@max(@abs(params.terrain_min), @abs(params.terrain_max)));
+    const rough = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
+    params.surface_noise_amplitude = 0.0;
+    const base = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
+    for (0..ChunkSize) |x| {
+        for (0..ChunkSize) |z| {
+            try std.testing.expect(@abs(rough[x][z] - base[x][z]) <= 0.05 * max_bound * scale * 2.0 + 0.5);
+        }
+    }
+}
+
+test "eroded height stays continuous across the shoreline" {
+    // The envelope switches sides at shaped == 0; the erosion delta must not
+    // switch with it, or every gully crossing the sea would end in a cliff.
+    const bounds: [2]f32 = .{ -4096, 8196 };
+    const up = DefaultGenerator.composeErodedHeight(1e-6, 0.2, bounds, 8196, 1.0);
+    const down = DefaultGenerator.composeErodedHeight(-1e-6, 0.2, bounds, 8196, 1.0);
+    try std.testing.expect(@abs(up - down) < 1.0);
+    // The delta keeps full relief below the sea, matching the land side.
+    const deep = DefaultGenerator.composeErodedHeight(-0.5, 0.2, bounds, 8196, 1.0);
+    try std.testing.expectApproxEqAbs(-0.5 * 4096 + 0.2 * 8196, deep, 1e-3);
 }
 
 test "erosion LOD consistency between level 0 and level 1" {

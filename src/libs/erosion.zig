@@ -206,6 +206,7 @@ fn slopeFadeMask(steepness: f32) f32 {
 
 /// Raises `x` to the power 1/`power`; below 1 this crushes the previous mask,
 /// restricting fine octaves to areas the coarse octaves already carved.
+/// At zero the mask latches closed, which is what keeps flat ground uncarved.
 fn powInv(x: f32, power: f32) f32 {
     return @exp(@log(x) / power);
 }
