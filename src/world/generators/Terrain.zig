@@ -111,9 +111,7 @@ pub const DefaultGenerator = struct {
         self.generateStructures(io, allocator, world, chunk, chunk_pos) catch |err| return mapStructureError(err);
     }
 
-    pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = world;
-        _ = io;
+    pub fn deinit(self: World.ChunkSource, _: std.Io, allocator: std.mem.Allocator, _: *World) void {
         const generator: *DefaultGenerator = @ptrCast(@alignCast(self.data));
         generator.terrain_height_cache.deinit(allocator);
     }
@@ -352,13 +350,11 @@ pub const DefaultGenerator = struct {
 
     const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32, beach_band_blocks: f32, sand_slope: f32, sand_slope_falloff_blocks: f32, sea_floor_rock_slope: f32, grass_height_falloff: f32, dirt_height_falloff: f32, ground_altitude_base: f32, snow_slope_gain: f32, snow_cliff_slope: f32 };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, _: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, _: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
         const chunk_scale_factor = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
-        _ = world;
-        _ = allocator;
         // The height field is shaped * |bounds| * scale, so terrain_scale stretches the
         // vertical min/max envelope; cull against the scaled world height, not the raw params.
         const max_global_y: i64 = @round(@as(f32, @floatFromInt(self.params.terrain_max)) * self.params.terrain_scale);
@@ -368,21 +364,20 @@ pub const DefaultGenerator = struct {
             return;
         }
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.null)));
-        const is_below_min = chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1];
-        if (!is_below_min) {
+        if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1]) {
+            blocks.merge(.{ .uniform = .stone }, grid_buffer);
+        } else {
             var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
             const heights = try self.getTerrainHeight(io, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const gen_terrain_zone = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
             generateTerrain(&block_grid, chunk_pos, heights, .{ .params = &self.params, .rand = &rand, .chunk_scale = chunk_scale_factor });
             gen_terrain_zone.end();
-            const one_block = Chunk.getUniform(&block_grid);
-            if (one_block == Block.air) {
+            if (Chunk.getUniform(&block_grid) == Block.air) {
                 blocks.merge(.{ .uniform = .air }, grid_buffer);
                 return;
             }
         }
-        if (is_below_min) blocks.merge(.{ .uniform = .stone }, grid_buffer);
         generateCavesInterpolate(&block_grid, chunk_pos, chunk_scale_factor, &self.params);
         const one_block = Chunk.getUniform(&block_grid);
         if (one_block) |block| {
@@ -396,7 +391,6 @@ pub const DefaultGenerator = struct {
         const one_d_terrain_scale: f32 = 1.0 / scale;
         const sea_level: i32 = ctx.params.sea_level;
         const sea_level_f: f32 = @floatFromInt(sea_level);
-        const IntV = @Vector(ChunkSize, i32);
         const BoolV = @Vector(ChunkSize, bool);
         const TagV = @Vector(ChunkSize, Block.Tag);
         const zero_v: FloatV = @splat(0);
@@ -404,13 +398,12 @@ pub const DefaultGenerator = struct {
         // Preserves the old integer test floor(th) - bh > ceil(dirt_depth * scale), translated to f32.
         const depth_threshold: f32 = @floor(ctx.params.dirt_depth * scale) + 1.0;
 
-        const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(IntV, @splat(chunk_pos.position[1] * ChunkSize));
+        const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(@Vector(ChunkSize, i32), @splat(chunk_pos.position[1] * ChunkSize));
         // The differential is the slope (block-space gradient magnitude) and is LOD-invariant,
         // so it feeds randGround directly with no divisor or normalization.
         const differential = getDifferential(&heights);
         for (heights, chunk_blocks, 0..) |heights_row, *col, x| {
             const th: FloatV = heights_row;
-            const th_arr: [ChunkSize]f32 = th;
             for (block_height_vec, col) |bh, *row| {
                 const diff: FloatV = th - @as(FloatV, @splat(@as(f32, @floatFromInt(bh))));
                 const below_depth: BoolV = diff >= @as(FloatV, @splat(depth_threshold));
@@ -424,19 +417,16 @@ pub const DefaultGenerator = struct {
                     continue;
                 }
 
-                var tags: TagV = @splat(@intFromEnum(Block.air));
+                const base_tag: TagV = @splat(@intFromEnum(if (bh <= sea_level) Block.water else Block.air));
                 const land_tag: TagV = @splat(@intFromEnum(if (bh <= sea_level) Block.sand else Block.dirt));
-                tags = @select(Block.Tag, below_or, @select(Block.Tag, below_depth, @as(TagV, @splat(@intFromEnum(Block.stone))), land_tag), tags);
-                if (bh <= sea_level) {
-                    tags = @select(Block.Tag, !below_or, @as(TagV, @splat(@intFromEnum(Block.water))), tags);
-                }
-                row.* = @bitCast(tags);
+                const stone_tag: TagV = @splat(@intFromEnum(Block.stone));
+                row.* = @bitCast(@select(Block.Tag, below_or, @select(Block.Tag, below_depth, stone_tag, land_tag), base_tag));
 
                 var surface_bits: u32 = @as(u32, @bitCast(below_or)) & @as(u32, @bitCast(diff < one_v));
                 while (surface_bits != 0) {
                     const z: usize = @ctz(surface_bits);
                     surface_bits &= surface_bits - 1;
-                    row[z] = randGround(ctx.rand, th_arr[z] * terrain_scales[@intFromBool(th_arr[z] <= sea_level_f)], .{
+                    row[z] = randGround(ctx.rand, heights_row[z] * terrain_scales[@intFromBool(heights_row[z] <= sea_level_f)], .{
                         .block_height = bh,
                         .sea_level = sea_level,
                         .block_randomness = ctx.params.terrain_block_randomness,
@@ -472,54 +462,28 @@ pub const DefaultGenerator = struct {
         const cave_grid_size: usize = 4;
         const CaveInterp = interpolation.MultilinearInterpolator(f32, 3, .{ cave_grid_size, cave_grid_size, cave_grid_size }, .{ ChunkSize, ChunkSize, ChunkSize });
         const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
-        const one_d_terrain_scale_vec: @Vector(3, f32) = @splat(1.0 / (gen_params.terrain_scale * chunk_scale));
+        const one_d_scale: f32 = 1.0 / (gen_params.terrain_scale * chunk_scale);
         const cave_noise_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveNoise" });
         var grid_flat: [cave_grid_size * cave_grid_size * cave_grid_size]f32 = undefined;
-        const grid_origin = float_pos * one_d_terrain_scale_vec;
-        gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], (1.0 / @as(f32, cave_grid_size - 1)) * one_d_terrain_scale_vec[0]);
-        const grid: [cave_grid_size][cave_grid_size][cave_grid_size]f32 = @bitCast(grid_flat);
+        const grid_origin = float_pos * @as(@Vector(3, f32), @splat(one_d_scale));
+        gen_params.cave_noise.fillGrid3D(&grid_flat, cave_grid_size, cave_grid_size, grid_origin[0], grid_origin[1], grid_origin[2], (1.0 / @as(f32, cave_grid_size - 1)) * one_d_scale);
         cave_noise_zone.end();
 
-        const interpolator = CaveInterp.init(grid);
-        const cave_values = interpolator.sampleGrid();
+        const cave_values = CaveInterp.init(@bitCast(grid_flat)).sampleGrid();
 
         const apply_zone = tracy.Zone.begin(.{ .src = @src(), .name = "caveApply" });
         defer apply_zone.end();
         for (0..ChunkSize) |y| {
-            const real_y = ((float_pos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * one_d_terrain_scale_vec[0];
+            const real_y = ((float_pos[1] * ChunkSize) + @as(f32, @floatFromInt(y))) * one_d_scale;
             const cave_threshold: f32 = caveThresholdAt(real_y, gen_params.cave_threshold, gen_params.cave_expansion_max);
             for (0..ChunkSize) |z| {
                 const is_cave = cave_values[y][z] < @as(@Vector(ChunkSize, f32), @splat(cave_threshold));
-                if (std.simd.firstTrue(is_cave)) |_| {
-                    inline for (0..ChunkSize) |x| {
-                        if (is_cave[x]) chunk_blocks[x][y][z] = .air;
-                    }
+                if (std.simd.firstTrue(is_cave) == null) continue;
+                inline for (0..ChunkSize) |x| {
+                    if (is_cave[x]) chunk_blocks[x][y][z] = .air;
                 }
             }
         }
-    }
-
-    /// Beach elevation available at a slope: the sand line is
-    /// elev + falloff * slope <= beach_band, so steeper shores need lower
-    /// ground to stay sand.
-    inline fn effectiveBeachTop(beach_band_blocks: f32, falloff_blocks: f32, slope: f32) f32 {
-        return beach_band_blocks - falloff_blocks * slope;
-    }
-
-    /// Grass slope limit at a normalized altitude. Falls past the base so high
-    /// ground turns rocky sooner.
-    inline fn effectiveGroundThreshold(ground_threshold: f32, falloff: f32, base: f32, height_norm: f32) f32 {
-        return ground_threshold - falloff * @max(height_norm - base, 0);
-    }
-
-    /// Dirt band width at a normalized altitude. Never negative.
-    inline fn effectiveDirtWidth(dirt_band: f32, falloff: f32, base: f32, height_norm: f32) f32 {
-        return @max(dirt_band - falloff * @max(height_norm - base, 0), 0);
-    }
-
-    /// Snow line at a slope. Rises so steep faces need more altitude for snow.
-    inline fn effectiveSnowLine(snow_line: f32, gain: f32, slope: f32) f32 {
-        return snow_line + gain * slope;
     }
 
     fn randGround(rand: *const std.Random, height_percent: f32, ctx: GroundContext) Block {
@@ -528,35 +492,35 @@ pub const DefaultGenerator = struct {
         // each other's cover type.
         const slope_jitter = (rand.float(f32) * 2.0 - 1.0) * ctx.slope_randomness;
         const cover_rand = rand.float(f32);
-        // Jitter the slope so ground, dirt, and stone boundaries break up instead
-        // of tracing smooth contours. Shared by every test so the slanted
-        // boundaries move together with no gaps or overlaps.
+        // Jitter the slope so the cover boundaries break up instead of tracing
+        // smooth contours. Shared by every test so the slanted boundaries move
+        // together with no gaps or overlaps.
         const a = ctx.slope + slope_jitter;
         const height_norm = height_percent * ctx.one_d_terrain_scale;
+        const height_above = @max(height_norm - ctx.ground_altitude_base, 0);
 
         // Steep underwater cliffs are rock; only gentle seabed is sand.
         if (ctx.block_height < ctx.sea_level) return if (a < ctx.sea_floor_rock_slope) Block.sand else Block.stone;
 
-        // Sand beaches taper with slope: the higher the gradient, the lower the
-        // block has to be to stay sand. Keeps its own cap so beaches can still
-        // be narrower or wider than the grass band.
+        // Beaches taper with slope: higher gradients need lower ground to stay
+        // sand. Keeps its own cap so beaches can be narrower or wider than grass.
         const elev: f32 = @floatFromInt(ctx.block_height - ctx.sea_level);
-        if (elev <= effectiveBeachTop(ctx.beach_band_blocks, ctx.sand_slope_falloff_blocks, a) and a < ctx.sand_slope) return Block.sand;
+        if (elev <= ctx.beach_band_blocks - ctx.sand_slope_falloff_blocks * a and a < ctx.sand_slope) return Block.sand;
 
-        const ground_threshold = effectiveGroundThreshold(ctx.ground_threshold, ctx.grass_height_falloff, ctx.ground_altitude_base, height_norm);
-        const dirt_band = effectiveDirtWidth(ctx.dirt_band, ctx.dirt_height_falloff, ctx.ground_altitude_base, height_norm);
+        // High ground turns rocky sooner and the dirt band narrows with altitude.
+        const ground_threshold = ctx.ground_threshold - ctx.grass_height_falloff * height_above;
+        const dirt_band = @max(ctx.dirt_band - ctx.dirt_height_falloff * height_above, 0);
 
         // Exposed rock: high steep faces shed snow and dirt to bare stone.
         if (height_norm >= ctx.snow_line and a >= ctx.snow_cliff_slope) return Block.stone;
 
         if (a < ground_threshold) {
             // Soft ground: grass or snow by altitude, with the snow line rising
-            // on slopes.
+            // on slopes so steep faces need more altitude to hold snow.
             const cover = std.math.lerp(height_norm, cover_rand, ctx.block_randomness);
-            return if (cover < effectiveSnowLine(ctx.snow_line, ctx.snow_slope_gain, a)) Block.grass else Block.snow;
+            return if (cover < ctx.snow_line + ctx.snow_slope_gain * a) Block.grass else Block.snow;
         }
-        // Dirt occupies a band of width `dirt_band` above the ground threshold;
-        // steeper ground is stone.
+        // Dirt band above the ground threshold; steeper ground is stone.
         return if (a - dirt_band < ground_threshold) Block.dirt else Block.stone;
     }
 
@@ -616,11 +580,9 @@ pub const DefaultGenerator = struct {
         // each evaluated from world coordinates alone so chunk borders stay
         // seamless. Feeds the erosion filter and the gradient-scaled surface
         // noise; accumulators are only read when one of them is active.
-        var grad_x: [sample_count]f32 = undefined;
-        var grad_z: [sample_count]f32 = undefined;
+        var grad_x: [sample_count]f32 = @splat(0);
+        var grad_z: [sample_count]f32 = @splat(0);
         if (erosion_on or (surface_on and params.surface_noise_gradient_influence > 0)) {
-            grad_x = @splat(0);
-            grad_z = @splat(0);
             computeGradient(&ctx, &base_x, &base_z, &grad_x, &grad_z);
         }
 
@@ -639,9 +601,8 @@ pub const DefaultGenerator = struct {
 
     /// Signed power curve: sign-preserving |v|^power, steepening (>1) or flattening (<1).
     inline fn signedPow(comptime N: usize, v: @Vector(N, f32), power: @Vector(N, f32)) @Vector(N, f32) {
-        const V = @Vector(N, f32);
         const magnitude = @exp2(power * @log2(@abs(v)));
-        return @select(f32, v < @as(V, @splat(0)), -magnitude, magnitude);
+        return @select(f32, v < @as(@Vector(N, f32), @splat(0)), -magnitude, magnitude);
     }
 
     /// Final height from the shaped field and a normalized delta (erosion,
@@ -671,8 +632,7 @@ pub const DefaultGenerator = struct {
         var row_z: [N]f32 = undefined;
         for (0..N) |j| row_z[j] = (@as(f32, @floatFromInt(j)) - pad_f) * dxo + pos[1] * o;
         for (0..N) |i| {
-            const row_x: [N]f32 = @splat(((@as(f32, @floatFromInt(i)) - pad_f) * d + pos[0]) * o);
-            @memcpy(x_out[i * N ..][0..N], &row_x);
+            x_out[i * N ..][0..N].* = @splat(((@as(f32, @floatFromInt(i)) - pad_f) * d + pos[0]) * o);
             @memcpy(z_out[i * N ..][0..N], &row_z);
         }
     }
@@ -686,12 +646,10 @@ pub const DefaultGenerator = struct {
         var scratch: GradientScratch = undefined;
         const e = ctx.step * ctx.one_d_scale;
         const one_d_2e = 1.0 / (2.0 * e);
-        const grads = .{ grad_x, grad_z };
         inline for (0..2) |axis| {
             for ([2]f32{ 1.0, -1.0 }) |sign| {
-                var offset: [2]f32 = .{ 0, 0 };
-                offset[axis] = sign * e;
-                addGradientSamples(ctx.params, &scratch, base_x, base_z, grads[axis], offset, sign, one_d_2e);
+                const offset: [2]f32 = if (axis == 0) .{ sign * e, 0 } else .{ 0, sign * e };
+                addGradientSamples(ctx.params, &scratch, base_x, base_z, .{ grad_x, grad_z }[axis], offset, sign, one_d_2e);
             }
         }
     }
@@ -764,13 +722,12 @@ pub const DefaultGenerator = struct {
         for (0..ChunkSize) |x| {
             for (0..ChunkSize) |z| {
                 const i = x * ChunkSize + z;
-                const result = erosion.erosionFilter(
+                extra[i] += erosion.erosionFilter(
                     .{ base_x[i] / p_scale, base_z[i] / p_scale },
                     .{ shaped[x][z], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
                     fade[i],
                     eparams,
-                );
-                extra[i] += result.height_delta;
+                ).height_delta;
             }
         }
     }
@@ -823,10 +780,8 @@ pub const DefaultGenerator = struct {
         const offset_x_v: FloatV = @splat(offset[0]);
         const offset_z_v: FloatV = @splat(offset[1]);
         for (0..ChunkSize) |x| {
-            const ox: FloatV = @as(FloatV, base_x[x * ChunkSize ..][0..ChunkSize].*) + offset_x_v;
-            const oz: FloatV = @as(FloatV, base_z[x * ChunkSize ..][0..ChunkSize].*) + offset_z_v;
-            scratch.off_x[x * ChunkSize ..][0..ChunkSize].* = ox;
-            scratch.off_z[x * ChunkSize ..][0..ChunkSize].* = oz;
+            scratch.off_x[x * ChunkSize ..][0..ChunkSize].* = @as(FloatV, base_x[x * ChunkSize ..][0..ChunkSize].*) + offset_x_v;
+            scratch.off_z[x * ChunkSize ..][0..ChunkSize].* = @as(FloatV, base_z[x * ChunkSize ..][0..ChunkSize].*) + offset_z_v;
         }
         params.terrain_noise.fillWarp2DGrid(&scratch.warp_x, &scratch.warp_z, &scratch.off_x, &scratch.off_z);
         params.large_terrain_noise_warp.fillWarp2DGrid(&scratch.large_warp_x, &scratch.large_warp_z, &scratch.off_x, &scratch.off_z);
@@ -840,8 +795,7 @@ pub const DefaultGenerator = struct {
             // build modes: an unfused mul+add contracts into fma only in
             // optimized builds, and on low-slope terrain those ulps become
             // entirely different gradient directions.
-            const delta = @mulAdd(FloatV, shapedRow(ChunkSize, params, large, raw), @as(FloatV, @splat(sign * one_d_2e)), grad_row);
-            grad[x * ChunkSize ..][0..ChunkSize].* = delta;
+            grad[x * ChunkSize ..][0..ChunkSize].* = @mulAdd(FloatV, shapedRow(ChunkSize, params, large, raw), @as(FloatV, @splat(sign * one_d_2e)), grad_row);
         }
     }
 
@@ -876,13 +830,13 @@ pub const DefaultGenerator = struct {
                     };
                     if (!block.plantsCanGrow()) continue;
 
-                    const lvl_x: f32 = @floatFromInt((chunk_pos.position[0] * ChunkSize) + @as(i32, @intCast(x)));
-                    const lvl_z: f32 = @floatFromInt((chunk_pos.position[2] * ChunkSize) + @as(i32, @intCast(z)));
+                    const lvl_x: f32 = @floatFromInt(chunk_pos.position[0] * ChunkSize + @as(i32, @intCast(x)));
+                    const lvl_z: f32 = @floatFromInt(chunk_pos.position[2] * ChunkSize + @as(i32, @intCast(z)));
 
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
                         const structure_seed = tree_conf.placer.getStructure(.{ @trunc(lvl_x), @trunc(lvl_z) }, @intCast(chunk_pos.level)) orelse continue;
-                        const center_pos = ((chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize })) + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
+                        const center_pos = chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize } + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const tree_seed = self.params.seed.? ^ @as(u64, @bitCast(structure_seed));
                         var random = std.Random.DefaultPrng.init(@bitCast(tree_seed));
                         const rand = random.random();
@@ -1146,9 +1100,7 @@ fn instanceGenStructures(source: World.ChunkSource, io: std.Io, allocator: std.m
     self.generator.generateStructures(io, allocator, world, chunk, chunk_pos) catch |err| return mapStructureError(err);
 }
 
-fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-    _ = io;
-    _ = world;
+fn instanceDeinit(source: World.ChunkSource, _: std.Io, allocator: std.mem.Allocator, _: *World) void {
     const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
     self.generator.terrain_height_cache.deinit(allocator);
     self.arena.deinit();
@@ -1386,25 +1338,26 @@ test "erosion LOD consistency between level 0 and level 1" {
 }
 
 fn testGroundContext(overrides: anytype) DefaultGenerator.GroundContext {
+    const p = DefaultGenerator.Params.default;
     var ctx: DefaultGenerator.GroundContext = .{
         .block_height = 20,
-        .sea_level = 0,
+        .sea_level = p.sea_level,
         .block_randomness = 0,
         .one_d_terrain_scale = 1,
         .slope = 0,
         .slope_randomness = 0,
-        .ground_threshold = 0.3,
-        .dirt_band = 0.2,
-        .snow_line = 0.6,
-        .beach_band_blocks = 6,
-        .sand_slope = 0.3,
-        .sand_slope_falloff_blocks = 10,
-        .sea_floor_rock_slope = 0.6,
-        .grass_height_falloff = 0.3,
-        .dirt_height_falloff = 0.2,
-        .ground_altitude_base = 0.0,
-        .snow_slope_gain = 0.35,
-        .snow_cliff_slope = 1.0,
+        .ground_threshold = p.ground_threshold,
+        .dirt_band = p.dirt_band,
+        .snow_line = p.snow_line,
+        .beach_band_blocks = p.beach_band,
+        .sand_slope = p.sand_slope,
+        .sand_slope_falloff_blocks = p.sand_slope_falloff,
+        .sea_floor_rock_slope = p.sea_floor_rock_slope,
+        .grass_height_falloff = p.grass_height_falloff,
+        .dirt_height_falloff = p.dirt_height_falloff,
+        .ground_altitude_base = p.ground_altitude_base,
+        .snow_slope_gain = p.snow_slope_gain,
+        .snow_cliff_slope = p.snow_cliff_slope,
     };
     inline for (std.meta.fields(@TypeOf(overrides))) |field| {
         @field(ctx, field.name) = @field(overrides, field.name);
@@ -1419,12 +1372,11 @@ fn testGround(height_percent: f32, ctx: DefaultGenerator.GroundContext) Block {
 }
 
 test "sand beach tapers with slope" {
-    // Same elevation is sand on flat ground but dirt on a slope: higher
-    // gradient means the block has to be lower to stay sand.
+    // Beaches taper with slope: the same elevation is sand on flat ground but
+    // grass on a slope, and dirt higher up. Low shores stay sand when steep.
     try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 5, .slope = 0.0 })));
     try std.testing.expectEqual(Block.grass, testGround(0, testGroundContext(.{ .block_height = 5, .slope = 0.29 })));
     try std.testing.expectEqual(Block.dirt, testGround(0.3, testGroundContext(.{ .block_height = 5, .slope = 0.29 })));
-    // Low shore stays sand even when steep, and the flat beach keeps its width.
     try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 2, .slope = 0.29 })));
     try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 6, .slope = 0.0 })));
 }
@@ -1441,17 +1393,19 @@ test "dirt band narrows with altitude" {
 }
 
 test "snow line rises with slope" {
-    const flat = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.0 });
-    const steep = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.2 });
-    try std.testing.expectEqual(Block.snow, testGround(0.65, flat));
-    try std.testing.expectEqual(Block.grass, testGround(0.65, steep));
+    var ctx = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0 });
+    ctx.slope = 0.0;
+    try std.testing.expectEqual(Block.snow, testGround(0.65, ctx));
+    ctx.slope = 0.2;
+    try std.testing.expectEqual(Block.grass, testGround(0.65, ctx));
 }
 
 test "high cliffs shed to stone" {
-    const gentle = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.1 });
-    const cliff = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 1.2 });
-    try std.testing.expectEqual(Block.snow, testGround(0.8, gentle));
-    try std.testing.expectEqual(Block.stone, testGround(0.8, cliff));
+    var ctx = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0 });
+    ctx.slope = 0.1;
+    try std.testing.expectEqual(Block.snow, testGround(0.8, ctx));
+    ctx.slope = 1.2;
+    try std.testing.expectEqual(Block.stone, testGround(0.8, ctx));
 }
 
 test "underwater floor is rock when steep" {
@@ -1460,9 +1414,14 @@ test "underwater floor is rock when steep" {
 }
 
 test "zero couplings reproduce the flat thresholds" {
-    const base = .{ .sand_slope_falloff_blocks = 0.0, .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .snow_slope_gain = 0.0, .snow_cliff_slope = 10.0, .sea_floor_rock_slope = 10.0 };
-    try std.testing.expectEqual(Block.grass, testGround(0, testGroundContext(.{ .slope = 0.25, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
-    try std.testing.expectEqual(Block.dirt, testGround(0, testGroundContext(.{ .slope = 0.4, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
-    try std.testing.expectEqual(Block.stone, testGround(0, testGroundContext(.{ .slope = 0.9, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
-    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = -5, .slope = 1.0, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
+    var ctx = testGroundContext(.{ .sand_slope_falloff_blocks = 0.0, .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .snow_slope_gain = 0.0, .snow_cliff_slope = 10.0, .sea_floor_rock_slope = 10.0 });
+    ctx.slope = 0.25;
+    try std.testing.expectEqual(Block.grass, testGround(0, ctx));
+    ctx.slope = 0.4;
+    try std.testing.expectEqual(Block.dirt, testGround(0, ctx));
+    ctx.slope = 0.9;
+    try std.testing.expectEqual(Block.stone, testGround(0, ctx));
+    ctx.slope = 1.0;
+    ctx.block_height = -5;
+    try std.testing.expectEqual(Block.sand, testGround(0, ctx));
 }
