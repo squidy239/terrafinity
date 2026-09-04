@@ -15,6 +15,7 @@ pub const Block = enum(Tag) {
 
     air = invis_end - 1,
     null = invis_end - 2,
+    fine_grass = invis_end - 3,
     pub const invis_end = 2 << 10;
     pub const transparent_end = 2 << 11;
     pub const normal_start = transparent_end;
@@ -40,6 +41,7 @@ pub const Block = enum(Tag) {
             .null => unreachable,
             .air,
             .water,
+            .fine_grass,
             => false,
             else => true,
         };
@@ -70,4 +72,6 @@ test "Block properties" {
     try testing.expect(!Block.air.isSolid());
     try testing.expect(Block.grass.isVisible());
     try testing.expect(!Block.air.isVisible());
+    try testing.expect(!Block.fine_grass.isVisible());
+    try testing.expect(!Block.fine_grass.isSolid());
 }
