@@ -39,6 +39,14 @@ pub const DefaultGenerator = struct {
         }
     };
 
+    /// Height field the grass detail slope is computed from: the level-0
+    /// parent chunk (one evaluation cached across all detail levels) or
+    /// this chunk's own fine level (fresh evaluation per detail chunk).
+    pub const GrassDetailGradient = enum {
+        parent,
+        fine,
+    };
+
     /// Asymmetric height envelope plus the symmetric maximum that normalized
     /// deltas (erosion, surface noise) convert with.
     const Envelope = struct {
@@ -229,6 +237,16 @@ pub const DefaultGenerator = struct {
         /// Normalized altitude where the grass/dirt falloffs start. Below this
         /// the lowland thresholds apply in full.
         ground_altitude_base: f32 = 0.0,
+        /// Height field the grass detail slope is computed from: the level-0
+        /// parent chunk or this chunk's own fine level.
+        grass_detail_gradient_source: GrassDetailGradient = .parent,
+        /// Slope magnitude in blocks per block at which grass blades keep
+        /// their full hash height. The height scales down linearly to nothing
+        /// on flat ground. Zero disables the fade and keeps full height.
+        grass_detail_slope_scale: f32 = 0.5,
+        /// Sampling density of the grass slope lattice; coarser is faster
+        /// and smoother. Full disables interpolation.
+        grass_detail_gradient_interp: InterpResolution = .quarter,
         /// How much the snow line rises per unit slope. Steep faces need more
         /// altitude to hold snow.
         snow_slope_gain: f32 = 0.35,
@@ -429,7 +447,7 @@ pub const DefaultGenerator = struct {
     /// Parent-hoisted: one fine chunk spans few level-0 parents, so each
     /// parent column is read once and fanned out to its fine voxels instead
     /// of re-reading the same parents per voxel.
-    fn genDetailTest(_: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
+    fn genDetailTest(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         if (chunk_pos.level >= World.standard_level or chunk_pos.level <= -60) return;
         // One level-0 block spans 2^-level fine voxels per axis. Integer math
         // keeps the mapping bit-exact; the f64 levelToLevelRatio would round.
@@ -443,15 +461,29 @@ pub const DefaultGenerator = struct {
         var reader = World.Reader{ .world = world };
         defer reader.clear(io);
         var detail_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.null)));
+        const source = self.params.grass_detail_gradient_source;
+        const slope_scale = self.params.grass_detail_slope_scale;
+        const slope_interp = self.params.grass_detail_gradient_interp;
+        const half: u32 = @intCast(half_block);
+        const batch = BladeBatch{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .half = half, .slope_scale = slope_scale };
+        var fine_slopes: [ChunkSize][ChunkSize]f32 = undefined;
+        var parent_slopes = ParentSlopes{ .generator = self, .io = io, .interp = slope_interp };
+        if (source == .fine) fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
         var any_filled = false;
         var parent_x = parent_min[0];
         while (parent_x <= parent_max[0]) : (parent_x += 1) {
             var parent_z = parent_min[2];
             while (parent_z <= parent_max[2]) : (parent_z += 1) {
-                var layers: [ChunkSize + 1]DetailLayer = undefined;
+                var layers: [ChunkSize + 1]i64 = undefined;
                 const layer_count = try surfaceLayers(&reader, io, allocator, parent_x, parent_min[1], parent_max[1], parent_z, &layers);
                 if (layer_count == 0) continue;
-                if (fillBlades(&detail_grid, base, fine_per_block, half_block, parent_x, parent_z, layers[0..layer_count])) any_filled = true;
+                // The parent slope is one value per column, so its scale is
+                // shared by every blade; fine slopes vary per blade.
+                const slope: BladeSlope = switch (source) {
+                    .parent => .{ .parent = bladeHeightScale(try parent_slopes.slopeAt(parent_x, parent_z), slope_scale) },
+                    .fine => .{ .fine = &fine_slopes },
+                };
+                if (fillBlades(batch, .{ .parent_x = parent_x, .parent_z = parent_z, .layers = layers[0..layer_count], .slope = slope })) any_filled = true;
             }
         }
         if (!any_filled) {
@@ -463,19 +495,36 @@ pub const DefaultGenerator = struct {
         blocks.merge(.{ .grid = &detail_grid }, grid_buffer);
     }
 
-    const DetailLayer = struct { y: i64, short: bool };
+    /// Slope grid for one detail chunk's own level at the grass gradient
+    /// density. Coarse densities run the whole height pipeline on the
+    /// lattice instead of all 1024 samples. A params copy keeps the shared
+    /// settings untouched, and the result bypasses the height cache so
+    /// coarse heights never poison it.
+    fn fineDetailSlopes(self: *DefaultGenerator, io: std.Io, chunk_pos: ChunkPos, interp: InterpResolution) ![ChunkSize][ChunkSize]f32 {
+        if (interp == .full) {
+            const heights = try self.getTerrainHeight(io, .{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
+            return grassSlopes(&heights, interp);
+        }
+        var density_params = self.params;
+        density_params.terrain_interp = interp;
+        density_params.large_terrain_interp = interp;
+        density_params.surface_interp = interp;
+        density_params.erosion_interp = interp;
+        const heights = genTerrainHeight(&density_params, chunk_pos.level, .{ chunk_pos.position[0], chunk_pos.position[2] });
+        return grassSlopes(&heights, interp);
+    }
 
-    /// Collects the parent heights in one (x, z) column whose block is open
-    /// air above grass or dirt. Reads chain vertically: each block doubles as
-    /// the next layer's below, so the scan costs one read per layer.
-    fn surfaceLayers(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, parent_x: i64, parent_min_y: i64, parent_max_y: i64, parent_z: i64, layers: *[ChunkSize + 1]DetailLayer) !usize {
+    /// Collects the parent surface heights in one (x, z) column whose block
+    /// is open air above grass or dirt. Reads chain vertically: each block
+    /// doubles as the next layer's below, so the scan costs one read per row.
+    fn surfaceLayers(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, parent_x: i64, parent_min_y: i64, parent_max_y: i64, parent_z: i64, layers: *[ChunkSize + 1]i64) !usize {
         var layer_count: usize = 0;
         var below = try reader.getBlock(io, allocator, .{ parent_x, parent_min_y - 1, parent_z }, World.standard_level);
         var parent_y = parent_min_y;
         while (parent_y <= parent_max_y) : (parent_y += 1) {
             const current = try reader.getBlock(io, allocator, .{ parent_x, parent_y, parent_z }, World.standard_level);
             if ((below == .grass or below == .dirt) and current == .air) {
-                layers[layer_count] = .{ .y = parent_y, .short = below == .dirt };
+                layers[layer_count] = parent_y;
                 layer_count += 1;
             }
             below = current;
@@ -483,38 +532,185 @@ pub const DefaultGenerator = struct {
         return layer_count;
     }
 
+    /// Slope input for one parent column's blades: the precomputed height
+    /// scale from the parent slope, or the fine slope grid sampled per blade.
+    const BladeSlope = union(GrassDetailGradient) {
+        parent: f32,
+        fine: *const [ChunkSize][ChunkSize]f32,
+    };
+
+    /// Lazily fetched level-0 slope grids for one detail chunk's parent
+    /// columns. A fine chunk spans few parents, so at most four level-0
+    /// chunks overlap the range; entries are found by linear search.
+    const ParentSlopes = struct {
+        generator: *DefaultGenerator,
+        io: std.Io,
+        interp: InterpResolution,
+        keys: [4][2]i32 = undefined,
+        grids: [4][ChunkSize][ChunkSize]f32 = undefined,
+        count: usize = 0,
+
+        fn slopeAt(self: *ParentSlopes, parent_x: i64, parent_z: i64) !f32 {
+            const chunk: [2]i32 = .{ @intCast(@divFloor(parent_x, ChunkSize)), @intCast(@divFloor(parent_z, ChunkSize)) };
+            for (self.keys[0..self.count], self.grids[0..self.count]) |key, *grid| {
+                if (key[0] == chunk[0] and key[1] == chunk[1]) return gridAt(grid, parent_x, parent_z);
+            }
+            const heights = try self.generator.getTerrainHeight(self.io, chunk, World.standard_level);
+            const slot = if (self.count < self.keys.len) self.count else 0;
+            self.keys[slot] = chunk;
+            self.grids[slot] = grassSlopes(&heights, self.interp);
+            self.count = @min(self.count + 1, self.keys.len);
+            return gridAt(&self.grids[slot], parent_x, parent_z);
+        }
+
+        fn gridAt(grid: *const [ChunkSize][ChunkSize]f32, parent_x: i64, parent_z: i64) f32 {
+            const local_x: usize = @intCast(@mod(parent_x, ChunkSize));
+            const local_z: usize = @intCast(@mod(parent_z, ChunkSize));
+            return grid[local_x][local_z];
+        }
+    };
+
+    /// Fraction of the hash height a blade keeps on the given slope. Flat
+    /// ground grows nothing; slopes at or above the scale keep full height.
+    /// A non-positive scale disables the fade and keeps full height.
+    fn bladeHeightScale(slope: f32, slope_scale: f32) f32 {
+        if (slope_scale <= 0) return 1;
+        if (slope <= 0) return 0;
+        return @min(slope / slope_scale, 1);
+    }
+
+    /// Invariant inputs for fanning parent columns out to fine voxels.
+    const BladeBatch = struct {
+        detail_grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
+        base: World.BlockPos,
+        fine_per_block: i64,
+        half: u32,
+        slope_scale: f32,
+    };
+
+    /// One parent column's varying inputs for blade fan-out.
+    const BladeColumn = struct {
+        parent_x: i64,
+        parent_z: i64,
+        layers: []const i64,
+        slope: BladeSlope,
+    };
+
     /// Fans one parent column's surface layers out to fine voxels. Returns
-    /// whether any voxel was written. Matches the per-voxel checker, blade
-    /// hash, and height gate exactly. Dirt layers grow at half height.
-    fn fillBlades(detail_grid: *[ChunkSize][ChunkSize][ChunkSize]Block, base: World.BlockPos, fine_per_block: i64, half_block: i64, parent_x: i64, parent_z: i64, layers: []const DetailLayer) bool {
-        const half: u32 = @intCast(half_block);
-        const fine_lo_x = @max(parent_x * fine_per_block, base[0]);
-        const fine_hi_x = @min(parent_x * fine_per_block + fine_per_block - 1, base[0] + ChunkSize - 1);
-        const fine_lo_z = @max(parent_z * fine_per_block, base[2]);
-        const fine_hi_z = @min(parent_z * fine_per_block + fine_per_block - 1, base[2] + ChunkSize - 1);
+    /// whether any voxel was written. Blades sit on alternating voxels, grow
+    /// to the slope-scaled hash height, and are skipped below one voxel, so
+    /// flat ground grows nothing.
+    fn fillBlades(batch: BladeBatch, column: BladeColumn) bool {
+        const fine_lo_x = @max(column.parent_x * batch.fine_per_block, batch.base[0]);
+        const fine_hi_x = @min(column.parent_x * batch.fine_per_block + batch.fine_per_block - 1, batch.base[0] + ChunkSize - 1);
+        const fine_lo_z = @max(column.parent_z * batch.fine_per_block, batch.base[2]);
+        const fine_hi_z = @min(column.parent_z * batch.fine_per_block + batch.fine_per_block - 1, batch.base[2] + ChunkSize - 1);
+        // Blade-independent layer bounds, hoisted out of the blade loop.
+        var layer_los: [ChunkSize + 1]i64 = undefined;
+        var layer_caps: [ChunkSize + 1]i64 = undefined;
+        var layer_bases: [ChunkSize + 1]i64 = undefined;
+        for (column.layers, 0..) |layer_y, i| {
+            const layer_base = layer_y * batch.fine_per_block;
+            layer_bases[i] = layer_base;
+            layer_los[i] = @max(layer_base, batch.base[1]);
+            layer_caps[i] = @min(layer_base + batch.fine_per_block - 1, batch.base[1] + ChunkSize - 1);
+        }
         var filled = false;
         var fine_x = fine_lo_x;
         while (fine_x <= fine_hi_x) : (fine_x += 1) {
-            var fine_z = fine_lo_z;
-            while (fine_z <= fine_hi_z) : (fine_z += 1) {
-                if ((fine_x + fine_z) & 1 != 0) continue;
+            const gx: usize = @intCast(fine_x - batch.base[0]);
+            // Blades sit where x + z is even; stepping by 2 from the matching
+            // phase visits exactly those voxels with no per-voxel skip.
+            var fine_z = fine_lo_z + ((fine_x + fine_lo_z) & 1);
+            while (fine_z <= fine_hi_z) : (fine_z += 2) {
+                const gz: usize = @intCast(fine_z - batch.base[2]);
                 const blade: u32 = @bitCast(Noise.hash2D(0, @truncate(fine_x), @truncate(fine_z)));
-                const height: i64 = 1 + @as(i64, @intCast((blade >> 16) % half));
-                for (layers) |layer| {
-                    const h = if (layer.short) @max(@divFloor(height, 2), 1) else height;
-                    const layer_base = layer.y * fine_per_block;
-                    const lo = @max(layer_base, base[1]);
-                    const hi = @min(@min(layer_base + fine_per_block - 1, base[1] + ChunkSize - 1), layer_base + h - 1);
+                const height: i64 = 1 + @as(i64, @intCast((blade >> 16) % batch.half));
+                const scale = switch (column.slope) {
+                    .parent => |s| s,
+                    .fine => |grid| bladeHeightScale(grid[gx][gz], batch.slope_scale),
+                };
+                // NaN scales fail the comparison and skip the blade.
+                const scaled_f = @as(f32, @floatFromInt(height)) * scale;
+                if (!(scaled_f >= 1)) continue;
+                const scaled: i64 = @intFromFloat(scaled_f);
+                for (0..column.layers.len) |i| {
+                    const hi = @min(layer_caps[i], layer_bases[i] + scaled - 1);
+                    const lo = layer_los[i];
                     if (hi < lo) continue;
-                    var fine_y = lo;
-                    while (fine_y <= hi) : (fine_y += 1) {
-                        detail_grid[@intCast(fine_x - base[0])][@intCast(fine_y - base[1])][@intCast(fine_z - base[2])] = .grass;
+                    const gy_lo: usize = @intCast(lo - batch.base[1]);
+                    const gy_hi: usize = @intCast(hi - batch.base[1]);
+                    var gy = gy_lo;
+                    while (gy <= gy_hi) : (gy += 1) {
+                        batch.detail_grid[gx][gy][gz] = .grass;
                     }
                     filled = true;
                 }
             }
         }
         return filled;
+    }
+
+    test "blade height scales with slope" {
+        try std.testing.expectEqual(0, bladeHeightScale(0, 0.5));
+        try std.testing.expectEqual(1, bladeHeightScale(0.5, 0.5));
+        try std.testing.expectEqual(1, bladeHeightScale(2, 0.5));
+        try std.testing.expectApproxEqAbs(0.5, bladeHeightScale(0.25, 0.5), 1e-6);
+        try std.testing.expectEqual(1, bladeHeightScale(0, 0));
+    }
+
+    test "blades sit on alternating voxels" {
+        // Negative base pins the stride phase for two's-complement parity:
+        // every written voxel must satisfy (x + z) % 2 == 0 in global fine
+        // coordinates, exactly like the old per-voxel skip.
+        const base: World.BlockPos = .{ -8, -8, -8 };
+        var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
+        const batch = BladeBatch{ .detail_grid = &grid, .base = base, .fine_per_block = 8, .half = 4, .slope_scale = 0.5 };
+        const filled = fillBlades(batch, .{ .parent_x = -1, .parent_z = -1, .layers = &.{0}, .slope = .{ .parent = 1 } });
+        try std.testing.expect(filled);
+        for (grid, 0..) |plane, gx| {
+            for (plane) |row| {
+                for (row, 0..) |b, gz| {
+                    if (b != .grass) continue;
+                    const fine_x: i64 = base[0] + @as(i64, @intCast(gx));
+                    const fine_z: i64 = base[2] + @as(i64, @intCast(gz));
+                    try std.testing.expect((fine_x + fine_z) & 1 == 0);
+                }
+            }
+        }
+    }
+
+    test "grass slopes at full density match getDifferential" {
+        const heights = DefaultGenerator.genTerrainHeight(&DefaultGenerator.Params.default, 0, .{ 3, 5 });
+        const slopes = DefaultGenerator.grassSlopes(&heights, .full);
+        const expected = DefaultGenerator.getDifferential(&heights);
+        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&expected), std.mem.asBytes(&slopes)));
+    }
+
+    test "coarse grass slopes stay bounded by the full density" {
+        // Each lattice difference averages full-res steps over its stride,
+        // so no lattice value exceeds the largest full-res slope, and the
+        // multilinear upsample only blends lattice values. A lattice origin
+        // or normalization bug would overshoot far past it.
+        const heights = DefaultGenerator.genTerrainHeight(&DefaultGenerator.Params.default, 0, .{ 3, 5 });
+        const full = DefaultGenerator.getDifferential(&heights);
+        var max_full: f32 = 0;
+        for (full) |row| {
+            for (row) |s| {
+                try std.testing.expect(std.math.isFinite(s));
+                max_full = @max(max_full, s);
+            }
+        }
+        try std.testing.expect(max_full > 0);
+        inline for ([_]DefaultGenerator.InterpResolution{ .half, .quarter, .eighth, .sixteenth }) |d| {
+            const coarse = DefaultGenerator.grassSlopes(&heights, d);
+            for (coarse) |row| {
+                for (row) |s| {
+                    try std.testing.expect(std.math.isFinite(s));
+                    try std.testing.expect(s <= max_full + 1e-3);
+                }
+            }
+        }
     }
 
     test "detail parent mapping matches renderer placement" {
@@ -1074,6 +1270,49 @@ pub const DefaultGenerator = struct {
         return differential;
     }
 
+    /// Grass slope grid at the configured lattice density: full runs
+    /// getDifferential directly, coarser densities decimate and
+    /// interpolate up.
+    fn grassSlopes(height: *const [ChunkSize][ChunkSize]f32, interp: InterpResolution) [ChunkSize][ChunkSize]f32 {
+        return switch (interp) {
+            .full => getDifferential(height),
+            inline else => |tag| grassSlopesCoarse(tag.size(), height),
+        };
+    }
+
+    /// Coarse grass slopes: backward differences on a (G+1)² lattice
+    /// decimated at stride, normalized per sample, then interpolated to
+    /// the full grid. Node (a, b) sits on full-res sample
+    /// (min(a*stride, 31), min(b*stride, 31)) like coarseSourceIndex, so
+    /// the far edge clamps to the last sample.
+    fn grassSlopesCoarse(comptime G: usize, height: *const [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
+        const N = G + 1;
+        const stride: usize = ChunkSize / G;
+        const stride_f: f32 = @floatFromInt(stride);
+        var lattice: [N * N]f32 = undefined;
+        for (0..N) |a| {
+            for (0..N) |b| {
+                const fx: usize = @min(a * stride, ChunkSize - 1);
+                const fz: usize = @min(b * stride, ChunkSize - 1);
+                // Backward neighbor, or the forward one past the near edge;
+                // both sit exactly one stride away, so one divisor fits all.
+                const bx: usize = if (fx >= stride) fx - stride else fx + stride;
+                const bz: usize = if (fz >= stride) fz - stride else fz + stride;
+                const gx = (height[fx][fz] - height[bx][fz]) / stride_f;
+                const gz = (height[fx][fz] - height[fx][bz]) / stride_f;
+                lattice[a * N + b] = @sqrt(gx * gx + gz * gz);
+            }
+        }
+        const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
+        const samples = Interp.init(@bitCast(lattice)).sampleGrid();
+        var out: [ChunkSize][ChunkSize]f32 = undefined;
+        for (0..ChunkSize) |x| {
+            const row: [ChunkSize]f32 = samples[x];
+            for (0..ChunkSize) |z| out[x][z] = row[z];
+        }
+        return out;
+    }
+
     /// Shaped height row: signed-power continents and mountains combined and
     /// normalized, then contrast-scaled. Shared by the base grid, the
     /// gradient samples, and the fade ring; the lane count follows the args.
@@ -1287,6 +1526,9 @@ const field_specs = .{
     .grass_height_falloff = .{ .label = "Grass Height Falloff", .description = "How much the grass slope limit drops per unit of altitude above the base. High meadows turn rocky sooner.", .min = 0, .max = 4 },
     .dirt_height_falloff = .{ .label = "Dirt Height Falloff", .description = "How much the dirt band narrows per unit of altitude above the base.", .min = 0, .max = 2 },
     .ground_altitude_base = .{ .label = "Ground Altitude Base", .description = "Normalized altitude where the grass and dirt falloffs start. Below this the lowland thresholds apply in full.", .min = -1, .max = 1 },
+    .grass_detail_gradient_source = .{ .label = "Grass Detail Gradient Source", .description = "Height field the grass blade slope is computed from: parent level-0 heights (one evaluation cached across detail levels) or this chunk's own fine level." },
+    .grass_detail_slope_scale = .{ .label = "Grass Detail Slope Scale", .description = "Slope in blocks per block at which grass blades keep full height. Flat ground grows nothing; 0 keeps full height everywhere.", .min = 0, .max = 4 },
+    .grass_detail_gradient_interp = .{ .label = "Grass Gradient Resolution", .description = "Sampling density of the grass slope lattice; coarser is faster and smoother. Full disables interpolation." },
     .snow_slope_gain = .{ .label = "Snow Slope Gain", .description = "How much the snow line rises per unit slope. Steep faces need more altitude to hold snow.", .min = 0, .max = 2 },
     .snow_cliff_slope = .{ .label = "Snow Cliff Slope", .description = "Slope at or above which high ground sheds snow and dirt to bare stone.", .min = 0, .max = 4 },
     .size_variation = .{ .min = 0, .max = 2 },
@@ -1760,6 +2002,9 @@ test "interp densities round trip through the config tree" {
     params.erosion_interp = .quarter;
     params.cave_interp_h = .half;
     params.cave_interp_v = .quarter;
+    params.grass_detail_gradient_source = .fine;
+    params.grass_detail_slope_scale = 1.5;
+    params.grass_detail_gradient_interp = .eighth;
     const tree = try generator_api.fromStruct(DefaultGenerator.Params, allocator, &params, field_specs);
     defer generator_api.free(allocator, tree);
 
@@ -1772,6 +2017,9 @@ test "interp densities round trip through the config tree" {
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.quarter, restored.erosion_interp);
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.half, restored.cave_interp_h);
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.quarter, restored.cave_interp_v);
+    try std.testing.expectEqual(DefaultGenerator.GrassDetailGradient.fine, restored.grass_detail_gradient_source);
+    try std.testing.expectApproxEqAbs(1.5, restored.grass_detail_slope_scale, 1e-6);
+    try std.testing.expectEqual(DefaultGenerator.InterpResolution.eighth, restored.grass_detail_gradient_interp);
     // Untouched fields keep their declaration defaults.
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.full, DefaultGenerator.Params.default.terrain_interp);
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.eighth, DefaultGenerator.Params.default.cave_interp_h);

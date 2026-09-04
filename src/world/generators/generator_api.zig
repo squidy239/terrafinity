@@ -5,7 +5,7 @@ const World = @import("../World.zig");
 /// Shared interface between the terrafinity host and generator shared
 /// libraries. Both sides are compiled by the same `zig build` with the same
 /// compiler, so every type here has identical layout across the DLL boundary.
-pub const ApiVersion: u32 = 3;
+pub const ApiVersion: u32 = 4;
 
 pub const GeneratorInfo = struct {
     name: []const u8,

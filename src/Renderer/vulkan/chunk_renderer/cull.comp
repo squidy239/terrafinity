@@ -123,6 +123,13 @@ void main() {
     // culled while still visible.
     vec3 relative_pos = candidate.absolute_position.xyz - pc.player_pos.xyz;
     float size = candidate.scale * chunk_size;
+    // Shadow passes drop transparent and undersized chunks before any box or
+    // frustum work: with dense sub-block detail most shadow invocations die
+    // here instead of after the full AABB evaluation below.
+    if (pc.mode >= 2u) {
+        if (candidate.is_transparent != 0u) return;
+        if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
+    }
     vec3 half_block = vec3(0.5 * candidate.scale);
     vec3 box_min = relative_pos - half_block;
     vec3 box_max = relative_pos + vec3(size) - half_block;
@@ -148,9 +155,8 @@ void main() {
     if (pc.mode >= 2u) {
         // Shadow cull for cascade slot (pc.mode - 2): opaque only, writes into slot
         // shadow_slot_base + slot. Each cascade's planes are pushed so it culls to its
-        // own box and depth range.
-        if (candidate.is_transparent != 0u) return;
-        if (pc.min_chunk_size > 0.0 && size < pc.min_chunk_size) return;
+        // own box and depth range. Transparent and undersized candidates already
+        // returned above.
         uint slot = pc.mode - 2u;
         uint idx = atomicAdd(shadow_count[slot], 1u);
         if (idx >= pc.draw_capacity) {
