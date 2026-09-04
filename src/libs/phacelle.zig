@@ -28,10 +28,18 @@ pub const Phacelle = struct {
 /// across the whole world.
 const jitter_salt: i32 = 0x51AB3A9D;
 
-/// The 4x4 cell neighbourhood is processed as one vector op per wave term.
-const cell_lanes = 16;
+/// The neighbourhood spans 4x4 cells; the wave from all 16 blends into one
+/// vector op per wave term instead of 16 scalar transcendental evaluations.
+const cell_span = 4;
+const cell_lanes = cell_span * cell_span;
 const CellIntV = @Vector(cell_lanes, i32);
 const CellFloatV = @Vector(cell_lanes, f32);
+
+/// Maps squared cell distance into the bell weight's Chebyshev interval, and
+/// the cutoff beyond which the reference's floor term already forces the
+/// weight to zero (distance 1.5).
+const weight_scale = 8.0 / 9.0;
+const weight_cutoff = 1.0;
 
 /// Jitter offset for a cell block, in [-0.5, 0.5] per axis, derived from the
 /// low and high 16 bits of each cell hash.
@@ -67,9 +75,8 @@ const bell_coeffs: [11]f32 = .{
 
 /// Bell-curve weight over the squared cell distance, evaluated by Clenshaw's
 /// recurrence in Chebyshev form: a dozen FMAs replace the vector exp of the
-/// reference. Max absolute error ~3e-7 over the active range; the caller
-/// masks s > 1 where the reference's floor term has already cut the weight
-/// to zero.
+/// reference (~3e-7 max error). The caller masks s > 1 where the reference's
+/// floor term has already cut the weight to zero.
 fn bellWeight(s: CellFloatV) CellFloatV {
     const two_s: CellFloatV = @as(CellFloatV, @splat(2.0)) * s;
     var b_2: CellFloatV = @splat(0);
@@ -91,49 +98,50 @@ pub fn phacelleNoise(p: [2]f32, norm_dir: [2]f32, freq: f32, offset: f32, normal
     const tau = std.math.tau;
     // Orthogonal to the stripe direction; the magnitude carries the cell
     // scale and the wave count per unit.
-    const side_x = -norm_dir[1] * freq * tau;
-    const side_y = norm_dir[0] * freq * tau;
-    const wave_input = offset * tau;
-    const scaled_x = p[0] * freq;
-    const scaled_y = p[1] * freq;
-    const base_cell_x: i32 = @intFromFloat(@floor(scaled_x));
-    const base_cell_y: i32 = @intFromFloat(@floor(scaled_y));
+    const side: [2]f32 = .{ -norm_dir[1] * freq * tau, norm_dir[0] * freq * tau };
+    const scaled: [2]f32 = .{ p[0] * freq, p[1] * freq };
+    const base: [2]i32 = .{ @intFromFloat(@floor(scaled[0])), @intFromFloat(@floor(scaled[1])) };
+    const acc = blendWaves(cellDiffs(scaled, base), side, offset * tau);
+    // Dividing by max(1 - normalization, |acc|) crisps the ridges: wherever
+    // the cells align, the output magnitude snaps to one.
+    const mag = @max(1.0 - normalization, @sqrt(acc[0] * acc[0] + acc[1] * acc[1]));
+    return .{
+        .cos = acc[0] / mag,
+        .sin = acc[1] / mag,
+        .side_x = side[0],
+        .side_y = side[1],
+    };
+}
 
-    // Lane l covers the neighbour cell (l % 4 - 1, l / 4 - 1), so the whole
-    // 4x4 neighbourhood is one vector op per wave term instead of 16 scalar
-    // transcendental evaluations.
+/// Offset of the sample from each neighbouring cell center, including the
+/// hash jitter. Lane l covers the neighbour cell (l % 4 - 1, l / 4 - 1).
+fn cellDiffs(scaled: [2]f32, base: [2]i32) [2]CellFloatV {
     const lane = std.simd.iota(i32, cell_lanes);
-    const cell_quad: CellIntV = @splat(4);
-    const cell_x = @as(CellIntV, @splat(base_cell_x)) + @mod(lane, cell_quad) - @as(CellIntV, @splat(1));
-    const cell_y = @as(CellIntV, @splat(base_cell_y)) + @divTrunc(lane, cell_quad) - @as(CellIntV, @splat(1));
-
+    const span: CellIntV = @splat(cell_span);
+    const one: CellIntV = @splat(1);
+    const cell_x = @as(CellIntV, @splat(base[0])) + @mod(lane, span) - one;
+    const cell_y = @as(CellIntV, @splat(base[1])) + @divTrunc(lane, span) - one;
     // The cell point sits at the cell center plus a hash jitter; a half-unit
     // jitter keeps all 16 neighbouring cells relevant.
     const rand = cellJitter(cell_x, cell_y);
-    const diff_x = @as(CellFloatV, @splat(scaled_x)) - (@as(CellFloatV, @floatFromInt(cell_x)) + @as(CellFloatV, @splat(0.5))) - rand[0];
-    const diff_y = @as(CellFloatV, @splat(scaled_y)) - (@as(CellFloatV, @floatFromInt(cell_y)) + @as(CellFloatV, @splat(0.5))) - rand[1];
-
-    // The phase ramps perpendicular to the stripe direction; the distance is
-    // mapped to the weight's Chebyshev interval s = (d^2 - 1.125) / 1.125.
-    const wave_phase = diff_x * @as(CellFloatV, @splat(side_x)) + diff_y * @as(CellFloatV, @splat(side_y)) + @as(CellFloatV, @splat(wave_input));
-    const s = (diff_x * diff_x + diff_y * diff_y) * @as(CellFloatV, @splat(8.0 / 9.0)) - @as(CellFloatV, @splat(1.0));
-    // Bell curve over the cell; beyond s = 1 (distance 1.5) the reference's
-    // floor term already forces the weight to zero, so far cells are masked.
-    const zero_v: CellFloatV = @splat(0);
-    const w = @select(f32, s <= @as(CellFloatV, @splat(1.0)), @max(bellWeight(s), zero_v), zero_v);
-
-    const wave_acc: [2]f32 = .{
-        @reduce(.Add, @cos(wave_phase) * w),
-        @reduce(.Add, @sin(wave_phase) * w),
-    };
-    // Dividing by max(1 - normalization, |acc|) crisps the ridges: wherever
-    // the cells align, the output magnitude snaps to one.
-    const mag = @max(1.0 - normalization, @sqrt(wave_acc[0] * wave_acc[0] + wave_acc[1] * wave_acc[1]));
+    const half: CellFloatV = @splat(0.5);
     return .{
-        .cos = wave_acc[0] / mag,
-        .sin = wave_acc[1] / mag,
-        .side_x = side_x,
-        .side_y = side_y,
+        @as(CellFloatV, @splat(scaled[0])) - (@as(CellFloatV, @floatFromInt(cell_x)) + half) - rand[0],
+        @as(CellFloatV, @splat(scaled[1])) - (@as(CellFloatV, @floatFromInt(cell_y)) + half) - rand[1],
+    };
+}
+
+/// Cosine/sine accumulations of the cell waves, bell-weighted by distance.
+fn blendWaves(diff: [2]CellFloatV, side: [2]f32, wave_input: f32) [2]f32 {
+    // The phase ramps perpendicular to the stripe direction; the distance is
+    // mapped to the weight's Chebyshev interval.
+    const phase = diff[0] * @as(CellFloatV, @splat(side[0])) + diff[1] * @as(CellFloatV, @splat(side[1])) + @as(CellFloatV, @splat(wave_input));
+    const s = (diff[0] * diff[0] + diff[1] * diff[1]) * @as(CellFloatV, @splat(weight_scale)) - @as(CellFloatV, @splat(1.0));
+    const zero: CellFloatV = @splat(0);
+    const w = @select(f32, s <= @as(CellFloatV, @splat(weight_cutoff)), @max(bellWeight(s), zero), zero);
+    return .{
+        @reduce(.Add, @cos(phase) * w),
+        @reduce(.Add, @sin(phase) * w),
     };
 }
 
