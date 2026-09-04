@@ -194,6 +194,26 @@ pub const DefaultGenerator = struct {
         snow_line: f32 = 0.6,
         beach_band: f32 = 6,
         sand_slope: f32 = 0.3,
+        /// Beach elevation lost per unit slope, in blocks. The sand line is
+        /// elev + falloff * slope <= beach_band, so steep shores get narrower
+        /// beaches and cliffs meet the water with stone.
+        sand_slope_falloff: f32 = 10,
+        /// Slope above which the underwater floor is stone instead of sand.
+        sea_floor_rock_slope: f32 = 0.6,
+        /// How much the grass slope limit drops per unit of normalized
+        /// altitude above ground_altitude_base. High meadows turn rocky sooner.
+        grass_height_falloff: f32 = 0.3,
+        /// How much the dirt band narrows per unit of normalized altitude
+        /// above ground_altitude_base.
+        dirt_height_falloff: f32 = 0.2,
+        /// Normalized altitude where the grass/dirt falloffs start. Below this
+        /// the lowland thresholds apply in full.
+        ground_altitude_base: f32 = 0.0,
+        /// How much the snow line rises per unit slope. Steep faces need more
+        /// altitude to hold snow.
+        snow_slope_gain: f32 = 0.35,
+        /// Slope at or above which high ground sheds snow to bare stone.
+        snow_cliff_slope: f32 = 1.0,
         /// Weight of the mountain (ridged) noise added on top of the continental noise.
         terrain_noise_balance: f32 = 1,
         terrain_noise: Noise.Noise(f32) = .{
@@ -330,7 +350,7 @@ pub const DefaultGenerator = struct {
 
     const GenContext = struct { params: *const Params, rand: *std.Random, chunk_scale: f32 };
 
-    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32, beach_band_blocks: f32, sand_slope: f32 };
+    const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32, beach_band_blocks: f32, sand_slope: f32, sand_slope_falloff_blocks: f32, sea_floor_rock_slope: f32, grass_height_falloff: f32, dirt_height_falloff: f32, ground_altitude_base: f32, snow_slope_gain: f32, snow_cliff_slope: f32 };
 
     pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
@@ -428,6 +448,13 @@ pub const DefaultGenerator = struct {
                         .snow_line = ctx.params.snow_line,
                         .beach_band_blocks = ctx.params.beach_band * scale,
                         .sand_slope = ctx.params.sand_slope,
+                        .sand_slope_falloff_blocks = ctx.params.sand_slope_falloff * scale,
+                        .sea_floor_rock_slope = ctx.params.sea_floor_rock_slope,
+                        .grass_height_falloff = ctx.params.grass_height_falloff,
+                        .dirt_height_falloff = ctx.params.dirt_height_falloff,
+                        .ground_altitude_base = ctx.params.ground_altitude_base,
+                        .snow_slope_gain = ctx.params.snow_slope_gain,
+                        .snow_cliff_slope = ctx.params.snow_cliff_slope,
                     });
                 }
             }
@@ -472,25 +499,65 @@ pub const DefaultGenerator = struct {
         }
     }
 
+    /// Beach elevation available at a slope: the sand line is
+    /// elev + falloff * slope <= beach_band, so steeper shores need lower
+    /// ground to stay sand.
+    inline fn effectiveBeachTop(beach_band_blocks: f32, falloff_blocks: f32, slope: f32) f32 {
+        return beach_band_blocks - falloff_blocks * slope;
+    }
+
+    /// Grass slope limit at a normalized altitude. Falls past the base so high
+    /// ground turns rocky sooner.
+    inline fn effectiveGroundThreshold(ground_threshold: f32, falloff: f32, base: f32, height_norm: f32) f32 {
+        return ground_threshold - falloff * @max(height_norm - base, 0);
+    }
+
+    /// Dirt band width at a normalized altitude. Never negative.
+    inline fn effectiveDirtWidth(dirt_band: f32, falloff: f32, base: f32, height_norm: f32) f32 {
+        return @max(dirt_band - falloff * @max(height_norm - base, 0), 0);
+    }
+
+    /// Snow line at a slope. Rises so steep faces need more altitude for snow.
+    inline fn effectiveSnowLine(snow_line: f32, gain: f32, slope: f32) f32 {
+        return snow_line + gain * slope;
+    }
+
     fn randGround(rand: *const std.Random, height_percent: f32, ctx: GroundContext) Block {
-        if (ctx.block_height < ctx.sea_level) return Block.sand;
-
+        // Both draws happen up front so every surface voxel consumes the same
+        // RNG stream whatever branch it takes; neighbors stay independent of
+        // each other's cover type.
+        const slope_jitter = (rand.float(f32) * 2.0 - 1.0) * ctx.slope_randomness;
+        const cover_rand = rand.float(f32);
         // Jitter the slope so ground, dirt, and stone boundaries break up instead
-        // of tracing smooth contours.
-        const a = ctx.slope + (rand.float(f32) * 2.0 - 1.0) * ctx.slope_randomness;
+        // of tracing smooth contours. Shared by every test so the slanted
+        // boundaries move together with no gaps or overlaps.
+        const a = ctx.slope + slope_jitter;
+        const height_norm = height_percent * ctx.one_d_terrain_scale;
 
-        // Sand beaches on the gentle shoreline use their own slope threshold,
-        // so they can be narrower or wider than the grass band.
-        if (@as(f32, @floatFromInt(ctx.block_height - ctx.sea_level)) <= ctx.beach_band_blocks and a < ctx.sand_slope) return Block.sand;
+        // Steep underwater cliffs are rock; only gentle seabed is sand.
+        if (ctx.block_height < ctx.sea_level) return if (a < ctx.sea_floor_rock_slope) Block.sand else Block.stone;
 
-        if (a < ctx.ground_threshold) {
-            // Soft ground: grass or snow by altitude.
-            const cover = std.math.lerp(height_percent * ctx.one_d_terrain_scale, rand.float(f32), ctx.block_randomness);
-            return if (cover < ctx.snow_line) Block.grass else Block.snow;
+        // Sand beaches taper with slope: the higher the gradient, the lower the
+        // block has to be to stay sand. Keeps its own cap so beaches can still
+        // be narrower or wider than the grass band.
+        const elev: f32 = @floatFromInt(ctx.block_height - ctx.sea_level);
+        if (elev <= effectiveBeachTop(ctx.beach_band_blocks, ctx.sand_slope_falloff_blocks, a) and a < ctx.sand_slope) return Block.sand;
+
+        const ground_threshold = effectiveGroundThreshold(ctx.ground_threshold, ctx.grass_height_falloff, ctx.ground_altitude_base, height_norm);
+        const dirt_band = effectiveDirtWidth(ctx.dirt_band, ctx.dirt_height_falloff, ctx.ground_altitude_base, height_norm);
+
+        // Exposed rock: high steep faces shed snow and dirt to bare stone.
+        if (height_norm >= ctx.snow_line and a >= ctx.snow_cliff_slope) return Block.stone;
+
+        if (a < ground_threshold) {
+            // Soft ground: grass or snow by altitude, with the snow line rising
+            // on slopes.
+            const cover = std.math.lerp(height_norm, cover_rand, ctx.block_randomness);
+            return if (cover < effectiveSnowLine(ctx.snow_line, ctx.snow_slope_gain, a)) Block.grass else Block.snow;
         }
         // Dirt occupies a band of width `dirt_band` above the ground threshold;
         // steeper ground is stone.
-        return if (a - ctx.dirt_band < ctx.ground_threshold) Block.dirt else Block.stone;
+        return if (a - dirt_band < ground_threshold) Block.dirt else Block.stone;
     }
 
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]f32 {
@@ -893,7 +960,7 @@ const field_specs = .{
     .sea_level = .{ .label = "Sea Level", .min = -1000, .max = 1000 },
     .terrain_block_randomness = .{ .label = "Block Randomness", .min = 0, .max = 1 },
     .slope_randomness = .{ .label = "Slope Randomness", .min = 0, .max = 1 },
-    .ground_threshold = .{ .min = 0, .max = 1 },
+    .ground_threshold = .{ .min = 0, .max = 4 },
     .dirt_band = .{ .min = 0, .max = 1 },
     .erosion_strength = .{ .skip = true },
     .erosion_enabled = .{ .label = "Erosion Enabled", .description = "Applies the Phacelle erosion filter to the terrain." },
@@ -925,8 +992,15 @@ const field_specs = .{
     .gen_structures = .{ .label = "Generate Structures" },
     .dirt_depth = .{ .min = 1, .max = 32 },
     .snow_line = .{ .min = 0, .max = 1 },
-    .beach_band = .{ .min = 0, .max = 32 },
-    .sand_slope = .{ .min = 0, .max = 1 },
+    .beach_band = .{ .min = 0, .max = 256 },
+    .sand_slope = .{ .min = 0, .max = 4 },
+    .sand_slope_falloff = .{ .label = "Sand Slope Falloff", .description = "Beach elevation lost per unit slope, in blocks. Steep shores get narrower beaches.", .min = 0, .max = 256 },
+    .sea_floor_rock_slope = .{ .label = "Sea Floor Rock Slope", .description = "Slope above which the underwater floor is stone instead of sand.", .min = 0, .max = 2 },
+    .grass_height_falloff = .{ .label = "Grass Height Falloff", .description = "How much the grass slope limit drops per unit of altitude above the base. High meadows turn rocky sooner.", .min = 0, .max = 4 },
+    .dirt_height_falloff = .{ .label = "Dirt Height Falloff", .description = "How much the dirt band narrows per unit of altitude above the base.", .min = 0, .max = 2 },
+    .ground_altitude_base = .{ .label = "Ground Altitude Base", .description = "Normalized altitude where the grass and dirt falloffs start. Below this the lowland thresholds apply in full.", .min = -1, .max = 1 },
+    .snow_slope_gain = .{ .label = "Snow Slope Gain", .description = "How much the snow line rises per unit slope. Steep faces need more altitude to hold snow.", .min = 0, .max = 2 },
+    .snow_cliff_slope = .{ .label = "Snow Cliff Slope", .description = "Slope at or above which high ground sheds snow and dirt to bare stone.", .min = 0, .max = 4 },
     .size_variation = .{ .min = 0, .max = 2 },
     .box_size = .{ .min = 16, .max = 4096 },
     .inner_box_size = .{ .min = 16, .max = 4096 },
@@ -1309,4 +1383,86 @@ test "erosion LOD consistency between level 0 and level 1" {
             try std.testing.expect(diff <= limit);
         }
     }
+}
+
+fn testGroundContext(overrides: anytype) DefaultGenerator.GroundContext {
+    var ctx: DefaultGenerator.GroundContext = .{
+        .block_height = 20,
+        .sea_level = 0,
+        .block_randomness = 0,
+        .one_d_terrain_scale = 1,
+        .slope = 0,
+        .slope_randomness = 0,
+        .ground_threshold = 0.3,
+        .dirt_band = 0.2,
+        .snow_line = 0.6,
+        .beach_band_blocks = 6,
+        .sand_slope = 0.3,
+        .sand_slope_falloff_blocks = 10,
+        .sea_floor_rock_slope = 0.6,
+        .grass_height_falloff = 0.3,
+        .dirt_height_falloff = 0.2,
+        .ground_altitude_base = 0.0,
+        .snow_slope_gain = 0.35,
+        .snow_cliff_slope = 1.0,
+    };
+    inline for (std.meta.fields(@TypeOf(overrides))) |field| {
+        @field(ctx, field.name) = @field(overrides, field.name);
+    }
+    return ctx;
+}
+
+fn testGround(height_percent: f32, ctx: DefaultGenerator.GroundContext) Block {
+    var rng = std.Random.DefaultPrng.init(1);
+    var rand = rng.random();
+    return DefaultGenerator.randGround(&rand, height_percent, ctx);
+}
+
+test "sand beach tapers with slope" {
+    // Same elevation is sand on flat ground but dirt on a slope: higher
+    // gradient means the block has to be lower to stay sand.
+    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 5, .slope = 0.0 })));
+    try std.testing.expectEqual(Block.grass, testGround(0, testGroundContext(.{ .block_height = 5, .slope = 0.29 })));
+    try std.testing.expectEqual(Block.dirt, testGround(0.3, testGroundContext(.{ .block_height = 5, .slope = 0.29 })));
+    // Low shore stays sand even when steep, and the flat beach keeps its width.
+    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 2, .slope = 0.29 })));
+    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = 6, .slope = 0.0 })));
+}
+
+test "grass threshold drops with altitude" {
+    // Gentle high meadow turns to dirt while the same slope stays grass down low.
+    try std.testing.expectEqual(Block.grass, testGround(0, testGroundContext(.{ .slope = 0.25 })));
+    try std.testing.expectEqual(Block.dirt, testGround(0.4, testGroundContext(.{ .slope = 0.25 })));
+}
+
+test "dirt band narrows with altitude" {
+    try std.testing.expectEqual(Block.dirt, testGround(0, testGroundContext(.{ .slope = 0.4 })));
+    try std.testing.expectEqual(Block.stone, testGround(0.5, testGroundContext(.{ .slope = 0.4 })));
+}
+
+test "snow line rises with slope" {
+    const flat = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.0 });
+    const steep = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.2 });
+    try std.testing.expectEqual(Block.snow, testGround(0.65, flat));
+    try std.testing.expectEqual(Block.grass, testGround(0.65, steep));
+}
+
+test "high cliffs shed to stone" {
+    const gentle = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 0.1 });
+    const cliff = testGroundContext(.{ .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .slope = 1.2 });
+    try std.testing.expectEqual(Block.snow, testGround(0.8, gentle));
+    try std.testing.expectEqual(Block.stone, testGround(0.8, cliff));
+}
+
+test "underwater floor is rock when steep" {
+    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = -5, .slope = 0.0 })));
+    try std.testing.expectEqual(Block.stone, testGround(0, testGroundContext(.{ .block_height = -5, .slope = 1.0 })));
+}
+
+test "zero couplings reproduce the flat thresholds" {
+    const base = .{ .sand_slope_falloff_blocks = 0.0, .grass_height_falloff = 0.0, .dirt_height_falloff = 0.0, .snow_slope_gain = 0.0, .snow_cliff_slope = 10.0, .sea_floor_rock_slope = 10.0 };
+    try std.testing.expectEqual(Block.grass, testGround(0, testGroundContext(.{ .slope = 0.25, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
+    try std.testing.expectEqual(Block.dirt, testGround(0, testGroundContext(.{ .slope = 0.4, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
+    try std.testing.expectEqual(Block.stone, testGround(0, testGroundContext(.{ .slope = 0.9, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
+    try std.testing.expectEqual(Block.sand, testGround(0, testGroundContext(.{ .block_height = -5, .slope = 1.0, .sand_slope_falloff_blocks = base.sand_slope_falloff_blocks, .grass_height_falloff = base.grass_height_falloff, .dirt_height_falloff = base.dirt_height_falloff, .snow_slope_gain = base.snow_slope_gain, .snow_cliff_slope = base.snow_cliff_slope, .sea_floor_rock_slope = base.sea_floor_rock_slope })));
 }
