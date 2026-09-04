@@ -6,6 +6,7 @@ const DeviceProxy = vk.DeviceProxy;
 
 const Renderer = @import("../../../Renderer.zig");
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
+const World = @import("../../../world/World.zig");
 const core = @import("../core.zig");
 const gpu = @import("../gpu.zig");
 const Csm = @import("Csm.zig");
@@ -546,6 +547,15 @@ fn promotePending(self: *ShadowRenderer) void {
     self.pending_valid = @splat(false);
 }
 
+/// Minimum chunk world size that may cast a shadow: the larger of the texel-based
+/// floor and the size of a chunk at `lowest_shadow_level`, so chunks below that
+/// level are culled from the shadow pass. Chunk world size is exactly
+/// `levelToBlockRatioFloat(level)`, which the cull shader recomputes as
+/// `scale * chunk_size`, so equal levels compare equal and pass the `<` filter.
+fn effectiveMinChunkSize(texel_based: f32, lowest_shadow_level: i32) f32 {
+    return @max(texel_based, World.ChunkPos.levelToBlockRatioFloat(lowest_shadow_level));
+}
+
 /// Selects the cascades to refresh this frame — derived per-cascade intervals (near
 /// cascades much more often) capped by the per-frame budget — and computes each into
 /// pending, deriving the frame's cull planes and minimum chunk size along the way.
@@ -564,7 +574,7 @@ fn refreshCascades(self: *ShadowRenderer, count: u32, ctx: Csm.CascadeContext) v
         const texel = self.refreshCascade(ctx, c);
         if (texel < finest_texel) finest_texel = texel;
     }
-    if (std.math.isFinite(finest_texel)) self.frame_min_chunk_size = ctx.cfg.min_chunk_texels * finest_texel;
+    if (std.math.isFinite(finest_texel)) self.frame_min_chunk_size = effectiveMinChunkSize(ctx.cfg.min_chunk_texels * finest_texel, ctx.cfg.lowest_shadow_level);
 }
 
 /// Computes one refreshed cascade into its pending slot with the frame's cull planes,
@@ -801,4 +811,17 @@ fn recordCascadePass(
 
 test "ShadowParams layout" {
     try std.testing.expectEqual(@as(usize, 2464), @sizeOf(ShadowParams));
+}
+
+test "effectiveMinChunkSize respects lowest shadow level" {
+    // Level 0 chunks span 32 blocks: with no texel floor, size-16 chunks (level -1)
+    // are culled while size-32 chunks (level 0) still cast.
+    const floor_0 = effectiveMinChunkSize(0, 0);
+    try std.testing.expect(floor_0 > 16.0 and floor_0 <= 32.0);
+
+    // A tiny level floor loses to the texel floor exactly.
+    try std.testing.expectEqual(@as(f32, 1000.0), effectiveMinChunkSize(1000.0, -100));
+
+    // A coarse level floor dominates the texel floor.
+    try std.testing.expect(effectiveMinChunkSize(0, 10) > 1000.0);
 }

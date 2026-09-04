@@ -618,12 +618,18 @@ fn applyRetireUpload(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuff
     var new_mesh = new_mesh_in;
 
     const ratio = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
-    const mesh_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
+    const scale = ChunkPos.toScale(chunk_pos.level);
+    var mesh_blockpos = @as(@Vector(3, f64), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f64), @splat(ratio));
+    // Centered cubes put faces at +-0.5*scale around integer centers, so a
+    // coarse face lands on integer grid lines while fine faces sit on
+    // half-integers. Bias the origin by (scale-1)/2 blocks so each coarse
+    // voxel exactly contains its children and all levels share one face grid.
+    mesh_blockpos += @as(@Vector(3, f64), @splat(0.5 * (@as(f64, scale) - 1.0)));
     const abs_vec: [4]f32 = .{ @floatCast(mesh_blockpos[0]), @floatCast(mesh_blockpos[1]), @floatCast(mesh_blockpos[2]), 1.0 };
     const is_transparent = key == .transparent;
     const transform: gpu.CandidateTransform = .{
         .absolute_position = abs_vec,
-        .scale = ChunkPos.toScale(chunk_pos.level),
+        .scale = scale,
     };
 
     const existing = self.meshes.get(io, key);

@@ -62,6 +62,10 @@ pub const ShadowConfig = struct {
     min_sun_elevation_deg: f32 = 0,
     max_depth_range: f32 = 65536,
     min_chunk_texels: f32 = 1,
+    /// Chunks with a detail level below this never cast shadows. Chunks get
+    /// smaller as the level drops, so this keeps fine detail out of the shadow
+    /// map while coarser levels still cast.
+    lowest_shadow_level: i32 = 0,
     // Negative depth bias fattens occluders in depth (stored depth moves toward the
     // light), closing the light band at shadow bases that a positive bias causes
     // (peter panning). The sample-side normal offset handles acne.

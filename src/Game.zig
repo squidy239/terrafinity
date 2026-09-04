@@ -126,6 +126,7 @@ fn markSubtree(
 ) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree" });
     defer zone.end();
+    if (pos.level < 0) return;
     const parent = pos.parent();
     if (parent.level > highest) return;
     const pos_in_parent = pos.posInParent();
@@ -188,6 +189,10 @@ fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
 }
 
 fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: World.ChunkPos) bool {
+    if (chunk_pos.level < 0) {
+        if (!view.keepChunkLoaded(chunk_pos)) return true;
+        return false;
+    }
     var parent = chunk_pos;
     if (parent.level > view.highest_level) return true;
     while (parent.level < view.highest_level) {
@@ -889,9 +894,11 @@ const ViewSnapshot = struct {
 };
 
 /// Levels above the lowest are refined by their children, so their generation ring
-/// stops one chunk short of the child ring it feeds.
+/// stops one chunk short of the child ring it feeds. Sub-zero levels are decorations:
+/// they refine nothing and nothing refines through them, so the hierarchy base stays
+/// at 0 and every level at or below 0 draws its full ring.
 fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
-    if (level <= lowest_level) return @splat(0);
+    if (level <= @max(lowest_level, 0)) return @splat(0);
     const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
     return inner_radius -| @Vector(2, u32){ 1, 1 };
 }

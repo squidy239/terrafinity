@@ -668,7 +668,7 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
 
     if (self.settingsSection(@src(), "World Streaming", settingsId("streaming"), true)) |section| {
         defer section.deinit();
-        settingsSlider("Minimum Detail Level", &options.lowest_level, 0, 24, settingsId("streaming.lowest_level"));
+        settingsSlider("Minimum Detail Level", &options.lowest_level, -4, 24, settingsId("streaming.lowest_level"));
         settingsSlider("Maximum Detail Level", &options.highest_level, 0, 24, settingsId("streaming.highest_level"));
         settingsSlider("Horizontal Render Distance", &options.render_distance_x, 6, 64, settingsId("streaming.render_distance_x"));
         settingsSlider("Vertical Render Distance", &options.render_distance_y, 6, 64, settingsId("streaming.render_distance_y"));
@@ -725,6 +725,7 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
         defer section.deinit();
         settingsCheckbox("Enabled", &render_options.shadow.enabled, settingsId("shadows.enabled"));
         settingsSlider("Cascade Count", &render_options.shadow.cascade_count, 1, 16, settingsId("shadows.cascade_count"));
+        settingsSlider("Lowest Shadow Level", &render_options.shadow.lowest_shadow_level, -4, 24, settingsId("shadows.lowest_shadow_level"));
         settingsSlider("Shadow Map Resolution", &render_options.shadow.shadow_map_size, 512, 8192, settingsId("shadows.shadow_map_size"));
         _ = configSlider("Shadow Distance", &render_options.shadow.max_shadow_distance, .{}, 1000, 250000, settingsId("shadows.max_shadow_distance"));
         _ = configSlider("Shadow Opacity", &render_options.shadow.shadow_strength, .{}, 0, 1, settingsId("shadows.shadow_strength"));
@@ -744,9 +745,11 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
 }
 
 fn normalizeSettings(options: *Game.Options) void {
-    options.lowest_level = if (options.lowest_level < 0) 0 else if (options.lowest_level > 24) 24 else options.lowest_level;
+    options.lowest_level = if (options.lowest_level < -4) -4 else if (options.lowest_level > 24) 24 else options.lowest_level;
     options.highest_level = if (options.highest_level < 1) 1 else if (options.highest_level > 24) 24 else options.highest_level;
     options.highest_level = @max(options.highest_level, options.lowest_level);
+
+    options.render_options.shadow.lowest_shadow_level = if (options.render_options.shadow.lowest_shadow_level < -4) -4 else if (options.render_options.shadow.lowest_shadow_level > 24) 24 else options.render_options.shadow.lowest_shadow_level;
 
     options.render_options.sky.star_brightness_min = std.math.clamp(options.render_options.sky.star_brightness_min, 0, 1);
     options.render_options.sky.star_brightness_max = std.math.clamp(options.render_options.sky.star_brightness_max, 0, 1);

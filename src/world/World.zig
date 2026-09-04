@@ -818,7 +818,7 @@ fn getBlocks(
             }
         };
     }
-    @panic("at least one ChunkSource must be able to generate a chunk");
+    return .{ encoding, .{ .from_disk = false, .structures = false } };
 }
 
 fn runPlaceStructures(

@@ -383,8 +383,12 @@ pub const DefaultGenerator = struct {
 
     const GroundContext = struct { block_height: i64, sea_level: i64, block_randomness: f32, one_d_terrain_scale: f32, slope: f32, slope_randomness: f32, ground_threshold: f32, dirt_band: f32, snow_line: f32, beach_band_blocks: f32, sand_slope: f32, sand_slope_falloff_blocks: f32, sea_floor_rock_slope: f32, grass_height_falloff: f32, dirt_height_falloff: f32, ground_altitude_base: f32, snow_slope_gain: f32, snow_cliff_slope: f32 };
 
-    pub fn genChunk(self: *DefaultGenerator, io: std.Io, _: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, _: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
+    pub fn genChunk(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         @setFloatMode(.optimized);
+        if (chunk_pos.level < 0) {
+            try self.genDetailTest(io, allocator, chunk_pos, blocks, world, grid_buffer);
+            return;
+        }
         const chunk_scale_factor = 1.0 / ChunkPos.toScale(chunk_pos.level);
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
@@ -416,6 +420,60 @@ pub const DefaultGenerator = struct {
         if (one_block) |block| {
             blocks.merge(.{ .uniform = block }, grid_buffer);
         } else blocks.merge(.{ .grid = &block_grid }, grid_buffer);
+    }
+
+    /// Grass detail test: grows a flat checkerboard carpet, half a level-0
+    /// block tall, on top of grass for every level below 0. Each level reads
+    /// level 0 directly, so all detail LODs align to the same blocks.
+    fn genDetailTest(_: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
+        if (chunk_pos.level >= World.standard_level or chunk_pos.level <= -60) return;
+        // One level-0 block spans 2^-level fine voxels per axis. Integer math
+        // keeps the mapping bit-exact; the f64 levelToLevelRatio would round.
+        const fine_per_block: i64 = @as(i64, 1) << @as(u6, @intCast(-chunk_pos.level));
+        const half_block: i64 = @divExact(fine_per_block, 2);
+        // Chunk origin in fine-voxel units. Global coords keep every level
+        // aligned even where the chunk grid stops dividing the block grid.
+        const base: World.BlockPos = chunk_pos.toLocalBlockPos();
+        var reader = World.Reader{ .world = world };
+        defer reader.clear(io);
+        var detail_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.null)));
+        for (0..ChunkSize) |x| {
+            for (0..ChunkSize) |y| {
+                for (0..ChunkSize) |z| {
+                    const fine: World.BlockPos = base + @Vector(3, i64){ @intCast(x), @intCast(y), @intCast(z) };
+                    if (@mod(fine[1], fine_per_block) >= half_block) continue;
+                    if (@mod(fine[0] + fine[2], 2) != 0) continue;
+                    const parent: World.BlockPos = @divFloor(fine, @as(World.BlockPos, @splat(fine_per_block)));
+                    if (try reader.getBlock(io, allocator, parent - @Vector(3, i64){ 0, 1, 0 }, World.standard_level) != .grass) continue;
+                    const parent_block = try reader.getBlock(io, allocator, parent, World.standard_level);
+                    if (parent_block != .air and parent_block != .grass) continue;
+                    detail_grid[x][y][z] = .grass;
+                }
+            }
+        }
+        blocks.merge(.{ .grid = &detail_grid }, grid_buffer);
+    }
+
+    test "detail parent mapping matches renderer placement" {
+        const levels = [_]i32{ -1, -2, -3, -4 };
+        const positions = [_]i32{ -33, -3, -2, -1, 0, 1, 5, 100 };
+        for (levels) |level| {
+            const fine_per_block: i64 = @as(i64, 1) << @as(u6, @intCast(-level));
+            const ratio = ChunkPos.levelToBlockRatioFloat(level);
+            const scale = ChunkPos.toScale(level);
+            for (positions) |c| {
+                for (0..ChunkSize) |l| {
+                    const world_lo: f32 = @as(f32, @floatFromInt(c)) * ratio + @as(f32, @floatFromInt(l)) * scale;
+                    const g: i64 = @as(i64, c) * ChunkSize + @as(i64, @intCast(l));
+                    const parent = @divFloor(g, fine_per_block);
+                    const parent_f: f32 = @floatFromInt(parent);
+                    try std.testing.expect(world_lo >= parent_f - 1e-4);
+                    try std.testing.expect(world_lo + scale <= parent_f + 1 + 1e-4);
+                    const frac_expected: f32 = @as(f32, @floatFromInt(@mod(g, fine_per_block))) * scale;
+                    try std.testing.expect(@abs(world_lo - parent_f - frac_expected) < 1e-4);
+                }
+            }
+        }
     }
 
     fn generateTerrain(chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]f32, ctx: GenContext) void {
