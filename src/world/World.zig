@@ -84,6 +84,9 @@ pub const ChunkPos = struct {
         return .{ .position = @trunc(pos_vec * ratio_vec), .level = level };
     }
 
+    /// Chunk origin in world blocks. Only exact for level >= chunk_level:
+    /// below that a chunk spans less than one block, so its origin is
+    /// fractional; compare via fromGlobalBlockPos instead.
     pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
     }
@@ -93,8 +96,20 @@ pub const ChunkPos = struct {
     }
 
     pub inline fn fromGlobalBlockPos(block_pos: BlockPos, level: i32) ChunkPos {
+        if (level >= chunk_level) {
+            return .{
+                .position = @intCast(@divFloor(block_pos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))),
+                .level = level,
+            };
+        }
+        // Below chunk_level a chunk spans less than one block, so the integer
+        // ratio would underflow: convert blocks to fine voxels first (exact,
+        // powers of two) and divide by the chunk size instead. Capped well
+        // beyond any usable world size or detail level.
+        const depth: u6 = if (level < -30) 30 else @intCast(-level);
+        const fine_per_block: i64 = @as(i64, 1) << depth;
         return .{
-            .position = @intCast(@divFloor(block_pos, @as(@Vector(3, i64), @splat(levelToBlockRatio(level))))),
+            .position = @intCast(@divFloor(block_pos * @as(BlockPos, @splat(fine_per_block)), @as(BlockPos, @splat(ChunkSize)))),
             .level = level,
         };
     }
@@ -471,7 +486,7 @@ pub const Editor = struct {
                 while (dz <= bb[5]) : (dz += 1) {
                     if (shape.isPointInside(.{ dx, y, dz })) {
                         const world_pos: @Vector(3, i64) = switch (comptime @typeInfo(@TypeOf(bb[0]))) {
-                            .float => .{ @trunc(dx), @trunc(y), @trunc(dz) },
+                            .float => .{ @floor(dx), @floor(y), @floor(dz) },
                             .int => .{ @intCast(dx), @intCast(y), @intCast(dz) },
                             else => unreachable,
                         };
@@ -818,7 +833,7 @@ fn getBlocks(
             }
         };
     }
-    return .{ encoding, .{ .from_disk = false, .structures = false } };
+    @panic("at least one ChunkSource must be able to generate a chunk");
 }
 
 fn runPlaceStructures(
@@ -886,6 +901,11 @@ test "ChunkPos" {
 
     const pos3 = ChunkPos.fromGlobalBlockPos(.{ 32, 64, 32 }, -5);
     try testing.expect(std.meta.eql(pos3, ChunkPos{ .level = -5, .position = .{ 32, 64, 32 } }));
+
+    const neg6 = ChunkPos.fromGlobalBlockPos(.{ 64, 0, -1 }, -6);
+    try testing.expect(std.meta.eql(neg6, ChunkPos{ .level = -6, .position = .{ 128, 0, -2 } }));
+    const neg8 = ChunkPos.fromGlobalBlockPos(.{ 100, -7, 0 }, -8);
+    try testing.expect(std.meta.eql(neg8, ChunkPos{ .level = -8, .position = .{ 800, -56, 0 } }));
 
     const pos4 = ChunkPos{ .level = 0, .position = .{ 1, 1, 1 } };
     const pos5 = pos4.toLevel(-5);

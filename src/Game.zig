@@ -206,9 +206,10 @@ fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: 
                 // could still be refining the area, so a stale low-res view does
                 // not flash before the higher-res chunks land. The check is
                 // geometric only, so it cannot race the loader or leak if the
-                // loader stalls.
+                // loader stalls. Level bounds apply: the loader never refines
+                // out-of-bounds levels, so stale levels drain without lingering.
                 const refine_radius = view.render_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-                return !keepLoaded(null, null, view.player_pos, chunk_pos, null, refine_radius);
+                return !keepLoaded(view.lowest_level, view.highest_level, view.player_pos, chunk_pos, null, refine_radius);
             }
         }
     }
@@ -278,6 +279,8 @@ pub const Options = struct {
 
     render_distance_x: u32 = 8,
     render_distance_y: u32 = 6,
+
+    lod_overlap: i32 = 1,
 
     loader_frequency_ms: u64 = 250,
     mesh_unload_frequency_ms: u64 = 500,
@@ -869,11 +872,19 @@ fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
 }
 
 fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getRenderDistance" });
+    const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
     return .{ self.options.render_distance_x, self.options.render_distance_y };
+}
+
+fn getLodOverlap(self: *@This(), io: std.Io) i32 {
+    const z = tracy.Zone.begin(.{ .src = @src() });
+    defer z.end();
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
+    return self.options.lod_overlap;
 }
 
 /// Consistent snapshot of everything geometry culling depends on. Taken once
@@ -883,9 +894,10 @@ const ViewSnapshot = struct {
     highest_level: i32,
     player_pos: @Vector(3, f64),
     render_distance: @Vector(2, u32),
+    lod_overlap: i32,
 
     fn innerGenRadius(self: @This(), level: i32) @Vector(2, u32) {
-        return innerRadiusFor(self.lowest_level, self.render_distance, level);
+        return innerRadiusFor(self.lowest_level, self.render_distance, self.lod_overlap, level);
     }
 
     fn keepChunkLoaded(self: @This(), chunk_pos: World.ChunkPos) bool {
@@ -893,14 +905,19 @@ const ViewSnapshot = struct {
     }
 };
 
-/// Levels above the lowest are refined by their children, so their generation ring
-/// stops one chunk short of the child ring it feeds. Sub-zero levels are decorations:
-/// they refine nothing and nothing refines through them, so the hierarchy base stays
-/// at 0 and every level at or below 0 draws its full ring.
-fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
-    if (level <= @max(lowest_level, 0)) return @splat(0);
-    const inner_radius = gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-    return inner_radius -| @Vector(2, u32){ 1, 1 };
+/// Levels refine their children, so a generation ring stops short of the child
+/// ring it feeds by the configured LOD overlap. A negative overlap opens a
+/// visible gap instead, which outlines each level's boundary. Holes are
+/// proportional: every holed level excludes the same fraction, so shells nest
+/// inside each other and adjacent levels meet only at the overlap margin.
+/// Detail levels never mark coverage, so the refinement floor stays at 0: with
+/// detail active level 0 draws its full disk, keeping every holed level above
+/// it coverable.
+fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), lod_overlap: i32, level: i32) @Vector(2, u32) {
+    if (level <= lowest_level or (lowest_level < 0 and level == 0)) return @splat(0);
+    const half: @Vector(2, i32) = @intCast(gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor });
+    const hole: @Vector(2, i32) = @max(half - @as(@Vector(2, i32), @splat(lod_overlap)), @as(@Vector(2, i32), @splat(0)));
+    return @intCast(hole);
 }
 
 fn snapshotView(self: *@This(), io: std.Io) ViewSnapshot {
@@ -910,6 +927,7 @@ fn snapshotView(self: *@This(), io: std.Io) ViewSnapshot {
         .highest_level = highest_level,
         .player_pos = self.getPlayerPos(io),
         .render_distance = self.getRenderDistance(io),
+        .lod_overlap = self.getLodOverlap(io),
     };
 }
 
@@ -917,7 +935,7 @@ fn getInnerGenRadius(self: *@This(), io: std.Io, gen_distance: @Vector(2, u32), 
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "getInnerGenRadius" });
     defer z.end();
     const lowest_level, _ = self.getLevels(io);
-    return innerRadiusFor(lowest_level, gen_distance, level);
+    return innerRadiusFor(lowest_level, gen_distance, self.getLodOverlap(io), level);
 }
 
 fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
@@ -928,11 +946,11 @@ fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
     return self.options.mouse_sensitivity;
 }
 
-fn isUniformAir(io: std.Io, chunk: *Chunk) !bool {
+fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
     try chunk.lockShared(io);
     defer chunk.unlockShared(io);
     return switch (chunk.encoding) {
-        .uniform => |block| block == .air,
+        .uniform => |block| !block.isVisible(),
         .grid => false,
     };
 }
@@ -941,6 +959,11 @@ fn isUniformAir(io: std.Io, chunk: *Chunk) !bool {
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer GenMeshAndAdd.end();
+    // A task that dies before the mark block below would strand is_queued set,
+    // and needs_load would skip the chunk forever. Always release the flag so
+    // failures and cancels retry on a later pass; a newer in-flight task only
+    // causes one harmless duplicate pass.
+    defer self.clearQueuedFlag(io, chunk_pos);
 
     // Prevent an old version of the chunk from staying loaded. One snapshot keeps both
     // halves of the decision consistent.
@@ -954,11 +977,12 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
 
-    // Uniform air produces no faces against any neighbor, so the extraction and
-    // renderer round-trip are pure overhead unless an old mesh must be cleared.
+    // Invisible uniform chunks produce no faces against any neighbor, so the
+    // extraction and renderer round-trip are pure overhead unless an old mesh
+    // must be cleared.
     // A concurrent edit that turns this chunk non-air queues its own pass, so
     // reading the encoding outside the meshing lock cannot strand a missing mesh.
-    if (!try isUniformAir(io, chunk) or self.renderer.hasMesh(io, chunk_pos)) {
+    if (!try isUniformInvisible(io, chunk) or self.renderer.hasMesh(io, chunk_pos)) {
         var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
         {
             const zone_faces = tracy.Zone.begin(.{ .src = @src(), .name = "extract_faces" });
@@ -1004,6 +1028,11 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     }
 }
 
+fn clearQueuedFlag(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) void {
+    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
+    if (bucket.getPtr(io, chunk_pos)) |state| state.is_queued = false;
+}
+
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool) !void {
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
@@ -1029,7 +1058,11 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f6
     if (lowest_level) |l| if (chunk_pos.level < l) return false;
     if (highest_level) |h| if (chunk_pos.level > h) return false;
 
-    const player_chunk_pos = @trunc(player_pos / @as(@Vector(3, f64), @splat(World.ChunkPos.levelToBlockRatioF64(chunk_pos.level))));
+    // Player chunk via the same integer path the loader uses. A float divide
+    // here can land on the wrong side of a chunk boundary from pow dust when
+    // the quotient is exactly integral, disagreeing with the spiral's pick.
+    const player_block: World.BlockPos = @intFromFloat(@floor(player_pos));
+    const player_chunk_pos: @Vector(3, f64) = World.ChunkPos.fromGlobalBlockPos(player_block, chunk_pos.level).position;
     const chunk_center: @Vector(3, f64) = chunk_pos.position;
 
     if (inner_chunk_range) |icr| {
@@ -1083,7 +1116,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
     try game.player.physics.mutex.lock(io);
     var player_pos = game.player.physics.pos;
     game.player.physics.mutex.unlock(io);
-    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(player_pos), level);
+    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(player_pos), level);
 
     var outer_radius = game.getRenderDistance(io);
     var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
@@ -1096,11 +1129,11 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
 
     while (true) {
         if (!game.running.load(.unordered)) return;
-        if (amount_tested >= 4 * outer_radius[0] * outer_radius[0]) break;
+        if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
 
         if (game.player.physics.mutex.tryLock()) {
             defer game.player.physics.mutex.unlock(io);
-            const new_player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@trunc(game.player.physics.pos), level);
+            const new_player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(game.player.physics.pos), level);
             if (!std.meta.eql(player_chunk_pos, new_player_chunk_pos)) {
                 player_chunk_pos = new_player_chunk_pos;
                 player_pos = game.player.physics.pos;
@@ -1122,7 +1155,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
-            while (y < outer_radius[1]) : (y += 1) {
+            while (y <= outer_radius[1]) : (y += 1) {
                 const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
 
                 if (!keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius)) continue;

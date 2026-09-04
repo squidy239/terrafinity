@@ -125,7 +125,7 @@ pub const Explosive = struct {
         var world_reader = World.Reader{ .world = world };
         defer world_reader.clear(io);
 
-        if ((try world_reader.getBlockUncached(io, allocator, @trunc(self.pos), World.standard_level)) != .air) {
+        if ((try world_reader.getBlockUncached(io, allocator, @floor(self.pos), World.standard_level)) != .air) {
             var editor = World.Editor{ .world = world, .temp_allocator = allocator };
             try editor.placeSamplerShape(.grass, Sphere(f32).init(@floatCast(self.pos), 8), World.standard_level);
             editor.flush(io, allocator) catch |err| switch (err) {

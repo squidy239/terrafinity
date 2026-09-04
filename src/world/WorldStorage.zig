@@ -114,6 +114,14 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
 
+    // Null is "no data", never content: persisting it would pin an empty row
+    // that shadows live generation on every later load. Drop it in all modes,
+    // clearing the flag so the background saver does not retry it forever.
+    if (chunk.encoding == .uniform and chunk.encoding.uniform == .null) {
+        _ = chunk.modified.swap(false, .acq_rel);
+        return;
+    }
+
     const modified = chunk.modified.load(.seq_cst);
     try self.options_lock.lockShared(io);
     const save_mode = self.save_mode.*;

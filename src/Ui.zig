@@ -668,10 +668,11 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
 
     if (self.settingsSection(@src(), "World Streaming", settingsId("streaming"), true)) |section| {
         defer section.deinit();
-        settingsSlider("Minimum Detail Level", &options.lowest_level, -4, 24, settingsId("streaming.lowest_level"));
+        settingsSlider("Minimum Detail Level", &options.lowest_level, -8, 24, settingsId("streaming.lowest_level"));
         settingsSlider("Maximum Detail Level", &options.highest_level, 0, 24, settingsId("streaming.highest_level"));
         settingsSlider("Horizontal Render Distance", &options.render_distance_x, 6, 64, settingsId("streaming.render_distance_x"));
         settingsSlider("Vertical Render Distance", &options.render_distance_y, 6, 64, settingsId("streaming.render_distance_y"));
+        settingsSlider("LOD Overlap (chunks)", &options.lod_overlap, -4, 8, settingsId("streaming.lod_overlap"));
         settingsInterval("Chunk Load Interval (ms)", &options.loader_frequency_ms, settingsId("streaming.loader_frequency_ms"));
         settingsInterval("Mesh Unload Interval (ms)", &options.mesh_unload_frequency_ms, settingsId("streaming.mesh_unload_frequency_ms"));
         settingsInterval("Autosave Interval (ms)", &options.save_frequency_ms, settingsId("streaming.save_frequency_ms"));
@@ -745,9 +746,10 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
 }
 
 fn normalizeSettings(options: *Game.Options) void {
-    options.lowest_level = if (options.lowest_level < -4) -4 else if (options.lowest_level > 24) 24 else options.lowest_level;
+    options.lowest_level = if (options.lowest_level < -8) -8 else if (options.lowest_level > 24) 24 else options.lowest_level;
     options.highest_level = if (options.highest_level < 1) 1 else if (options.highest_level > 24) 24 else options.highest_level;
     options.highest_level = @max(options.highest_level, options.lowest_level);
+    options.lod_overlap = std.math.clamp(options.lod_overlap, -4, 8);
 
     options.render_options.shadow.lowest_shadow_level = if (options.render_options.shadow.lowest_shadow_level < -4) -4 else if (options.render_options.shadow.lowest_shadow_level > 24) 24 else options.render_options.shadow.lowest_shadow_level;
 

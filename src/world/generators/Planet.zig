@@ -137,7 +137,7 @@ pub const Generator = struct {
             return;
         }
         const ratio: f32 = ChunkPos.levelToBlockRatioFloat(chunk_pos.level);
-        const chunk_start: @Vector(3, f32) = @floatFromInt(chunk_pos.toGlobalBlockPos());
+        const chunk_start: @Vector(3, f32) = @as(@Vector(3, f32), @floatFromInt(chunk_pos.position)) * @as(@Vector(3, f32), @splat(ratio));
         // Local blocks span ratio / ChunkSize level-0 blocks each (one at level 0).
         const block_step: f32 = ratio / @as(f32, ChunkSize);
         const step_v: @Vector(3, f32) = @splat(block_step);

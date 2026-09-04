@@ -422,9 +422,13 @@ pub const DefaultGenerator = struct {
         } else blocks.merge(.{ .grid = &block_grid }, grid_buffer);
     }
 
-    /// Grass detail test: grows a flat checkerboard carpet, half a level-0
-    /// block tall, on top of grass for every level below 0. Each level reads
-    /// level 0 directly, so all detail LODs align to the same blocks.
+    /// Grass detail test: grows alternating blades, up to half a level-0
+    /// block tall, in open air on top of grass or dirt for every level below
+    /// 0. Each level reads level 0 directly, so all detail LODs align to the
+    /// same blocks.
+    /// Parent-hoisted: one fine chunk spans few level-0 parents, so each
+    /// parent column is read once and fanned out to its fine voxels instead
+    /// of re-reading the same parents per voxel.
     fn genDetailTest(_: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         if (chunk_pos.level >= World.standard_level or chunk_pos.level <= -60) return;
         // One level-0 block spans 2^-level fine voxels per axis. Integer math
@@ -434,28 +438,87 @@ pub const DefaultGenerator = struct {
         // Chunk origin in fine-voxel units. Global coords keep every level
         // aligned even where the chunk grid stops dividing the block grid.
         const base: World.BlockPos = chunk_pos.toLocalBlockPos();
+        const parent_min: World.BlockPos = @divFloor(base, @as(World.BlockPos, @splat(fine_per_block)));
+        const parent_max: World.BlockPos = @divFloor(base + @as(World.BlockPos, @splat(ChunkSize - 1)), @as(World.BlockPos, @splat(fine_per_block)));
         var reader = World.Reader{ .world = world };
         defer reader.clear(io);
         var detail_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = @splat(@splat(@splat(.null)));
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |y| {
-                for (0..ChunkSize) |z| {
-                    const fine: World.BlockPos = base + @Vector(3, i64){ @intCast(x), @intCast(y), @intCast(z) };
-                    if (@mod(fine[1], fine_per_block) >= half_block) continue;
-                    if (@mod(fine[0] + fine[2], 2) != 0) continue;
-                    const parent: World.BlockPos = @divFloor(fine, @as(World.BlockPos, @splat(fine_per_block)));
-                    if (try reader.getBlock(io, allocator, parent - @Vector(3, i64){ 0, 1, 0 }, World.standard_level) != .grass) continue;
-                    const parent_block = try reader.getBlock(io, allocator, parent, World.standard_level);
-                    if (parent_block != .air and parent_block != .grass) continue;
-                    detail_grid[x][y][z] = .grass;
-                }
+        var any_filled = false;
+        var parent_x = parent_min[0];
+        while (parent_x <= parent_max[0]) : (parent_x += 1) {
+            var parent_z = parent_min[2];
+            while (parent_z <= parent_max[2]) : (parent_z += 1) {
+                var layers: [ChunkSize + 1]DetailLayer = undefined;
+                const layer_count = try surfaceLayers(&reader, io, allocator, parent_x, parent_min[1], parent_max[1], parent_z, &layers);
+                if (layer_count == 0) continue;
+                if (fillBlades(&detail_grid, base, fine_per_block, half_block, parent_x, parent_z, layers[0..layer_count])) any_filled = true;
             }
+        }
+        if (!any_filled) {
+            // Uniform air, not null: null meshes to nothing anyway, but only
+            // after the full face-extraction round-trip, while air is skipped.
+            blocks.merge(.{ .uniform = .air }, grid_buffer);
+            return;
         }
         blocks.merge(.{ .grid = &detail_grid }, grid_buffer);
     }
 
+    const DetailLayer = struct { y: i64, short: bool };
+
+    /// Collects the parent heights in one (x, z) column whose block is open
+    /// air above grass or dirt. Reads chain vertically: each block doubles as
+    /// the next layer's below, so the scan costs one read per layer.
+    fn surfaceLayers(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, parent_x: i64, parent_min_y: i64, parent_max_y: i64, parent_z: i64, layers: *[ChunkSize + 1]DetailLayer) !usize {
+        var layer_count: usize = 0;
+        var below = try reader.getBlock(io, allocator, .{ parent_x, parent_min_y - 1, parent_z }, World.standard_level);
+        var parent_y = parent_min_y;
+        while (parent_y <= parent_max_y) : (parent_y += 1) {
+            const current = try reader.getBlock(io, allocator, .{ parent_x, parent_y, parent_z }, World.standard_level);
+            if ((below == .grass or below == .dirt) and current == .air) {
+                layers[layer_count] = .{ .y = parent_y, .short = below == .dirt };
+                layer_count += 1;
+            }
+            below = current;
+        }
+        return layer_count;
+    }
+
+    /// Fans one parent column's surface layers out to fine voxels. Returns
+    /// whether any voxel was written. Matches the per-voxel checker, blade
+    /// hash, and height gate exactly. Dirt layers grow at half height.
+    fn fillBlades(detail_grid: *[ChunkSize][ChunkSize][ChunkSize]Block, base: World.BlockPos, fine_per_block: i64, half_block: i64, parent_x: i64, parent_z: i64, layers: []const DetailLayer) bool {
+        const half: u32 = @intCast(half_block);
+        const fine_lo_x = @max(parent_x * fine_per_block, base[0]);
+        const fine_hi_x = @min(parent_x * fine_per_block + fine_per_block - 1, base[0] + ChunkSize - 1);
+        const fine_lo_z = @max(parent_z * fine_per_block, base[2]);
+        const fine_hi_z = @min(parent_z * fine_per_block + fine_per_block - 1, base[2] + ChunkSize - 1);
+        var filled = false;
+        var fine_x = fine_lo_x;
+        while (fine_x <= fine_hi_x) : (fine_x += 1) {
+            var fine_z = fine_lo_z;
+            while (fine_z <= fine_hi_z) : (fine_z += 1) {
+                if ((fine_x + fine_z) & 1 != 0) continue;
+                const blade: u32 = @bitCast(Noise.hash2D(0, @truncate(fine_x), @truncate(fine_z)));
+                const height: i64 = 1 + @as(i64, @intCast((blade >> 16) % half));
+                for (layers) |layer| {
+                    const h = if (layer.short) @max(@divFloor(height, 2), 1) else height;
+                    const layer_base = layer.y * fine_per_block;
+                    const lo = @max(layer_base, base[1]);
+                    const hi = @min(@min(layer_base + fine_per_block - 1, base[1] + ChunkSize - 1), layer_base + h - 1);
+                    if (hi < lo) continue;
+                    var fine_y = lo;
+                    while (fine_y <= hi) : (fine_y += 1) {
+                        detail_grid[@intCast(fine_x - base[0])][@intCast(fine_y - base[1])][@intCast(fine_z - base[2])] = .grass;
+                    }
+                    filled = true;
+                }
+            }
+        }
+        return filled;
+    }
+
     test "detail parent mapping matches renderer placement" {
-        const levels = [_]i32{ -1, -2, -3, -4 };
+        const levels = [_]i32{ -1, -2, -3, -4, -5, -6, -7, -8 };
         const positions = [_]i32{ -33, -3, -2, -1, 0, 1, 5, 100 };
         for (levels) |level| {
             const fine_per_block: i64 = @as(i64, 1) << @as(u6, @intCast(-level));
