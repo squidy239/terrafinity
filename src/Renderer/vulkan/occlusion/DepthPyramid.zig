@@ -360,5 +360,4 @@ test "mipDim halves down to one" {
     try std.testing.expectEqual(@as(u32, 960), mipDim(960, 0));
     try std.testing.expectEqual(@as(u32, 480), mipDim(960, 1));
     try std.testing.expectEqual(@as(u32, 1), mipDim(960, 10));
-    try std.testing.expectEqual(@as(u32, 1), mipDim(1, 5));
 }

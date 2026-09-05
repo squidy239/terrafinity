@@ -75,3 +75,9 @@ test "Block properties" {
     try testing.expect(!Block.fine_grass.isVisible());
     try testing.expect(!Block.fine_grass.isSolid());
 }
+
+test "water dense index matches shader" {
+    const testing = std.testing;
+    // vertexshader.vert hardcodes this dense index for waves; shifting water's tag value must fail here.
+    try testing.expectEqual(3, std.enums.EnumIndexer(Block).indexOf(.water));
+}

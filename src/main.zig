@@ -88,11 +88,11 @@ pub fn main(init: std.process.Init) !void {
     defer keymap.map.deinit();
 
     var single_press = Key.Singlepress.empty;
-    try keymap.setActionKey(io, .{ .key = .escape }, .escape_menu);
-    try keymap.setActionKey(io, .{ .key = .left_gui }, .escape_menu);
-    try keymap.setActionKey(io, .{ .key = .f11 }, .fullscreen);
-    try keymap.setActionKey(io, .{ .key = .f2 }, .screenshot);
-    try keymap.setActionKey(io, .{ .key = .f3 }, .debug_menu);
+    try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
+    try keymap.setActionKey(.{ .key = .left_gui }, .escape_menu);
+    try keymap.setActionKey(.{ .key = .f11 }, .fullscreen);
+    try keymap.setActionKey(.{ .key = .f2 }, .screenshot);
+    try keymap.setActionKey(.{ .key = .f3 }, .debug_menu);
     single_press.insert(.escape_menu);
     single_press.insert(.fullscreen);
     single_press.insert(.spawn_explosive);
@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = .f, .action = .use_item_tertiary },
         .{ .key = .t, .action = .spawn_explosive },
     }) |bind| {
-        try keymap.setActionKey(io, .{ .key = bind.key }, bind.action);
+        try keymap.setActionKey(.{ .key = bind.key }, bind.action);
     }
 
     var game: Game = undefined;
@@ -280,7 +280,6 @@ pub fn main(init: std.process.Init) !void {
 
             // Save screenshot
             if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
-                defer gpa.free(saved_path);
                 std.log.info("Screenshot saved: {s}", .{saved_path});
                 if (screenshot_after_should_exit and !screenshot_after_saved) {
                     screenshot_after_saved = true;
@@ -327,10 +326,6 @@ pub fn main(init: std.process.Init) !void {
     }
     window.disableRelativeMouse();
     vk_ctx.deviceWaitIdleLocked(io) catch {};
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }
 
 pub const Config = struct {
@@ -476,10 +471,10 @@ fn handleEvents(
     while (events.pop()) |event| {
         _ = try backend.addEvent(ui_window, event);
         switch (event) {
-            .button_press => |key| if (key_map.getAction(io, .{ .key = key })) |action| {
+            .button_press => |key| if (key_map.getAction(.{ .key = key })) |action| {
                 action_set.insert(action);
             },
-            .button_release => |key| if (key_map.getAction(io, .{ .key = key })) |action| {
+            .button_release => |key| if (key_map.getAction(.{ .key = key })) |action| {
                 action_set.remove(action);
             },
             .close => running.store(false, .unordered),

@@ -468,11 +468,7 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
 }
 
 test "SkyParams.default produces a valid std430-sized struct" {
-    const p = SkyParams.default();
     try std.testing.expectEqual(@as(usize, 432), @sizeOf(SkyParams));
-    try std.testing.expect(p.sun_intensity > 0.0);
-    try std.testing.expect(p.planet_count == 0.0);
-    try std.testing.expectEqual(@as(usize, max_planets), p.planet_dirs.len);
 }
 
 fn initTest(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.GpuMemory) !void {

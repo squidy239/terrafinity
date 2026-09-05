@@ -73,8 +73,6 @@ pub fn MultilinearInterpolator(
             break :blk s;
         };
 
-        const weights_0 = computeAxisWeights(Float, dims[0], samples[0]);
-
         /// Control-point grid: axis 0 along the SIMD lanes, the remaining axes
         /// flattened with axis 1 fastest-varying.
         cells: [rows]Row,
@@ -110,6 +108,24 @@ pub fn MultilinearInterpolator(
         }
 
         /// Sample at normalized coordinates in [0, 1]^N.
+        ///
+        /// Association note: this accumulates per-corner weights
+        /// (`w * w0 * corner`, the expanded `(1-f)*a + f*b` product form),
+        /// while `reduceLaneAxis`/`reduceAxis` evaluate the FMA-friendly
+        /// `a + f*(b-a)` lane form. The two are algebraically identical but
+        /// reassociated, so floating-point results can differ by a few ULPs;
+        /// the `sampleGrid` cross-check tests compare with an absolute
+        /// tolerance for exactly this reason. Neither form is bit-level
+        /// reference; do not tighten those tests to exact equality without
+        /// re-associating one path to match the other.
+        ///
+        /// Tolerances absorb the numeric gap, not exact-threshold branches:
+        /// an input landing exactly on a downstream comparison (blade
+        /// `scaled_f >= 1` in `fillBlades`, `slope <= 0` in
+        /// `bladeHeightScale`, cave `value < threshold` in
+        /// `carveCavesApply`, snow cover against `snow_line + gain * slope`
+        /// in `randGround`, all fed via `sampleGrid`) can flip sides versus
+        /// the pre-patch order.
         pub fn sample(self: *const Self, t: [N]Float) Float {
             const corners = 1 << N;
             var cell: [N]usize = undefined;
@@ -137,19 +153,30 @@ pub fn MultilinearInterpolator(
         }
 
         /// Reduce one control-point row along axis 0 into `samples[0]` lanes.
+        ///
+        /// Association note: evaluates `a + f*(b-a)` (FMA-friendly), reassociated
+        /// relative to `sample`'s corner-weight product form. The forms agree
+        /// algebraically and differ by a few ULPs in floating point, which the
+        /// `sampleGrid` cross-check tolerances absorb. Kept as-is deliberately:
+        /// re-associating to match `sample` bit-for-bit would cost the FMA.
         inline fn reduceLaneAxis(self: *const Self, row: usize) Lane {
             @setFloatMode(.optimized);
-            var acc: Lane = @splat(0);
+            const lerp = comptime computeAxisLerpData(Float, dims[0], samples[0]);
             const points = self.cells[row];
-            inline for (0..dims[0] - 1) |cell| {
-                acc += weights_0.lo[cell] * @as(Lane, @splat(points[cell]));
-                acc += weights_0.hi[cell] * @as(Lane, @splat(points[cell + 1]));
+            var acc: Lane = undefined;
+            inline for (0..samples[0]) |i| {
+                const c = lerp.cell[i];
+                const f = lerp.frac[i];
+                acc[i] = points[c] + f * (points[c + 1] - points[c]);
             }
             return acc;
         }
 
         /// Reduce `axis` (the innermost index of `in`) and recurse; the last
         /// axis writes straight into `out`, so it is fused with its parent.
+        ///
+        /// Same association as `reduceLaneAxis` (`a + f*(b-a)`); see `sample`
+        /// for why this differs by a few ULPs from the scalar product form.
         fn reduceAxis(
             comptime axis: usize,
             in: *const [gridCount(axis)]Lane,
@@ -196,36 +223,6 @@ pub fn MultilinearInterpolator(
             return result;
         }
     };
-}
-
-fn AxisWeights(comptime Float: type, comptime g: usize, comptime n: usize) type {
-    return struct {
-        lo: [g - 1]@Vector(n, Float),
-        hi: [g - 1]@Vector(n, Float),
-    };
-}
-
-/// For each grid cell, the lerp weights of the samples that land in it; all
-/// other lanes are zero. Sample `i` has coordinate `i / n` along the axis.
-fn computeAxisWeights(comptime Float: type, comptime g: usize, comptime n: usize) AxisWeights(Float, g, n) {
-    @setEvalBranchQuota(100_000);
-    var weights: AxisWeights(Float, g, n) = undefined;
-    inline for (0..g - 1) |cell| {
-        var lo: [n]Float = @splat(0);
-        var hi: [n]Float = @splat(0);
-        for (0..n) |i| {
-            const scaled = @as(Float, @floatFromInt(i * (g - 1))) / @as(Float, @floatFromInt(n));
-            const sample_cell: usize = @intFromFloat(scaled);
-            if (sample_cell == cell) {
-                const frac = scaled - @as(Float, @floatFromInt(sample_cell));
-                lo[i] = 1.0 - frac;
-                hi[i] = frac;
-            }
-        }
-        weights.lo[cell] = lo;
-        weights.hi[cell] = hi;
-    }
-    return weights;
 }
 
 fn AxisLerpData(comptime Float: type, comptime n: usize) type {
@@ -356,38 +353,24 @@ test "sample returns grid points exactly" {
 }
 
 test "sampleGrid matches scalar sample" {
-    const Grid = MultilinearInterpolator(f32, 3, .{ 8, 8, 8 }, .{ 16, 16, 16 });
-    const interp = Grid.init(randGrid(Grid.Grid));
-    const samples = interp.sampleGrid();
-    for (0..16) |y| {
-        for (0..16) |z| {
-            const row: [16]f32 = samples[y][z];
-            for (0..16) |x| {
-                const expected = interp.sample(.{
-                    @as(f32, @floatFromInt(x)) / 16.0,
-                    @as(f32, @floatFromInt(y)) / 16.0,
-                    @as(f32, @floatFromInt(z)) / 16.0,
-                });
-                try std.testing.expectApproxEqAbs(expected, row[x], 1e-4);
-            }
-        }
-    }
-}
-
-test "f64 asymmetric grid density matches scalar sample" {
-    const Grid = MultilinearInterpolator(f64, 3, .{ 8, 16, 8 }, .{ 16, 16, 16 });
-    const interp = Grid.init(randGrid(Grid.Grid));
-    const samples = interp.sampleGrid();
-    for (0..16) |y| {
-        for (0..16) |z| {
-            const row: [16]f64 = samples[y][z];
-            for (0..16) |x| {
-                const expected = interp.sample(.{
-                    @as(f64, @floatFromInt(x)) / 16.0,
-                    @as(f64, @floatFromInt(y)) / 16.0,
-                    @as(f64, @floatFromInt(z)) / 16.0,
-                });
-                try std.testing.expectApproxEqAbs(expected, row[x], 1e-12);
+    inline for (.{
+        .{ .Float = f32, .dims = [3]usize{ 8, 8, 8 }, .tol = 1e-4 },
+        .{ .Float = f64, .dims = [3]usize{ 8, 16, 8 }, .tol = 1e-12 },
+    }) |cfg| {
+        const Grid = MultilinearInterpolator(cfg.Float, 3, cfg.dims, .{ 16, 16, 16 });
+        const interp = Grid.init(randGrid(Grid.Grid));
+        const samples = interp.sampleGrid();
+        for (0..16) |y| {
+            for (0..16) |z| {
+                const row: [16]cfg.Float = samples[y][z];
+                for (0..16) |x| {
+                    const expected = interp.sample(.{
+                        @as(cfg.Float, @floatFromInt(x)) / 16.0,
+                        @as(cfg.Float, @floatFromInt(y)) / 16.0,
+                        @as(cfg.Float, @floatFromInt(z)) / 16.0,
+                    });
+                    try std.testing.expectApproxEqAbs(expected, row[x], cfg.tol);
+                }
             }
         }
     }
@@ -416,31 +399,5 @@ test "sampleGrid reproduces linear fields" {
                 try std.testing.expectApproxEqAbs(expected, row[x], 1e-3);
             }
         }
-    }
-}
-
-test "benchmark sampleGrid" {
-    const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;
-    const io = std.testing.io;
-
-    inline for (@as([2][4]usize, .{
-        .{ 4, 4, 32, 32 },
-        .{ 8, 8, 128, 128 },
-    })) |cfg| {
-        benchGrid(f32, 2, cfg[0..2].*, cfg[2..4].*, iterations, io);
-    }
-    inline for (@as([4][6]usize, .{
-        .{ 4, 4, 4, 32, 32, 32 },
-        .{ 8, 8, 8, 128, 128, 128 },
-        .{ 32, 32, 32, 32, 32, 32 },
-        .{ 8, 16, 8, 32, 32, 32 },
-    })) |cfg| {
-        benchGrid(f32, 3, cfg[0..3].*, cfg[3..6].*, iterations, io);
-    }
-    inline for (@as([2][8]usize, .{
-        .{ 4, 4, 4, 4, 32, 32, 32, 32 },
-        .{ 4, 4, 4, 4, 8, 8, 8, 8 },
-    })) |cfg| {
-        benchGrid(f32, 4, cfg[0..4].*, cfg[4..8].*, iterations, io);
     }
 }

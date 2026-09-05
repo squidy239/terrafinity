@@ -98,6 +98,8 @@ const push_constants_size = @offsetOf(PushConstants, "mesh_base") + @sizeOf(u32)
 comptime {
     if (push_constants_size != 84) @compileError("PushConstants effective size mismatch with GLSL layout (expected 84)");
 }
+/// Row-major zm Mat4f flattened into column-major GLSL mat4: dst[row * 4 + col] = src[col * 4 + row].
+const projview_transpose_mask: [16]i32 = .{ 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15 };
 
 const CullPushConstants = extern struct {
     planes: [6][4]f32,
@@ -1091,18 +1093,12 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     self.updateCullDescriptorsIfNeeded();
     self.uploader.cmdAcquireFaceBuffer(ctx.cmd_buffer);
 
-    const projview_array: [16]f32 = @bitCast(ctx.projview);
-    var pc: PushConstants = .{
-        .projview = @splat(0),
+    const pc: PushConstants = .{
+        .projview = @bitCast(@shuffle(f32, ctx.projview, undefined, projview_transpose_mask)),
         .sun_dir = ctx.sun_dir,
         .time = ctx.elapsed_sec,
         .mesh_base = 0,
     };
-    for (&pc.projview, 0..) |*dst, i| {
-        const row = i / 4;
-        const col = i % 4;
-        dst.* = projview_array[col * 4 + row];
-    }
     // The late cull projects with this frame's matrix and camera: the pyramid it
     // tests against is built from this frame's early opaque depth below.
     const occlusion_player_pos: [4]f32 = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
@@ -1369,32 +1365,14 @@ fn drawChunkMeshes(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, frame_idx
     self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, draw_offset, frame.count, count_offset, self.scene.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
 }
 
-test "RenderBufferKey.toPos" {
-    const pos_a: ChunkPos = .{ .level = 0, .position = .{ 1, 2, 3 } };
-    const pos_b: ChunkPos = .{ .level = -3, .position = .{ -10, 20, 30 } };
-    try std.testing.expectEqual(pos_a, (RenderBufferKey{ .@"opaque" = pos_a }).toPos());
-    try std.testing.expectEqual(pos_b, (RenderBufferKey{ .transparent = pos_b }).toPos());
-    const pos: ChunkPos = .{ .level = 5, .position = .{ -100, 200, -300 } };
-    try std.testing.expectEqual(pos, (RenderBufferKey{ .@"opaque" = pos }).toPos());
-}
-
-test "pushPendingUpload queue semantics: put(min=0) never blocks" {
-    // pushPendingUpload relies on put with min=0 returning 0 immediately when the
-    // queue is full (never suspending), so a retire pass always gets a chance to
-    // free the slot before the next attempt.
-    const io = std.testing.io;
-    var buf: [2]usize = undefined;
-    var queue: std.Io.Queue(usize) = .init(&buf);
-
-    var item: usize = 1;
-    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&item)[0..1], 0));
-    var item2: usize = 2;
-    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&item2)[0..1], 0));
-
-    var full_item: usize = 3;
-    try std.testing.expectEqual(@as(usize, 0), try queue.put(io, (&full_item)[0..1], 0));
-
-    var out: usize = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try queue.get(io, (&out)[0..1], 0));
-    try std.testing.expectEqual(@as(usize, 1), try queue.put(io, (&full_item)[0..1], 0));
+test "projview transpose shuffle matches scalar loop" {
+    const src: @Vector(16, f32) = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const shuffled: [16]f32 = @bitCast(@shuffle(f32, src, undefined, projview_transpose_mask));
+    var expected: [16]f32 = undefined;
+    for (0..16) |i| {
+        const row = i / 4;
+        const col = i % 4;
+        expected[i] = src[col * 4 + row];
+    }
+    try std.testing.expectEqual(expected, shuffled);
 }

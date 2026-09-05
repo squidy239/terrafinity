@@ -99,9 +99,19 @@ pub const Player = struct {
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
     pos: @Vector(3, f64),
+    /// Unit travel direction, fixed at spawn by `init` (zero stays zero).
+    /// Never re-normalized or mutated by `update`; only integrated into `pos`.
     dir: @Vector(3, f32),
     timestamp: i96,
     lock: std.Io.RwLock = .init,
+
+    pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp: i96) @This() {
+        const unit = if (std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 }))
+            dir
+        else
+            zm.Vec3f.norm(.{ .data = dir }).data;
+        return .{ .pos = pos, .dir = unit, .timestamp = timestamp };
+    }
 
     pub fn update(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool {
         const u = tracy.Zone.begin(.{ .src = @src(), .name = "updateExplosive" });
@@ -110,18 +120,15 @@ pub const Explosive = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
+        const len_sq = @reduce(.Add, self.dir * self.dir);
+        std.debug.assert(len_sq == 0 or std.math.approxEqAbs(f32, len_sq, 1, 1e-5));
 
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
         const dt = @as(f32, @floatFromInt(now_ns - self.timestamp)) * 1e-9;
         self.timestamp = now_ns;
 
-        if (!std.meta.eql(self.dir, @Vector(3, f32){ 0, 0, 0 })) {
-            self.dir = zm.Vec3f.norm(.{ .data = self.dir }).data;
-        }
         const move = self.dir * @as(@Vector(3, f32), @splat(10 * dt));
-        self.dir = move;
         self.pos += @as(@Vector(3, f64), @floatCast(move));
-
         var world_reader = World.Reader{ .world = world };
         defer world_reader.clear(io);
 

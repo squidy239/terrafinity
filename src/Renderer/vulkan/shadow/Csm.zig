@@ -712,12 +712,12 @@ test "refreshIntervals pinned endpoints, monotonic, lambda extremes" {
     try testing.expect(degenerate[0] >= 1);
 }
 
-test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvation" {
+test "nextRefreshSet budget, ramp, and due-gating" {
     const intervals: [max_cascades]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ .{0} ** 20;
     var last_refresh: [max_cascades]u32 = @splat(never_refreshed);
     var frame: u32 = 0;
 
-    // Initial ramp: the never-refreshed cascades fill the budget first (tie-break near).
+    // Phase 1 (budget/ramp): the never-refreshed cascades fill the budget first (tie-break near).
     const ramp = nextRefreshSet(4, 2, intervals, last_refresh, frame);
     var ramp_count: u32 = 0;
     for (ramp[0..4], last_refresh[0..4]) |picked, *lr| {
@@ -758,15 +758,12 @@ test "nextRefreshSet respects budget, ramps never-refreshed cascades, no starvat
     }
     for (refreshed[0..4]) |r| try testing.expect(r);
     try testing.expect(near_refreshes > 48); // near (interval 1) roughly every frame
-}
 
-test "nextRefreshSet gates on due, negative lateness never drawn" {
-    const intervals: [max_cascades]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
-    const last_refresh: [max_cascades]u32 = @splat(0);
-
-    // A huge budget must not pull in not-yet-due cascades: only cascade 0 (interval 1)
-    // is overdue at frame 5, so exactly one cascade is drawn.
-    var set = nextRefreshSet(4, 100, intervals, last_refresh, 5);
+    // Phase 2 (due-gating): a huge budget must not pull in not-yet-due
+    // cascades, and negative lateness never draws.
+    const gated_intervals: [max_cascades]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
+    const gated_last: [max_cascades]u32 = @splat(0);
+    var set = nextRefreshSet(4, 100, gated_intervals, gated_last, 5);
     try testing.expect(set[0]);
     try testing.expect(!set[1] and !set[2] and !set[3]);
     var count: u32 = 0;
@@ -775,7 +772,7 @@ test "nextRefreshSet gates on due, negative lateness never drawn" {
 
     // All cascades on a slow interval, none overdue: empty set so the pass is skipped.
     const slow_intervals: [max_cascades]u32 = .{ 100, 100, 100, 100 } ++ .{0} ** 28;
-    set = nextRefreshSet(4, 100, slow_intervals, last_refresh, 5);
+    set = nextRefreshSet(4, 100, slow_intervals, gated_last, 5);
     count = 0;
     for (set) |picked| count += @intFromBool(picked);
     try testing.expectEqual(@as(u32, 0), count);

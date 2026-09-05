@@ -97,6 +97,13 @@ pub const StagingRing = struct {
         return if (result) |pair| pair[0] else null;
     }
 
+    /// Offset of the oldest live entry from the mapping base. Non-empty only:
+    /// FIFO retirement guarantees entries[0] is the tail while any bytes are live.
+    fn tailOffset(self: *const StagingRing) vk.DeviceSize {
+        std.debug.assert(self.entries.items.len > 0);
+        return @intCast(@intFromPtr(self.entries.items[0].ptr) - @intFromPtr(self.mapping.ptr));
+    }
+
     /// Reserves slices for both sizes as one atomic operation: either every nonzero
     /// size gets a slice or the ring is left untouched and null is returned. A size
     /// of zero yields null in that slot. Allocating both at once removes the
@@ -114,8 +121,32 @@ pub const StagingRing = struct {
         // caller's retry loop; fail loudly instead.
         if (total > self.mapping.len) return error.StagingTooLarge;
 
-        const wraps = self.head + total > self.mapping.len;
-        if (wraps and self.entries.items.len > 0) return null;
+        var wraps = false;
+        if (self.entries.items.len > 0) {
+            const tail_offset = self.tailOffset();
+            std.debug.assert(tail_offset <= self.mapping.len);
+            // Ring occupancy truth table (FIFO: tail is entries[0], head is the bump cursor):
+            // | state                                 | live set              | free set                |
+            // | empty (no entries)                    | {}                    | [head, len)             |
+            // | contiguous (tail < head)              | [tail, head)          | [head, len) + [0, tail) |
+            // | split (head < tail)                   | [tail, len)+[0, head) | [head, tail)            |
+            // | degenerate full (head == tail, live)  | whole ring            | {} (zero gap)           |
+            // Equality MUST take the split branch: head == tail with live entries
+            // means full, so the gap is zero and any nonzero total returns null
+            // instead of wrapping to 0 and overwriting the tail mid-transfer.
+            if (self.head <= tail_offset) {
+                // Split (or degenerate full): live set is [tail,len)+[0,head); the prefix
+                // is occupied so only the [head,tail) gap is free. NEVER wrap here.
+                if (total > tail_offset - self.head) return null;
+            } else {
+                wraps = self.head + total > self.mapping.len;
+                if (wraps and total > tail_offset) return null;
+                // The wrap target [0, total) must stay inside the free prefix [0, tail).
+                if (wraps) std.debug.assert(total <= tail_offset);
+            }
+        } else {
+            wraps = self.head + total > self.mapping.len;
+        }
 
         var entry_count: usize = 0;
         for (sizes) |size| {
@@ -152,13 +183,13 @@ pub const StagingRing = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        while (self.entries.items.len > 0) {
-            const entry = self.entries.items[0];
-            const timeline_value = entry.timeline_value orelse break;
-            if (current_transfer_val < timeline_value) break;
-            _ = self.entries.orderedRemove(0);
+        var retire_count: usize = 0;
+        for (self.entries.items) |entry| {
+            if ((entry.timeline_value orelse break) > current_transfer_val) break;
+            retire_count += 1;
         }
-
+        if (retire_count > 0) std.mem.copyForwards(@TypeOf(self.entries.items[0]), self.entries.items[0 .. self.entries.items.len - retire_count], self.entries.items[retire_count..]);
+        self.entries.items.len -= retire_count;
         if (self.entries.items.len == 0) self.head = 0;
     }
 
@@ -1543,4 +1574,61 @@ test "orderedEncode/orderedDecode round-trip preserves float ordering" {
 
     try std.testing.expectEqual(aabb_min_inf_ord, orderedEncode(std.math.inf(f32)));
     try std.testing.expectEqual(aabb_max_inf_ord, orderedEncode(-std.math.inf(f32)));
+}
+
+test "StagingRing split gap boundary and degenerate full" {
+    const io = std.testing.io;
+    var ring = try StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
+    defer ring.deinit(std.testing.allocator);
+    ring.resolve(@enumFromInt(1));
+
+    const off = struct {
+        fn run(r: *const StagingRing, slice: []const u8) vk.DeviceSize {
+            return @intCast(@intFromPtr(slice.ptr) - @intFromPtr(r.mapping.ptr));
+        }
+    }.run;
+
+    const a = (try ring.alloc(io, 256)).?;
+    const b = (try ring.alloc(io, 256)).?;
+    const c = (try ring.alloc(io, 256)).?;
+    const d = (try ring.alloc(io, 256)).?;
+    try std.testing.expectEqual(@as(vk.DeviceSize, 0), off(&ring, a));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 256), off(&ring, b));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 512), off(&ring, c));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 768), off(&ring, d));
+    @memset(a, 0xaa);
+    @memset(b, 0xbb);
+    @memset(c, 0xcc);
+    @memset(d, 0xdd);
+
+    // Contiguous full: head ran to the end with tail at 0, so anything wraps past the tail.
+    try std.testing.expect((try ring.alloc(io, 1)) == null);
+
+    ring.bind(io, a, 1);
+    ring.bind(io, b, 1);
+    ring.retire(io, 1);
+
+    // Contiguous wrap refusal: 513 aligns to 768, which does not fit the [0, 512) prefix.
+    try std.testing.expect((try ring.alloc(io, 513)) == null);
+
+    // Contiguous wrap prefix fit: 256 fits the prefix and wraps to 0, leaving a split ring.
+    const e = (try ring.alloc(io, 256)).?;
+    try std.testing.expectEqual(@as(vk.DeviceSize, 0), off(&ring, e));
+    @memset(e, 0xee);
+
+    // Split gap is exactly [256, 512): 257 aligns to 512 and is refused ...
+    try std.testing.expect((try ring.alloc(io, 257)) == null);
+
+    // ... while 256 fits exactly and fills the ring to head == tail with live entries.
+    const f = (try ring.alloc(io, 256)).?;
+    try std.testing.expectEqual(@as(vk.DeviceSize, 256), off(&ring, f));
+    @memset(f, 0xff);
+
+    // Degenerate full: head == tail with live entries, so even 1 byte is refused.
+    // With head < tail misclassification this wraps to 512 and overwrites c.
+    try std.testing.expect((try ring.alloc(io, 1)) == null);
+    try std.testing.expect((try ring.allocPair(io, .{ 8, 8 })) == null);
+
+    // The wrap and gap fill only reused retired bytes; live slices are intact.
+    try std.testing.expect(c[0] == 0xcc and d[0] == 0xdd and e[0] == 0xee and f[0] == 0xff);
 }

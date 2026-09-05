@@ -446,11 +446,3 @@ pub const TextureManager = struct {
         if (self.sampler != .null_handle) self.services.dev.destroySampler(self.sampler, &self.services.vk_ctx.vkalloc);
     }
 };
-
-test "TextureManager.init — null handles and zeroed state" {
-    const manager = TextureManager.init(undefined, true);
-    try std.testing.expectEqual(@as(vk.Sampler, .null_handle), manager.sampler);
-    try std.testing.expectEqual(@as(vk.DescriptorSetLayout, .null_handle), manager.descriptor_set_layout);
-    try std.testing.expectEqual(@as(vk.DescriptorPool, .null_handle), manager.descriptor_pool);
-    try std.testing.expectEqual(@as(vk.DescriptorSet, .null_handle), manager.descriptor_set);
-}

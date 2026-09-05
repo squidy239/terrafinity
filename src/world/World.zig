@@ -24,22 +24,22 @@ pub const ChunkPos = struct {
     position: @Vector(3, i32),
 
     pub inline fn levelToBlockRatio(level: i32) i64 {
-        return std.math.powi(i64, scale_factor, level - chunk_level) catch |err| switch (err) {
-            error.Overflow => unreachable,
-            error.Underflow => 1,
-        };
+        const exp = level - chunk_level;
+        if (exp < 0) return 1;
+        if (exp >= 63) unreachable;
+        return @as(i64, 1) << @intCast(exp);
     }
 
     pub inline fn levelToBlockRatioFloat(level: i32) f32 {
-        return std.math.pow(f32, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
+        return @exp2(@as(f32, @floatFromInt(level - chunk_level)));
     }
 
     pub inline fn levelToBlockRatioF64(level: i32) f64 {
-        return std.math.pow(f64, @floatFromInt(scale_factor), @floatFromInt(level - chunk_level));
+        return @exp2(@as(f64, @floatFromInt(level - chunk_level)));
     }
 
     pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
-        return std.math.pow(f64, @floatFromInt(scale_factor), @floatFromInt(level1 - level2));
+        return @exp2(@as(f64, @floatFromInt(level1 - level2)));
     }
 
     pub inline fn toScale(level: i32) f32 {
@@ -417,7 +417,6 @@ pub const Editor = struct {
         pub const Sphere = @import("structures/Sphere.zig").Sphere;
     };
     pub const Tree = @import("structures/Tree.zig").Tree;
-    pub const TexturedSphere = @import("structures/TexturedSphere.zig");
 
     world: *World,
     temp_allocator: std.mem.Allocator,
@@ -910,74 +909,6 @@ test "ChunkPos" {
     const pos4 = ChunkPos{ .level = 0, .position = .{ 1, 1, 1 } };
     const pos5 = pos4.toLevel(-5);
     try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));
-}
-
-test "cube benchmark" {
-    const allocator = std.heap.smp_allocator;
-    const io = std.testing.io;
-
-    var generator = try DefaultGenerator.init(allocator, 1024 * 1024, .default);
-    errdefer generator.terrain_height_cache.deinit(allocator);
-    generator.params.setSeeds(io);
-
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        13104,
-        .{ .name = "benchmark chunk cache" },
-    );
-    errdefer {
-        var c = chunk_cache;
-        c.deinit(allocator);
-    }
-
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        816,
-        .{ .name = "benchmark grid cache" },
-    );
-    errdefer {
-        var g = grid_cache;
-        g.deinit(allocator);
-    }
-
-    var world: World = .{
-        .chunks = chunk_cache,
-        .grids = grid_cache,
-        .edit_callback = null,
-        .chunk_sources = .{ generator.getSource(), null, null, null },
-        .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
-    };
-    defer world.deinit(io, allocator);
-
-    var counter: std.atomic.Value(usize) = .init(0);
-    const start_time: std.Io.Timestamp = .now(io, .awake);
-    const levels: [2]i32 = .{ 0, 1 };
-    const square = 2;
-
-    var group: std.Io.Group = .init;
-    var level: i32 = levels[0];
-    while (level < levels[1]) : (level += 1) {
-        for (0..square) |x| {
-            for (0..square) |y| {
-                for (0..square) |z| {
-                    const pos = ChunkPos{
-                        .position = .{
-                            @as(i32, @intCast(x)) - square / 2,
-                            @as(i32, @intCast(y)) - square / 2,
-                            @as(i32, @intCast(z)) - square / 2,
-                        },
-                        .level = @intCast(level),
-                    };
-                    group.async(io, loadChunkTest, .{ &world, io, allocator, pos, true, &counter });
-                }
-            }
-        }
-    }
-    try group.await(io);
-
-    std.testing.log_level = .debug;
-    const elapsed_s = @as(f32, @floatFromInt(start_time.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s;
-    std.log.info("loaded at {d} chunks per second\n", .{@as(f32, @floatFromInt(counter.load(.seq_cst))) / elapsed_s});
 }
 
 fn loadChunkTest(

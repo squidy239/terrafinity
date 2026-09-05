@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="204" font-family="monospace">
+<text x="10" y="20" font-size="14">LOC flame graph — non-blank lines, total 28228 (77 files)</text>
+<style>rect:hover{stroke:#000;stroke-width:1.5}</style>
+<rect x="10.0" y="40" width="1580.0" height="22" fill="#dddddd" fill-opacity="0.85"><title>all — 28228 lines (100.0%)</title></rect>
+<text x="14.0" y="56" font-size="12">all 28228</text>
+<rect x="10.0" y="64" width="1551.8" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src — 27725 lines (98.2%)</title></rect>
+<text x="14.0" y="80" font-size="12">src 27725</text>
+<rect x="10.0" y="88" width="498.2" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/world — 8901 lines (31.5%)</title></rect>
+<text x="14.0" y="104" font-size="12">world 8901</text>
+<rect x="10.0" y="112" width="347.8" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/world/generators — 6214 lines (22.0%)</title></rect>
+<text x="14.0" y="128" font-size="12">generators 6214</text>
+<rect x="10.0" y="136" width="111.9" height="22" fill="#e9c46a" fill-opacity="0.85"><title>all/src/world/generators/Terrain.zig — 1999 lines (7.1%)</title></rect>
+<text x="14.0" y="152" font-size="12">Terrain.zig 1999</text>
+<rect x="121.9" y="136" width="111.1" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/world/generators/TerrainOldRef.zig — 1985 lines (7.0%)</title></rect>
+<text x="125.9" y="152" font-size="12">TerrainOldRef.zig 1985</text>
+<rect x="233.0" y="136" width="33.3" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/generators/generator_api.zig — 595 lines (2.1%)</title></rect>
+<rect x="266.3" y="136" width="30.5" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/world/generators/Planet.zig — 545 lines (1.9%)</title></rect>
+<rect x="296.8" y="136" width="23.4" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/world/generators/Voxelgame.zig — 418 lines (1.5%)</title></rect>
+<rect x="320.2" y="136" width="12.3" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/world/generators/Geodes.zig — 220 lines (0.8%)</title></rect>
+<rect x="332.5" y="136" width="8.5" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/world/generators/Sponge.zig — 151 lines (0.5%)</title></rect>
+<rect x="341.0" y="136" width="7.4" height="22" fill="#219ebc" fill-opacity="0.85"><title>all/src/world/generators/Fractal.zig — 133 lines (0.5%)</title></rect>
+<rect x="348.4" y="136" width="7.3" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/world/generators/Gyroid.zig — 131 lines (0.5%)</title></rect>
+<rect x="355.7" y="136" width="2.1" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/generators/Fuzz.zig — 37 lines (0.1%)</title></rect>
+<rect x="357.8" y="112" width="49.9" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/world/World.zig — 892 lines (3.2%)</title></rect>
+<rect x="407.7" y="112" width="29.3" height="22" fill="#577590" fill-opacity="0.85"><title>all/src/world/structures — 524 lines (1.9%)</title></rect>
+<rect x="407.7" y="136" width="9.2" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/structures/Tree.zig — 165 lines (0.6%)</title></rect>
+<rect x="417.0" y="136" width="9.2" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/world/structures/Trees — 165 lines (0.6%)</title></rect>
+<rect x="417.0" y="160" width="5.0" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/world/structures/Trees/huge.zon — 90 lines (0.3%)</title></rect>
+<rect x="422.0" y="160" width="4.2" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/structures/Trees/small.zon — 75 lines (0.3%)</title></rect>
+<rect x="426.2" y="136" width="3.4" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/world/structures/Cone.zig — 61 lines (0.2%)</title></rect>
+<rect x="429.6" y="136" width="2.3" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/structures/JitteredGrid.zig — 41 lines (0.1%)</title></rect>
+<rect x="431.9" y="136" width="2.2" height="22" fill="#577590" fill-opacity="0.85"><title>all/src/world/structures/TexturedSphere.zig — 39 lines (0.1%)</title></rect>
+<rect x="434.1" y="136" width="2.0" height="22" fill="#e9c46a" fill-opacity="0.85"><title>all/src/world/structures/Sphere.zig — 36 lines (0.1%)</title></rect>
+<rect x="436.1" y="136" width="1.0" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/world/structures/utils.zig — 17 lines (0.1%)</title></rect>
+<rect x="437.1" y="112" width="20.4" height="22" fill="#577590" fill-opacity="0.85"><title>all/src/world/Interpolation.zig — 364 lines (1.3%)</title></rect>
+<rect x="457.4" y="112" width="18.6" height="22" fill="#577590" fill-opacity="0.85"><title>all/src/world/Chunk.zig — 332 lines (1.2%)</title></rect>
+<rect x="476.0" y="112" width="11.6" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/world/WorldStorage.zig — 207 lines (0.7%)</title></rect>
+<rect x="487.6" y="112" width="8.5" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/world/generator_loader.zig — 152 lines (0.5%)</title></rect>
+<rect x="496.1" y="112" width="8.1" height="22" fill="#95d5b2" fill-opacity="0.85"><title>all/src/world/BufferFirstAllocator.zig — 145 lines (0.5%)</title></rect>
+<rect x="504.2" y="112" width="4.0" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/world/Block.zig — 71 lines (0.3%)</title></rect>
+<rect x="508.2" y="88" width="485.8" height="22" fill="#95d5b2" fill-opacity="0.85"><title>all/src/Renderer — 8679 lines (30.7%)</title></rect>
+<text x="512.2" y="104" font-size="12">Renderer 8679</text>
+<rect x="508.2" y="112" width="461.6" height="22" fill="#219ebc" fill-opacity="0.85"><title>all/src/Renderer/vulkan — 8246 lines (29.2%)</title></rect>
+<text x="512.2" y="128" font-size="12">vulkan 8246</text>
+<rect x="508.2" y="136" width="122.1" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer — 2181 lines (7.7%)</title></rect>
+<text x="512.2" y="152" font-size="12">chunk_renderer 2181</text>
+<rect x="508.2" y="160" width="67.8" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/ChunkRenderer.zig — 1212 lines (4.3%)</title></rect>
+<text x="512.2" y="176" font-size="12">ChunkRenderer.zig 1212</text>
+<rect x="576.1" y="160" width="21.4" height="22" fill="#219ebc" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/textures.zig — 382 lines (1.4%)</title></rect>
+<rect x="597.4" y="160" width="10.9" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/cull.comp — 195 lines (0.7%)</title></rect>
+<rect x="608.3" y="160" width="7.3" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/BlockMaterials.zig — 130 lines (0.5%)</title></rect>
+<rect x="615.6" y="160" width="6.5" height="22" fill="#219ebc" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/transparent_frag.frag — 116 lines (0.4%)</title></rect>
+<rect x="622.1" y="160" width="5.0" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/vertexshader.vert — 89 lines (0.3%)</title></rect>
+<rect x="627.1" y="160" width="3.2" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/chunk_renderer/fragshader.frag — 57 lines (0.2%)</title></rect>
+<rect x="630.3" y="136" width="93.8" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow — 1676 lines (5.9%)</title></rect>
+<text x="634.3" y="152" font-size="12">shadow 1676</text>
+<rect x="630.3" y="160" width="41.1" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow/ShadowRenderer.zig — 734 lines (2.6%)</title></rect>
+<rect x="671.4" y="160" width="40.5" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow/Csm.zig — 724 lines (2.6%)</title></rect>
+<rect x="711.9" y="160" width="7.4" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow/shadow.glsl — 133 lines (0.5%)</title></rect>
+<rect x="719.3" y="160" width="2.6" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow/shadow.vert — 47 lines (0.2%)</title></rect>
+<rect x="722.0" y="160" width="2.1" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/shadow/face_decode.glsl — 38 lines (0.1%)</title></rect>
+<rect x="724.1" y="136" width="77.7" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/gpu.zig — 1388 lines (4.9%)</title></rect>
+<text x="728.1" y="152" font-size="12">gpu.zig 1388</text>
+<rect x="801.8" y="136" width="56.5" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/core.zig — 1009 lines (3.6%)</title></rect>
+<rect x="858.3" y="136" width="36.3" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/Renderer/vulkan/sky — 649 lines (2.3%)</title></rect>
+<rect x="858.3" y="160" width="28.5" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/Renderer/vulkan/sky/SkyRenderer.zig — 509 lines (1.8%)</title></rect>
+<rect x="886.8" y="160" width="7.5" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/sky/sky.frag — 134 lines (0.5%)</title></rect>
+<rect x="894.6" y="136" width="26.6" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/VulkanRenderer.zig — 475 lines (1.7%)</title></rect>
+<rect x="921.2" y="136" width="22.4" height="22" fill="#95d5b2" fill-opacity="0.85"><title>all/src/Renderer/vulkan/occlusion — 401 lines (1.4%)</title></rect>
+<rect x="921.2" y="160" width="17.7" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/Renderer/vulkan/occlusion/DepthPyramid.zig — 316 lines (1.1%)</title></rect>
+<rect x="938.9" y="160" width="3.3" height="22" fill="#577590" fill-opacity="0.85"><title>all/src/Renderer/vulkan/occlusion/occlusion.glsl — 59 lines (0.2%)</title></rect>
+<rect x="942.2" y="160" width="1.5" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/Renderer/vulkan/occlusion/depth_pyramid.comp — 26 lines (0.1%)</title></rect>
+<rect x="943.6" y="136" width="11.1" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/Renderer/vulkan/tracy_gpu.zig — 198 lines (0.7%)</title></rect>
+<rect x="954.7" y="136" width="10.2" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/Renderer/vulkan/OitCompositor.zig — 183 lines (0.6%)</title></rect>
+<rect x="965.0" y="136" width="2.4" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer/vulkan/Frustum.zig — 43 lines (0.2%)</title></rect>
+<rect x="967.4" y="136" width="2.1" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/Renderer/vulkan/composite_frag.frag — 37 lines (0.1%)</title></rect>
+<rect x="969.8" y="112" width="24.2" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/Renderer/Mesher.zig — 433 lines (1.5%)</title></rect>
+<rect x="994.0" y="88" width="245.9" height="22" fill="#95d5b2" fill-opacity="0.85"><title>all/src/libs — 4393 lines (15.6%)</title></rect>
+<text x="998.0" y="104" font-size="12">libs 4393</text>
+<rect x="994.0" y="112" width="154.9" height="22" fill="#e9c46a" fill-opacity="0.85"><title>all/src/libs/fastnoise.zig — 2768 lines (9.8%)</title></rect>
+<text x="998.0" y="128" font-size="12">fastnoise.zig 2768</text>
+<rect x="1148.9" y="112" width="38.2" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/libs/SetAssociativeCache.zig — 683 lines (2.4%)</title></rect>
+<rect x="1187.2" y="112" width="20.7" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/libs/erosion.zig — 369 lines (1.3%)</title></rect>
+<rect x="1207.8" y="112" width="13.8" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/libs/ConcurrentHashMap.zig — 247 lines (0.9%)</title></rect>
+<rect x="1221.6" y="112" width="11.7" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/libs/phacelle.zig — 209 lines (0.7%)</title></rect>
+<rect x="1233.3" y="112" width="5.8" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/libs/Cache.zig — 104 lines (0.4%)</title></rect>
+<rect x="1239.2" y="112" width="0.7" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/libs/utils.zig — 13 lines (0.0%)</title></rect>
+<rect x="1239.9" y="88" width="72.8" height="22" fill="#e76f51" fill-opacity="0.85"><title>all/src/VulkanContext.zig — 1301 lines (4.6%)</title></rect>
+<text x="1243.9" y="104" font-size="12">VulkanContext.zig 1301</text>
+<rect x="1312.7" y="88" width="70.0" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/Ui.zig — 1251 lines (4.4%)</title></rect>
+<text x="1316.7" y="104" font-size="12">Ui.zig 1251</text>
+<rect x="1382.7" y="88" width="63.4" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Game.zig — 1132 lines (4.0%)</title></rect>
+<text x="1386.7" y="104" font-size="12">Game.zig 1132</text>
+<rect x="1446.1" y="88" width="53.0" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/src/entity — 946 lines (3.4%)</title></rect>
+<rect x="1446.1" y="112" width="22.8" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/entity/EntityRegistry.zig — 407 lines (1.4%)</title></rect>
+<rect x="1468.9" y="112" width="16.1" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/entity/Physics.zig — 288 lines (1.0%)</title></rect>
+<rect x="1485.0" y="112" width="8.1" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/entity/EntityTypes.zig — 145 lines (0.5%)</title></rect>
+<rect x="1493.1" y="112" width="3.1" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/entity/Item.zig — 56 lines (0.2%)</title></rect>
+<rect x="1496.2" y="112" width="2.8" height="22" fill="#f4a261" fill-opacity="0.85"><title>all/src/entity/Entity.zig — 50 lines (0.2%)</title></rect>
+<rect x="1499.0" y="88" width="26.7" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/dvui_backend_wio.zig — 477 lines (1.7%)</title></rect>
+<rect x="1525.7" y="88" width="25.1" height="22" fill="#2a9d8f" fill-opacity="0.85"><title>all/src/main.zig — 448 lines (1.6%)</title></rect>
+<rect x="1550.8" y="88" width="5.2" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Renderer.zig — 93 lines (0.3%)</title></rect>
+<rect x="1556.0" y="88" width="3.0" height="22" fill="#ff70a6" fill-opacity="0.85"><title>all/src/Key.zig — 53 lines (0.2%)</title></rect>
+<rect x="1559.0" y="88" width="1.7" height="22" fill="#9d4edd" fill-opacity="0.85"><title>all/src/Screenshot.zig — 31 lines (0.1%)</title></rect>
+<rect x="1560.7" y="88" width="0.9" height="22" fill="#e9c46a" fill-opacity="0.85"><title>all/src/generator_root.zig — 16 lines (0.1%)</title></rect>
+<rect x="1561.8" y="64" width="15.6" height="22" fill="#70d6ff" fill-opacity="0.85"><title>all/build.zig — 278 lines (1.0%)</title></rect>
+<rect x="1577.4" y="64" width="9.5" height="22" fill="#95d5b2" fill-opacity="0.85"><title>all/Config.zon — 170 lines (0.6%)</title></rect>
+<rect x="1586.9" y="64" width="3.1" height="22" fill="#219ebc" fill-opacity="0.85"><title>all/build.zig.zon — 55 lines (0.2%)</title></rect>
+</svg>

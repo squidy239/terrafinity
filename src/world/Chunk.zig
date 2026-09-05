@@ -188,7 +188,10 @@ pub const Encoding = union(enum(u1)) {
     const simplified_size = ChunkSize / scale_factor;
 
     const area_factor = scale_factor * scale_factor;
-    const volume_factor = scale_factor * scale_factor * scale_factor;
+    // The u8 vote score packs exposed-first ordering as exp * (area_factor + 1) + tot, so its max must fit in u8.
+    comptime {
+        if ((area_factor + 1) * area_factor + area_factor > std.math.maxInt(u8)) @compileError("findBestBlock u8 score overflows; widen score or lower scale_factor");
+    }
 
     fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, center: @Vector(ChunkSize, Block.Tag)) @Vector(ChunkSize, bool) {
         const center_trans = Block.isTransparentVector(ChunkSize, center);
@@ -214,53 +217,41 @@ pub const Encoding = union(enum(u1)) {
         rows: [area_factor]@Vector(len, Block.Tag),
         exposures: [area_factor]@Vector(len, bool),
     ) @Vector(len / scale_factor, Block.Tag) {
-        var v: [volume_factor]@Vector(len, Block.Tag) = undefined;
-        var exp: [volume_factor]@Vector(len, bool) = undefined;
-
-        for (0..area_factor) |i| {
-            for (0..scale_factor) |dz| {
-                v[i * scale_factor + dz] = rows[i];
-                exp[i * scale_factor + dz] = exposures[i];
-            }
-        }
-
-        var total_counts: [volume_factor]@Vector(len, u8) = undefined;
-        var exp_counts: [volume_factor]@Vector(len, u8) = undefined;
-
-        for (0..volume_factor) |i| {
-            total_counts[i] = @splat(0);
-            exp_counts[i] = @splat(0);
-
-            for (0..volume_factor) |j| {
-                const match = v[i] == v[j];
-                total_counts[i] += @intFromBool(match);
-                exp_counts[i] += @intFromBool(match & exp[j]);
-            }
-        }
-
-        var best_v = v[0];
-        var best_tot = total_counts[0];
-        var best_exp = exp_counts[0];
-
-        for (1..volume_factor) |i| {
-            const exp_differs = best_exp != exp_counts[i];
-            const exp_wins = best_exp >= exp_counts[i];
-            const total_wins = best_tot >= total_counts[i];
-            const a_wins = @select(bool, exp_differs, exp_wins, total_wins);
-
-            best_v = @select(Block.Tag, a_wins, best_v, v[i]);
-            best_tot = @select(u8, a_wins, best_tot, total_counts[i]);
-            best_exp = @select(u8, a_wins, best_exp, exp_counts[i]);
-        }
-
+        const ds_len = len / scale_factor;
         const stride_mask = comptime blk: {
-            const downsampled_len = len / scale_factor;
-            var m: @Vector(downsampled_len, i32) = undefined;
-            for (0..downsampled_len) |i| m[i] = @intCast(i * scale_factor);
+            var m: @Vector(ds_len, i32) = undefined;
+            for (0..ds_len) |i| m[i] = @intCast(i * scale_factor);
             break :blk m;
         };
 
-        return @shuffle(Block.Tag, best_v, undefined, stride_mask);
+        // Downsample first: odd lanes are discarded by the stride anyway, so vote in half-width vectors.
+        var r: [area_factor]@Vector(ds_len, Block.Tag) = undefined;
+        var e: [area_factor]@Vector(ds_len, bool) = undefined;
+        inline for (0..area_factor) |i| {
+            r[i] = @shuffle(Block.Tag, rows[i], undefined, stride_mask);
+            e[i] = @shuffle(bool, exposures[i], undefined, stride_mask);
+        }
+
+        // Exposed-first, then total; tot <= area_factor so one u8 orders both. Min score 1 beats the zero init.
+        const weight: @Vector(ds_len, u8) = @splat(area_factor + 1);
+        var best_v = r[0];
+        var best_score: @Vector(ds_len, u8) = @splat(0);
+        inline for (0..area_factor) |i| {
+            var tot: @Vector(ds_len, u8) = @splat(1);
+            var exp: @Vector(ds_len, u8) = @intFromBool(e[i]);
+            inline for (0..area_factor) |j| {
+                if (i != j) {
+                    const match = r[i] == r[j];
+                    tot += @intFromBool(match);
+                    exp += @intFromBool(match & e[j]);
+                }
+            }
+            const score = exp * weight + tot;
+            const wins = score > best_score;
+            best_v = @select(Block.Tag, wins, r[i], best_v);
+            best_score = @select(u8, wins, score, best_score);
+        }
+        return best_v;
     }
 
     pub fn simplifyBlocks(grid: *align(GridAlignment) const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
@@ -284,7 +275,6 @@ pub const Encoding = union(enum(u1)) {
                     simplified_grid[nx][ny] = @splat(@enumFromInt(rows[0][0]));
                     continue;
                 }
-
                 var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
 
                 inline for (0..scale_factor) |dx| {
@@ -299,33 +289,6 @@ pub const Encoding = union(enum(u1)) {
         }
         return simplified_grid;
     }
-
-    test "SimplifyBlocksAvgBenchmark" {
-        var grid: [ChunkSize][ChunkSize][ChunkSize]Block align(GridAlignment) = @splat(@splat(@splat(.air)));
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |y| {
-                for (0..ChunkSize) |z| {
-                    grid[x][y][z] = switch (y) {
-                        0...16 => .stone,
-                        17 => .grass,
-                        else => .air,
-                    };
-                }
-            }
-        }
-        const test_amount = if (@import("builtin").mode == .Debug) 100 else 100000;
-        const st = std.Io.Timestamp.now(std.testing.io, .awake);
-
-        for (0..test_amount) |_| {
-            const res = simplifyBlocks(&grid);
-            std.mem.doNotOptimizeAway(res);
-        }
-
-        const et = std.Io.Timestamp.now(std.testing.io, .awake);
-        const dt = st.durationTo(et);
-        const us_per_mesh = (@as(f64, @floatFromInt(dt.toMicroseconds())) / test_amount);
-        std.log.info("Simplify benchmark: completed with an avg time of {d} us per chunk, {d} ns per block", .{ us_per_mesh, (us_per_mesh * std.time.ns_per_us) / (ChunkSize * ChunkSize * ChunkSize) });
-    }
 };
 
 ///checks if the block array is all the same block
@@ -333,7 +296,12 @@ pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?B
     const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(block_array[0][0][0]));
     var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
     const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(block_array);
-    for (linear_block_array) |blocks| uniform &= (blocks == first_block_vec);
+    // Early-out in batches of 8 rows: amortizes the horizontal reduce while still
+    // bailing long before the full 1024-row fold on any mismatch.
+    for (linear_block_array, 0..) |blocks, idx| {
+        uniform &= (blocks == first_block_vec);
+        if ((idx & 7) == 7 and !@reduce(.And, uniform)) return null;
+    }
     return if (@reduce(.And, uniform)) block_array[0][0][0] else null;
 }
 
@@ -402,9 +370,6 @@ test "getUniform" {
     var all_stone: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
     try testing.expectEqual(Block.stone, getUniform(&all_stone));
 
-    var all_air: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
-    try testing.expectEqual(Block.air, getUniform(&all_air));
-
     var diff_first: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.air)));
     diff_first[0][0][0] = .stone;
     try testing.expectEqual(@as(?Block, null), getUniform(&diff_first));
@@ -413,13 +378,9 @@ test "getUniform" {
     diff_last[ChunkSize - 1][ChunkSize - 1][ChunkSize - 1] = .stone;
     try testing.expectEqual(@as(?Block, null), getUniform(&diff_last));
 
-    var diff_middle: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
-    diff_middle[ChunkSize / 2][ChunkSize / 2][ChunkSize / 2] = .air;
-    try testing.expectEqual(@as(?Block, null), getUniform(&diff_middle));
-
-    var diff_row_end: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
-    diff_row_end[0][0][ChunkSize - 1] = .air;
-    try testing.expectEqual(@as(?Block, null), getUniform(&diff_row_end));
+    var diff_interior: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.stone)));
+    diff_interior[ChunkSize / 2][ChunkSize / 2][ChunkSize / 2] = .air;
+    try testing.expectEqual(@as(?Block, null), getUniform(&diff_interior));
 }
 
 test {

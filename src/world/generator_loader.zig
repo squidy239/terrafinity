@@ -111,7 +111,9 @@ pub const Registry = struct {
 
         var it = dir_handle.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind != .file) continue;
+            // Linux-only: generators are .generator shared libraries; skip anything
+            // else (configs, READMEs) so a stray file doesn't spam load errors.
+            if (!std.mem.endsWith(u8, entry.name, ".generator")) continue;
             const path = try std.fs.path.join(allocator, &.{ dir, entry.name });
             defer allocator.free(path);
             registry.loadGenerator(io, path) catch |err|

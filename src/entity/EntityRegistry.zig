@@ -95,6 +95,9 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
     const shard, const lock = self.map.getShardAndLock(entity.uuid);
     var skips: usize = 0;
     while (true) {
+        // Deliberately flat: Zig runs while-body defers on `continue`, so
+        // this unlock still runs on the skip_victim `continue` below. Do
+        // not wrap the body in an extra block scope to "fix" it.
         try lock.lock(io);
         defer lock.unlock(io);
 
@@ -107,6 +110,7 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
                 shard.skip_victim(entity.uuid);
                 continue;
             }
+            // Runs under the shard lock; see unloadEntity's no-reentry contract.
             unloadEntity(io, allocator, world, victim.*);
             victim.* = undefined;
         }
@@ -116,6 +120,14 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
     }
 }
 
+/// Unloads one evicted entity while its shard lock is held (see insert).
+/// This runs arbitrary vtable/allocator/world I/O under the lock, so unload
+/// implementations MUST NOT reenter this registry (spawn, getAndAddRef,
+/// markDeleted, update, deinit): reentry self-deadlocks on the held shard
+/// lock, or inverts the queue_mutex -> shard lock order and deadlocks
+/// against a concurrent spawn/update. Kept under the lock because handing
+/// the victim slot off across an unlock is not race-free: another thread
+/// could pin or replace the victim before it is overwritten.
 fn unloadEntity(io: std.Io, allocator: std.mem.Allocator, world: *World, entity: Entity) void {
     const save = !entity.deleted.load(.seq_cst);
     entity.vtable.unload(entity.ptr, io, world, entity.uuid, allocator, save) catch |err|

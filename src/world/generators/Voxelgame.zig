@@ -268,17 +268,17 @@ pub const Generator = struct {
         x: usize,
         z: usize,
         layer_y_i: i32,
-        width: i8,
+        width: i16,
         round: bool,
     ) void {
         if (layer_y_i < 0 or layer_y_i >= ChunkSize) return;
         const layer_y: usize = @intCast(layer_y_i);
 
-        var dx: i8 = -width;
+        var dx: i16 = -width;
         while (dx <= width) : (dx += 1) {
-            var dz: i8 = -width;
+            var dz: i16 = -width;
             while (dz <= width) : (dz += 1) {
-                if (round and dx *| dx +| dz * dz > width * width) continue;
+                if (round and dx * dx + dz * dz > width * width) continue;
                 const leaf_x = @as(i32, @intCast(x)) + dx;
                 const leaf_z = @as(i32, @intCast(z)) + dz;
                 if (leaf_x >= 0 and leaf_x < ChunkSize and leaf_z >= 0 and leaf_z < ChunkSize) {
@@ -319,7 +319,6 @@ pub const Generator = struct {
             for (0..ChunkSize) |zz| {
                 const global_z = (chunk_offset_z + @as(f32, @floatFromInt(zz))) * level_scale;
 
-                _ = self.params.terrain_noise;
                 const noise = self.params.terrain_noise2.genNoise2D(global_x * self.params.scale, global_z * self.params.scale);
 
                 // Calculate the true physical world height

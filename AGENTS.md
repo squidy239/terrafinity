@@ -9,42 +9,32 @@ Use these full commands without modification after each change and ensure the pl
 - run and open to a game: `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
 - format code: `zig fmt .`
 
-Important:
 Do not git stash or commit, it can mess up git history.
 
-# Codebase Naming Conventions & Guidelines
+## Running tests
 
-This document outlines the strict naming conventions and core principles for this project. To maintain a clean, predictable, and highly readable codebase, we follow a precise set of rules primarily inspired by Zig's ecosystem.
+- `zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.
+- `-Dtest_filter` only sees tests from files reachable in the module import graph. A new `.zig` file with tests is invisible until something reachable from `main.zig` references it (e.g. `pub const Csm = @import(...)` in Renderer.zig, or a field type like `shadow: Csm.ShadowConfig` in RenderOptions forces its analysis).
+- Due to a zig issue `zig test` always seems to output exit code 1, you can ignore it unless it says which test failed.
+- glslc `#include` dependencies must be registered as build inputs: glslc resolves `#include "shadow.glsl"` internally, but the Zig build graph only knows inputs declared with `addFileArg`/`addFileInput`. An unregistered include does NOT invalidate the glslc cache, so the SPIR-V goes stale while Zig source (e.g. `ShadowParams` layout) recompiles — a silent layout mismatch (no shadows). Symptom: the `.spv` mtime predates your edit and `spirv-dis` shows old member offsets. Fix: `frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));` plus `frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));` (`addFileInput` tracks without appending to argv). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` against the Zig `@offsetOf` asserts.
 
-When in doubt, rely on the core philosophy: **Meaning dictates casing.**
+## Verify before writing
 
----
+When a scout or audit proposes a change, independently verify its claim before implementing it: grep callers including vendored deps, check framework dispatch and call order, prove ordering or equivalence, or write a ~10-line scratch test on this toolchain. A claim without its check goes back.
 
-## Core Philosophy: Simplicity & Self-Documenting Code
+## Adding to this file
 
-- **Code must be self-documenting:** The structure, variable names, and logic should clearly communicate intent without relying on external explanations.
-- **Prioritize elegance:** Code should be as simple and elegant as possible. Avoid clever tricks in favor of readable, straightforward implementations.
+Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Keep it tight: state the rule once, compress instances, drop anything that restates a rule already written.
 
----
+# Naming, Style & Code Quality
+
+Core philosophy: **meaning dictates casing**. Code must be self-documenting and elegant — structure, names, and logic communicate intent without external explanation.
 
 ## Comments
 
-Comments must be simple and unobtrusive. They exist to clarify, not to decorate.
-
-- **When to comment:** Use comments sparingly. They are appropriate for explaining _why_ behind a non-obvious decision, flagging `TODO` items, or documenting a genuinely confusing piece of logic that cannot be clarified through renaming or restructuring.
-- **Never use decorative characters:** No ASCII art, no dashes or equals signs used as separators, no box-drawing, no banner comments. A comment is plain text.
-- **Keep them simple:** One or two plain English sentences. If you need a paragraph, the code is too complex.
-- **Doc comments (`///`):** Doc comments are the exception — they are expected on public declarations. They must still follow the same style rules: no decorative characters, no banners, plain and direct.
+Comments must be simple and unobtrusive. Use them sparingly: the _why_ behind a non-obvious decision, `TODO` items, or logic that cannot be clarified by renaming. Never decorative characters, ASCII art, or banner separators. One or two plain sentences; a paragraph means the code is too complex. Doc comments (`///`) are expected on public declarations, same plain style.
 
 ```zig
-// ✗ WRONG — decorative cruft
-// ==========================================
-// INITIALIZATION PHASE
-// ==========================================
-
-// ✗ WRONG — ASCII art
-// /\_/\  meow
-
 // ✗ WRONG — stating the obvious
 // increment i by 1
 i += 1;
@@ -52,18 +42,9 @@ i += 1;
 // ✓ CORRECT — explains why
 // The order matters here: upstream expects sorted keys.
 std.sort.insertion(Key, keys, {}, Key.lessThan);
-
-// ✓ CORRECT — TODO marker
-// TODO: replace with arena allocation once the allocator is threaded through.
-
-// ✓ CORRECT — doc comment on a public declaration
-/// Returns the number of active connections, or 0 if the pool is uninitialized.
-pub fn activeConnectionCount(self: *const Pool) u32 {
 ```
 
----
-
-## Quick Reference Cheat Sheet
+## Naming quick reference
 
 | Element                          | Casing Convention        | Example                                                                  |
 | :------------------------------- | :----------------------- | :----------------------------------------------------------------------- |
@@ -76,403 +57,182 @@ pub fn activeConnectionCount(self: *const Pool) u32 {
 | **Files (Namespaces)**           | `snake_case`             | `matrix_helpers.zig`                                                     |
 | **Directories**                  | `snake_case`             | `data_loaders/`, `utils/`                                                |
 
----
+Detailed rules: non-type/non-namespace/non-callable identifiers are `snake_case` (locals, fields, args, constants). Types and aliases are `PascalCase`, no underscores. Standard callables are `camelCase`; callables returning a `type` are `PascalCase`. Zero-field structs used only as function containers are namespaces and use `snake_case`. Acronyms are treated as normal words — never fully capitalized (`parseHttp`, `JsonParser`, `io_stream`, `fetchApiData`; not `parseHTTP`, `JSONParser`). Files map to structural intent: top-level fields means a type (`PascalCase`); functions/constants only means a namespace (`snake_case`). Directories are always `snake_case`.
 
-## Detailed Rules & Specifications
+## Structural hygiene and function size
 
-### Variables and General Identifiers
+- **Single responsibility:** one thing per function; conjunctions in the name/description mean it does too much. If a body needs visual dividers or heavy blank-line padding between phases, split it into private helpers. A body that does not fit on one screen without scrolling is a refactor candidate.
+- **Minimal signatures:** group related args into a context struct instead of a long argument list.
 
-If an identifier is not a type, a namespace, or a callable, it must use **`snake_case`**.
+## Control flow
 
-- **Rule:** All lowercase letters, with words separated by underscores.
-- **Applies to:** Local variables, struct fields, constants (unless an established convention dictates otherwise), and function arguments.
-- **Examples:** `learning_rate`, `batch_size`, `input_tensor`.
+- **Guard clauses, flat hierarchy:** early returns over nesting; the happy path runs down the left side.
+- **Fail fast:** handle errors immediately, never swallow with empty catches; unrecoverable failure fails loudly.
+- **Inlining:** let the compiler decide, except to change stack-frame count for debugging, to force comptime-ness to propagate, or when real measurements demand it. `inline` restricts the compiler and can harm size, compile speed, and runtime.
 
-### Types and Type Aliases
+## State and mutation
 
-Any defined type or alias must use **`PascalCase`** (referred to in Zig as TitleCase).
+- Declare variables in the deepest scope of use, as close to first use as possible. Never rely on hidden state; a mutating function's name and signature must make that obvious. Bind magic numbers/literals to named constants.
+- **Minimize unsafe casts:** `bitcast` is safer and has fewer footguns than `ptrcast`/`aligncast`. `ptrcast` is almost never right — only for things like casting to/from opaque pointers.
+- **Never use `std.mem.zeroes`:** it bypasses field defaults, so adding a non-zero default or field later silently changes every zeroed site. Prefer `.{}` with defaulted fields, `@splat(0)` for arrays, or a named `fn zeroed() T` constructor.
+- **Initialize before use; prefer optionals over undefined.** An optional set to undefined cannot be null-checked.
 
-- **Rule:** The first letter of every word is capitalized. No underscores.
-- **Applies to:** Structs, enums, unions, and type aliases.
-- **Examples:** `InferenceEngine`, `TransformerBlock`, `F1Score`.
+## Capture syntax over index variables
 
-### Callables (Functions and Methods)
-
-The naming of a callable depends entirely on its return type.
-
-- **Standard Callables:** If a function or method performs an action and returns a value, struct, or primitive, it must use **`camelCase`**. (_Examples:_ `calculateLoss(predictions: Tensor, targets: Tensor)`, `forwardPass(input: Tensor)`, `optimizeWeights(learning_rate: f32)`)
-- **Type-Generating Callables:** If a function or method is called to generate and return a `type`, it must use **`PascalCase`**. This signals to the reader that invoking this function resolves to a type definition. (_Examples:_ `LinearLayer(comptime T: type)`, `CustomDataset(comptime T: type)`)
-
-### Namespaces
-
-If a struct has **zero fields** and is strictly used as a container for related functions (never meant to be instantiated), it is considered a namespace.
-
-- **Rule:** Namespaces must use **`snake_case`**.
-- **Examples:** `activation_functions`, `string_utils`.
-
-### Acronyms and Initialisms
-
-Acronyms, initialisms, and proper nouns are subject to standard capitalization rules just like any normal English word. **Do not fully capitalize acronyms.** Even two-letter acronyms follow this rule.
-
-- **Rule:** Treat acronyms as a single word with only the first letter capitalized (in PascalCase/camelCase) or all lowercase (in snake_case).
-- **Correct:** `parseHttp(request: []const u8)`, `JsonParser`, `io_stream`, `fetchApiData(url: []const u8)`
-- **Incorrect:** `parseHTTP(request: []const u8)`, `JSONParser`, `IO_stream`, `fetchAPIData(url: []const u8)`
-
-### Files and Directories
-
-File names map directly to the structural intent of the file contents. In this ecosystem, a file is implicitly a struct.
-
-- **Types (Structs with fields):** If the file contains top-level fields (state/data), it represents a type and must use **`PascalCase`**. (_Example:_ `ModelCheckpoint.zig`, `DataPipeline.zig`)
-- **Namespaces (No fields):** If the file contains only functions, constants, or declarations (no top-level fields), it is a namespace and must use **`snake_case`**. (_Example:_ `gpu_allocator.zig`, `math_constants.zig`)
-- **Directories:** All directories must strictly use **`snake_case`**. (_Example:_ `natural_language_processing/`, `core_engine/`)
-
----
-
-# Zig 0.16.0: Quick `std.Io` Guide
-
-I/O is an Interface. Anything that potentially blocks control flow or introduces nondeterminism requires an `Io` instance to operate.
-
-## Core Concurrency Primitives
-
-`std.Io` uses task-level abstractions for handling concurrency natively.
-
-- **`Future(T)`:** Represents an asynchronous function call.
-  - Create with `io.async(func: anytype, args: anytype)` (infallible) or `io.concurrent(func: anytype, args: anytype)` (allocates, can fail).
-  - Retrieve the result using `future.await(io: std.Io)`.
-  - Cancel ongoing work using `future.cancel(io: std.Io)`.
-- **`Group`:** Manages multiple tasks that share a lifetime.
-  - Create with `var group: std.Io.Group = .init;`.
-  - Spawn tasks with `group.async(io: std.Io, func: anytype, args: anytype)`.
-  - Wait for all to finish with `group.await(io: std.Io)`.
-- **`Batch`:** A lower-level abstraction for grouping concurrent operations rather than functions (e.g., executing multiple file reads at once).
-
-## Handling Cancelation Gracefully
-
-When an operation is canceled, the I/O operation will return `error.Canceled`. It is standard practice to defer the cancelation of a task immediately after creating it to ensure cleanup.
+Prefer captures (`|variable|`) over indexing; they remove off-by-one/out-of-bounds risk. Zip parallel arrays with multi-captures; mutate with `|*item|`. Only use a numeric index when the index itself is meaningful (bit positions, matrix dims, index-taking APIs) — then use the `, 0..` capture, never `for (0..x.len)`. `if (maybe_value) |value|` unwraps without a `.?` failure point.
 
 ```zig
-var file_task = io.async(std.Io.Dir.openFile, .{ .cwd(), io, "hello.txt", .{} });
-defer if (file_task.cancel(io)) |file| file.close(io) else |_| {};
-
-const file = try file_task.await(io);
-```
-
-## Standard I/O Subsystem Operations
-
-Standard library systems utilize the `Io` interface directly. Function signatures explicitly require `std.Io`.
-
-- **Filesystem:** Uses `std.Io.Dir` and `std.Io.File`. Closing files requires the context: `file.close(io: std.Io)`.
-- **Networking:** Uses `std.Io.net` for all socket and connection operations.
-- **Process Management:** Spawning processes requires I/O context: `std.process.spawn(io: std.Io, options: std.process.SpawnOptions)`.
-- **Time:** Retrieving current timestamps uses `std.Io.Timestamp.now(io: std.Io)`.
-
-## Mutex Functions
-
-Synchronization primitives integrate directly with the `std.Io` interface so that blocking operations suspend the task/thread efficiently based on the active I/O runtime.
-
-- **`lock(io: std.Io)`**: Acquires the lock, blocking/suspending the current execution context until it becomes available.
-- **`tryLock()`**: Attempts to acquire the lock without blocking. Returns a boolean indicating success.
-- **`unlock(io: std.Io)`**: Releases the lock.
-
-# Code Simplicity and Quality Standards
-
-Maintaining a high-quality codebase requires strict adherence to structural hygiene, readability, and predictable logic. Code should read linearly and plainly.
-
-## Structural Hygiene and Function Size
-
-- **Single Responsibility:** A function must do exactly one thing. If a function contains conjunctions in its name or its description, it is likely doing too much.
-- **Visual Chunking and Length:** If a function requires visual dividers or heavy blank-line padding to separate different phases of internal logic, it is violating the single responsibility principle. Break long functions into smaller, private helper functions. If a function's body cannot fit comfortably on a single monitor screen without scrolling, it is an immediate candidate for refactoring.
-- **Parameter Limits:** Keep function signatures minimal. If a function requires a large list of arguments, group related arguments into a dedicated struct to pass as a single context parameter. Prefer `processUserData(context: UserContext)` over `processUserData(name: []const u8, age: u8, id: u32, is_active: bool)`.
-
-## Control Flow
-
-- **Guard Clauses and Flat Hierarchy:** Deep nesting is a design failure. Always prefer early returns and guard clauses over nested conditional blocks. The primary "happy path" of a function should sit at the lowest possible level of indentation, running straight down the left side of the screen.
-- **Fail Fast:** Handle errors immediately. Do not silently swallow errors with empty catch blocks. If a failure state is unrecoverable, fail fast and loudly rather than propagating bad state further through the system.
-- **Inline Functions:** From the zig docs: It is generally better to let the compiler decide when to inline a function, except for these scenarios:
-
-- To change how many stack frames are in the call stack, for debugging purposes.
-- To force comptime-ness of the arguments to propagate to the return value of the function, as in the above example.
-- Real world performance measurements demand it.
-- Note that inline actually restricts what the compiler is allowed to do. This can harm binary size, compilation speed, and even runtime performance.
-
-## State and Mutation
-
-- **Proximity of State:** Declare variables in the deepest scope where they are used, as close to their first usage as possible. Do not declare a variable in an outer scope if it is only consumed in a nested block; this reduces the reader's mental stack by narrowing the variable's lifetime and proving it has no effect on the code outside that block.
-- **Explicit Over Implicit:** Never rely on hidden state or side effects. If a function mutates state, its name and signature must make that glaringly obvious.
-- **Constants Over Magic Values:** Avoid magic numbers or hardcoded string literals entirely. Bind them to properly named constants at the top of the file or within a dedicated namespace.
-- **Minimize Unsafe Casts:** Avoid things like ptrcast and aligncast if you can. Bitcast is safer and has less footguns so only ptrcast if their is a good reason. Ptrcasts are ALMOST NEVER the right solution, only use them for things like casting to/from opaque pointers.
-- **Never Use `std.mem.zeroes`:** Do not use `std.mem.zeroes(T)` to initialize values. It bypasses field defaults and future-proofs nothing: adding a non-zero default or a new field later silently changes behavior at every zeroed site. Prefer explicit initialization — `.{}` with defaulted fields, `@splat(0)` for arrays, or a named constructor like `fn zeroed() T` on the type when many call sites need an all-zero value.
-
-### Use Capture Syntax Over Index Variables
-
-Prefer capture syntax (`|variable|`) over index variables in `for` loops. Captures eliminate off-by-one errors, out-of-bounds risk, and make the loop's intent obvious.
-
-**Bad — index variable to index into arrays:**
-
-```zig
-for (0..items.len) |i| {
-    doSomething(items[i]);
-}
-```
-
-**Good — direct element capture:**
-
-```zig
-for (items) |item| {
-    doSomething(item);
-}
-```
-
-**Bad — index to mutate:**
-
-```zig
-for (0..items.len) |i| {
-    items[i] = generate();
-}
-```
-
-**Good — pointer capture for mutation:**
-
-```zig
-for (items) |*item| {
-    item.* = generate();
-}
-```
-
-**Bad — indexing into parallel arrays:**
-
-```zig
+// ✗ WRONG
 for (0..count) |i| {
     arr[i] = f(others[i]);
 }
-```
 
-**Good — zip parallel arrays with captures:**
-
-```zig
+// ✓ CORRECT — zip with captures
 for (arr, others[0..count]) |*dest, src| {
     dest.* = f(src);
 }
 ```
 
-**Good — multiple captured arrays:**
+**Rule:** writing `for (0..x.len) |i|` means asking whether the elements can be captured directly.
 
-```zig
-for (buffers, mapped, offsets) |*buf, *map, *off| {
-    buf.* = new_buf;
-    map.* = new_map;
-    off.* = new_off;
-}
-```
+## Array literals: `: Type = .{vals}`
 
-**When you genuinely need an index** (e.g. calling an API that takes an index), use the `, 0..` capture instead of a range loop:
+Annotate the binding, don't repeat the type in the literal: `const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };` instead of `[_]vk.Format{...}`.
 
-```zig
-for (items, 0..) |item, i| {
-    externalApi(items[i], i);
-}
-```
+# Zig 0.16.0 Toolchain Facts
 
-**`if` captures** unwrap optionals without introducing a `.?` failure point:
+## `std.Io` quick guide
 
-```zig
-if (maybe_value) |value| {
-    // value is the unwrapped type, no .? needed
-}
-```
+I/O is an interface: anything that can block or introduce nondeterminism takes an `Io` instance.
 
-**Rule:** If you find yourself writing `for (0..x.len) |i|`, ask whether you can capture the elements directly. Index variables should only appear when the numeric index itself is meaningful (e.g. bit positions, matrix dimensions, or API callbacks).
+- **`Future(T)`:** `io.async(func, args)` (infallible) or `io.concurrent(func, args)` (allocates, can fail); `future.await(io)` retrieves; `future.cancel(io)` cancels. Defer-cancel right after creating a task so cleanup runs: `defer if (file_task.cancel(io)) |file| file.close(io) else |_| {};`.
+- **`Group`:** `var group: std.Io.Group = .init;`, `group.async(io, func, args)`, `group.await(io)`.
+- **`Batch`:** lower-level grouping of concurrent operations (e.g. batched file reads), not functions.
+- Subsystems take `Io` directly: `std.Io.Dir`/`std.Io.File` (`file.close(io)`), `std.Io.net`, `std.process.spawn(io, options)`, `std.Io.Timestamp.now(io)`.
+- Mutexes suspend via the runtime: `lock(io)`, `tryLock()` (non-blocking, returns bool), `unlock(io)`.
+- Canceled operations return `error.Canceled`.
 
-- **Watch Out for Undefined:** Always initialize variables before using them, and avoid values that it is easy to forget are undefined. For example, you can not check a optional set as undefined to see if it is null. Use optionals instead of undefined where possible.
+## Pointer safety patterns
 
-## Comptime Pointer Alignment and `@embedFile`
+**Comptime alignment and `@embedFile`.** `@embedFile` returns `*const [N:0]u8` with alignment 1. `@alignCast` on it must be applied to the original comptime-known pointer: a non-inline helper taking `[]const u8` loses the alignment metadata and panics at runtime. Cast at the call site (`.p_code = @ptrCast(@alignCast(spv.ptr))`) or in an `inline fn` the compiler fully resolves at comptime.
 
-`@embedFile` returns `*const [N:0]u8` with **alignment 1**. This matters when the data requires higher alignment (e.g. SPIR-V shaders need 4-byte alignment for `[*]const u32`).
+**Single-item slices.** When a C API expects a many-pointer (`[*]T`/`[]T`) to one element, use `(&x)[0..1]` — never `@ptrCast(&x)` (suppresses type checking) or `&[1]T{x}` (anonymous temporary). Never declare a `[1]` array just to smuggle one value into a many-pointer; use a scalar plus `(&x)[0..1]`, and write directly into the destination (`(&sets[i])[0..1]`) instead of bouncing through a local. For real arrays use `arr[0..n]` (mutable `[]T`; add `.ptr` when the field wants `?[*]const T`), never `@ptrCast(&arr)` / `@ptrCast(&arr[0])`. Exceptions: `p_next` chains (need `@ptrCast` to `*const c_void`) and output params (`&x` for `*T`).
 
-**The rule:** `@alignCast` on an `@embedFile` pointer **must** be applied to the original comptime-known pointer, not to a function parameter. If you extract the cast into a helper function that accepts `[]const u8`, the comptime alignment information is lost and `@alignCast` will **panic at runtime**.
+## Toolchain footguns (Zig 0.16.0, x86_64)
 
-```zig
-// ✗ WRONG — alignment info lost through function parameter
-fn createModule(code: []const u8) vk.ShaderModuleCreateInfo {
-    return .{ .p_code = @ptrCast(@alignCast(code.ptr)) }; // RUNTIME PANIC
-}
-const spv: []const u8 = @embedFile("shader");
-_ = createModule(spv);
+- **`std.atomic.Value(i128)` fails codegen in Debug** (`genSetReg called with a value larger than dst_reg`; a one-line store reproduces it). Never pad non-power-of-2 atomics (i96 timestamps) to i128; guard the plain integer with a lock or truncate to i64. Note dead code hides such bugs: uninstantiated functions are never analyzed.
+- **Never `@splat` a runtime bool into a bool vector** (miscompiles on `@Vector(32, bool)` in Debug — silent lane garbage, caught only against a scalar reference). Splat a comptime bool or build the mask from a vector comparison (`bh_v <= @as(@Vector(N, i32), @splat(sea_level))`). Integer splats and comptime bool splats are fine; `@select` chains are safest for combining masks; verify bit-identical output against a scalar reference.
+- **`@typeInfo` has no `.slice` variant** — slices are `.pointer` with `Pointer.size == .slice`.
+- **`std.meta.eql` compares slices by pointer identity**, not content. Deep slice comparison must be hand-written.
+- **`std.Io.Writer` has a field named `end`** (usize), so `writer.end()` exists only on file writers, not bare `std.Io.Writer`.
+- **`std.zon.parse.free` crashes on comptime-backed defaults** (e.g. slices into `@embedFile` data). Parse into a throwaway `std.heap.ArenaAllocator` and discard the arena instead of freeing field-by-field.
 
-// ✓ CORRECT — inline keeps comptime-known pointer
-inline fn createModule(code: []const u8) vk.ShaderModuleCreateInfo {
-    return .{ .p_code = @ptrCast(@alignCast(code.ptr)) }; // OK if caller inlines
-}
-
-// ✓ CORRECT — cast at the call site, not in a helper
-const module = try dev.createShaderModule(&.{
-    .p_code = @ptrCast(@alignCast(spv.ptr)),
-}, null);
-```
-
-**Takeaway:** When `@embedFile` data needs alignment casts, perform the cast at the call site or in an `inline` function that the compiler can fully resolve at comptime. Non-inline helper functions that accept `[]const u8` parameters will lose the alignment metadata.
-
-## Single-Item Slice Pattern (`(&x)[0..1]`)
-
-When a Vulkan (or other C) API expects a many-pointer (`[*]T` or `[]T`) to a single element, prefer `(&x)[0..1]` over two common anti-patterns:
-
-- **`@ptrCast(&x)`** — unsafe; suppresses type checking and can hide errors
-- **`&[1]T{x}`** — verbose; creates an anonymous temporary array
-
-The `(&x)[0..1]` syntax is safe, concise, and makes the intent ("this pointer represents exactly one element") explicit.
-
-```zig
-const foo: Foo = .{ .x = 1 };
-
-// ✓ CORRECT — single-item slice from pointer
-.p_single_foo = (&foo)[0..1];
-
-// ✗ WRONG — unsafe cast
-.p_single_foo = @ptrCast(&foo);
-
-// ✗ WRONG — verbose anonymous array
-.p_single_foo = &[1]Foo{foo};
-```
-
-For actual multi-element arrays, use `array[0..n]` instead of `@ptrCast(&array)` or `@ptrCast(&array[0])`:
-
-```zig
-var arr: [4]Foo = undefined;
-
-// ✓ CORRECT — many-pointer from array
-.p_arr = arr[0..count].ptr;
-
-// ✓ ALSO CORRECT — slice form (when field accepts a slice)
-.p_arr = arr[0..count];
-
-// ✗ WRONG — unsafe cast
-.p_arr = @ptrCast(&arr);
-
-// ✗ WRONG — pointer to first element
-.p_arr = @ptrCast(&arr[0]);
-```
-
-Note: For `var` (mutable) arrays, the slice `arr[0..n]` is `[]T` (mutable). If the field expects `?[*]const T`, use `.ptr` to get `[*]T` which coerces to `?[*]const T`. For `const` arrays or single-item `(&x)[0..1]` the slice is already `[]const T` and may coerce directly.
-
-## Prefer `: Type = .{vals}` Over `[_]Type{vals}`
-
-When declaring array literals, use an explicit type annotation with `.{}` syntax instead of repeating the type inside `[_]`:
-
-```zig
-// ✗ WRONG — type repeated in the literal
-const formats = [_]vk.Format{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
-
-// ✓ CORRECT — type annotates the binding, not the literal
-const formats: [2]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat };
-```
-
-This avoids redundancy and reads more naturally as "formats is an array of 2 Formats = ...".
-
-**Does not apply to:** `p_next` chains (which need `@ptrCast` to `*const c_void`) or output parameters (`&x` where the API expects `*T`).
-
-## Avoid `[1]` Arrays as Casting Workarounds
-
-Declaring a length-1 array solely to convert a single value to a pointer is a code smell. It adds unnecessary ceremony and hides the intent. Use the `(&x)[0..1]` pattern instead.
-
-```zig
-// ✗ WRONG — 1-element array workaround
-var desc_set: [1]vk.DescriptorSet = undefined;
-try dev.allocateDescriptorSets(&alloc_info, &desc_set);
-
-// ✓ CORRECT — single variable with slice
-var desc_set: vk.DescriptorSet = undefined;
-try dev.allocateDescriptorSets(&alloc_info, (&desc_set)[0..1]);
-```
-
-This applies everywhere: fence arrays, semaphore arrays, descriptor set arrays, command buffer arrays — wherever you find `[1]` used to smuggle a single value into a many-pointer parameter, replace it with a plain variable and `(&x)[0..1]`.
-
-Once a variable is a scalar, check if the temporary even needs to exist. If the destination is already allocated (like `array[i]`), pass `(&array[i])[0..1]` directly instead of bouncing through a local:
-
-```zig
-// ✗ WRONG — unnecessary temporary
-var desc_set: vk.DescriptorSet = undefined;
-try dev.allocateDescriptorSets(&info, (&desc_set)[0..1]);
-sets[i] = desc_set;
-
-// ✓ CORRECT — write directly into the destination
-try dev.allocateDescriptorSets(&info, (&sets[i])[0..1]);
-```
-
-## Per-Frame Fence Wait Pattern
-
-In a multi-buffered Vulkan render loop, wait for **only the current frame's fence**, not all in-flight fences. Each swapchain image slot maps to one fence; waiting for all of them is overly conservative and introduces dependency on ALL prior submissions completing, which can cause hangs.
-
-```zig
-// ✓ CORRECT — wait only for the current ring-buffer slot's fence
-const current_frame = self.currentFrame();
-_ = try self.dev.waitForFences((&self.in_flight_fences[current_frame])[0..1], .true, timeout);
-try self.dev.resetFences((&self.in_flight_fences[current_frame])[0..1]);
-
-// ✗ WRONG — waiting for every fence makes frame N+1 wait for frame 1's fence
-// which may not be signaled yet (even though that slot's resources are not reused yet)
-for (self.in_flight_fences) |fence| {
-    _ = try self.dev.waitForFences((&fence)[0..1], .true, timeout);
-}
-```
-
-This is especially important after swapchain recreation: the new fences are created SIGNALED, and old fences are destroyed. The "wait all" loop tries to wait for a fence from a previous submission cycle (which wasn't signaled because the recreation happened between submit and signal).
-
-# Modify this file with things you learned or changes you think would be beneficial
-
-- Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Try not to make it crowded, but extend it with stuff that would be helpful. You can add new sections or modify it with new information or tips.
+# Concurrency, Vulkan & GPU
 
 ## Mesh upload backpressure: all-or-nothing reservation under an admission mutex
 
-`MeshUploader.reserveUpload` acquires everything an upload needs (command pool, both staging slices via `StagingRing.allocPair`, both face regions) atomically under `admission_mutex`. The invariant: any thread holding upload resources outside that section is fully provisioned and on a non-blocking path to `submitBatch`, so the flush-and-wait backpressure loops always wait on GPU progress, never on another blocked CPU thread. Do not add resource acquisition after `reserveUpload` in the `addMesh` path — holding a resource while blocking on another reintroduces the hold-and-wait deadlock (the staging ring retires FIFO and stops at the first unbound entry, so an unbound slice held by a blocked thread wedges the ring permanently).
+`MeshUploader.reserveUpload` acquires everything an upload needs (command pool, both staging slices via `StagingRing.allocPair`, both face regions) atomically under `admission_mutex`. Invariant: any thread holding upload resources outside that section is fully provisioned and on a non-blocking path to `submitBatch`, so flush-and-wait backpressure always waits on GPU progress, never on another blocked CPU thread. Never add acquisition after `reserveUpload` in the `addMesh` path — hold-and-wait reintroduces the deadlock (the staging ring retires FIFO and stops at the first unbound entry, so an unbound slice held by a blocked thread wedges the ring permanently).
+
+## Async drain vs. the candidate buffer's GPU-idle window
+
+The upload drain (`submitBatch` + `retireCompletedUploads` + `processRetired`) runs on a background task dispatched per frame via a `restartFuture`-style poll (`drain_is_running` + `drain_future`; the frame reaps a finished pass with `future.await` inside the `if (!running)` branch, then re-dispatches with `io.concurrent(...) catch io.async(...)` — never waiting on a running pass). The frame's draw then calls `publishPending` to apply the recorded scene effects.
+
+The split exists because the cull shader reads `scene.persistent.buffer` every frame, and CPU writes to `persistent.mapped` (`writeCandidate`/`markInactive`/`releaseCandidate`/`growPersistentCandidates`) are only safe when no GPU command can be reading it. `beginFrame`'s timeline throttle (waits `frame_number - max_frames_in_flight + 1`) proves the GPU idle for the graphics queue, so the frame thread's window between `beginFrame` and the first recorded cull is the only sound place to touch candidates — a background task cannot self-gate this. The drain task therefore only _records_ cheap `Publication` ops (`retire`/`remove`/`free_index`) into a list guarded by `retire_mutex`; `publishPending` (frame thread) applies them (`allocIndex`/`writeCandidate`/`fetchPut`/`markInactive`/`releaseCandidate`/`enqueueRetiredMesh` plus index-pool frees). Worker-thread flush drains (`flushUploads`, full-queue `pushPendingUpload`) record publications the same way. Teardown cancels + awaits the drain future before draining queues.
+
+`publishPending` must NOT hold `retire_mutex` while applying (the drain task can hold it for the whole pass — the frame would stall). Swap the whole `ArrayList` out under the mutex (`std.mem.swap(...)` with a frame-private scratch) and apply lock-free. Stealing a _slice_ is a memory-safety bug: `clearRetainingCapacity` keeps the backing buffer, so the drain task's next appends overwrite the slice mid-iteration (`switch on corrupt value` panic). `retired_meshes` appends from the apply step race the drain task's `processRetired` sweep, so that list has its own `retired_meshes_mutex`. Lock order: `retire_mutex` → `retired_meshes_mutex`, never reversed.
 
 ## Entity update queue (EntityRegistry)
 
-The registry never iterates its cache: `update` and `deinit` walk a dynamically-sized `ArrayList` of live entity ids and look each up by uuid. The `SetAssociativeCache` iterator walks every slot, so per-frame cost must not depend on cache capacity. The entities form a memory hierarchy: the queue is the authoritative live set and is deliberately uncapped (it can hold more ids than the cache has slots), the cache is the bounded resident tier, and eviction spills the victim through the `save` flag on unload. An evicted entity leaves a stale id that the pass drops when the lookup misses, so no cross-structure cleanup exists; until a load path reloads evicted entities, the steady-state live set is bounded by cache eviction. `queue_mutex` is always acquired before a cache shard lock, never after (spawn inserts into the cache while holding it).
+The registry never iterates its cache: `update` and `deinit` walk a dynamically-sized `ArrayList` of live entity ids and look each up by uuid (the `SetAssociativeCache` iterator walks every slot, so per-frame cost must not depend on cache capacity). Queue (authoritative, deliberately uncapped — can exceed cache slots) → cache (bounded resident tier) → eviction spills the victim through the `save` flag on unload. An evicted entity leaves a stale id that the pass drops on lookup miss — no cross-structure cleanup; until a load path reloads evicted entities, the steady-state live set is bounded by cache eviction. Lock order: `queue_mutex` before any cache shard lock, never after.
 
-## MangoHud and Vulkan Synchronization Validation
+## Per-frame fence wait
 
-When using `mangohud` combined with Vulkan Synchronization Validation (`VK_VALIDATION_VALIDATE_SYNC=1`), you may encounter `SYNC-HAZARD-READ-AFTER-WRITE` validation errors. This is due to a known issue where MangoHud's injected `vkCmdBeginRenderPass` issues a `VK_ATTACHMENT_LOAD_OP_LOAD` without a proper execution dependency on the application's prior layout transitions to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`. These errors are technically MangoHud bugs rather than application bugs. You can safely ignore validation messages containing `0xe4d96472` and `vkCmdBeginRenderPass`.
+In a multi-buffered loop, wait for only the current frame's fence: `_ = try self.dev.waitForFences((&self.in_flight_fences[current_frame])[0..1], .true, timeout);` then `resetFences` on the same slot. Waiting for all fences over-constrains frame N+1 on every prior submission and can hang — especially after swapchain recreation, where new fences are created signaled and a wait-all loop can block on a previous cycle's unsignaled fence.
 
-## `deviceWaitIdle` and Timeline Semaphore Synchronization False Positives
+## Handling persistent VK_SUBOPTIMAL_KHR
 
-Mixing `vkDeviceWaitIdle` with timeline semaphore synchronization (e.g. during buffer capacity reallocations) can confuse the synchronization validation layer, resulting in false positive `SYNC-HAZARD-WRITE-RACING-WRITE` errors on `vkQueueSubmit2`. The validation layer loses track of the execution dependency chain provided by the timeline semaphore wait stage and the device idle state. You can safely ignore validation messages containing `0x743c6069` when a timeline semaphore and `deviceWaitIdle` are involved.
+`VK_SUBOPTIMAL_KHR` is usable; recreating may improve compatibility, but some variable-extent platforms keep returning it after a valid replacement is installed. Guard against an infinite loop: let the first suboptimal result request recreation, suppress duplicates until an explicit physical-size/configuration change resets the guard. `VK_ERROR_OUT_OF_DATE_KHR` is still handled unconditionally.
 
-## `std.atomic.Value(i128)` Fails Codegen in Debug
+## Validation-layer false positives (safe to ignore)
 
-On this toolchain (Zig 0.16.0, x86_64), any analyzed function containing a `std.atomic.Value(i128)` load or store fails with a backend error: `genSetReg called with a value larger than dst_reg`. A minimal `fn f(x: *std.atomic.Value(i128)) void { x.store(1, .seq_cst); }` reproduces it in Debug builds. Non-power-of-2 atomics (i96 timestamps) must not be padded to i128 atomics; guard the field with a lock and store the plain integer instead, or truncate to i64.
+- **MangoHud + sync validation:** MangoHud's injected `vkCmdBeginRenderPass` issues `VK_ATTACHMENT_LOAD_OP_LOAD` without a proper execution dependency on the app's prior transitions to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`, producing `SYNC-HAZARD-READ-AFTER-WRITE`. Ignore messages containing `0xe4d96472` and `vkCmdBeginRenderPass` — MangoHud bugs, not app bugs.
+- **`deviceWaitIdle` + timeline semaphores:** mixing `vkDeviceWaitIdle` with timeline-semaphore sync (e.g. buffer capacity reallocations) confuses the validation layer into `SYNC-HAZARD-WRITE-RACING-WRITE` on `vkQueueSubmit2`. Ignore messages containing `0x743c6069` when a timeline semaphore and `deviceWaitIdle` are involved.
 
-This stayed hidden because the old `Explosive.update` was never instantiated: dead entity code that nothing spawns is not analyzed at all, so `if (true or ...)` short-circuits and malformed calls inside it never compile.
+## OIT volume term invariants (transparent_frag.frag / composite_frag.frag)
 
-## Avoid `@splat` of Runtime Bools into Bool Vectors
+The water volume integrates in a reference frame: each face adds `density * absorption * (bg - frag)` entering and subtracts it exiting, so thickness only survives if entry and exit faces integrate against the same background distance. Rules:
 
-On this toolchain, `@splat` of a runtime-computed `bool` into `@Vector(N, bool)` can miscompile (observed on `@Vector(32, bool)` in Debug): some lanes receive garbage, producing lane-dependent values from a uniform splat. The result is silently wrong — this was caught only by comparing vectorized output against a scalar reference.
+- Sky pixels hold cleared depth 0.0, whose linearization `near / depth` is infinite — both faces of a pair saturate the same clamp and cancel to zero, so water against sky would show no volume. `sky_dist` (256) substitutes the reference only for those pixels. Real backgrounds must never be clamped: volumes sit up to ~100,000 blocks away, and clamping erases every volume past the clamp. `sky_dist_max` (2048) clamps sky-referenced distances symmetrically so distant sky pairs cancel cleanly instead of leaving f16 quantization noise. The surface term's gate uses the unclamped value so water past `sky_dist` keeps its fresnel surface.
+- Pair precision is bounded by f16 quantization: thickness survives only past ~1/1024 of the write magnitude. Finite backgrounds write ~the local segment (far oceans correct at any distance); the sky reference writes ~max(sky_dist, z) (sky-backed volumes exact to roughly a thousand blocks, clean zero beyond). Stacked saturated faces can overflow the f16 sum to Inf, so the composite gates scatter on `td_scalar < 65504`.
+- Absorption must stay position-independent (`1 - volume_color`, no light term) — entry/exit faces sample light at different points, so light-dependent absorption leaves a cancelation residue. Day/night scatter is applied in the composite via `OitCompositor.volumeScatterLight`.
+- Thickness is ray length, not eye-Z difference: multiply by the slant `length(frag_pos) / fragment_depth` (off-axis pixels at 90° FOV otherwise undercount by up to ~0.58x).
 
-**Rule:** never splat a runtime bool into a bool vector. Either splat a comptime bool, or build the mask from a vector comparison:
+`near_plane` must match core.zig's projection near (0.01); the `near / depth` linearization assumes the infinite reverse-Z projection. Known gap: inside water, rays have an exit face but no entry face, so net optical depth is negative and clamps to zero (no underwater tint) — needs a virtual entry term in the composite or raymarched volumes.
 
-```zig
-// ✗ WRONG — runtime bool splat, may miscompile
-const sea_ok = @as(@Vector(N, bool), @splat(bh <= sea_level));
+## Matrix layout for GLSL push/params (CSM gotcha)
 
-// ✓ CORRECT — comparison with splatted scalar operand
-const sea_ok = bh_v <= @as(@Vector(N, i32), @splat(sea_level));
+zm matrices store translation in the **last column of each row** (`v · M`, row-vector). `@bitCast(zm.data)` into `[16]f32` handed to GLSL as `mat4` makes `M * v` compute `v · M_zm` — fine for an origin-eye camera view (last column `(0,0,0,1)`, `w` stays 1), but a light/projection matrix with a non-origin eye gets a huge projective `w` term and is silently wrong. Build light view-projection **directly in GLSL column-major layout** (translation in the 4th column, bottom row `(0,0,0,1)`, so `w == 1`):
+
+```
+flat[i*4+j] = M[i][j];   // column-major GLSL: M[c][r] = flat[c*4+r]
+row0: (s.x/r, u.x/r, f.x/fnf, 0)
+row1: (s.y/r, u.y/r, f.y/fnf, 0)
+row2: (s.z/r, u.z/r, f.z/fnf, 0)
+row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
 ```
 
-Runtime `@splat` of integers (`i32`, etc.) is fine. Comptime bool splats (`@splat(false)`) are fine. When combining masks, `@select` chains are the safest form; verify with a scalar-reference test when output must be bit-identical.
+`s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = view_pos - center`. Vulkan NDC depth is `[0,1]` — near maps to 0, far to 1, no OpenGL `z * 0.5 + 0.5` conversion on shadow depth. Verify with a CPU helper `out[i] = sum_j flat[j*4+i]·v[j]` against ground-truth light-space coordinates (the Csm tests do this). zm's `lookAtRH`/`orthographicRH` compose in the opposite product order to a column-vector mental model; prefer building these matrices by hand.
 
-## Testing
+# Worldgen & Terrain
 
-Due to a zig issue `zig test` always seems to output exit code 1, you can ignore it unless it says which test failed.
-After writing a test, check it over to follow AGENTS.md principles.
+## Runevision erosion filter (Terrain.zig + libs/phacelle.zig + libs/erosion.zig)
 
-### Noise Vector-vs-Scalar Tests and ReleaseFast ULP Differences
+- **Units (all normalized):** `p` into `erosionFilter` is the noise-grid base coordinate _divided_ by `erosion_scale` (multiplying makes gullies coarser than the relief). Height input is raw `shaped` (≈[-1,1]). On the way out the base field takes the asymmetric envelope `|bounds| * scale` (continuous through zero), but deltas must not: local-`|bounds|` conversion doubles them at the shoreline and cliffs every crossing gully. Both deltas convert with symmetric `max(|min|, |max|) * scale` (both flow through `composeErodedHeight`), so relief matches on land and under water; both amplitudes stay normalized so saved configs keep magnitude. Downhill slope is the negated central-difference gradient of `shaped` at +/- one sample spacing.
+- **Cell size is a locked ratio:** inside `phacelleNoise` the phase ramps at `cell_scale * TAU` per unit cell, and octave `freq` scales stripe frequency and cell grid together (unit cells in `p * freq` space) — doubling frequency halves cells automatically, no per-octave tuning. `cell_scale` is a unitless ratio on the `erosion_scale` master.
+- **Load-bearing order:** each octave steers off the `gully` slope accumulated by the previous octave (`State.apply`); `side *= -freq` is the chain rule for the caller's `p * freq` scaling plus the downhill sign flip. `side` carries `norm_dir_perp * cell_scale * TAU`; the caller scales it by the octave `freq` exactly once.
+- **Mask chain:** `mask = powInv(mask, detail) * new_mask`, `powInv(x, p) = x^(1/p)` (detail < 1 crushes older masks onto steep slopes; `powInv(0)` latches closed, flats stay uncarved). `smoothStart(t, smoothing)` must guard `smoothing <= 0` and return a step (`crease_rounding = 0` would divide by zero). Per-octave `new_mask` gates on the _wave's_ slope (`|sin|`); the first-octave seed is the terrain steepness mask (next bullet).
+- **Peak/valley preservation (steepness fade):** octave sampling stays absolute in world space; flats are protected by the mask alone. First-octave mask seeds with inverted-quadratic `1 - (1 - steepness)^2` (closed on flats, 3/4 open at half steepness), so on flat ground every octave lerps to the previous target (zero on the first) and the delta is exactly 0. `fade_slope` is the steepness of fully-open mask. Steepness comes from a wide-stencil average (`fadeSteepness`), not the per-sample gradient, or fine-noise flicker strobes the mask between neighbors. `fade_slope <= 0` disables the fade.
+- **LOD consistency:** effective octaves = `max(1, erosion_octaves -| level)` (`Params.erosionFilterParams`); octaves stay absolute in world space. The level-1 vs box-filtered level-0 test tolerance covers the gradient-resampling shift (e doubles per level) plus the coarser fade stencil moving the per-sample mask: 40% of `filter_strength / (1 - gain) * gully_weight` plus 128 blocks fixed slack.
+- **Hash deviation:** the reference's `fract` cell jitter loses precision far from origin; `phacelle.zig` uses `fastnoise.hash2D`/`hash2DVec` with low/high 16 bits mapped to [-0.5, 0.5]. Exact at ±100,000-block coordinates.
+- **Benchmark (Debug, Xeon):** base `genTerrainHeight` ≈ 540 µs/chunk; with filter ≈ 6.4 ms/chunk (~12x the base pipeline). Gradient stage ≈ 4 extra batched warp+noise fills; Phacelle's 16 cells × 4 octaves of transcendentals dominate. Done levers: polynomial `exp(-2d^2)` weight (`bellWeight`, ~3e-7), LOD octave drop, `@Vector(16, f32)` cell loop.
+- **Build-stable direction:** `grad_x`/`grad_z` were `undefined` and `addGradientSamples`' first pass reads them (`grad_row + shaped*k`) — uninitialized stack content is build-dependent, so ReleaseFast vs Debug rotated the whole gully pattern. Fixes: zero-init accumulators, `@mulAdd` so accumulation cannot FMA-contract differently per build, blend the seeded direction toward the assumed-slope direction below the 1e-4 gradient noise floor (`gradient_floor` in `erosion.zig`), since fastnoise fills run `@setFloatMode(.optimized)` and are never bit-stable across build modes. FP reassociation anywhere in this pipeline changes the terrain bit pattern; keep operation order when refactoring.
+- **Config compat:** `erosion_strength` stays in `Params` with `.skip = true` in `field_specs` (superseded `erosion_fade_altitude` follows the same pattern). See Config compat below for the declaration-default and `InvalidConfig` rules.
 
-Tests comparing a vectorized noise/warp path against its scalar counterpart (`fillGrid2D`/`fillNoise2DGrid`/`fillWarp2DGrid` vs `genNoise2D`/`domainWarp2D`) pass bit-exact in Debug but differ by ~1 ULP in ReleaseFast, because the wider vector ops reassociate/FMA-contract differently than the N=1 path. Use `std.testing.expectApproxEqAbs(expected, actual, 1e-5)` for these, not `expectEqual`. Do not use relative tolerance: noise values can sit near zero, where the relative error of a 1e-8 absolute difference explodes past any sane epsilon.
+## JitteredGrid placement (Planet generator)
 
-### Allocation Failure Testing
+- `JitteredGrid.getStructure` only finds a structure from positions **at or below** it (`structure_pos >= pos_in_box`), and for negative cells the structure position itself goes negative so the in-range check always fails — negative-coordinate queries silently return null. Shift the grid by a large positive constant so every used cell index is positive.
+- `level` scales the query position by `2^level` (`real_position = scale * position`). Querying position = `cell` with `scale == box_size` lands on the cell origin (`pos_in_box == 0`), reducing the in-range check to `jitter < scale` — always true when `inner_box_size < box_size`. This is the O(1) "which structure owns this cell" trick.
+- A sphere with a one-sided found region can never be found from all sides. Clamp the structure position inside its cell (`clamp(jitter, radius, box_size - radius)`) so the whole sphere stays in the owning cell; every block then finds it through its own cell.
 
-Have `std.testing.checkAllAllocationFailures` test coverage for any function that performs allocations. This exhaustively tests every allocation point for proper `OutOfMemory` handling and ensures no leaks occur on the error path.
+# Config, Persistence & Plugins
 
-The test function must accept only an allocator and perform the allocation-heavy work using it. Keep it focused: allocate, operate, and ensure cleanup runs (via `defer` or early-return cleanup).
+## Config compat
+
+`std.zon.parse` only tolerates missing fields that carry a **declaration default**, so every `Params` field keeps its default in the declaration (`.default` is just `Params{}`) or old saved configs break. `loadConfig` returns `error.InvalidConfig` instead of falling back, so a broken config fails loudly without being overwritten. Any field added to `Params` must keep a declaration default. Superseded fields are kept with `.skip = true` in `field_specs` (`erosion_strength`, `erosion_fade_altitude`).
+
+## Clearing RocksDB chunk storage
+
+Clear persisted chunks through RocksDB while the database is open, using a `WriteBatch` range tombstone per chunk column family and flushing both families afterward. Stop background saves and finish the final save before clearing; never remove the database directory from the filesystem while RocksDB owns it.
+
+## Generator shared libraries (DLL plugins)
+
+Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen on this libc-linked Linux build). The exe embeds the built `.so` (via `addAnonymousImport` + `@embedFile`, same as the shaders) and writes it into `generators/` at startup.
+
+**C-ABI export rules (Zig 0.16):** `pub export fn` / `@export` require a machine calling convention and cannot take auto-layout structs by value (`std.mem.Allocator`, `std.Io`, slices, error-union returns). Everything crossing the boundary must be a pointer, nullable pointer, or primitive. The working pattern: export a single `extern struct` vtable of function pointers (`@export(&vtable, .{ .name = "..." })`) — function pointers cross as data with Zig's native calling convention, identical on both sides since host and generators share one compiler. Error unions cannot be exported; use nullable-pointer returns (`?*T`, null = failure).
+
+**Module scope:** a module's import scope is its `root_source_file`'s directory, so a generator under `src/world/generators/` cannot be the `.so` root (its `../` imports escape the module path). One shared root `src/generator_root.zig` sits at `src/` level; `build.zig` compiles it once per generator, selecting via a `generator_select` options module and comptime switch, and each generator's `comptime { @export(...) }` block emits its `generator_api` vtable. No per-generator shims — add a generator with a `.kind` arm in `build.zig`'s `GeneratorKind` plus a `@import` arm in `generator_root.zig`.
+
+**Config UI metadata:** `generator_api.Spec` presentation fields (`label`, `description`) are borrowed from the loaded generator library, while config keys/values/choice entries are owned by the config allocator — keep the library loaded as long as its config tree is used. Changes to shared config-tree layouts require incrementing `generator_api.ApiVersion` and rebuilding every plugin. Derive config widget IDs from the stable parameter path, not traversal order (order-derived IDs shift when an array is edited and widget state lands on the wrong field).
+
+## Editor UI (dvui)
+
+Widget ids collide when the same `@src()` line runs for multiple params — pass `.id_extra` per param. `dvui.dropdown` (and other `*T` choice widgets) write the selected index into the pointed-to value **in place during the draw call**: never guard a post-draw action with `if (index == my_choice_var)` after passing `&my_choice_var` as `.choice` — the variable was already mutated, so the guard always fires and the action is skipped. Capture `const previous = my_choice_var;` first and compare against `previous`.
+
+# Testing
+
+## Allocation failure testing
+
+Cover allocation-performing functions with `std.testing.checkAllAllocationFailures` — it exhaustively fails each allocation point to prove `OutOfMemory` handling and leak-free error paths. The test fn takes only an allocator (plus `std.Io` in the args tuple when needed), allocates, operates, and cleans up via `defer`.
 
 ```zig
 fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
@@ -485,29 +245,15 @@ test "StagingRing checkAllAllocationFailures" {
 }
 ```
 
-For tests that need `std.Io`, pass it in the args tuple:
+## Noise vector-vs-scalar tolerance
 
-```zig
-fn test_fn(alloc: std.mem.Allocator, io: std.Io) !void {
-    var map = try ConcurrentHashMap.init(alloc, io);
-    defer map.deinit(alloc, io);
-    // ...
-}
+Vectorized noise/warp paths vs their scalar counterparts (`fillGrid2D`/`fillNoise2DGrid`/`fillWarp2DGrid` vs `genNoise2D`/`domainWarp2D`) match bit-exact in Debug but differ ~1 ULP in ReleaseFast (wider vector ops reassociate/FMA-contract differently than the N=1 path). Use `std.testing.expectApproxEqAbs(expected, actual, 1e-5)`, never `expectEqual` — and never relative tolerance, since values near zero explode the relative error of a 1e-8 absolute difference.
 
-test "ConcurrentHashMap allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_fn, .{io});
-}
-```
+## Fuzz tests
 
-### Fuzz Tests
+Fuzz with `std.testing.fuzz` + `std.testing.Smith` when the input space is too large to enumerate (meshing, chunk encoding, allocator internals). Fuzz callbacks find crashes/panics — never `try std.testing.expect*` inside them; use `std.debug.assert`/`@panic` or let the code crash. Always clean up with `defer` (leaks accumulate across runs and hide bugs). `@disableInstrumentation()` in allocators/fakes used by fuzz tests, so the fuzzer tracks the code under test, not allocator branches. Write single-threaded first (deterministic, fast, catches most bugs); add multi-threaded only for thread-safe code.
 
-Fuzz tests use `std.testing.fuzz` with a `std.testing.Smith` to generate random inputs. The fuzz harness runs the test function many times with different random seeds, trying to find inputs that crash or violate invariants. Unlike property-based testing, fuzz tests don't need explicit "for all X, property P holds" assertions — they just need to not crash (though explicit assertions sharpen the search).
-
-**When to write a fuzz test:** Any time a function has a large input space where manually enumerating edge cases is impractical. Meshing, chunk encoding, and allocator internals are all strong candidates.
-
-#### Simple fuzz test (void context)
-
-For pure functions with no external dependencies, use a void context:
+Simple (void context) and context-rich (allocator/Io/state) forms:
 
 ```zig
 test "FuzzMesh" {
@@ -526,29 +272,12 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
 }
 ```
 
-Key points:
-
-- Use `smith.value(T)` for any type where any value of `T` is valid input.
-- Use `smith.valueWeighted(T, weights)` when some values need higher probability (e.g., edge cases like max alignment or zero).
-- **Do not `try std.testing.expectEqual` inside fuzz callbacks.** Fuzz tests are about finding crashes and panics. Assertions should use `std.debug.assert` or `@panic` — these count as failures the fuzzer will minimize.
-- Always clean up with `defer` to avoid leaks that would confuse the fuzzer.
-
-#### Context-rich fuzz test
-
-For tests that need allocators, I/O, or mutable state across runs, pass a context struct:
-
 ```zig
 const Context = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     world: *World,
 };
-
-test "fuzz world" {
-    // ... set up io, allocator, world ...
-    defer world.deinit(io, allocator);
-    try std.testing.fuzz(Context{ .io = io, .allocator = allocator, .world = &world }, fuzzChunkLoad, .{});
-}
 
 fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
     var generator: FuzzGenerator = try .init(smith);
@@ -563,281 +292,8 @@ fn fuzzChunkLoad(context: Context, smith: *std.testing.Smith) !void {
 }
 ```
 
-#### The `fuzzerMake*` helper pattern
+**`fuzzerMake*` helpers** live on the type (not the test) so every test can use them: randomly choose a representation (e.g. grid vs uniform encoding) so the fuzzer explores all paths without the test knowing the variant.
 
-When a type has multiple representations (e.g., uniform vs. grid encoding), provide a `fuzzerMake*` method that randomly chooses a representation. This lets the fuzzer explore all code paths without the test knowing which variant was selected:
+**Weighted generation:** `smith.valueWeighted` biases toward edge cases (e.g. alignments ≤ 16 at high weight plus rare max-alignment overflow; `smith.boolWeighted(31, 1)` for ~3% OOM rates). Weights are multiplicative within a call; comment the intent.
 
-```zig
-pub fn fuzzerMakeEncoding(
-    grid: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
-    smith: *std.testing.Smith,
-) Encoding {
-    return switch (smith.value(@typeInfo(Encoding).\"union\".tag_type.?)) {
-        .grid => blk: {
-            grid.* = smith.value([ChunkSize][ChunkSize][ChunkSize]Block);
-            break :blk .fromBlocks(grid);
-        },
-        .uniform => .{ .uniform = smith.value(Block) },
-    };
-}
-```
-
-This pattern belongs on the type itself (not the test file) so any test can use it.
-
-#### Weighted value generation
-
-Use `smith.valueWeighted` to bias the fuzzer toward interesting edge cases:
-
-```zig
-// Alignment: 75% chance of 1-16, but also test max-alignment overflow cases
-const alignment: []const Smith.Weight = &.{
-    .rangeAtMost(Alignment, .@"1", .@"16", 32),
-    .rangeAtMost(Alignment, .@"16", @enumFromInt(@bitSizeOf(usize) - 1), 1),
-    .value(Alignment, @enumFromInt(@bitSizeOf(usize) - 1), 32),
-};
-
-// End-of-stream: run long sequences (high false weight) to stress allocation tables
-const eos: []const Smith.Weight = &.{
-    .value(bool, false, 255),
-    .value(bool, true, 1),
-};
-```
-
-Weights are multiplicative within a `valueWeighted` call. Higher weight = more likely to be chosen. Use comments to document the intent (e.g., "75% of alignments are ≤ 16").
-
-#### Fuzz test best practices
-
-- **No `std.testing.expect*` in fuzz callbacks.** Use `assert`, `@panic`, or just let the code crash.
-- **Clean up with `defer`.** The fuzzer runs the callback many times; leaks accumulate and hide real bugs.
-- **`@disableInstrumentation()` in allocators/fakes used by fuzz tests.** This prevents the fuzzer from treating internal allocator branches as coverage goals, keeping focus on the code under test.
-- **Separate single-threaded and multi-threaded fuzz tests.** Single-threaded is deterministic and higher throughput. Multi-threaded catches concurrency bugs but is slower. Write both when the code is thread-safe.
-- **Fake backing allocators that never reuse memory.** This catches use-after-free and memory reuse bugs. The `FuzzSingleThreadedAllocator` pattern increments a fill pointer and never reuses freed ranges.
-- **Splat patterns for data integrity.** Fill newly allocated memory with a known byte, and verify it hasn't changed on free/resize/remap. This catches corruption bugs.
-- **Memory dependency tracking for multi-threaded fuzz tests.** Use `std.Io.Event` to sequence operations between threads so the test remains deterministic and reproducible.
-- **Keep fuzz callbacks fast.** Avoid I/O, large allocations, or expensive setup inside the callback. Do setup once in the test function body (outside `std.testing.fuzz`).
-
-#### Concurrent fuzz tests
-
-For multi-threaded code, follow a producer-plans / workers-execute model. The main fuzz callback pre-generates all operations and failure sequences, spawns worker threads, and synchronizes runs via atomics. Workers consume ops from a shared queue using a CAS-based index.
-
-**Pre-generate all ops up front.** The main thread decides the full sequence of operations (alloc, free, resize, remap), their parameters, and which operations depend on which prior results. This keeps the workers' logic trivial and deterministic.
-
-**`MemoryDependency` for producer-consumer sequencing.** When one thread's result feeds another thread's operation, wrap the result in a struct containing an `Io.Event`:
-
-```zig
-const MemoryDependency = struct {
-    ready: std.Io.Event,
-    memory: ?[]u8, // null if allocation failed
-
-    fn get(dep: *MemoryDependency, io: std.Io) ?[]u8 {
-        dep.ready.waitUncancelable(io);
-        return dep.memory;
-    }
-};
-```
-
-The producer calls `dep.ready.set(io)` after computing the result; the consumer calls `dep.get(io)` to block until it's available.
-
-**`Run` synchronization for batch coordination.** Use a packed struct with a boolean toggle to signal workers to start a new fuzz iteration:
-
-```zig
-const Run = packed struct(u32) {
-    n: bool,
-    pad: u31 = 0,
-
-    fn wait(ptr: *Run, val: Run, io: std.Io) error{Canceled}!void {
-        while (true) {
-            const prev = @atomicLoad(Run, ptr, .acquire);
-            if (prev.n == val.n) break;
-            try io.futexWait(Run, ptr, prev);
-        }
-    }
-
-    fn next(r: Run) Run {
-        return .{ .n = !r.n };
-    }
-};
-```
-
-The main thread flips `run` to `.next()` and wakes all workers with `io.futexWake`. Each worker waits for its expected `run` value before starting, processes ops until the queue is empty, then atomically decrements `running`. The main thread blocks until `running` reaches zero.
-
-**Worker loop pattern.** Workers atomically grab the next op index via CAS, process it, then either signal a result event (for producer ops) or await a dependency (for consumer ops):
-
-```zig
-fn worker(io: std.Io, ops: *SharedOps) error{Canceled}!void {
-    var next_run: Run = .{ .n = true };
-    while (true) {
-        try ops.run.wait(next_run, io);
-        next_run = .next(next_run);
-
-        while (true) {
-            const i = @atomicRmw(usize, &ops.next_i, .Add, 1, .monotonic);
-            if (i >= ops.items.len) break;
-
-            switch (ops.items[i]) {
-                .alloc => |call| {
-                    const ptr = alloc(call.len, call.alignment);
-                    call.result.memory = if (ptr) |p| p[0..call.len] else null;
-                    call.result.ready.set(io);
-                },
-                .free => |call| {
-                    const memory = call.memory.get(io) orelse continue;
-                    free(memory, call.alignment);
-                },
-                // ...
-            }
-        }
-
-        // All ops consumed; signal the main thread
-        _ = @atomicRmw(u32, &ops.running, .Sub, 1, .acq_rel);
-    }
-}
-```
-
-**Pre-generate failure sequences.** To test OOM paths deterministically across threads, generate arrays of random booleans that the fake backing allocator consumes via atomics:
-
-```zig
-const fails: []bool = gpa.alloc(bool, ops.len * 2 + smith.value(u8)) catch &.{};
-for (fails) |*f| f.* = smith.boolWeighted(31, 1); // ~3% failure rate
-```
-
-The fake allocator reads these in order with `@atomicRmw(usize, &fail_i, .Add, 1, .monotonic)` and fails the corresponding allocation. This injects OOM deterministically while still exercising interleaved thread behavior.
-
-**Fake allocators with atomic fill.** The multi-threaded fake backing allocator uses a CAS-based fill pointer (identical logic to the single-threaded version but with atomics) so multiple threads can allocate concurrently:
-
-```zig
-const FuzzMultiThreadedAllocator = struct {
-    fill: usize,
-    buf: []u8,
-    fail_i: usize,
-    fails: []const bool,
-
-    fn allocInner(f: *@This(), len: usize, alignment: Alignment) ?[*]u8 {
-        var prev_fill = @atomicLoad(usize, &f.fill, .monotonic);
-        while (true) {
-            const start = alignment.forward(@intFromPtr(f.buf[prev_fill..].ptr));
-            const offset = @intFromPtr(start) - @intFromPtr(f.buf.ptr);
-            if (offset +| len > f.buf.len or f.maybeFail()) return null;
-            prev_fill = @cmpxchgStrong(usize, &f.fill, prev_fill, offset + len, .monotonic, .monotonic)
-                orelse break;
-        }
-        return f.buf[offset..][0..len].ptr;
-    }
-};
-```
-
-**Write single-threaded first.** A single-threaded fuzz test for the same code is simpler, faster, and deterministic. Get it working and passing before adding the multi-threaded variant. The single-threaded test catches most bugs; the multi-threaded test catches the remainder.
-
-## Generator shared libraries (DLL plugins)
-
-Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen on this libc-linked Linux build). The exe embeds the built `.so` (via `addAnonymousImport` + `@embedFile`, same as the shaders) and writes it into the `generators/` directory at startup.
-
-### C-ABI export rules (Zig 0.16)
-
-- `pub export fn` (and `@export`) require a machine calling convention, and such functions cannot take auto-layout structs by value (`std.mem.Allocator`, `std.Io`, slices, error-union returns). Everything crossing the boundary must be a pointer, a nullable pointer, or a primitive.
-- The pattern that works: export a single `extern struct` vtable of function pointers (`@export(&vtable, .{ .name = "..." })`). Function pointers cross as data with Zig's native calling convention, which is identical on both sides because host and generators are built by the same compiler.
-- Error unions cannot be exported; use nullable-pointer returns (`?*T`, null = failure).
-
-### Zig 0.16 gotchas hit while building this
-
-- `@typeInfo` has no `.slice` variant — slices are `.pointer` with `Pointer.size == .slice`.
-- `std.meta.eql` compares slices by pointer identity (`a.ptr == b.ptr`), NOT content. Any deep comparison over slices must be hand-written.
-- A module's import scope is the directory of its `root_source_file`; a generator file under `src/world/generators/` cannot be the `.so` root because its `../` imports would escape the module path. Instead a single shared root `src/generator_root.zig` sits at `src/` level, where all `..`/`../..` imports stay in scope. `build.zig` compiles that one file once per generator, selecting the generator via a `generator_select` options module and a comptime switch; each generator's own `comptime { @export(...) }` block then emits its `generator_api` vtable. There are no per-generator `_generator.zig` shims — add a new generator by adding a `.kind` enum arm to `GeneratorKind` in `build.zig` and a `@import` arm in `generator_root.zig`.
-- `std.Io.Writer` has a field named `end` (usize), so `writer.end()` only exists on file writers, not on a bare `std.Io.Writer`.
-- `dvui` widget ids collide when the same `@src()` line runs for multiple params — pass `.id_extra` per param.
-- `dvui.dropdown` (and other `*T` choice widgets) write the selected index into the pointed-to value **in place during the draw call**. Do not guard a post-draw action with `if (index == my_choice_var)` after passing `&my_choice_var` as `.choice` — the variable was already mutated to the new value, so the guard always fires and the action is skipped. Capture `const previous = my_choice_var;` before the widget, compare against `previous`, and pass the already-updated value (or just act unconditionally) in the branch.
-
-- `std.zon.parse.free` crashes on values holding comptime-backed defaults (e.g. slices pointing at `@embedFile` data). Parse into a throwaway `std.heap.ArenaAllocator` and discard the arena instead of freeing field-by-field.
-
-### Generator config UI metadata
-
-`generator_api.Spec` presentation fields such as `label` and `description` are borrowed from the loaded generator library, while config keys, values, and choice entries are owned by the config allocator. Keep the generator library loaded for as long as its config tree is used. Changes to shared config-tree layouts require incrementing `generator_api.ApiVersion` and rebuilding every generator plugin.
-
-Config widget IDs should be derived from the stable parameter path, not from traversal order. Traversal-order IDs change when an array is edited and can make widget state move to a different field.
-
-## JitteredGrid placement gotchas (Planet generator)
-
-- `JitteredGrid.getStructure` only finds a structure from positions **at or below** it (`structure_pos >= pos_in_box`), and for negative cells the structure position itself goes negative, so the in-range check always fails. Querying cells at negative coordinates silently returns null. If a structure grid must cover the whole world (e.g. planets near spawn on all sides), shift the grid by a large positive constant so every used cell index is positive.
-- The `level` parameter scales the query position by `2^level` internally (`real_position = scale * position`). Querying at position = `cell` with `scale == box_size` lands exactly on the cell origin, where `pos_in_box == 0` and the in-range check reduces to `jitter < scale` — always true when `inner_box_size < box_size`. This is the trick for O(1) "which structure owns this cell" lookups.
-- A sphere placed with a one-sided found region can never be found from all sides. To keep placement O(1) AND correct, clamp the structure position inside its cell (`clamp(jitter, radius, box_size - radius)`) so the whole sphere stays inside the owning cell; every block then finds the sphere through its own cell.
-
-### Filtered tests
-
-`zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.
-
-### Matrix layout for GLSL push/params (CSM gotcha)
-
-zm matrices (lookAtRH, orthographicRH, translation) store the translation in the **last column of each row**, and `v · M` (row-vector) is the row-major convention. When you `@bitCast(zm.data)` into a `[16]f32` and hand it to GLSL as `mat4`, the GLSL `M * v` computes `v · M_zm` (row-vector dotted with each row). This is fine for the camera view (eye at origin → last column is `(0,0,0,1)`, so `w` stays 1), but a light/projection matrix with a **non-origin eye has a non-(0,0,0,1) last column → GLSL `w` becomes a huge projective term** and the matrix is silently wrong.
-
-Fix that was adopted for CSM: build the light view-projection **directly in standard GLSL column-major layout** (translation in the 4th column, bottom row `(0,0,0,1)`, so `w == 1`):
-
-```
-flat[i*4+j] = M[i][j];   // column-major GLSL: M[c][r] = flat[c*4+r]
-row0: (s.x/r, u.x/r, f.x/fnf, 0)
-row1: (s.y/r, u.y/r, f.y/fnf, 0)
-row2: (s.z/r, u.z/r, f.z/fnf, 0)
-row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
-```
-
-where `s,u,f` = light basis, `r` = box half-extent, `fnf = far - near`, `t = view_pos - center`. Vulkan NDC depth is `[0,1]`, so near maps to 0 and far maps to 1; do not apply the OpenGL `z * 0.5 + 0.5` conversion to shadow depth. Verify any such matrix with a CPU helper `out[i] = sum_j flat[j*4+i]·v[j]` against ground-truth light-space coordinates (the Csm tests do this). zm's `lookAtRH`/`orthographicRH` compose with the _opposite_ product order to what a column-vector mental model expects; prefer building these matrices by hand.
-
-### Filtered tests (cont.)
-
-`-Dtest_filter` only sees tests from files reachable in the module import graph. A new `.zig` file with tests is invisible until something reachable from `main.zig` references it (e.g. `pub const Csm = @import(...)` in Renderer.zig, or a field type like `shadow: Csm.ShadowConfig` in RenderOptions forces its analysis).
-
-### Shader `#include` dependencies must be registered as build inputs
-
-glslc resolves `#include "shadow.glsl"` internally, but the Zig build graph only knows the inputs you declare with `addFileArg`/`addFileInput`. If an included file is not registered, editing it does NOT invalidate the glslc cache and the compiled SPIR-V goes stale while Zig source (e.g. `ShadowParams` layout) recompiles — a silent layout mismatch that breaks rendering (no shadows). Symptom: the `.spv` mtime predates your edit and `spirv-dis` shows the old member offsets.
-
-Fix: register every `#include` with `addFileInput` on the same `addSystemCommand`:
-
-```zig
-frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));
-frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));
-```
-
-`addFileInput` tracks the dependency without appending it to the glslc argv (unlike `addFileArg`). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` and cross-check against the Zig `@offsetOf` asserts.
-
-### Clearing RocksDB chunk storage
-
-Clear persisted chunks through RocksDB while the database is open, using a `WriteBatch` range tombstone for each chunk column family and flushing both families afterward. Stop background saves and finish the final save before clearing; do not remove the database directory from the filesystem while RocksDB owns it.
-
-### Async drain vs. the candidate buffer's GPU-idle window
-
-The upload drain (submitBatch + retireCompletedUploads + processRetired) runs on a background task = dispatched per frame via a `restartFuture`-style poll (`drain_is_running` + `drain_future`; the frame reaps a finished pass with `future.await` inside the `if (!running)` branch, then re-dispatches with `io.concurrent(...) catch io.async(...)` — never waiting on a running pass). The frame's draw then calls `publishPending` to apply the recorded scene effects.
-
-**Why the split:** the cull shader reads `scene.persistent.buffer` (the CPU-mapped candidate array) every frame, and CPU writes to `persistent.mapped` (`writeCandidate`/`markInactive`/`releaseCandidate`/`growPersistentCandidates`) are only safe when no GPU command can be reading it. `beginFrame`'s timeline throttle (waits `frame_number - max_frames_in_flight + 1`) proves the GPU idle for the graphics queue, so the _frame thread's_ window between beginFrame and the first recorded cull is the only sound place to touch candidates — a background task cannot self-gate this, because the frame thread can always submit right after the task's check. Hence: the drain task only _records_ cheap `Publication` ops (union: `retire`/`remove`/`free_index`) into a list guarded by `retire_mutex`; `publishPending` (frame thread) applies them: `allocIndex`/`writeCandidate`/`fetchPut`/`markInactive`/`releaseCandidate`/`enqueueRetiredMesh` and the index-pool frees. Any code that writes `persistent.mapped` must run inside that idle window, never inside the background drain. Worker-thread flush drains (`flushUploads`, `pushPendingUpload` full-queue) record publications the same way. Teardown must cancel+await the drain future before draining the queues.
-
-`publishPending` must NOT hold `retire_mutex` while applying: the drain task can hold it for the whole pass, so the frame would stall behind it (this caused visible lag). Swap the entire `ArrayList` out under the mutex (`std.mem.swap(std.ArrayList(Publication), &publish_scratch, &pending_publications)`) and apply lock-free from the frame-private scratch. Stealing a _slice_ of the list instead is a memory-safety bug: `clearRetainingCapacity` keeps the backing buffer, so the drain task's next appends overwrite the slice mid-iteration (triggered a `switch on corrupt value` panic). Appends into `retired_meshes` from the apply step race the drain task's `processRetired` sweep, so that list needs its own `retired_meshes_mutex` (lock order: `retire_mutex` → `retired_meshes_mutex`, never reversed).
-
-## Handling persistent VK_SUBOPTIMAL_KHR results
-
-`VK_SUBOPTIMAL_KHR` is a usable result, but applications may recreate to improve surface compatibility. Some variable-extent platforms continue returning it after a valid replacement is installed, so guard against an infinite loop: allow the first suboptimal result to request recreation, then suppress duplicate requests until an explicit physical-size/configuration change resets the guard. Continue handling `VK_ERROR_OUT_OF_DATE_KHR` unconditionally.
-
-## OIT volume term invariants (transparent_frag.frag / composite_frag.frag)
-
-The water volume is integrated in a reference frame: each face adds `density * absorption * (bg - frag)` entering and subtracts it exiting, so a volume's thickness only survives if the entry and exit faces integrate against the same background distance. Three rules follow:
-
-- Sky pixels hold the cleared depth 0.0, whose linearization `near / depth` is infinite. Both faces of a pair then saturate the same clamp and cancel to zero, so water against the sky showed no volume at all. `sky_dist` (256) substitutes the reference only for those pixels. Real backgrounds must never be clamped: volumes sit up to ~100,000 blocks away (planet scale), and clamping their background erases every volume past the clamp. `sky_dist_max` (2048) clamps sky-referenced distances symmetrically so distant sky pairs cancel cleanly to zero rather than leaving f16 quantization noise. The surface term's gate uses the unclamped value so water farther than `sky_dist` keeps its fresnel surface.
-- Pair precision is bounded by f16 quantization of each face's write: a thickness signal survives only when it exceeds ~1/1024 of the write magnitude. Finite backgrounds write ~the local segment, so far oceans stay correct at any distance; the sky reference writes ~max(sky_dist, z), so sky-backed volumes stay exact to roughly a thousand blocks and render clean zero beyond (subvisual there). Stacked saturated faces can still overflow the f16 volume sum to Inf, so the composite gates the scatter on `td_scalar < 65504`.
-- Absorption must stay position-independent (`1 - volume_color`, no light term). Entry and exit faces sample light at different points, so a light-dependent absorption leaves a residue when the pair cancels. Day/night for the scatter color is applied in the composite pass via `OitCompositor.volumeScatterLight` instead.
-- Thickness is ray length, not eye-Z difference: multiply by the slant `length(frag_pos) / fragment_depth`. Off-axis pixels at 90° FOV otherwise undercount by up to ~0.58x.
-
-`near_plane` in the shader must match core.zig's projection near (0.01); the `near / depth` linearization assumes the infinite reverse-Z projection where depth = near / eye_dist.
-
-Known remaining gap: when the camera is inside water, rays have an exit face but no entry face, so the net optical depth is negative and clamps to zero (no underwater tint). Fixing it needs a virtual entry term in the composite or raymarched volumes.
-
-## Almost never use std.mem.zeroes, it can mask bugs and is less explicit
-
-## Runevision erosion filter (Terrain.zig + libs/phacelle.zig + libs/erosion.zig)
-
-- **Units:** the filter runs entirely in normalized space. `p` fed to `erosionFilter` is the noise-grid base coordinate _divided_ by `erosion_scale` (multiplying instead makes gullies _coarser_ than the relief and looks wrong). The height input is the raw `shaped` field (≈[-1,1]). On the way out the base field takes the asymmetric envelope `|bounds| * scale` (continuous through zero by construction), but the deltas must not: converting with the local `|bounds|` doubles them at the shoreline and ends every crossing gully in a cliff. Both deltas convert with the symmetric `max(|min|, |max|) * scale` instead (both flow through `composeErodedHeight`), so relief is identical on land and under water; both amplitudes stay in normalized units so saved configs keep their magnitude. The downhill slope is the negated central-difference gradient of `shaped` at +/- one sample spacing.
-- **Cell size is a locked ratio, never an absolute size:** inside `phacelleNoise` the phase ramps at `cell_scale * TAU` per unit cell, and the octave `freq` scales the stripe frequency and the cell grid simultaneously (cells are unit-sized in `p * freq` space). Doubling the stripe frequency therefore halves the cells automatically, so no per-octave cell tuning is needed — `cell_scale` is a unitless ratio layered on the `erosion_scale` master.
-- **Load-bearing order:** each octave steers off the `gully` slope accumulated by the previous octave (`State.apply`); `side *= -freq` is the chain rule for the caller's `p * freq` scaling plus the downhill sign flip. `side` carries `norm_dir_perp * cell_scale * TAU`; the caller scales it by the octave `freq` exactly once.
-- **Mask chain:** `mask = powInv(mask, detail) * new_mask` with `powInv(x, p) = x^(1/p)` (detail < 1 crushes older masks, restricting fine octaves to steep slopes; `powInv(0)` latches closed, keeping flats uncarved). `smoothStart(t, smoothing)` must guard `smoothing <= 0` and return a step (`crease_rounding = 0` would otherwise divide by zero). The per-octave `new_mask` gates on the _wave's_ slope (`|sin|`), while the first-octave seed is the terrain steepness mask (see the next bullet).
-- **Peak/valley preservation (steepness fade):** the octave sampling stays absolute in world space; flats are protected by the mask alone. The first octave's mask is seeded with the inverted-quadratic `1 - (1 - steepness)^2` (fully closed on flats, 3/4 open at half steepness), so on flat ground every octave lerps to the previous target (zero on the first) and the height delta is exactly 0. `fade_slope` is the steepness at which the mask runs fully open. The steepness itself comes from a wide-stencil average (`fadeSteepness`), not the per-sample gradient, or fine-noise flicker would strobe the mask between neighbors. `fade_slope <= 0` disables the fade.
-- **LOD consistency:** effective octaves = `max(1, erosion_octaves -| level)` (`Params.erosionFilterParams`); octaves stay absolute in world space. The test compares a level-1 chunk against box-filtered level-0 chunks; tolerance must cover the gradient-resampling shift (e doubles per level) plus the coarser fade stencil moving the per-sample mask, so the LOD bound is 40% of `filter_strength / (1 - gain) * gully_weight` plus 128 blocks fixed slack.
-- **Hash deviation:** the reference's `fract`-based cell jitter loses precision far from the origin; `phacelle.zig` uses `fastnoise.hash2D`/`hash2DVec` with the low/high 16 bits mapped to [-0.5, 0.5]. Keeps the pattern exact at ±100,000-block coordinates.
-- **Benchmark (Debug, Xeon):** base `genTerrainHeight` ≈ 540 µs/chunk; with the filter ≈ 6.4 ms/chunk — the filter is ~12x the whole base pipeline. The gradient stage is ~4 extra batched warp+noise fills; Phacelle's 16 cells x 4 octaves of transcendentals dominate the rest. Done levers: polynomial `exp(-2d^2)` weight (`bellWeight`, ~3e-7), LOD octave drop, `@Vector(16, f32)` cell loop.
-- **Erosion direction must be build-stable:** the `grad_x`/`grad_z` accumulators were `undefined`, and `addGradientSamples`' first pass reads them (`grad_row + shaped*k`). Uninitialized stack content is build- and layout-dependent, so ReleaseFast vs Debug got different per-chunk gradient offsets and the whole gully pattern rotated between builds. Fixes: zero-init the accumulators, use `@mulAdd` for the accumulation so it cannot FMA-contract differently per build, and blend the seeded direction toward the assumed-slope direction below the 1e-4 gradient noise floor (`gradient_floor` in `erosion.zig`), because the fastnoise fills run `@setFloatMode(.optimized)` and are never bit-stable across build modes. FP reassociation anywhere in this pipeline changes the terrain bit pattern; keep operation order when refactoring.
-- **Config compat:** `erosion_strength` is kept in `Params` with `.skip = true` in `field_specs`; the superseded `erosion_fade_altitude` follows the same pattern. `std.zon.parse` only tolerates missing fields that carry a **declaration default**, so every `Params` field keeps its default in the declaration (`.default` is just `Params{}`) or old saved configs break; and `loadConfig` returns `error.InvalidConfig` instead of falling back, so a broken config fails loudly without being overwritten. Any field added to `Params` must keep a declaration default.
+**Concurrent fuzz tests** use a producer-plans/workers-execute model: the main callback pre-generates all ops, parameters, and OOM failure sequences (boolean arrays consumed via atomic index), spawns workers that grab op indexes with atomic CAS, and coordinates with two primitives — `MemoryDependency` (`std.Io.Event` + `?[]u8` result; producer `set`s, consumer `get`s via `waitUncancelable`) for producer-consumer sequencing, and a toggling packed-struct `Run` (`io.futexWait`/`futexWake`, main thread flips and waits for `running` to reach zero) for batch coordination. Fake backing allocators never reuse memory (fill-pointer bump; atomic fill for multi-threaded) to catch use-after-free, fill new memory with a splat pattern and verify on free/resize/remap, and keep fuzz callbacks fast (setup once outside `std.testing.fuzz`).

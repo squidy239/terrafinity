@@ -86,7 +86,8 @@ void main() {
     sun_dir_norm = normalize(push_consts.pc.sun_dir);
     sun_day = smoothstep(-0.1, 0.25, sun_dir_norm.y);
 
-    const uint water_block_type = 2u;
+    // Dense EnumIndexer index of water. EnumIndexer sorts by tag VALUE (fine_grass2045=0, null=1, air=2, water4095=3), not decl order. Keep in sync with src/world/Block.zig.
+    const uint water_block_type = 3u;
     if ((local_pos + absolute_position).y == 0.0 && block_type_local == water_block_type) {
         float speed = 0.1;
         float t = 1.0 + push_consts.pc.time;

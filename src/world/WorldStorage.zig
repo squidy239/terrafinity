@@ -114,15 +114,6 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     const z = tracy.Zone.begin(.{ .src = @src() });
     defer z.end();
 
-    // Null is "no data", never content: persisting it would pin an empty row
-    // that shadows live generation on every later load. Drop it in all modes,
-    // clearing the flag so the background saver does not retry it forever.
-    if (chunk.encoding == .uniform and chunk.encoding.uniform == .null) {
-        _ = chunk.modified.swap(false, .acq_rel);
-        return;
-    }
-
-    const modified = chunk.modified.load(.seq_cst);
     try self.options_lock.lockShared(io);
     const save_mode = self.save_mode.*;
     self.options_lock.unlockShared(io);
@@ -130,13 +121,20 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
         .everything => {},
         .modified_grids_all_uniforms => switch (chunk.encoding) {
             .uniform => {},
-            .grid => if (!modified) return,
+            .grid => if (!chunk.modified.load(.seq_cst)) return,
         },
-        .only_modified => if (!modified) return,
+        .only_modified => if (!chunk.modified.load(.seq_cst)) return,
     }
 
     const was_modified = chunk.modified.swap(false, .acq_rel);
     errdefer if (was_modified) chunk.modified.store(true, .release);
+
+    // Null is "no data", never content: persisting it would pin an empty row
+    // that shadows live generation on every later load. Drop it in all modes,
+    // clearing the flag so the background saver does not retry it forever.
+    if (chunk.encoding == .uniform and chunk.encoding.uniform == .null) {
+        return;
+    }
 
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     const data: ChunkData = .{
@@ -187,26 +185,27 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     var data = std.mem.bytesToValue(ChunkData, data_bytes.data);
     data_bytes.deinit();
 
-    var retried_missing_grid = false;
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
-    get: switch (data.encoding) {
-        .grid => gr: {
-            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse {
-                if (retried_missing_grid) return error.Unrecoverable;
-                retried_missing_grid = true;
-                // The encoding may have changed while the old grid row was removed.
-                const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
-                defer new_data_bytes.deinit();
-                if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
-                data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
-                continue :get data.encoding;
-            };
-            if (grid_bytes.?.data.len != @sizeOf([ChunkSize][ChunkSize][ChunkSize]World.Block)) return error.Unrecoverable;
-            blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
-            break :gr;
-        },
-        .uniform => blocks.mergeUniform(data.one_block),
+    if (data.encoding == .uniform) {
+        blocks.mergeUniform(data.one_block);
+    } else {
+        // Single retry: assumes any storage race settles after one re-read;
+        // a still-missing grid is treated as corruption (Unrecoverable), not retried.
+        grid_bytes = self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable;
+        if (grid_bytes == null) { // encoding may have changed; refetch data once
+            const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+            defer new_data_bytes.deinit();
+            if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
+            data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
+            if (data.encoding == .uniform) {
+                blocks.mergeUniform(data.one_block);
+                return .{ .from_disk = true, .structures = data.structures_generated };
+            }
+            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return error.Unrecoverable;
+        }
+        if (grid_bytes.?.data.len != @sizeOf([ChunkSize][ChunkSize][ChunkSize]World.Block)) return error.Unrecoverable;
+        blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
     }
 
     return .{ .from_disk = true, .structures = data.structures_generated };

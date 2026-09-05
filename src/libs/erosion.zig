@@ -65,6 +65,13 @@ const wave_offset: f32 = 0.25;
 const ridge_onset: f32 = 2.0;
 /// Per-octave decay of the mask rounding width.
 const rounding_decay: f32 = 0.5;
+/// Unit smoothing width: smoothStart(t, 1.0) is exactly the old easeOut(t),
+/// the smoothstep ramp over [0, 1].
+const unit_ramp: f32 = 1.0;
+/// Floor for the config-controlled `detail` exponent; keeps the hoisted
+/// reciprocal finite in release builds where the debug assert is compiled
+/// out.
+const min_detail: f32 = 1e-6;
 /// Gradient magnitude below which the seeded direction is float noise; the
 /// seed blends toward the assumed-slope direction there so flats stay
 /// deterministic across build modes.
@@ -81,6 +88,13 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
         std.math.clamp(fade_steepness / params.fade_slope, 0.0, 1.0)
     else
         1.0;
+    // Detail must stay positive: 0 makes the reciprocal infinite and
+    // pow(1, inf) == 1 silently latches the mask fully open, while a
+    // negative value flips the exponent sign so the mask grows instead of
+    // crushing fine octaves. Assert in debug, clamp for release.
+    if (params.detail <= 0) std.log.warn("erosion: detail {d} <= 0; clamping to {d}", .{ params.detail, min_detail });
+    std.debug.assert(params.detail > 0);
+    const inv_detail: f32 = 1.0 / @max(params.detail, min_detail);
     var octave: Octave = .{ .strength = params.filter_strength };
     var state = State{
         .gully = seedSlope(height_and_slope, params),
@@ -89,7 +103,7 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
         .mask = slopeFadeMask(steepness),
     };
     for (0..params.octaves) |_| {
-        state.apply(p, octave, params);
+        state.apply(p, octave, params, inv_detail);
         octave.advance(params);
     }
     return .{
@@ -124,8 +138,7 @@ const State = struct {
     ridge_fade: f32 = 0.0,
     ridge_mask: f32 = 1.0,
     magnitude: f32 = 0.0,
-
-    fn apply(self: *State, p: [2]f32, octave: Octave, params: ErosionParams) void {
+    fn apply(self: *State, p: [2]f32, octave: Octave, params: ErosionParams, inv_detail: f32) void {
         const wave = phacelle.phacelleNoise(
             .{ p[0] * octave.freq, p[1] * octave.freq },
             safeNormalize(self.gully),
@@ -165,12 +178,12 @@ const State = struct {
             params.ridge_rounding,
             std.math.clamp(wave.cos + 0.5, 0.0, 1.0),
         ) * octave.rounding;
-        self.mask = powInv(self.mask, params.detail) * easeOut(smoothStart(sloping, rounding));
+        self.mask = powInv(self.mask, inv_detail) * smoothStart(smoothStart(sloping, rounding), unit_ramp);
 
         // Ridge map: tracks the wave where the terrain is sloped. Ported for
         // completeness; its tuning is pending the ridge-map terrain features.
         self.ridge_fade = std.math.lerp(self.ridge_fade, gullies[0], self.ridge_mask);
-        self.ridge_mask *= easeOut(sloping * ridge_onset);
+        self.ridge_mask *= smoothStart(sloping * ridge_onset, unit_ramp);
     }
 };
 
@@ -200,12 +213,6 @@ fn smoothStart(t: f32, smoothing: f32) f32 {
     return m * m * (3.0 - 2.0 * m);
 }
 
-/// Eased ramp from 0 to 1 across [0, 1].
-fn easeOut(t: f32) f32 {
-    const m = std.math.clamp(t, 0.0, 1.0);
-    return m * m * (3.0 - 2.0 * m);
-}
-
 /// Slope fade mask: an inverted quadratic in the steepness, so the fade
 /// engages gradually as the terrain flattens instead of snapping like a
 /// sqrt-shaped curve would near zero slope.
@@ -213,11 +220,18 @@ fn slopeFadeMask(steepness: f32) f32 {
     return 1.0 - (1.0 - steepness) * (1.0 - steepness);
 }
 
-/// Raises `x` to the power 1/`power`; below 1 this crushes the previous mask,
+/// Raises `x` to the power `inv_power`; below 1 this crushes the previous mask,
 /// restricting fine octaves to areas the coarse octaves already carved.
 /// At zero the mask latches closed, which is what keeps flat ground uncarved.
-fn powInv(x: f32, power: f32) f32 {
-    return @exp(@log(x) / power);
+///
+/// NOTE: intentional algorithm change (rebake). This previously computed
+/// `@exp(@log(x) / power)` per octave; the hoisted `std.math.pow` form
+/// shifts terrain ~1 ULP per octave, so outputs differ slightly from
+/// pre-patch builds. The smoothstep side is bit-exact: smoothStart(t,
+/// unit_ramp) == the old easeOut(t).
+fn powInv(x: f32, inv_power: f32) f32 {
+    if (x <= 0) return 0;
+    return std.math.pow(f32, x, inv_power);
 }
 
 /// Unit vector, falling back to +x for degenerate input (flat terrain).

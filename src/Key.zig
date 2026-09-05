@@ -40,8 +40,9 @@ pub const Key = struct {
     key: Keys,
 };
 
+// Single-threaded: written once during init, read on the loop thread only.
+// Do not share across threads without adding synchronization.
 pub const Map = struct {
-    lock: std.Io.RwLock = .init,
     map: std.AutoHashMap(Key, Action),
 
     pub fn init(allocator: std.mem.Allocator) Map {
@@ -50,15 +51,11 @@ pub const Map = struct {
         };
     }
 
-    pub fn setActionKey(self: *Map, io: std.Io, key: Key, action: Action) !void {
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+    pub fn setActionKey(self: *Map, key: Key, action: Action) !void {
         try self.map.put(key, action);
     }
 
-    pub fn getAction(self: *Map, io: std.Io, key: Key) ?Action {
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+    pub fn getAction(self: *Map, key: Key) ?Action {
         return self.map.get(key);
     }
 };

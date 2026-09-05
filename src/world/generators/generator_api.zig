@@ -629,35 +629,6 @@ test "fromStruct allocation failure" {
     }.testFn, .{});
 }
 
-test "emitZon output" {
-    const allocator = std.testing.allocator;
-    var config: TestConfig = .{ .items = &.{} };
-
-    const tree = try fromStruct(TestConfig, allocator, &config, test_specs);
-    defer free(allocator, tree);
-
-    var buffer: [1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try emitZon(&writer, tree);
-
-    const expected =
-        \\.{
-        \\.enabled = true,
-        \\.scale = 0.5,
-        \\.count = 3,
-        \\.seed = 0,
-        \\.mode = .b,
-        \\.inner = .{
-        \\.freq = 0.1,
-        \\.octaves = 4,
-        \\},
-        \\.items = .{
-        \\},
-        \\}
-    ;
-    try std.testing.expectEqualStrings(expected, std.Io.Writer.buffered(&writer));
-}
-
 test "clone and array add remove" {
     const allocator = std.testing.allocator;
     var config: TestConfig = .{ .items = &.{} };

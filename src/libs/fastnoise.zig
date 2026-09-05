@@ -2770,9 +2770,6 @@ pub fn Noise(comptime Float: type) type {
         }
     };
 }
-test "reference all" {
-    std.testing.refAllDecls(Noise(f32));
-}
 
 test "range of all 2D noise/fractal combinations" {
     @setEvalBranchQuota(500_000);
@@ -2850,11 +2847,17 @@ test "range of all 3D cellular return/distance combinations" {
     }
 }
 
-test "domain warp keeps coordinates finite for all warp/fractal types" {
+test "domain warp keeps coordinates finite (scalar and batched)" {
     @setEvalBranchQuota(100_000);
     var noise = Noise(f32){
         .seed = -1234567890,
     };
+    var xs: [64]f32 = undefined;
+    var ys: [64]f32 = undefined;
+    for (0..64) |i| {
+        xs[i] = @floatFromInt(i % 8);
+        ys[i] = @floatFromInt(i / 8);
+    }
     inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp_type| {
         noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp_type.name).?;
         inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
@@ -2867,13 +2870,26 @@ test "domain warp keeps coordinates finite for all warp/fractal types" {
                 noise.domainWarp3D(&x, &y, &z);
                 try std.testing.expect(std.math.isFinite(x) and std.math.isFinite(y) and std.math.isFinite(z));
             }
+            var out_xs: [64]f32 = undefined;
+            var out_ys: [64]f32 = undefined;
+            noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
+            for (0..64) |i| {
+                try std.testing.expect(std.math.isFinite(out_xs[i]) and std.math.isFinite(out_ys[i]));
+            }
         }
     }
 }
 
-test "fillGrid2D matches scalar genNoise2D" {
+test "2D batch paths match scalar genNoise2D" {
     @setEvalBranchQuota(500_000);
     const size = 30;
+    const count = 35;
+    var xs: [count]f32 = undefined;
+    var ys: [count]f32 = undefined;
+    for (0..count) |i| {
+        xs[i] = @as(f32, @floatFromInt(i)) * 0.37 + @as(f32, @floatFromInt(i % 3)) * 0.11;
+        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.53 - @as(f32, @floatFromInt(i / 5)) * 0.07;
+    }
     var noise = Noise(f32){};
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
@@ -2885,15 +2901,30 @@ test "fillGrid2D matches scalar genNoise2D" {
                 const expected = noise.genNoise2D(3.0 + @as(f32, @floatFromInt(x)) * 0.25, -7.0 + @as(f32, @floatFromInt(y)) * 0.25);
                 try std.testing.expectApproxEqAbs(expected, grid[y * size + x], 1e-5);
             };
+            var out: [count]f32 = undefined;
+            noise.fillNoise2DGrid(&out, &xs, &ys);
+            for (0..count) |i| {
+                const expected = noise.genNoise2D(xs[i], ys[i]);
+                try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
+            }
         }
     }
 }
 
-test "fillGrid3D matches scalar genNoise3D" {
+test "3D batch paths match scalar genNoise3D" {
     @setEvalBranchQuota(500_000);
     const width = 6;
     const height = 5;
     const depth = 3;
+    const count = 29;
+    var xs: [count]f32 = undefined;
+    var ys: [count]f32 = undefined;
+    var zs: [count]f32 = undefined;
+    for (0..count) |i| {
+        xs[i] = @as(f32, @floatFromInt(i)) * 0.31;
+        ys[i] = @as(f32, @floatFromInt(i % 4)) * 0.47 - 1.0;
+        zs[i] = @as(f32, @floatFromInt(i / 3)) * 0.19;
+    }
     var noise = Noise(f32){};
     inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
         noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
@@ -2911,6 +2942,12 @@ test "fillGrid3D matches scalar genNoise3D" {
                     );
                     try std.testing.expectApproxEqAbs(expected, grid[(z * height + y) * width + x], 1e-5);
                 };
+                var out: [count]f32 = undefined;
+                noise.fillNoise3DGrid(&out, &xs, &ys, &zs);
+                for (0..count) |i| {
+                    const expected = noise.genNoise3D(xs[i], ys[i], zs[i]);
+                    try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
+                }
             }
         }
     }
@@ -2924,112 +2961,6 @@ test "range mapping handles full int ranges without overflow" {
         try std.testing.expect(i8_value >= -128 and i8_value <= 127);
         const u16_value = noise.genNoise3DRange(x, 0, 1, u16, 0, 65535);
         try std.testing.expect(u16_value <= 65535);
-    }
-}
-
-test "benchmark fillGrid2D on a 32x32 grid" {
-    const size = 32;
-    const x0 = -16.0;
-    const y0 = -16.0;
-    const spacing = 1.0 / @as(f32, size);
-    var noise = Noise(f32){ .noise_type = .perlin, .fractal_type = .ridged, .octaves = 12 };
-    noise.seed = 1337;
-
-    var grid: [size * size]f32 = undefined;
-    noise.fillGrid2D(&grid, size, x0, y0, spacing);
-    for (0..size) |y| for (0..size) |x| {
-        const expected = noise.genNoise2D(x0 + @as(f32, @floatFromInt(x)) * spacing, y0 + @as(f32, @floatFromInt(y)) * spacing);
-        try std.testing.expectApproxEqAbs(expected, grid[y * size + x], 1e-5);
-    };
-
-    const io = std.testing.io;
-    const iterations = 100;
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| noise.fillGrid2D(&grid, size, x0, y0, spacing);
-    const fill_done = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| for (0..size * size) |i| {
-        grid[i] = noise.genNoise2D(x0 + @as(f32, @floatFromInt(i % size)) * spacing, y0 + @as(f32, @floatFromInt(i / size)) * spacing);
-    };
-    const end = std.Io.Clock.Timestamp.now(io, .awake);
-
-    const samples: f64 = @floatFromInt(iterations * size * size);
-    const scalar_ns = @as(f64, @floatFromInt(fill_done.durationTo(end).raw.toNanoseconds())) / samples;
-    const fill_ns = @as(f64, @floatFromInt(start.durationTo(fill_done).raw.toNanoseconds())) / samples;
-    std.debug.print("32x32 grid: scalar {d:.1} ns/sample, fillGrid2D {d:.1} ns/sample, {d:.2}x faster\n", .{ scalar_ns, fill_ns, scalar_ns / fill_ns });
-
-    // The terrain height path samples at warped (irregular) coordinates, so
-    // benchmark the explicit-coordinate variant against per-point sampling.
-    var xs: [size * size]f32 = undefined;
-    var ys: [size * size]f32 = undefined;
-    for (0..size * size) |i| {
-        xs[i] = @as(f32, @floatFromInt(i % size)) * 0.53 - @as(f32, @floatFromInt(i / size)) * 0.11;
-        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.37 + @as(f32, @floatFromInt(i / 7)) * 0.29;
-    }
-    var points_out: [size * size]f32 = undefined;
-    noise.fillNoise2DGrid(&points_out, &xs, &ys);
-    const points_start = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| noise.fillNoise2DGrid(&points_out, &xs, &ys);
-    const points_done = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| for (0..size * size) |i| {
-        points_out[i] = noise.genNoise2D(xs[i], ys[i]);
-    };
-    const points_end = std.Io.Clock.Timestamp.now(io, .awake);
-
-    const points_scalar_ns = @as(f64, @floatFromInt(points_done.durationTo(points_end).raw.toNanoseconds())) / samples;
-    const points_fill_ns = @as(f64, @floatFromInt(points_start.durationTo(points_done).raw.toNanoseconds())) / samples;
-    std.debug.print("32x32 points: scalar {d:.1} ns/sample, fillNoise2DGrid {d:.1} ns/sample, {d:.2}x faster\n", .{ points_scalar_ns, points_fill_ns, points_scalar_ns / points_fill_ns });
-}
-
-test "fillNoise2DGrid matches scalar genNoise2D at explicit coordinates" {
-    @setEvalBranchQuota(500_000);
-    const count = 35;
-    var xs: [count]f32 = undefined;
-    var ys: [count]f32 = undefined;
-    for (0..count) |i| {
-        xs[i] = @as(f32, @floatFromInt(i)) * 0.37 + @as(f32, @floatFromInt(i % 3)) * 0.11;
-        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.53 - @as(f32, @floatFromInt(i / 5)) * 0.07;
-    }
-    var noise = Noise(f32){};
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
-            var out: [count]f32 = undefined;
-            noise.fillNoise2DGrid(&out, &xs, &ys);
-            for (0..count) |i| {
-                const expected = noise.genNoise2D(xs[i], ys[i]);
-                try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
-            }
-        }
-    }
-}
-
-test "fillNoise3DGrid matches scalar genNoise3D at explicit coordinates" {
-    @setEvalBranchQuota(500_000);
-    const count = 29;
-    var xs: [count]f32 = undefined;
-    var ys: [count]f32 = undefined;
-    var zs: [count]f32 = undefined;
-    for (0..count) |i| {
-        xs[i] = @as(f32, @floatFromInt(i)) * 0.31;
-        ys[i] = @as(f32, @floatFromInt(i % 4)) * 0.47 - 1.0;
-        zs[i] = @as(f32, @floatFromInt(i / 3)) * 0.19;
-    }
-    var noise = Noise(f32){};
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
-            inline for (@typeInfo(RotationType).@"enum".fields) |rotation| {
-                noise.rotation_type = comptime std.meta.stringToEnum(RotationType, rotation.name).?;
-                var out: [count]f32 = undefined;
-                noise.fillNoise3DGrid(&out, &xs, &ys, &zs);
-                for (0..count) |i| {
-                    const expected = noise.genNoise3D(xs[i], ys[i], zs[i]);
-                    try std.testing.expectApproxEqAbs(expected, out[i], 1e-5);
-                }
-            }
-        }
     }
 }
 
@@ -3082,29 +3013,6 @@ test "fillWarp2DGrid matches scalar domainWarp2D" {
     }
 }
 
-test "fillWarp2DGrid keeps coordinates finite for all warp/fractal types" {
-    @setEvalBranchQuota(100_000);
-    var noise = Noise(f32){ .seed = -1234567890 };
-    var xs: [64]f32 = undefined;
-    var ys: [64]f32 = undefined;
-    for (0..64) |i| {
-        xs[i] = @floatFromInt(i % 8);
-        ys[i] = @floatFromInt(i / 8);
-    }
-    inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp| {
-        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp.name).?;
-        inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
-            var out_xs: [64]f32 = undefined;
-            var out_ys: [64]f32 = undefined;
-            noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
-            for (0..64) |i| {
-                try std.testing.expect(std.math.isFinite(out_xs[i]) and std.math.isFinite(out_ys[i]));
-            }
-        }
-    }
-}
-
 test "warp gradient select tree matches the pair table" {
     // The table holds 16 direction pairs repeated eight times; the low four
     // hash bits select the pair, and every higher bit combination must hit it.
@@ -3115,46 +3023,4 @@ test "warp gradient select tree matches the pair table" {
         try std.testing.expectEqual(warp_gradient_pairs[pair][0], grad.xg[0]);
         try std.testing.expectEqual(warp_gradient_pairs[pair][1], grad.yg[0]);
     }
-}
-
-test "benchmark fillWarp2DGrid on a 32x32 grid" {
-    const size = 32;
-    var noise = Noise(f32){ .domain_warp_type = .simplex, .fractal_type = .fbm, .octaves = 3 };
-    noise.seed = 1337;
-
-    var xs: [size * size]f32 = undefined;
-    var ys: [size * size]f32 = undefined;
-    for (0..size * size) |i| {
-        xs[i] = @as(f32, @floatFromInt(i % size)) * 0.53 - @as(f32, @floatFromInt(i / size)) * 0.11;
-        ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.37 + @as(f32, @floatFromInt(i / 7)) * 0.29;
-    }
-    var out_xs: [size * size]f32 = undefined;
-    var out_ys: [size * size]f32 = undefined;
-    noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
-    for (0..size * size) |i| {
-        var gx = xs[i];
-        var gy = ys[i];
-        noise.domainWarp2D(&gx, &gy);
-        try std.testing.expectEqual(gx, out_xs[i]);
-        try std.testing.expectEqual(gy, out_ys[i]);
-    }
-
-    const io = std.testing.io;
-    const iterations = 100;
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);
-    const fill_done = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..iterations) |_| for (0..size * size) |i| {
-        var gx = xs[i];
-        var gy = ys[i];
-        noise.domainWarp2D(&gx, &gy);
-        out_xs[i] = gx;
-        out_ys[i] = gy;
-    };
-    const end = std.Io.Clock.Timestamp.now(io, .awake);
-
-    const samples: f64 = @floatFromInt(iterations * size * size);
-    const scalar_ns = @as(f64, @floatFromInt(fill_done.durationTo(end).raw.toNanoseconds())) / samples;
-    const fill_ns = @as(f64, @floatFromInt(start.durationTo(fill_done).raw.toNanoseconds())) / samples;
-    std.debug.print("32x32 warp: scalar {d:.1} ns/sample, fillWarp2DGrid {d:.1} ns/sample, {d:.2}x faster\n", .{ scalar_ns, fill_ns, scalar_ns / fill_ns });
 }

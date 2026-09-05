@@ -95,6 +95,8 @@ new_game: NewGameState = .{},
 /// World awaiting deletion confirmation, owned by the Ui allocator.
 delete_world_name: ?[]const u8 = null,
 terrain_recreate_error: ?[]const u8 = null,
+world_list: std.ArrayList(FolderData) = .empty,
+world_list_dirty: bool = true,
 
 menu_state: struct {
     ingame: bool = false,
@@ -137,6 +139,8 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     if (self.new_game.generator_name_allocated) allocator.free(self.new_game.generator_name);
     if (self.delete_world_name) |name| allocator.free(name);
     self.config_section_states.deinit();
+    for (self.world_list.items) |entry| allocator.free(entry.name);
+    self.world_list.deinit(allocator);
     self.new_game = .{};
     self.delete_world_name = null;
 }
@@ -302,6 +306,9 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
         self.menu_state.pending_game_deinit = true;
+        // Refresh once on menu entry so externally added/removed worlds appear.
+        // Steady-state frames keep hitting the cache (see continueMenu).
+        self.world_list_dirty = true;
         return true;
     }
 
@@ -415,7 +422,11 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
     try self.config_lock.lock(io);
     const first_config = self.config.*;
-    const options = &self.config.game_config;
+    self.config_lock.unlock(io);
+
+    var working_config = first_config;
+    working_config.game_config.render_options.selected_pack = try allocator.dupe(u8, first_config.game_config.render_options.selected_pack);
+    const options = &working_config.game_config;
 
     dvui.labelNoFmt(@src(), "Settings", .{}, .{ .font = .{ .size = 28 }, .gravity_x = 0.5 });
     drawGeneralSettings(self, options);
@@ -434,11 +445,19 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
     normalizeSettings(options);
 
-    const config_changed = !std.meta.eql(first_config, self.config.*);
+    const config_changed = !std.meta.eql(first_config, working_config);
     const gamma_changed = first_config.game_config.render_options.gamma_correction != options.render_options.gamma_correction;
     const present_mode_changed = first_config.game_config.render_options.present_mode != options.render_options.present_mode;
     const aa_changed = first_config.game_config.render_options.anti_aliasing != options.render_options.anti_aliasing;
-    self.config_lock.unlock(io);
+    if (config_changed) {
+        // The working pack is owned here until it moves into self.config below;
+        // free it if the commit-path lock returns early. Lock stays narrow.
+        errdefer allocator.free(working_config.game_config.render_options.selected_pack);
+        try self.config_lock.lock(io);
+        allocator.free(self.config.game_config.render_options.selected_pack);
+        self.config.* = working_config;
+        self.config_lock.unlock(io);
+    } else allocator.free(working_config.game_config.render_options.selected_pack);
 
     if (gamma_changed or present_mode_changed or aa_changed) {
         self.vk_ctx.requestSwapchainRecreate();
@@ -746,18 +765,13 @@ fn drawRenderSettings(self: *@This(), allocator: std.mem.Allocator, options: *Ga
 }
 
 fn normalizeSettings(options: *Game.Options) void {
-    options.lowest_level = if (options.lowest_level < -8) -8 else if (options.lowest_level > 24) 24 else options.lowest_level;
-    options.highest_level = if (options.highest_level < 1) 1 else if (options.highest_level > 24) 24 else options.highest_level;
-    options.highest_level = @max(options.highest_level, options.lowest_level);
+    const render_options = &options.render_options;
+    options.lowest_level = std.math.clamp(options.lowest_level, -8, 24);
+    options.highest_level = @max(std.math.clamp(options.highest_level, 1, 24), options.lowest_level);
     options.lod_overlap = std.math.clamp(options.lod_overlap, -4, 8);
-
-    options.render_options.shadow.lowest_shadow_level = if (options.render_options.shadow.lowest_shadow_level < -4) -4 else if (options.render_options.shadow.lowest_shadow_level > 24) 24 else options.render_options.shadow.lowest_shadow_level;
-
-    options.render_options.sky.star_brightness_min = std.math.clamp(options.render_options.sky.star_brightness_min, 0, 1);
-    options.render_options.sky.star_brightness_max = std.math.clamp(options.render_options.sky.star_brightness_max, 0, 1);
-    if (options.render_options.sky.star_brightness_min > options.render_options.sky.star_brightness_max) {
-        options.render_options.sky.star_brightness_max = options.render_options.sky.star_brightness_min;
-    }
+    render_options.shadow.lowest_shadow_level = std.math.clamp(render_options.shadow.lowest_shadow_level, -4, 24);
+    render_options.sky.star_brightness_min = std.math.clamp(render_options.sky.star_brightness_min, 0, 1);
+    render_options.sky.star_brightness_max = @max(std.math.clamp(render_options.sky.star_brightness_max, 0, 1), render_options.sky.star_brightness_min);
 }
 
 pub fn crossHair(self: *@This()) void {
@@ -858,6 +872,9 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     };
     try world_options.save(io, game_path);
     try self.saveGeneratorConfig(allocator, io, game_path);
+    // Mark the cached list stale before the fallible open tail so a failed
+    // open still refreshes and the newly created world becomes visible.
+    self.world_list_dirty = true;
     try self.openGame(io, allocator, game_path);
     self.menu_state.ingame = true;
     self.menu_state.newgame = false;
@@ -943,6 +960,9 @@ pub fn sidebar(self: *@This()) bool {
 
     if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
         self.menu_state = .{ .main = true };
+        // Refresh once on menu entry so externally added/removed worlds appear.
+        // Steady-state frames keep hitting the cache (see continueMenu).
+        self.world_list_dirty = true;
         return true;
     }
     if (dvui.button(@src(), "Settings", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
@@ -986,30 +1006,22 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         }
     }
 
-    var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{ .open_options = .{ .iterate = true } });
-    defer worlds_folder.close(io);
-
-    var list: std.ArrayList(FolderData) = .empty;
-
-    defer {
-        for (list.items) |data| {
-            allocator.free(data.name);
+    if (self.world_list_dirty) {
+        var worlds_folder = try std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{ .open_options = .{ .iterate = true } });
+        defer worlds_folder.close(io);
+        while (self.world_list.pop()) |data| allocator.free(data.name);
+        var it = worlds_folder.iterate();
+        while (try it.next(io)) |item| {
+            if (item.kind != .directory) continue;
+            const stat = try std.Io.Dir.statFile(worlds_folder, io, item.name, .{});
+            const data = FolderData{ .access_time = stat.ctime, .name = try allocator.dupe(u8, item.name) };
+            errdefer allocator.free(data.name);
+            try self.world_list.append(allocator, data);
         }
-        list.deinit(allocator);
+        std.sort.pdq(FolderData, self.world_list.items, {}, lessThanFn);
+        self.world_list_dirty = false;
     }
-
-    var it = worlds_folder.iterate();
-    while (try it.next(io)) |item| {
-        if (item.kind != .directory) continue;
-        const stat = try std.Io.Dir.statFile(worlds_folder, io, item.name, .{});
-        const data = FolderData{ .access_time = stat.ctime, .name = try allocator.dupe(u8, item.name) };
-        errdefer allocator.free(data.name);
-        try list.append(allocator, data);
-    }
-
-    std.sort.pdq(FolderData, list.items, {}, lessThanFn);
-
-    for (list.items, 0..) |item, i| {
+    for (self.world_list.items, 0..) |item, i| {
         const game = menuCard(@src(), .{}, .{ .id_extra = i, .expand = .vertical });
         defer game.deinit();
 
@@ -1061,9 +1073,20 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             self.delete_world_name = null;
         }
         if (self.delete_world_name != null and dvui.button(@src(), "Delete", .{}, .{ .margin = .all(8), .color_fill = .red })) {
-            try worlds_folder.deleteTree(io, name);
-            allocator.free(name);
+            const pending = self.delete_world_name.?;
             self.delete_world_name = null;
+            defer allocator.free(pending);
+            var worlds_folder = std.Io.Dir.cwd().createDirPathOpen(io, self.worlds_path, .{}) catch |err| {
+                self.world_list_dirty = true;
+                return err;
+            };
+            defer worlds_folder.close(io);
+            worlds_folder.deleteTree(io, pending) catch |err| {
+                // Stale cached entry: drop it from the cache on next refresh.
+                self.world_list_dirty = true;
+                return err;
+            };
+            self.world_list_dirty = true;
             return true;
         }
         // Dismissed via Esc or clicking outside the modal.

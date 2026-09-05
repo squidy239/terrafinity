@@ -1,9 +1,6 @@
 const std = @import("std");
 
-const Block = @import("../World.zig").Block;
-const World = @import("../World.zig");
 const Sphere = @import("Sphere.zig").Sphere;
-const utils = @import("utils.zig");
 
 pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytype) t, sampler_args_type: type) type {
     return struct {
@@ -34,19 +31,6 @@ pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytyp
             return self.sphere.isPointInside(sample_block_pos);
         }
     };
-}
-
-pub fn noiseSphere(editor: *World.Editor, center_pos: @Vector(3, f64), radius: f64, min_radius_factor: f32, noise: World.DefaultGenerator.Noise.Noise(f32), block: Block, level: i32) !void {
-    const explosion_sphere = TexturedSphere(f64, noiseTexture, NoiseParams).init(center_pos, radius, NoiseParams{ .noise = noise, .min_radius = min_radius_factor }, min_radius_factor);
-    try editor.placeSamplerShape(block, explosion_sphere, level);
-}
-const NoiseParams = struct {
-    noise: World.DefaultGenerator.Noise.Noise(f32),
-    minRadius: f32,
-};
-fn noiseTexture(u: f64, v: f64, args: anytype) f64 {
-    const sampled = args.noise.genNoise2DRange(@floatCast(u), @floatCast(v), f32, 0, 1);
-    return @floatCast(std.math.lerp(sampled, @as(f32, 1.0), @as(f32, args.minRadius)));
 }
 
 pub fn projectEquirectangular(shapeP: @Vector(3, f64), sphere_radius: f64) @Vector(2, f64) {

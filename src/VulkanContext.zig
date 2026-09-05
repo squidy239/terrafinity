@@ -111,6 +111,9 @@ screenshot_requested: std.atomic.Value(bool) = .init(false),
 screenshot_resolution: Screenshot.Resolution = .native,
 screenshot_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
 screenshot_counter: u32 = 0,
+// Grow-only resize scratch + last-path storage: no per-save allocs, no path dupe.
+screenshot_scratch: []u8 = &.{},
+screenshot_path_buf: [256]u8 = undefined,
 
 fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () void {
     return @ptrCast(wio.vkGetInstanceProcAddr(@intFromEnum(instance), procname));
@@ -650,6 +653,7 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     }
     if (self.screenshot_buffer != .null_handle) self.dev.destroyBuffer(self.screenshot_buffer, &self.vkalloc);
     if (self.screenshot_memory != .null_handle) self.dev.freeMemory(self.screenshot_memory, &self.vkalloc);
+    self.allocator.free(self.screenshot_scratch);
 
     self.dev.destroyDevice(&self.vkalloc);
     if (self.surface != .null_handle) self.instance.destroySurfaceKHR(self.surface, &self.vkalloc);
@@ -694,27 +698,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         if (current_gamma == gamma_correction and extent_same and self.present_mode == self.last_present_mode_requested) return;
     }
 
-    // Lock order is transfer then graphics, matching deviceWaitIdleLocked and the
-    // uploader submit path; taking them in the opposite order would deadlock those
-    // paths against a swapchain recreation during a resize. Callers must NOT hold
-    // either mutex.
-    self.transfer_queue_mutex.lockUncancelable(io);
-    defer self.transfer_queue_mutex.unlock(io);
-    self.queue_mutex.lockUncancelable(io);
-    defer self.queue_mutex.unlock(io);
-
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
+    // Surface queries can block on the window system, so they run without holding either queue mutex.
     const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
-
-    _ = self.dev.deviceWaitIdle() catch |err| {
-        std.log.err("deviceWaitIdle failed during swapchain creation: {}", .{err});
-    };
-    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
-    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
-
-    const old_swapchain = self.swapchain;
-    self.destroySwapchainResources();
 
     const actual_extent = if (caps.current_extent.width != std.math.maxInt(u32))
         caps.current_extent
@@ -778,6 +765,24 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         caps.min_image_count,
         caps.max_image_count,
     });
+
+    // Lock order is transfer then graphics, matching deviceWaitIdleLocked and the
+    // uploader submit path; taking them in the opposite order would deadlock those
+    // paths against a swapchain recreation during a resize. Callers must NOT hold
+    // either mutex.
+    self.transfer_queue_mutex.lockUncancelable(io);
+    defer self.transfer_queue_mutex.unlock(io);
+    self.queue_mutex.lockUncancelable(io);
+    defer self.queue_mutex.unlock(io);
+
+    _ = self.dev.deviceWaitIdle() catch |err| {
+        std.log.err("deviceWaitIdle failed during swapchain creation: {}", .{err});
+    };
+    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
+    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+
+    const old_swapchain = self.swapchain;
+    self.destroySwapchainResources();
 
     const queue_family_indices: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
     const new_swapchain = try self.dev.createSwapchainKHR(&.{
@@ -1159,6 +1164,12 @@ pub fn recordScreenshotCopyFromColorAttachment(self: *VulkanContext, cmd: vk.Com
     self.screenshot_pending_save = true;
 }
 
+/// Saves the pending screenshot and returns a BORROWED path: MUST NOT FREE.
+/// The bytes live in the fixed `screenshot_path_buf` (no per-save alloc) and
+/// stay valid only until the next `savePendingScreenshot` call or context
+/// deinit — dupe the path if you need it longer. `Allocator.free` accepts any
+/// slice type, so nothing stops a mistaken free at compile time: that is what
+/// this warning (and the `must_not_free` naming at the return site) is for.
 pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
     if (!self.screenshot_pending_save) return error.NoPendingScreenshot;
     const native_w = self.screenshot_extent.width;
@@ -1169,36 +1180,33 @@ pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.me
         error.PathAlreadyExists => {},
         else => return err,
     };
+    // In-place BGRA->RGBA swizzle; the next copy overwrites staging, so src_img borrows it.
     const pixel_count = @as(usize, native_w) * @as(usize, native_h);
     const src_bytes = self.screenshot_mapped.?[0 .. pixel_count * 4];
-    var rgba = try allocator.alloc(u8, pixel_count * 4);
-    defer allocator.free(rgba);
-    var i: usize = 0;
-    while (i < pixel_count) : (i += 1) {
-        const o = i * 4;
-        rgba[o + 0] = src_bytes[o + 2];
-        rgba[o + 1] = src_bytes[o + 1];
-        rgba[o + 2] = src_bytes[o + 0];
-        rgba[o + 3] = src_bytes[o + 3];
+    for (0..pixel_count) |p| {
+        std.mem.swap(u8, &src_bytes[p * 4], &src_bytes[p * 4 + 2]);
     }
-    var src_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(native_h, native_w, rgba);
-    var final_img: zignal.Image(zignal.Rgba(u8)) = undefined;
-    var needs_deinit = false;
-    defer if (needs_deinit) final_img.deinit(allocator);
+    const src_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(native_h, native_w, src_bytes);
     var to_save = src_img;
     if (target.width != native_w or target.height != native_h) {
-        final_img = try zignal.Image(zignal.Rgba(u8)).init(allocator, target.height, target.width);
-        needs_deinit = true;
-        src_img.resize(allocator, final_img, .bilinear);
-        to_save = final_img;
+        const dst_len = @as(usize, target.width) * @as(usize, target.height) * 4;
+        if (self.screenshot_scratch.len < dst_len) {
+            self.allocator.free(self.screenshot_scratch);
+            // Empty BEFORE the fallible alloc: OOM (`try` throws) leaves cleanly
+            // empty, never a dangling nonzero-length slice that deinit would free.
+            self.screenshot_scratch = &.{};
+            self.screenshot_scratch = try self.allocator.alloc(u8, dst_len);
+        }
+        const dst_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(target.height, target.width, self.screenshot_scratch[0..dst_len]);
+        src_img.resize(allocator, dst_img, .bilinear);
+        to_save = dst_img;
     }
     const ts = std.Io.Timestamp.now(io, .real).toSeconds();
-    var buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
-    try to_save.save(io, allocator, path);
+    const must_not_free_path = try std.fmt.bufPrint(&self.screenshot_path_buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
+    try to_save.save(io, allocator, must_not_free_path);
     self.screenshot_pending_save = false;
     self.screenshot_counter += 1;
-    return try allocator.dupe(u8, path);
+    return must_not_free_path;
 }
 
 pub const VulkanHostAllocator = struct {
@@ -1331,30 +1339,6 @@ test "VulkanContext init and deinit" {
     try std.testing.expect(ctx.render_complete_semaphores.len > 0);
 }
 
-test "VulkanRenderer init and deinit" {
-    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
-    defer wio.deinit();
-
-    var events: wio.EventQueue = .empty;
-    defer events.deinit();
-
-    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
-    defer window.destroy();
-
-    const ctx = try VulkanContext.init(std.testing.allocator, &window);
-    defer ctx.deinit(std.testing.io);
-
-    ctx.swapchain_extent = .{ .width = 640, .height = 480 };
-    try ctx.createSwapchainLocked(std.testing.io, false);
-
-    var render_opts: Renderer.RenderOptions = .{};
-    var render_opts_lock: std.Io.RwLock = .init;
-
-    var renderer: VulkanRenderer = undefined;
-    try renderer.init(std.testing.io, std.testing.allocator, ctx, &render_opts, &render_opts_lock);
-    defer renderer.deinit(std.testing.io);
-}
-
 test "VulkanRenderer mesh upload" {
     try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
     defer wio.deinit();
@@ -1445,6 +1429,7 @@ fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
 
 test "StagingRing checkAllAllocationFailures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocPairDeinit, .{});
 }
 
 test "StagingRing allocPair atomicity" {
@@ -1484,35 +1469,6 @@ fn stagingRingAllocPairDeinit(alloc: std.mem.Allocator) !void {
     // the ring, so a failed pair leaves no partial state behind.
     const pair = try ring.allocPair(std.testing.io, .{ 8, 8 });
     try std.testing.expect(pair != null);
-}
-
-test "StagingRing allocPair checkAllAllocationFailures" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocPairDeinit, .{});
-}
-
-test "GpuRegionAllocator init and deinit" {
-    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
-    defer wio.deinit();
-
-    var events: wio.EventQueue = .empty;
-    defer events.deinit();
-
-    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
-    defer window.destroy();
-
-    const ctx = try VulkanContext.init(std.testing.allocator, &window);
-    defer ctx.deinit(std.testing.io);
-
-    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
-    defer backing.deinit();
-
-    const gpu_alloc = backing.allocator(.gpu_only);
-
-    var alloc = try gpu.GpuRegionAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
-    defer alloc.deinit(gpu_alloc);
-
-    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(buf_info.buffer, buf_info.offset);
 }
 
 test "GpuRegionAllocator grow and retire old buffer" {

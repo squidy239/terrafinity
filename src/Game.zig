@@ -19,7 +19,6 @@ const generator_loader = @import("world/generator_loader.zig");
 const generator_api = @import("world/generators/generator_api.zig");
 const Cone = @import("world/structures/Cone.zig").Cone;
 const Sphere = @import("world/structures/Sphere.zig").Sphere;
-const TexturedSphere = @import("world/structures/TexturedSphere.zig");
 const World = @import("world/World.zig");
 
 const Game = @This();
@@ -184,10 +183,6 @@ fn markSubtree(
     }
 }
 
-fn canUnloadMesh(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
-    return self.canUnloadMeshView(io, self.snapshotView(io), chunk_pos);
-}
-
 fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: World.ChunkPos) bool {
     if (chunk_pos.level < 0) {
         if (!view.keepChunkLoaded(chunk_pos)) return true;
@@ -230,8 +225,9 @@ fn tryRemoveChunkFromLoaded(
     io: std.Io,
     allocator: std.mem.Allocator,
     chunk_pos: World.ChunkPos,
+    view: ViewSnapshot,
 ) !void {
-    if (!self.canUnloadMesh(io, chunk_pos)) return;
+    if (!self.canUnloadMeshView(io, view, chunk_pos)) return;
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     var was_covering: bool = undefined;
     var is_covering: bool = undefined;
@@ -263,10 +259,8 @@ fn tryRemoveChunkFromLoaded(
             try bucket.hash_map.put(allocator, chunk_pos, state);
         }
     }
-
     if (was_covering and !is_covering) {
-        _, const highest = self.getLevels(io);
-        try self.markSubtree(io, allocator, chunk_pos, false, highest);
+        try self.markSubtree(io, allocator, chunk_pos, false, view.highest_level);
     }
 }
 
@@ -626,12 +620,17 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
     defer z.end();
+    // Snapshot frequencies under one short shared hold; the awaits and
+    // spawns below run lock-free.
     self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
+    const loader_frequency_ms = self.options.loader_frequency_ms;
+    const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
+    const save_frequency_ms = self.options.save_frequency_ms;
+    self.options_lock.unlockShared(io);
 
-    try restartFuture(io, &self.chunk_load_is_running, &self.last_chunk_load, &self.load_future, self.options.loader_frequency_ms, loadChunks, .{ self, io, allocator });
-    try restartFuture(io, &self.mesh_unload_is_running, &self.last_mesh_unload, &self.mesh_unload_future, self.options.mesh_unload_frequency_ms, unloadChunkMeshes, .{ self, io });
-    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, self.options.save_frequency_ms, saveFuture, .{ self, io });
+    try restartFuture(io, &self.chunk_load_is_running, &self.last_chunk_load, &self.load_future, loader_frequency_ms, loadChunks, .{ self, io, allocator });
+    try restartFuture(io, &self.mesh_unload_is_running, &self.last_mesh_unload, &self.mesh_unload_future, mesh_unload_frequency_ms, unloadChunkMeshes, .{ self, io });
+    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, save_frequency_ms, saveFuture, .{ self, io });
 }
 
 fn restartFuture(
@@ -742,11 +741,11 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     const player_pos = self.getPlayerPos(io);
     const looking = self.getCameraFront(io);
     const pos = player_pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(2));
-    const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive{
-        .pos = pos,
-        .dir = looking,
-        .timestamp = std.Io.Timestamp.now(io, .awake).toNanoseconds(),
-    });
+    const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive.init(
+        pos,
+        looking,
+        std.Io.Timestamp.now(io, .awake).toNanoseconds(),
+    ));
     entity.release();
 }
 
@@ -921,21 +920,20 @@ fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), lod_overlap:
 }
 
 fn snapshotView(self: *@This(), io: std.Io) ViewSnapshot {
-    const lowest_level, const highest_level = self.getLevels(io);
+    // One short shared hold covers every options field; per-entry checks stay lock-free.
+    self.options_lock.lockSharedUncancelable(io);
+    const lowest_level = self.options.lowest_level;
+    const highest_level = self.options.highest_level;
+    const render_distance: @Vector(2, u32) = .{ self.options.render_distance_x, self.options.render_distance_y };
+    const lod_overlap = self.options.lod_overlap;
+    self.options_lock.unlockShared(io);
     return .{
         .lowest_level = lowest_level,
         .highest_level = highest_level,
         .player_pos = self.getPlayerPos(io),
-        .render_distance = self.getRenderDistance(io),
-        .lod_overlap = self.getLodOverlap(io),
+        .render_distance = render_distance,
+        .lod_overlap = lod_overlap,
     };
-}
-
-fn getInnerGenRadius(self: *@This(), io: std.Io, gen_distance: @Vector(2, u32), level: i32) @Vector(2, u32) {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getInnerGenRadius" });
-    defer z.end();
-    const lowest_level, _ = self.getLevels(io);
-    return innerRadiusFor(lowest_level, gen_distance, self.getLodOverlap(io), level);
 }
 
 fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
@@ -956,7 +954,7 @@ fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
 }
 
 /// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
-fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
+fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool, view: ViewSnapshot) !void {
     const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer GenMeshAndAdd.end();
     // A task that dies before the mark block below would strand is_queued set,
@@ -964,13 +962,18 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     // failures and cancels retry on a later pass; a newer in-flight task only
     // causes one harmless duplicate pass.
     defer self.clearQueuedFlag(io, chunk_pos);
-
-    // Prevent an old version of the chunk from staying loaded. One snapshot keeps both
-    // halves of the decision consistent.
-    const view = self.snapshotView(io);
-    if (!view.keepChunkLoaded(chunk_pos) and self.canUnloadMeshView(io, view, chunk_pos)) {
+    // Queued tasks capture the spiral's segment-boundary snapshot by value, but
+    // the spiral only resets on a player-chunk crossing, so movement and
+    // settings drift can stale the capture by task start: a stale "drop" would
+    // unload what the current view needs (transient hole), a stale "keep"
+    // would load what it drops (waste). Re-snapshot the keep/unload gate here
+    // so the decision observes the current view; the passed view survives only
+    // as the markSubtree cutoff below. One snapshot per task keeps the
+    // steady-state lock cost unchanged in spirit.
+    const gate_view = self.snapshotView(io);
+    if (!gate_view.keepChunkLoaded(chunk_pos) and self.canUnloadMeshView(io, gate_view, chunk_pos)) {
         try self.renderer.removeChunk(io, chunk_pos);
-        try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos);
+        try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos, gate_view);
         return;
     }
 
@@ -1020,12 +1023,8 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         try bucket.hash_map.put(allocator, chunk_pos, state);
     }
 
-    if (!was_covering and is_covering) {
-        const mark_get_levels = tracy.Zone.begin(.{ .src = @src(), .name = "mark_get_levels" });
-        defer mark_get_levels.end();
-        _, const highest = self.getLevels(io);
-        try self.markSubtree(io, allocator, chunk_pos, true, highest);
-    }
+    if (!was_covering and is_covering)
+        try self.markSubtree(io, allocator, chunk_pos, true, view.highest_level);
 }
 
 fn clearQueuedFlag(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) void {
@@ -1033,7 +1032,7 @@ fn clearQueuedFlag(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) void {
     if (bucket.getPtr(io, chunk_pos)) |state| state.is_queued = false;
 }
 
-fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool) !void {
+fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool, view: ViewSnapshot) !void {
     {
         const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
         try bucket.lock.lock(io);
@@ -1042,16 +1041,12 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
         entry.value_ptr.is_queued = true;
     }
 
-    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, gen_structures });
+    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, gen_structures, view });
 }
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    game.addChunkToRender(io, allocator, chunk_pos, false) catch return error.OnEditFailed;
-}
-
-fn keepChunkLoaded(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) bool {
-    return self.snapshotView(io).keepChunkLoaded(chunk_pos);
+    game.addChunkToRender(io, allocator, chunk_pos, false, game.snapshotView(io)) catch return error.OnEditFailed;
 }
 
 fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
@@ -1113,40 +1108,50 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, level: i32, error_int: *std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)))) Io.Cancelable!void {
     const spiral_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "loadChunksSpiral" });
     defer spiral_zone.end();
-    try game.player.physics.mutex.lock(io);
-    var player_pos = game.player.physics.pos;
-    game.player.physics.mutex.unlock(io);
+    var view = game.snapshotView(io);
+    var player_pos = view.player_pos;
     var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(player_pos), level);
 
-    var outer_radius = game.getRenderDistance(io);
-    var inner_radius = game.getInnerGenRadius(io, outer_radius, level);
+    var outer_radius = view.render_distance;
+    var inner_radius = view.innerGenRadius(level);
 
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
     var xz: [2]i32 = .{ 0, 0 };
     var c: usize = 0;
+    var first_segment = true;
 
     while (true) {
         if (!game.running.load(.unordered)) return;
         if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
 
-        if (game.player.physics.mutex.tryLock()) {
-            defer game.player.physics.mutex.unlock(io);
-            const new_player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(game.player.physics.pos), level);
-            if (!std.meta.eql(player_chunk_pos, new_player_chunk_pos)) {
-                player_chunk_pos = new_player_chunk_pos;
-                player_pos = game.player.physics.pos;
+        // One snapshot per segment boundary covers center, radii, and levels
+        // for the whole segment, so the queue filter and the tasks it queues
+        // share center/radii/bounds. A player-chunk crossing resets the spiral.
+        if (first_segment) {
+            first_segment = false;
+        } else {
+            const fresh = game.snapshotView(io);
+            const fresh_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(fresh.player_pos), level);
+            if (!std.meta.eql(player_chunk_pos, fresh_chunk_pos)) {
+                view = fresh;
+                player_pos = fresh.player_pos;
+                player_chunk_pos = fresh_chunk_pos;
+                outer_radius = fresh.render_distance;
+                inner_radius = fresh.innerGenRadius(level);
                 c = 0;
                 xz = .{ 0, 0 };
                 amount_tested = 0;
                 continue;
             }
+            view = fresh;
+            player_pos = fresh.player_pos;
+            outer_radius = fresh.render_distance;
+            inner_radius = fresh.innerGenRadius(level);
         }
 
         try io.checkCancel();
-        outer_radius = game.getRenderDistance(io);
-        inner_radius = game.getInnerGenRadius(io, outer_radius, level);
 
         const m = move(xz, &c);
         var cc: i32 = 0;
@@ -1167,7 +1172,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
 
                 if (needs_load) {
                     amount_loaded += 1;
-                    game.addChunkToRenderAsync(io, allocator, chunk_pos, true) catch |err| switch (err) {
+                    game.addChunkToRenderAsync(io, allocator, chunk_pos, true, view) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => |e| error_int.store(@intFromError(e), .unordered),
                     };
@@ -1198,7 +1203,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
             if (ctx.view.keepChunkLoaded(chunk_pos)) return;
             if (!ctx.game.canUnloadMeshView(ctx.io, ctx.view, chunk_pos)) return;
 
-            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos) catch |err| {
+            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos, ctx.view) catch |err| {
                 ctx.err = err;
                 return error.Failed;
             };
@@ -1230,7 +1235,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
-        try self.tryRemoveChunkFromLoaded(io, self.allocator, key);
+        try self.tryRemoveChunkFromLoaded(io, self.allocator, key, view);
         try it.unpause(io);
     }
 }
@@ -1293,8 +1298,4 @@ fn line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
         xz[0] += if (xz[0] < end[0]) 1 else -1;
     }
     return !(xz[0] == end[0] and xz[1] == end[1]);
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }
