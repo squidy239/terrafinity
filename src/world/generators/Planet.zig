@@ -76,7 +76,7 @@ pub const Generator = struct {
         pub fn setSeeds(self: *Params, io: std.Io) void {
             if (self.seed == null) {
                 var random_seed: u64 = undefined;
-                io.random(@ptrCast(&random_seed));
+                io.random(std.mem.asBytes(&random_seed));
                 self.seed = random_seed;
             }
             self.surface_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
@@ -302,8 +302,11 @@ pub const Generator = struct {
             center_units = cell * box_v + clampVector(offset, radius_units, box - radius_units);
         }
 
+        // Sea level as a fraction above mean radius. Bump peaks at ~5%, so a
+        // fraction above that drowns the whole planet; the spawn planet stays
+        // at 1-3% to guarantee landing islands.
         const ocean_frac: f32 = if (self.params.water)
-            0.03 + 0.07 * (@as(f32, @floatFromInt(h & 0xFF)) / 255.0)
+            (if (is_spawn_cell) @as(f32, 0.01) else 0.03) + (if (is_spawn_cell) @as(f32, 0.02) else 0.07) * (@as(f32, @floatFromInt(h & 0xFF)) / 255.0)
         else
             0;
         const radius: f32 = @as(f32, @floatFromInt(radius_units)) * @as(f32, ChunkSize);
@@ -392,6 +395,145 @@ fn nextPowerOfTwo(comptime T: type, value: T) T {
     return @as(T, 1) << shift;
 }
 
+/// Nearest planet surface to `point`, searching expanding cell rings so a
+/// `0` radius still means "closest" while guaranteeing escape from voids.
+fn nearestPlanet(self: *const Generator, point: @Vector(3, f32)) ?Planet {
+    const base = self.cellOf(point) orelse self.spawn_cell;
+    var best: ?Planet = null;
+    var best_gap: f32 = std.math.inf(f32);
+    var ring: i32 = 0;
+    while (ring <= 2) : (ring += 1) {
+        var dx: i32 = -ring;
+        while (dx <= ring) : (dx += 1) {
+            var dy: i32 = -ring;
+            while (dy <= ring) : (dy += 1) {
+                var dz: i32 = -ring;
+                while (dz <= ring) : (dz += 1) {
+                    if (@max(@abs(dx), @max(@abs(dy), @abs(dz))) != ring) continue;
+                    const cell = base + @Vector(3, i32){ dx, dy, dz };
+                    // Outside the safe range planet placement is undefined
+                    // (jitter lookups miss, cell*box can overflow i32).
+                    if (@reduce(.Or, cell < @as(@Vector(3, i32), @splat(0))) or
+                        @reduce(.Or, cell > @as(@Vector(3, i32), @splat(self.safe_cell)))) continue;
+                    const planet = self.planetAt(cell) orelse continue;
+                    const diff = planet.center - point;
+                    const gap = @sqrt(@reduce(.Add, diff * diff)) - planet.radius;
+                    if (gap < best_gap) {
+                        best_gap = gap;
+                        best = planet;
+                    }
+                }
+            }
+        }
+        if (best != null) return best;
+    }
+    if (self.params.spawn_planet) return self.planetAt(self.spawn_cell);
+    return best;
+}
+
+/// Exact top of column `x, z`: walks real blocks down with the same
+/// `planetBlock` predicate the chunk filler uses, so bump noise, water,
+/// and limb geometry agree with the world by construction. A single
+/// analytic sample cannot do this: near the limb, surface height amplifies
+/// bump error manyfold. Returns the top solid block center and whether
+/// water sits above it, or null past the limb / below the lowest surface.
+fn planetColumnTop(self: *const Generator, planet: Planet, x: f32, z: f32) ?struct { top: f32, wet: bool } {
+    const ddx = x - planet.center[0];
+    const ddz = z - planet.center[2];
+    const hd_sq = ddx * ddx + ddz * ddz;
+    const reach = planet.radius + planet.bump_amp;
+    if (hd_sq > reach * reach) return null;
+    // Span the column's chord through the bounding sphere: the true surface
+    // can sit anywhere on it (diagonal columns hit far below the pole), and
+    // the walk stops at the first solid from the top, so typical cost is
+    // only the bump band, not the chord.
+    const half_chord = @sqrt(reach * reach - hd_sq);
+    var y = planet.center[1] + half_chord + 4.0;
+    const bottom = planet.center[1] - half_chord - 4.0;
+    var wet = false;
+    // First solid from the top is the surface: no caves or floaters exist
+    // in `planetBlock`, and the host enforces player-box clearance itself.
+    while (y >= bottom) : (y -= 1.0) {
+        const block = Generator.planetBlock(.{ x, y, z }, planet, self.params.surface_noise.genNoise3D(x, y, z));
+        if (block == .water) wet = true;
+        if (block.isSolid()) return .{ .top = y, .wet = wet };
+    }
+    return null;
+}
+
+const SpawnBest = struct {
+    point: generator_api.Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false },
+    score: f64 = std.math.inf(f64),
+    good: bool = false,
+};
+
+/// Unbumped surface point nearest `point`: blind discs around a deep-space
+/// request almost never intersect a small sphere, so the search anchors
+/// here while scoring still prefers nearness to the request.
+fn anchorPlanet(planet: Planet, point: @Vector(3, f32)) @Vector(3, f32) {
+    const to_point = point - planet.center;
+    const dist = @max(@sqrt(@reduce(.Add, to_point * to_point)), 1e-6);
+    return planet.center + to_point / @as(@Vector(3, f32), @splat(dist)) * @as(@Vector(3, f32), @splat(planet.radius));
+}
+
+/// Near-side sphere-uniform sample: the anchor cap can be all ocean while
+/// islands dot the far side, which discs oversample poorly. Hit odds equal
+/// land fraction. `facing` points from the planet toward the request.
+fn sphereSample(seed: u64, nonce: u64, i: u32, planet: Planet, facing: @Vector(3, f32)) [2]f64 {
+    var hasher = std.hash.Wyhash.init(seed ^ nonce ^ 0x51ab129de09339a3 ^ @as(u64, i));
+    const hu = hasher.final();
+    const frac_a: f64 = @as(f64, @floatFromInt(hu & 0xFFFFFFFF)) / 4294967296.0;
+    const frac_b: f64 = @as(f64, @floatFromInt(hu >> 32)) / 4294967296.0;
+    const z_dir: f32 = @floatCast(2.0 * frac_a - 1.0);
+    const ring_r: f32 = @sqrt(@max(1.0 - z_dir * z_dir, 0.0));
+    const phi: f32 = @floatCast(std.math.tau * frac_b);
+    var dir = @Vector(3, f32){ ring_r * @cos(phi), z_dir, ring_r * @sin(phi) };
+    if (@reduce(.Add, dir * facing) < 0) dir = -dir;
+    const surf = planet.center + dir * @as(@Vector(3, f32), @splat(planet.radius));
+    return .{ surf[0], surf[2] };
+}
+
+/// Scores one candidate column with the shared scorer. The walk reports
+/// wet directly, mapped onto the scorer's height-above-water axis.
+fn considerPlanetColumn(gen: *const Generator, planet: Planet, center: *const [3]f64, sample: [2]f64, best: *SpawnBest) void {
+    const column = planetColumnTop(gen, planet, @floatCast(sample[0]), @floatCast(sample[1])) orelse return;
+    const dx = sample[0] - center[0];
+    const dz = sample[1] - center[2];
+    const scored = generator_api.scoreSpawnColumn(@sqrt(dx * dx + dz * dz), if (column.wet) -1.0 else 2.0, 0);
+    if (scored.score < best.score) {
+        best.score = scored.score;
+        best.point = .{ .pos = .{ sample[0], @as(f64, column.top) + generator_api.spawn_hint_clearance, sample[1] }, .found = true };
+        best.good = !scored.wet and !scored.steep;
+    }
+}
+
+pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
+    const self: *PlanetInstance = @ptrCast(@alignCast(instance));
+    if (self.generator.params.seed == null) return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const point: @Vector(3, f32) = .{ @floatCast(center[0]), @floatCast(center[1]), @floatCast(center[2]) };
+    const planet = nearestPlanet(&self.generator, point) orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const anchor = anchorPlanet(planet, point);
+    const to_center = point - planet.center;
+    const seed = self.generator.params.seed.?;
+    var best = SpawnBest{};
+    // Discs around the anchor honor `radius` and keep island worlds
+    // clustered; each pick gets a cheap analytic test, and the host
+    // re-validates the winner against real blocks.
+    const disc_budget = @min(attempts, 8 * generator_api.spawn_samples_per_ring);
+    for (0..disc_budget) |i| {
+        considerPlanetColumn(&self.generator, planet, center, generator_api.spawnSample(seed, .{ anchor[0], anchor[2] }, radius, nonce, @intCast(i)), &best);
+        if (i >= generator_api.spawn_samples_per_ring - 1 and best.good) break;
+    }
+    if (!best.good) {
+        const sphere_budget = @min(attempts, generator_api.spawn_attempt_cap);
+        var i: u32 = 0;
+        while (i < sphere_budget) : (i += 1) {
+            considerPlanetColumn(&self.generator, planet, center, sphereSample(seed, nonce, i, planet, to_center), &best);
+        }
+    }
+    return best.point;
+}
+
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .info = &generator_info,
     .create = &generator_create,
@@ -402,6 +544,7 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .preset_config = &generator_preset_config,
     .config_from_zon = &generator_config_from_zon,
     .config_set_seeds = &generator_config_set_seeds,
+    .propose_spawn = &generator_propose_spawn,
 };
 
 comptime {
@@ -499,7 +642,7 @@ pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]
 
 pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.ConfigTree) callconv(.c) void {
     var random_seed: u64 = undefined;
-    io.*.random(@ptrCast(&random_seed));
+    io.*.random(std.mem.asBytes(&random_seed));
     for (config.params) |*param| {
         if (param.spec.is_seed and param.value == .u64 and param.value.u64 == 0) {
             param.value.u64 = random_seed;
@@ -598,4 +741,32 @@ test "genChunk fills the spawn planet with stone" {
     gen.genChunk(std.testing.io, &blocks, .{ .level = 0, .position = .{ 500, 500, 500 } }, &grid_buffer);
     blocks.toGrid(&grid_buffer);
     try std.testing.expectEqual(Block.stone, grid_buffer[0][0][0]);
+}
+
+test "proposeSpawn lands on the spawn planet" {
+    var params: Generator.Params = .default;
+    params.seed = 42;
+    // Dry planet: every surface column passes, so the result is fully
+    // determined by the anchor + first ring.
+    params.water = false;
+    params.setSeeds(std.testing.io);
+    const gen = Generator.init(std.testing.allocator, 0, params);
+    var instance = PlanetInstance{ .generator = gen, .source = undefined };
+    const center = [3]f64{ 0, 0, 0 };
+    const a = generator_propose_spawn(&instance, &center, 0, 32, 1);
+    const b = generator_propose_spawn(&instance, &center, 0, 32, 1);
+    try std.testing.expect(a.found);
+    try std.testing.expectEqual(a.pos[0], b.pos[0]);
+    try std.testing.expectEqual(a.pos[1], b.pos[1]);
+    try std.testing.expectEqual(a.pos[2], b.pos[2]);
+    // The spawn sits on the guaranteed planet's surface: within reach of
+    // its center in all three axes.
+    const planet = gen.planetAt(gen.spawn_cell).?;
+    const reach: f64 = @as(f64, planet.radius + planet.bump_amp);
+    const dx: f64 = a.pos[0] - @as(f64, planet.center[0]);
+    const dy: f64 = a.pos[1] - @as(f64, planet.center[1]);
+    const dz: f64 = a.pos[2] - @as(f64, planet.center[2]);
+    try std.testing.expect(@abs(dx) <= reach);
+    try std.testing.expect(@abs(dy) <= reach + 8.0);
+    try std.testing.expect(@abs(dz) <= reach);
 }

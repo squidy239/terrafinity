@@ -5,7 +5,19 @@ const Cache = @import("../libs/Cache.zig").Cache;
 const tracy = @import("tracy");
 
 pub const Entity = @import("Entity.zig");
+const EntityTypes = @import("EntityTypes.zig");
 const World = @import("../world/World.zig");
+
+/// Where entities appear: user settings (center, range, mode) plus the
+/// resolved canonical spawn (pos, found). Lives here, not in `World`,
+/// because spawning is entity-domain; the GUI edits only the settings.
+pub const SpawnConfig = struct {
+    center: @Vector(3, f64) = .{ 0, 0, 0 },
+    range: u32 = 0,
+    mode: EntityTypes.Player.GameMode = .Spectator,
+    pos: @Vector(3, f64) = .{ 0, 0, 0 },
+    found: bool = false,
+};
 
 inline fn uuidHash(uuid: u128) u64 {
     var hasher = std.hash.Wyhash.init(0);
@@ -231,7 +243,9 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
 }
 
 /// Unloads every entity. All references must have been released and no
-/// update pass may still be running before this.
+/// update pass may still be running before this. Panics if any entity is
+/// still referenced: that violates the release contract and would otherwise
+/// unload the implementation out from under the outstanding reference.
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -240,7 +254,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
         // Stale ids (evicted entities) are simply skipped.
         const entity = self.getAndAddRef(io, uuid) orelse continue;
         if (entity.ref_count.load(.seq_cst) != 2)
-            std.log.warn("entity {d} still referenced during shutdown", .{uuid});
+            std.debug.panic("entity {d} still referenced during shutdown", .{uuid});
         if (self.map.remove(io, uuid)) |removed| {
             unloadEntity(io, allocator, world, removed);
         } else {
@@ -357,9 +371,11 @@ test "spawn fails when every way is pinned" {
     var registry = try init(testing.allocator, EntityMapType.value_count_min);
     defer registry.deinit(testing.io, testing.allocator, test_world);
 
-    for (0..EntityMapType.value_count_min) |_| {
-        _ = try registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded });
+    var pinned: [EntityMapType.value_count_min]*Entity = undefined;
+    for (&pinned) |*slot| {
+        slot.* = try registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded });
     }
+    defer for (pinned) |entity| entity.release();
 
     try testing.expectError(error.EntityCacheSetFull, registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded }));
     try testing.expectEqual(@as(u32, 0), test_unloaded.load(.seq_cst));

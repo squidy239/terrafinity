@@ -49,7 +49,7 @@ pub const DefaultGenerator = struct {
 
     /// Asymmetric height envelope plus the symmetric maximum that normalized
     /// deltas (erosion, surface noise) convert with.
-    const Envelope = struct {
+    pub const Envelope = struct {
         bounds: [2]f32,
         max: f32,
         scale: f32,
@@ -741,7 +741,8 @@ pub const DefaultGenerator = struct {
                     if (b != .grass) continue;
                     try std.testing.expectEqual(0, gx);
                     try std.testing.expectEqual(0, gz);
-                    try std.testing.expect(gy < 8);
+                    const fine_y: i64 = base[1] + @as(i64, @intCast(gy));
+                    try std.testing.expect(fine_y >= 0 and fine_y < 8);
                 }
             }
         }
@@ -1111,7 +1112,7 @@ pub const DefaultGenerator = struct {
     /// continuous through zero by construction; the delta converts with the
     /// symmetric maximum so relief matches on land and under water instead
     /// of ending in a cliff at the shoreline.
-    inline fn composeErodedHeight(shaped: f32, delta: f32, env: Envelope) f32 {
+    pub inline fn composeErodedHeight(shaped: f32, delta: f32, env: Envelope) f32 {
         const base = if (shaped > 0) env.bounds[1] else env.bounds[0];
         return shaped * @abs(base) * env.scale + delta * env.max * env.scale;
     }
@@ -1391,7 +1392,7 @@ pub const DefaultGenerator = struct {
     /// Shaped height row: signed-power continents and mountains combined and
     /// normalized, then contrast-scaled. Shared by the base grid, the
     /// gradient samples, and the fade ring; the lane count follows the args.
-    inline fn shapedRow(comptime N: usize, params: *const Params, large: @Vector(N, f32), raw: @Vector(N, f32)) @Vector(N, f32) {
+    pub inline fn shapedRow(comptime N: usize, params: *const Params, large: @Vector(N, f32), raw: @Vector(N, f32)) @Vector(N, f32) {
         const V = @Vector(N, f32);
         const height_power_v: V = @splat(params.height_power);
         const large_power_v: V = @splat(params.large_power);
@@ -1518,6 +1519,34 @@ fn mapStructureError(err: anyerror) error{ OutOfMemory, Canceled, Unrecoverable 
     };
 }
 
+/// Single-point shaped height, mirroring the full-resolution grid path
+/// (`genTerrainHeight` with `.full` interpolation) without the erosion and
+/// surface-detail lattices. Close enough to classify land vs water and
+/// slope; the host's block check is authoritative for the final point.
+fn columnSpawnHeight(params: *const DefaultGenerator.Params, x: f32, z: f32) f32 {
+    const scale = @max(params.terrain_scale, 1e-6);
+    var wx = x / (@as(f32, ChunkSize) * scale);
+    var wz = z / (@as(f32, ChunkSize) * scale);
+    params.terrain_noise.domainWarp2D(&wx, &wz);
+    const raw = params.terrain_noise.genNoise2D(wx, wz);
+    var lx = x / (@as(f32, ChunkSize) * scale);
+    var lz = z / (@as(f32, ChunkSize) * scale);
+    params.large_terrain_noise_warp.domainWarp2D(&lx, &lz);
+    const large = params.large_terrain_noise.genNoise2D(lx, lz);
+    const shaped = DefaultGenerator.shapedRow(1, params, @as(@Vector(1, f32), @splat(large)), @as(@Vector(1, f32), @splat(raw)))[0];
+    const min: f32 = @floatFromInt(params.terrain_min);
+    const max: f32 = @floatFromInt(params.terrain_max);
+    const env = DefaultGenerator.Envelope{ .bounds = .{ min, max }, .max = @max(@abs(min), @abs(max)), .scale = scale };
+    return DefaultGenerator.composeErodedHeight(shaped, 0, env);
+}
+
+pub fn generatorProposeSpawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
+    const self: *TerrainInstance = @ptrCast(@alignCast(instance));
+    const seed = self.generator.params.seed orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const sea: f32 = @floatFromInt(self.generator.params.sea_level);
+    return generator_api.proposeSpawnField(seed, center.*, radius, attempts, nonce, sea, &self.generator.params, columnSpawnHeight);
+}
+
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .info = &generatorInfo,
     .create = &generatorCreate,
@@ -1528,6 +1557,7 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
     .preset_config = &generatorPresetConfig,
     .config_from_zon = &generatorConfigFromZon,
     .config_set_seeds = &generatorConfigSetSeeds,
+    .propose_spawn = &generatorProposeSpawn,
 };
 
 comptime {
@@ -1837,6 +1867,41 @@ test "config tree round trips through zon" {
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_fade_slope, params.erosion_fade_slope);
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_fade_altitude, params.erosion_fade_altitude);
     try std.testing.expectEqual(DefaultGenerator.Params.default.terrain_scale, params.terrain_scale);
+}
+
+test "columnSpawnHeight matches grid without erosion" {
+    // With the erosion and surface lattices off, the single-point sampler
+    // must agree with the full grid path (vector-vs-scalar ~1 ULP).
+    var params = DefaultGenerator.Params.default;
+    params.seed = 42;
+    params.setSeeds(std.testing.io);
+    params.erosion_enabled = false;
+    params.surface_noise_amplitude = 0;
+    const grid = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
+    for ([_]usize{ 0, 7, 31 }) |x| {
+        for ([_]usize{ 0, 11, 31 }) |z| {
+            const world_x: f32 = @floatFromInt(3 * ChunkSize + @as(i32, @intCast(x)));
+            const world_z: f32 = @floatFromInt(5 * ChunkSize + @as(i32, @intCast(z)));
+            try std.testing.expectApproxEqAbs(grid[x][z], columnSpawnHeight(&params, world_x, world_z), 1e-3);
+        }
+    }
+}
+
+test "proposeSpawn is deterministic and plausible" {
+    var params = DefaultGenerator.Params.default;
+    params.seed = 42;
+    params.setSeeds(std.testing.io);
+    var generator = try DefaultGenerator.init(std.testing.allocator, 0, params);
+    defer generator.terrain_height_cache.deinit(std.testing.allocator);
+    var instance = TerrainInstance{ .generator = generator, .arena = undefined, .source = undefined };
+    const center = [3]f64{ 0, 0, 0 };
+    const a = generatorProposeSpawn(&instance, &center, 64, 32, 1);
+    const b = generatorProposeSpawn(&instance, &center, 64, 32, 1);
+    try std.testing.expect(a.found);
+    try std.testing.expectEqual(a.pos[0], b.pos[0]);
+    try std.testing.expectEqual(a.pos[1], b.pos[1]);
+    try std.testing.expectEqual(a.pos[2], b.pos[2]);
+    try std.testing.expect(std.math.isFinite(a.pos[1]));
 }
 
 /// Pins border continuity between two adjacent chunks: the jump across the
@@ -2150,4 +2215,22 @@ test "zero couplings reproduce the flat thresholds" {
     ctx.slope = 1.0;
     ctx.block_height = -5;
     try std.testing.expectEqual(Block.sand, testGround(0, ctx));
+}
+
+test "continental seed keeps land within search reach" {
+    // Regression test for the search reach coupling bug, where capping
+    // attempts also capped ring expansion and retries re-searched the same
+    // ocean basin forever.
+    var params = continental_preset;
+    params.seed = 14214860294789680370;
+    params.setSeeds(std.testing.io);
+    var land: u32 = 0;
+    var z: f32 = -8192;
+    while (z <= 8192) : (z += 512) {
+        var x: f32 = -8192;
+        while (x <= 8192) : (x += 512) {
+            if (columnSpawnHeight(&params, x, z) > 1.0) land += 1;
+        }
+    }
+    try std.testing.expect(land > 100);
 }

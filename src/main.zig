@@ -499,3 +499,7 @@ fn handleEvents(
         try ui.game.handleButtonActions(io, action_set);
     }
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

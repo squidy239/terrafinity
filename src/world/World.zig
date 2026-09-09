@@ -122,10 +122,10 @@ pub const ChunkPos = struct {
     }
 };
 
-pub const WorldConfig = struct {
-    spawn_center_pos: @Vector(3, f64) = .{ 0, 0, 0 },
-    spawn_range: u32 = 0,
-};
+/// Per-world settings. Spawn configuration lives in
+/// `EntityRegistry.SpawnConfig` instead: spawning is entity-domain and
+/// this file must not depend on the entity layer.
+pub const WorldConfig = struct {};
 
 pub const ChunkSource = struct {
     pub const GetBlocksMetadata = struct {
@@ -966,7 +966,7 @@ fn makeTestingWorld(
     world.* = .{
         .chunks = chunk_cache,
         .grids = grid_cache,
-        .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
+        .config = .{},
         .chunk_sources = .{ generator.getSource(), null, null, null },
     };
 }
@@ -1022,7 +1022,7 @@ test "fuzz world" {
     world = .{
         .chunks = chunk_cache,
         .grids = grid_cache,
-        .config = .{ .spawn_center_pos = .{ 0, 0, 0 }, .spawn_range = 0 },
+        .config = .{},
         .chunk_sources = undefined,
     };
     defer world.deinit(threaded.io(), dba.allocator());

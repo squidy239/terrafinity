@@ -129,6 +129,10 @@ I/O is an interface: anything that can block or introduce nondeterminism takes a
 
 # Concurrency, Vulkan & GPU
 
+## ConcurrentHashMap compound ops
+
+`Bucket.getPtr`/`get` release the shard lock before returning, so never read-modify-write through them. For locked compound sequences use `getBucket(key)` plus explicit `bucket.lock` / `bucket.hash_map` access, holding one bucket lock at a time and never nesting.
+
 ## Mesh upload backpressure: all-or-nothing reservation under an admission mutex
 
 `MeshUploader.reserveUpload` acquires everything an upload needs (command pool, both staging slices via `StagingRing.allocPair`, both face regions) atomically under `admission_mutex`. Invariant: any thread holding upload resources outside that section is fully provisioned and on a non-blocking path to `submitBatch`, so flush-and-wait backpressure always waits on GPU progress, never on another blocked CPU thread. Never add acquisition after `reserveUpload` in the `addMesh` path — hold-and-wait reintroduces the deadlock (the staging ring retires FIFO and stops at the first unbound entry, so an unbound slice held by a blocked thread wedges the ring permanently).
@@ -222,7 +226,7 @@ Generators are shared libraries loaded at runtime with `std.DynLib` (real dlopen
 
 **Module scope:** a module's import scope is its `root_source_file`'s directory, so a generator under `src/world/generators/` cannot be the `.so` root (its `../` imports escape the module path). One shared root `src/generator_root.zig` sits at `src/` level; `build.zig` compiles it once per generator, selecting via a `generator_select` options module and comptime switch, and each generator's `comptime { @export(...) }` block emits its `generator_api` vtable. No per-generator shims — add a generator with a `.kind` arm in `build.zig`'s `GeneratorKind` plus a `@import` arm in `generator_root.zig`.
 
-**Config UI metadata:** `generator_api.Spec` presentation fields (`label`, `description`) are borrowed from the loaded generator library, while config keys/values/choice entries are owned by the config allocator — keep the library loaded as long as its config tree is used. Changes to shared config-tree layouts require incrementing `generator_api.ApiVersion` and rebuilding every plugin. Derive config widget IDs from the stable parameter path, not traversal order (order-derived IDs shift when an array is edited and widget state lands on the wrong field).
+**Config UI metadata:** `generator_api.Spec` presentation fields (`label`, `description`) are borrowed from the loaded generator library, while config keys/values/choice entries are owned by the config allocator — keep the library loaded as long as its config tree is used. Changes to shared config-tree layouts require bumping `generator_api.ApiVersion` (semver: minor for backward-compatible additions, major for breaking changes) and rebuilding every plugin. Derive config widget IDs from the stable parameter path, not traversal order (order-derived IDs shift when an array is edited and widget state lands on the wrong field).
 
 ## Editor UI (dvui)
 
@@ -230,9 +234,12 @@ Widget ids collide when the same `@src()` line runs for multiple params — pass
 
 # Testing
 
+Run `zig build test --summary all` after each change. Use `-Dtest_filter="substring"` only when running a single test; never as a substitute for the full suite.
+Write few tests: just enough to cover possible bugs. Every file should have a `refAllDecls` test (forces every decl to compile). Allocation-failure tests are good. Skip useless tests that restate the implementation without covering a real failure mode.
+
 ## Allocation failure testing
 
-Cover allocation-performing functions with `std.testing.checkAllAllocationFailures` — it exhaustively fails each allocation point to prove `OutOfMemory` handling and leak-free error paths. The test fn takes only an allocator (plus `std.Io` in the args tuple when needed), allocates, operates, and cleans up via `defer`.
+Allocation-failure tests are good for fallible allocation paths that must survive OOM: one `std.testing.checkAllAllocationFailures` per such function. Don't overdo it beyond that.
 
 ```zig
 fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {

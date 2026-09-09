@@ -130,7 +130,10 @@ pub const Registry = struct {
         const api = lib.lookup(*const generator_api.GeneratorApi, generator_api.api_export_name) orelse
             return error.MissingExport;
         const info = api.info().*;
-        if (info.api_version != generator_api.ApiVersion) return error.ApiVersionMismatch;
+        if (!generator_api.apiCompatible(info.api_version)) {
+            std.log.warn("generator {s} api version {} incompatible with host {}", .{ path, info.api_version, generator_api.ApiVersion });
+            return error.ApiVersionMismatch;
+        }
 
         const generator = Generator{
             .lib = lib,

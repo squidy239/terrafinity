@@ -7,6 +7,7 @@ const wio = @import("wio");
 const zignal = @import("zignal");
 
 const Config = @import("main.zig").Config;
+const EntityRegistry = @import("entity/EntityRegistry.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
 const utils = @import("libs/utils.zig");
@@ -26,6 +27,7 @@ const Ui = @This();
 
 const NewGameState = struct {
     world_config: World.WorldConfig = .{},
+    spawn_config: EntityRegistry.SpawnConfig = .{},
     generator_name: []const u8 = "Terrain",
     generator_name_allocated: bool = false,
     generator: ?*generator_loader.Generator = null,
@@ -155,6 +157,7 @@ fn showWorldError(frame_time: std.Io.Timestamp, err: anyerror) void {
         error.WorldNameMissing => error_writer.print("World needs a name.", .{}) catch unreachable,
         error.WorldNameExists => error_writer.print("A world with this name already exists.", .{}) catch unreachable,
         error.InvalidName => error_writer.print("World names can't contain '/'.", .{}) catch unreachable,
+        error.GeneratorSpawnFailed => error_writer.print("The generator could not find a safe spawn point.", .{}) catch unreachable,
         else => error_writer.print("{any}", .{err}) catch unreachable,
     }
     dvui.dialog(@src(), frame_time, .{ .message = error_writer.buffered(), .title = "                There was a problem                " });
@@ -193,7 +196,7 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
             showWorldError(frame_time, err);
             break :blk false;
         };
-        if (self.menu_state.ingame and self.menu_state.terrain_developer_settings) self.drawTerrainDeveloperSettings(gpa);
+        if (self.menu_state.ingame and self.menu_state.terrain_developer_settings) self.drawTerrainDeveloperSettings(io, gpa);
     }
     _ = try self.ui_window.end(.{});
 }
@@ -341,6 +344,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const chunk_hit_ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(total));
     const player_pos = self.game.getPlayerPos(io);
     const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
+    const spawn: @Vector(3, i64) = @intFromFloat(@round(self.game.spawn.pos));
     const str = try std.fmt.bufPrint(
         &fmt_buffer,
         \\FPS: {d}
@@ -352,6 +356,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         \\opaque faces: {d}
         \\transparent faces: {d}
         \\pos: {d}, {d}, {d}
+        \\spawn: {d}, {d}, {d}
         \\chunks cached: {d}
         \\grids cached: {d}
         \\entities cached: {d}
@@ -369,6 +374,9 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
             pos[0],
             pos[1],
             pos[2],
+            spawn[0],
+            spawn[1],
+            spawn[2],
             chunk_count,
             grid_count,
             self.game.debug_menu.entities.load(.unordered),
@@ -613,7 +621,7 @@ fn drawAdvancedShadowSettings(shadow: *ShadowConfig, root_id: u64) void {
     _ = configSlider("Minimum Chunk Size (texels)", &shadow.min_chunk_texels, .{}, 0, 16, configId(root_id, "min_chunk_texels"));
 }
 
-fn drawTerrainDeveloperSettings(self: *@This(), allocator: std.mem.Allocator) void {
+fn drawTerrainDeveloperSettings(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
     var open = true;
     const window = dvui.floatingWindow(
         @src(),
@@ -665,6 +673,24 @@ fn drawTerrainDeveloperSettings(self: *@This(), allocator: std.mem.Allocator) vo
         dvui.labelNoFmt(@src(), "No generator is loaded.", .{}, .{ .gravity_x = 0.5 });
     }
 
+    if (self.game.spawn.found) {
+        dvui.labelNoFmt(@src(), "World spawn is set. Clearing it re-picks on the next world load.", .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 4 } });
+    }
+    if (dvui.button(@src(), "Reset World Spawn", .{}, .{
+        .expand = .horizontal,
+        .margin = .{ .y = 4 },
+        .padding = .{ .y = 12, .h = 12 },
+    })) {
+        self.game.spawn.pos = .{ 0, 0, 0 };
+        self.game.spawn.found = false;
+        const opts = Game.WorldOptions{
+            .generator_name = if (self.game.generator) |*generator| generator.generator.info.name else "Terrain",
+            .world_config = self.game.world.config,
+            .spawn = self.game.spawn,
+        };
+        opts.save(io, self.game.world_path) catch |err|
+            std.log.err("reset world spawn failed to save: {any}", .{err});
+    }
     if (dvui.button(@src(), "Recreate World", .{}, .{
         .expand = .horizontal,
         .color_fill = .red,
@@ -834,7 +860,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
         if (create) return try self.createWorld(io, allocator, world_name_widget.textGet());
     }
 
-    dvui.structUI(@src(), "World", &self.new_game.world_config, 32, .{}, .{ .background = false, .color_fill = .transparent });
+    drawSpawnConfig(&self.new_game.spawn_config);
 
     try self.generatorDropdown(allocator);
     try self.presetDropdown(allocator);
@@ -869,6 +895,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     const world_options: Game.WorldOptions = .{
         .generator_name = self.new_game.generator_name,
         .world_config = self.new_game.world_config,
+        .spawn = self.new_game.spawn_config,
     };
     try world_options.save(io, game_path);
     try self.saveGeneratorConfig(allocator, io, game_path);
@@ -896,6 +923,35 @@ fn saveGeneratorConfig(self: *@This(), allocator: std.mem.Allocator, io: std.Io,
     const config_dir = try std.fs.path.join(allocator, &.{ game_path, "config" });
     defer allocator.free(config_dir);
     try generator.saveConfig(allocator, io, config_dir, config);
+}
+
+const newgame_spawn_id: u64 = 0x7370776e6366673f;
+
+fn newgameSpawnId(path: []const u8) u64 {
+    return configId(newgame_spawn_id, path);
+}
+
+fn spawnFloatRow(label: []const u8, value: *f64, id: u64) void {
+    var as_f32: f32 = @floatCast(value.*);
+    configTextf32(label, &as_f32, id);
+    value.* = as_f32;
+}
+
+fn spawnUintRow(label: []const u8, value: *u32, id: u64) void {
+    var as_u64: u64 = value.*;
+    configTextU64(label, &as_u64, id);
+    value.* = @intCast(@min(as_u64, std.math.maxInt(u32)));
+}
+
+/// Spawn settings for the new-game menu. Only the settings are editable;
+/// the resolved pos/found stay hidden here.
+fn drawSpawnConfig(spawn: *EntityRegistry.SpawnConfig) void {
+    dvui.labelNoFmt(@src(), "Spawn", .{}, .{ .font = .{ .size = 24 } });
+    spawnFloatRow("Center X", &spawn.center[0], newgameSpawnId("center_x"));
+    spawnFloatRow("Center Y", &spawn.center[1], newgameSpawnId("center_y"));
+    spawnFloatRow("Center Z", &spawn.center[2], newgameSpawnId("center_z"));
+    spawnUintRow("Range", &spawn.range, newgameSpawnId("range"));
+    settingsEnum("Game Mode", EntityTypes.Player.GameMode, &spawn.mode, newgameSpawnId("mode"));
 }
 
 fn generatorDropdown(self: *@This(), allocator: std.mem.Allocator) !void {

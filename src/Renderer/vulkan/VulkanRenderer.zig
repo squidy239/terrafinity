@@ -188,7 +188,10 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
 
         self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
         resetPoolQuiet(self.dev, self.vk_ctx.command_pool, .{ .release_resources_bit = true });
-        if (self.vk_ctx.ui_command_pool != .null_handle) resetPoolQuiet(self.dev, self.vk_ctx.ui_command_pool, .{ .release_resources_bit = true });
+        // The UI command pool is owned by main and may be mid-recording when
+        // deinit runs from a failed openGame inside the UI record path;
+        // resetting it yanks the buffer under the recorder and the next
+        // drawClippedTriangles faults on a non-recording command buffer.
         self.single_time.destroyFence();
     }
 

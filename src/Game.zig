@@ -9,6 +9,7 @@ const zm = @import("zm");
 const Entity = @import("entity/Entity.zig");
 const EntityRegistry = @import("entity/EntityRegistry.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
+const Physics = @import("entity/Physics.zig");
 const Key = @import("Key.zig");
 const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const utils = @import("libs/utils.zig");
@@ -36,6 +37,7 @@ vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
 generator: ?generator_loader.GeneratorInstance,
 world_storage: World.WorldStorage,
+spawn: EntityRegistry.SpawnConfig,
 game_arena: std.heap.ArenaAllocator,
 loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 128),
 
@@ -321,10 +323,11 @@ pub const Options = struct {
 };
 
 pub const WorldOptions = struct {
-    pub const default: @This() = .{ .generator_name = "Terrain", .world_config = .{} };
+    pub const default: @This() = .{ .generator_name = "Terrain", .world_config = .{}, .spawn = .{} };
     /// Name of the generator shared library this world uses.
     generator_name: []const u8,
     world_config: World.WorldConfig,
+    spawn: EntityRegistry.SpawnConfig,
 
     pub fn fromWorldFolder(folder: []const u8, io: std.Io, allocator: std.mem.Allocator) !WorldOptions {
         var world_folder = try std.Io.Dir.cwd().createDirPathOpen(io, folder, .{});
@@ -346,9 +349,20 @@ pub const WorldOptions = struct {
             generator_name = selection.generator;
         }
 
+        var spawn_state: EntityRegistry.SpawnConfig = .{};
+        const spawn_config_file = world_folder.openFile(io, "config/Spawn.zon", .{ .lock = .shared }) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (spawn_config_file) |file| {
+            defer file.close(io);
+            spawn_state = try utils.loadZon(EntityRegistry.SpawnConfig, io, file, allocator, allocator);
+        }
+
         return .{
             .generator_name = generator_name,
             .world_config = try utils.loadZon(World.WorldConfig, io, world_config_file, allocator, allocator),
+            .spawn = spawn_state,
         };
     }
 
@@ -356,6 +370,7 @@ pub const WorldOptions = struct {
     pub fn save(self: WorldOptions, io: std.Io, folder: []const u8) !void {
         var wbuffer: [1024]u8 = undefined;
         var gbuffer: [1024]u8 = undefined;
+        var sbuffer: [1024]u8 = undefined;
 
         var world_folder = try std.Io.Dir.cwd().openDir(io, folder, .{});
         defer world_folder.close(io);
@@ -375,11 +390,18 @@ pub const WorldOptions = struct {
 
         var generator_config_writer = generator_config_file.writer(io, &gbuffer);
 
+        const spawn_config_file = try world_folder.createFile(io, "config/Spawn.zon", .{ .lock = .exclusive });
+        defer spawn_config_file.close(io);
+
+        var spawn_config_writer = spawn_config_file.writer(io, &sbuffer);
+
         try std.zon.stringify.serialize(self.world_config, .{}, &world_config_writer.interface);
         try std.zon.stringify.serialize(GeneratorSelection{ .generator = self.generator_name }, .{}, &generator_config_writer.interface);
+        try std.zon.stringify.serialize(self.spawn, .{}, &spawn_config_writer.interface);
 
         try world_config_writer.end();
         try generator_config_writer.end();
+        try spawn_config_writer.end();
     }
 };
 
@@ -411,6 +433,7 @@ pub fn init(
         .generator = null,
         .loaded_or_meshed = .init,
         .world_storage = undefined,
+        .spawn = undefined,
         .world = undefined,
         .player = undefined,
         .player_entity = undefined,
@@ -500,7 +523,139 @@ pub fn init(
     game.entity_registry = try .init(game.allocator, entity_cache_capacity);
     errdefer game.entity_registry.deinit(io, game.allocator, &game.world);
 
-    try game.spawnPlayer(io, allocator);
+    game.spawn = world_options.spawn;
+    const spawn_pos = try game.resolveSpawnPos(io, allocator, folder, &world_options);
+    try game.spawnPlayer(io, allocator, spawn_pos);
+}
+
+const spawn_scan_above: f64 = 512;
+const spawn_scan_below: f64 = 1024;
+const spawn_required_air: u32 = 4;
+const spawn_max_nudges: u32 = 8;
+const spawn_rounds: u32 = 3;
+// Attempt budgets double as search reach (rings advance per sample):
+// phase 1 roams far for the canonical pick, phase 2 stays near home.
+const spawn_phase1_attempts: u32 = 128;
+const spawn_phase2_attempts: u32 = 64;
+
+const SpawnResolution = union(enum) {
+    ok: @Vector(3, f64),
+    ocean,
+    no_ground,
+    blocked,
+};
+
+/// Single authoritative spawn resolver: the generator proposes a column
+/// (its Y is only a hint — erosion, caves, and structures are invisible to
+/// it), and the host scans down from above the hint for the first solid
+/// block with clear air above it.
+fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, x: f64, z: f64, y_hint: f64) !SpawnResolution {
+    const mover = Physics.Mover{
+        .collisions = .init(true),
+        .zero_velocity = .init(true),
+        .bounding_box = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
+        .enabled = .init(true),
+    };
+    var reader = World.Reader{ .world = &game.world };
+    defer reader.clear(io);
+    const bx: i64 = @intFromFloat(@round(x));
+    const bz: i64 = @intFromFloat(@round(z));
+    // Analytic estimates can miss by hundreds of blocks under heavy
+    // erosion, so the window is generous; the first solid from the top is
+    // the surface, never a cave roof.
+    var y: i64 = @intFromFloat(@floor(y_hint + spawn_scan_above));
+    const bottom: i64 = @intFromFloat(@floor(y_hint - spawn_scan_below));
+    var air_run: u32 = 0;
+    var saw_water = false;
+    while (y >= bottom) : (y -= 1) {
+        const block = try reader.getBlock(io, allocator, .{ bx, y, bz }, World.standard_level);
+        if (block == .water) saw_water = true;
+        if (!block.isSolid()) {
+            air_run += 1;
+            continue;
+        }
+        if (air_run >= spawn_required_air) {
+            for (1..spawn_required_air + 1) |off| {
+                if ((try reader.getBlock(io, allocator, .{ bx, y + @as(i64, @intCast(off)), bz }, World.standard_level)) == .water) return .ocean;
+            }
+            // The box overlaps neighbor columns, so on slopes uphill
+            // blocks intrude: nudge up until clear instead of rejecting.
+            // Block top sits 0.5 above its center; the box extends 2 below.
+            var feet = @Vector(3, f64){ x, @as(f64, @floatFromInt(y)) + 0.5 + 2 + 0.01, z };
+            var nudges: u32 = 0;
+            while (try mover.checkCollision(io, allocator, feet, &reader) != null) {
+                nudges += 1;
+                if (nudges > spawn_max_nudges) return .blocked;
+                feet[1] += 1.0;
+            }
+            return .{ .ok = feet };
+        }
+        air_run = 0;
+    }
+    return if (saw_water) .ocean else .no_ground;
+}
+
+/// One propose-plus-resolve batch shared by both spawn phases. Returns
+/// resolved feet, or null when every round rejects. Abstention is a hard
+/// error: with no hard radius bound there is no fallback spawn.
+fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, center: [3]f64, radius: f64, attempts: u32, phase: u8) !?@Vector(3, f64) {
+    const generator = game.generator orelse return error.GeneratorNotFound;
+    var round: u32 = 0;
+    while (round < spawn_rounds) : (round += 1) {
+        var nonce: u64 = undefined;
+        io.random(std.mem.asBytes(&nonce));
+        const spot = generator.generator.api.propose_spawn(generator.instance, &center, radius, attempts, nonce);
+        if (!spot.found) {
+            std.log.err("spawn phase {d} round {d}: generator abstained", .{ phase, round });
+            return error.GeneratorSpawnFailed;
+        }
+        const resolved = try game.resolveSpawnColumn(io, allocator, spot.pos[0], spot.pos[2], spot.pos[1]);
+        switch (resolved) {
+            .ok => |pos| return pos,
+            .ocean, .no_ground, .blocked => std.log.warn("spawn phase {d} round {d}: {s} at candidate {d:.1}, {d:.1}, {d:.1}", .{ phase, round, @tagName(resolved), spot.pos[0], spot.pos[1], spot.pos[2] }),
+        }
+    }
+    return null;
+}
+
+/// Resolves the player spawn feet position. Phase 1 (no persisted spawn)
+/// picks the canonical world spawn once and saves it; later joins jitter
+/// around it so island worlds keep everyone in the same area. The
+/// generator proposes columns; exact feet Y comes from the host's column
+/// scan.
+fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, folder: []const u8, world_options: *WorldOptions) !@Vector(3, f64) {
+    if (!game.spawn.found) {
+        const center = [3]f64{
+            game.spawn.center[0],
+            game.spawn.center[1],
+            game.spawn.center[2],
+        };
+        if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase1_attempts, 1)) |pos| {
+            std.log.info("spawn phase 1 accepted {d:.1}, {d:.1}, {d:.1}", .{ pos[0], pos[1], pos[2] });
+            game.spawn.pos = pos;
+            game.spawn.found = true;
+            world_options.spawn = game.spawn;
+            try world_options.save(io, folder);
+            return pos;
+        }
+        std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{
+            spawn_rounds,
+            game.spawn.center[0],
+            game.spawn.center[1],
+            game.spawn.center[2],
+        });
+        return error.GeneratorSpawnFailed;
+    }
+    const center = [3]f64{
+        game.spawn.pos[0],
+        game.spawn.pos[1],
+        game.spawn.pos[2],
+    };
+    // Same radius on retry: growing it would abandon the island.
+    if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
+    // No fallback spawn exists; degrade to the canonical point itself.
+    std.log.warn("spawn phase 2 exhausted, degrading to canonical spawn", .{});
+    return game.spawn.pos;
 }
 
 fn stopBackgroundWork(self: *@This(), io: std.Io) void {
@@ -1240,9 +1395,10 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
     }
 }
 
-fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_pos: @Vector(3, f64)) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
+    const default_game_mode = game.spawn.mode;
     const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
@@ -1258,16 +1414,19 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
                 },
                 .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
-            .pos = .{ 0, 1000, 0 },
+            .pos = spawn_pos,
             .velocity = @splat(0),
             .last_update = .now(io, .awake),
         },
-        .game_mode = .init(.Spectator),
+        .game_mode = .init(default_game_mode),
         .view_direction = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
         .main_inventory = undefined,
     });
     game.player_entity = player_entity;
     game.player = @ptrCast(@alignCast(player_entity.ptr));
+    // The literal physics flags above match Spectator; normalize them to
+    // whatever mode was configured.
+    game.player.switchGameMode(default_game_mode);
     game.player.main_inventory = .initBuffer(
         10,
         16,

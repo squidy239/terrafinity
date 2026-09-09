@@ -5,13 +5,26 @@ const World = @import("../World.zig");
 /// Shared interface between the terrafinity host and generator shared
 /// libraries. Both sides are compiled by the same `zig build` with the same
 /// compiler, so every type here has identical layout across the DLL boundary.
-pub const ApiVersion: u32 = 4;
+///
+/// The API version is semver: bump minor for backward-compatible additions
+/// (e.g. appended vtable entries the host guards), major for breaking
+/// changes (removed/changed entries, shared layout changes).
+pub const ApiVersion: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
+
+/// Whether a plugin built against `plugin_version` can run on this host.
+/// Major must always match; while major is 0 (pre-1.0, including now) the
+/// minor and patch must match exactly, since anything may still break.
+pub fn apiCompatible(plugin_version: std.SemanticVersion) bool {
+    if (plugin_version.major != ApiVersion.major) return false;
+    if (ApiVersion.major == 0) return plugin_version.minor == ApiVersion.minor and plugin_version.patch == ApiVersion.patch;
+    return plugin_version.minor <= ApiVersion.minor;
+}
 
 pub const GeneratorInfo = struct {
     name: []const u8,
     description: []const u8,
     version: u32,
-    api_version: u32,
+    api_version: std.SemanticVersion,
 };
 
 pub const CreateOptions = struct {
@@ -75,6 +88,123 @@ pub const Array = struct {
 
 pub const ConfigTree = Group;
 
+/// A generator-proposed spawn position in world blocks. Returned by value
+/// from `propose_spawn`; `found == false` means the generator abstains and
+/// the host must fail the spawn loudly (there is no fallback spawn point).
+/// Deliberately position-only: no view direction, no player identity.
+pub const Spawnpoint = extern struct {
+    pos: [3]f64,
+    found: bool = false,
+};
+
+/// Shared spawn-search tuning: every generator samples, scores, and caps
+/// identically so behavior matches across plugins.
+pub const spawn_samples_per_ring: u32 = 8;
+pub const spawn_max_ring: u32 = 20;
+pub const spawn_ring_step: f64 = 16.0;
+/// Upper bound covering the full ring schedule; the host passes smaller
+/// `attempts` budgets when it wants cheaper, nearer searches.
+pub const spawn_attempt_cap: u32 = (spawn_max_ring + 1) * spawn_samples_per_ring;
+pub const spawn_slope_weight: f64 = 64.0;
+pub const spawn_ocean_penalty: f64 = 1e9;
+pub const spawn_steep_penalty: f64 = 1e6;
+pub const spawn_steep_limit: f32 = 1.0;
+pub const spawn_water_margin: f32 = 1.0;
+/// Hint feet sit this far above the estimated ground top; the host resolves
+/// exact feet, so hints only need to land the column scan window.
+pub const spawn_hint_clearance: f32 = 2.6;
+
+/// Deterministic disc sample shared by every `propose_spawn`
+/// implementation, so all generators expand identically. `radius` is soft:
+/// ring 0 samples within `radius` of `center` (exactly `center` when
+/// `radius == 0`), later rings grow by powers of two so a `0` radius still
+/// means "closest to center" while guaranteeing escape from oceans.
+/// Deterministic in `(seed, center, radius, nonce, i)`: per-join variation
+/// comes from the host-supplied `nonce`, never from hidden RNG.
+pub fn spawnSample(seed: u64, center: [2]f64, radius: f64, nonce: u64, i: u32) [2]f64 {
+    var hasher = std.hash.Wyhash.init(seed ^ nonce ^ 0x9e3779b97f4a7c15);
+    std.hash.autoHash(&hasher, i);
+    const h = hasher.final();
+    const frac_low: f64 = @as(f64, @floatFromInt(h & 0xFFFFFFFF)) / 4294967296.0;
+    const frac_high: f64 = @as(f64, @floatFromInt(h >> 32)) / 4294967296.0;
+    // Rings advance with the sample index so a larger `attempts` budget
+    // searches farther, not just denser: ring 12 reaches ~65km, ring 20
+    // the whole world. Reach must not be coupled to a CPU cap, or retries
+    // re-search the same basin forever.
+    const ring = @min(i / spawn_samples_per_ring, spawn_max_ring);
+    const extra: f64 = spawn_ring_step * (@exp2(@as(f64, @floatFromInt(ring))) - 1.0);
+    const r = radius + extra;
+    if (r <= 0) return center;
+    // Uniform disc: sqrt distributes area-evenly so near-center candidates
+    // win the distance term more often, keeping island worlds clustered.
+    const dist = r * @sqrt(frac_low);
+    const angle = std.math.tau * frac_high + @as(f64, @floatFromInt(i % spawn_samples_per_ring)) * (std.math.tau / @as(f64, spawn_samples_per_ring));
+    return .{ center[0] + @cos(angle) * dist, center[1] + @sin(angle) * dist };
+}
+
+/// Analytic column score shared by every `propose_spawn` implementation.
+/// `height_above_water` is height minus sea level (or raw height where the
+/// generator has no sea); slope is blocks per block. Water/steep columns
+/// stay tracked as best-effort so all-ocean seeds still return something.
+pub const SpawnScore = struct {
+    score: f64,
+    wet: bool,
+    steep: bool,
+};
+
+pub fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnScore {
+    const wet = height_above_water <= spawn_water_margin;
+    const steep = slope >= spawn_steep_limit;
+    return .{
+        .score = dist + @as(f64, slope) * spawn_slope_weight + (if (wet) spawn_ocean_penalty else 0) + (if (steep) spawn_steep_penalty else 0),
+        .wet = wet,
+        .steep = steep,
+    };
+}
+
+/// Shared pick-test-retry loop for heightfield generators: samples the
+/// disc schedule, scores each column, tracks the best. `columnHeight`
+/// returns the terrain height at world (x, z); `sea_level` gates water.
+/// Pure and deterministic; the host re-validates the winner.
+pub fn proposeSpawnField(
+    seed: u64,
+    center: [3]f64,
+    radius: f64,
+    attempts: u32,
+    nonce: u64,
+    sea_level: f32,
+    context: anytype,
+    comptime columnHeight: anytype,
+) Spawnpoint {
+    var best: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
+    var best_score: f64 = std.math.inf(f64);
+    var best_good = false;
+    const capped = @min(attempts, spawn_attempt_cap);
+    for (0..capped) |i| {
+        // Cheap analytic test per pick; the host re-validates the winner
+        // against real blocks, so misses here only cost retries.
+        const sample = spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
+        const sx: f32 = @floatCast(sample[0]);
+        const sz: f32 = @floatCast(sample[1]);
+        const h = columnHeight(context, sx, sz);
+        const hx = columnHeight(context, sx + 2, sz);
+        const hz = columnHeight(context, sx, sz + 2);
+        const slope = @max(@abs(hx - h), @abs(hz - h)) / 2.0;
+        const dx = sample[0] - center[0];
+        const dz = sample[1] - center[2];
+        const scored = scoreSpawnColumn(@sqrt(dx * dx + dz * dz), h - sea_level, slope);
+        if (scored.score < best_score) {
+            best_score = scored.score;
+            // Top solid block is floor(h); the hint only needs the column.
+            best = .{ .pos = .{ sample[0], @floor(h) + spawn_hint_clearance, sample[1] }, .found = true };
+            best_good = !scored.wet and !scored.steep;
+        }
+        // Stop after a full first ring once the tracked best passes.
+        if (i >= spawn_samples_per_ring - 1 and best_good) break;
+    }
+    return best;
+}
+
 /// The vtable every generator exports under `api_export_name`.
 ///
 /// The functions use the C calling convention, so aggregate types cross the
@@ -102,6 +232,23 @@ pub const GeneratorApi = extern struct {
     /// Returns null on failure. Fills in unspecified seeds (params with `Spec.is_seed`, value 0) and
     /// must be called before `create` so the chosen seeds can be persisted.
     config_set_seeds: *const fn (io: *const std.Io, config: *ConfigTree) callconv(.c) void,
+    /// Proposes a spawn position near `center`. `radius` is soft (0 means
+    /// "closest to center"): the generator samples with `spawnSample` and
+    /// roams beyond `radius` when nothing passes. `attempts` bounds the
+    /// inner analytic loop; `nonce` varies per call so joins spread without
+    /// player identity. Pure: no chunk I/O, deterministic in its inputs.
+    /// The returned Y is only a hint — erosion, caves, and structures are
+    /// invisible to the generator, so the host scans the column to resolve
+    /// exact feet. The host must call this when present; `found == false`
+    /// is a hard spawn failure. Returned by value: sound because both
+    /// sides share one compiler, the same guarantee the vtable relies on.
+    propose_spawn: *const fn (
+        instance: *anyopaque,
+        center: *const [3]f64,
+        radius: f64,
+        attempts: u32,
+        nonce: u64,
+    ) callconv(.c) Spawnpoint,
 };
 
 pub const api_export_name = "generator_api";
@@ -646,4 +793,34 @@ test "clone and array add remove" {
     try std.testing.expectEqual(@as(usize, 1), array.items.len);
     arrayRemove(allocator, array, 0);
     try std.testing.expectEqual(@as(usize, 0), array.items.len);
+}
+
+test "apiCompatible enforces semver" {
+    // At 0.0.0 (pre-1.0) only an exact match loads.
+    try std.testing.expect(apiCompatible(ApiVersion));
+    try std.testing.expect(!apiCompatible(.{ .major = 1, .minor = 0, .patch = 0 }));
+    try std.testing.expect(!apiCompatible(.{ .major = 0, .minor = 1, .patch = 0 }));
+    try std.testing.expect(!apiCompatible(.{ .major = 0, .minor = 0, .patch = 1 }));
+}
+
+test "spawnSample radius zero returns center" {
+    const center = [2]f64{ 10, -20 };
+    for (0..8) |i| {
+        const p = spawnSample(42, center, 0, 7, @intCast(i));
+        try std.testing.expectEqual(center[0], p[0]);
+        try std.testing.expectEqual(center[1], p[1]);
+    }
+}
+
+test "spawnSample is deterministic and ring 0 stays in radius" {
+    const center = [2]f64{ 0, 0 };
+    const a = spawnSample(42, center, 32, 1, 9);
+    const b = spawnSample(42, center, 32, 1, 9);
+    try std.testing.expectEqual(a[0], b[0]);
+    try std.testing.expectEqual(a[1], b[1]);
+    for (0..spawn_samples_per_ring) |i| {
+        const p = spawnSample(99, center, 32, 5, @intCast(i));
+        const d = @sqrt(p[0] * p[0] + p[1] * p[1]);
+        try std.testing.expect(d <= 32.0);
+    }
 }
