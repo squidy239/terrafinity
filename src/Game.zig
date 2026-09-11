@@ -59,7 +59,7 @@ save_is_running: std.atomic.Value(bool) = .init(false),
 save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) = null,
 
 group: std.Io.Group = .init,
-/// This error is handeled on the next frame and will close the game
+/// The next frame handles this error and closes the game.
 deferred_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError)),
 
 options: *Options,
@@ -84,7 +84,7 @@ debug_menu: struct {
 
 const NodeData = struct {
     /// How many direct children are currently subtree-covered.
-    covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = @splat(@splat(@splat(false))),
+    covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = empty_coverage,
     /// True when this chunk is queued or currently in the renderer.
     /// False for ghost entries that exist only to track child coverage.
     is_active: bool = false,
@@ -109,14 +109,8 @@ const NodeData = struct {
     }
 };
 
-/// Sets or clears pos's covered slot in its parent, bubbling up while the parent's
-/// aggregate flips. Setting creates the parent ghost if absent; clearing prunes it
-/// when it tracks nothing. The aggregate is monotonic in the slot value, so
-/// `was != is` is the directed transition condition for both directions of the walk.
-/// `highest` is a snapshot of `highest_level` taken at the outermost call; reusing
-/// it for the recursive bubble-up avoids N extra RwLock acquisitions and gives a
-/// consistent cutoff for the whole walk (concurrent `highest_level` changes take
-/// effect on the next top-level call).
+/// Bubbles coverage to the parent while the aggregate flips and prunes empty ghosts.
+/// Callers pass a `highest` snapshot so one walk uses a consistent cutoff.
 fn markSubtree(
     self: *@This(),
     io: std.Io,
@@ -137,10 +131,8 @@ fn markSubtree(
         const bucket = self.loaded_or_meshed.getBucket(parent);
         const p = pos_in_parent;
 
-        // Fast path: read under the shared lock and skip the exclusive lock
-        // entirely when the slot already holds the target value. The synthetic
-        // NodeData on miss has `structures_generated = false` only to satisfy
-        // the type; only `covered_children[p]` is examined here.
+        // Skip the exclusive lock when the slot already holds the target value.
+        // The synthetic entry on a miss only fills the examined slot.
         {
             const mark_subtree_fast = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_fast" });
             defer mark_subtree_fast.end();
@@ -161,8 +153,7 @@ fn markSubtree(
         else
             bucket.hash_map.get(parent) orelse return;
 
-        // Re-check after acquiring the exclusive lock; another thread may have
-        // flipped the slot while we waited.
+        // Another thread may flip the slot while this thread waits, so check again.
         if (state.covered_children[p[0]][p[1]][p[2]] == covered) {
             return;
         }
@@ -212,7 +203,6 @@ fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: 
     }
     std.debug.assert(parent.level == view.highest_level);
 
-    // Check if the highest level parent is out of render distance.
     if (!keepLoaded(null, null, view.player_pos, parent, null, view.render_distance)) return true;
 
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
@@ -231,8 +221,8 @@ fn tryRemoveChunkFromLoaded(
 ) !void {
     if (!self.canUnloadMeshView(io, view, chunk_pos)) return;
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    var was_covering: bool = undefined;
-    var is_covering: bool = undefined;
+    var was_covering: bool = false;
+    var is_covering: bool = false;
     {
         try bucket.lock.lock(io);
         defer bucket.lock.unlock(io);
@@ -256,7 +246,7 @@ fn tryRemoveChunkFromLoaded(
         is_covering = state.isCovering();
 
         if (state.noCoveredChildren()) {
-            _ = bucket.hash_map.remove(chunk_pos); // ghost with nothing to track
+            _ = bucket.hash_map.remove(chunk_pos);
         } else {
             try bucket.hash_map.put(allocator, chunk_pos, state);
         }
@@ -366,7 +356,7 @@ pub const WorldOptions = struct {
         };
     }
 
-    /// Saves the world options to the config directory in the given folder, creating the files if they do not exist.
+    /// Writes the world options into the config directory of the given folder, creating missing files.
     pub fn save(self: WorldOptions, io: std.Io, folder: []const u8) !void {
         var wbuffer: [1024]u8 = undefined;
         var gbuffer: [1024]u8 = undefined;
@@ -545,10 +535,7 @@ const SpawnResolution = union(enum) {
     blocked,
 };
 
-/// Single authoritative spawn resolver: the generator proposes a column
-/// (its Y is only a hint — erosion, caves, and structures are invisible to
-/// it), and the host scans down from above the hint for the first solid
-/// block with clear air above it.
+/// Resolves one generator-proposed column to feet. The hint Y ignores erosion and structures, so scan down for solid ground with clear air above it.
 fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, x: f64, z: f64, y_hint: f64) !SpawnResolution {
     const mover = Physics.Mover{
         .collisions = .init(true),
@@ -560,9 +547,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     defer reader.clear(io);
     const bx: i64 = @intFromFloat(@round(x));
     const bz: i64 = @intFromFloat(@round(z));
-    // Analytic estimates can miss by hundreds of blocks under heavy
-    // erosion, so the window is generous; the first solid from the top is
-    // the surface, never a cave roof.
+    // Erosion shifts analytic estimates by hundreds of blocks, so scan a wide window. The first solid block from the top is the surface.
     var y: i64 = @intFromFloat(@floor(y_hint + spawn_scan_above));
     const bottom: i64 = @intFromFloat(@floor(y_hint - spawn_scan_below));
     var air_run: u32 = 0;
@@ -578,9 +563,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
             for (1..spawn_required_air + 1) |off| {
                 if ((try reader.getBlock(io, allocator, .{ bx, y + @as(i64, @intCast(off)), bz }, World.standard_level)) == .water) return .ocean;
             }
-            // The box overlaps neighbor columns, so on slopes uphill
-            // blocks intrude: nudge up until clear instead of rejecting.
-            // Block top sits 0.5 above its center; the box extends 2 below.
+            // The box overlaps neighbor columns, so nudge up on slopes instead of rejecting the spot.
             var feet = @Vector(3, f64){ x, @as(f64, @floatFromInt(y)) + 0.5 + 2 + 0.01, z };
             var nudges: u32 = 0;
             while (try mover.checkCollision(io, allocator, feet, &reader) != null) {
@@ -595,13 +578,10 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     return if (saw_water) .ocean else .no_ground;
 }
 
-/// One propose-plus-resolve batch shared by both spawn phases. Returns
-/// resolved feet, or null when every round rejects. Abstention is a hard
-/// error: with no hard radius bound there is no fallback spawn.
+/// Runs one propose-plus-resolve batch for both spawn phases. Abstention fails hard because no fallback spawn exists without a radius bound.
 fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, center: [3]f64, radius: f64, attempts: u32, phase: u8) !?@Vector(3, f64) {
     const generator = game.generator orelse return error.GeneratorNotFound;
-    var round: u32 = 0;
-    while (round < spawn_rounds) : (round += 1) {
+    for (0..spawn_rounds) |round| {
         var nonce: u64 = undefined;
         io.random(std.mem.asBytes(&nonce));
         const spot = generator.generator.api.propose_spawn(generator.instance, &center, radius, attempts, nonce);
@@ -618,18 +598,10 @@ fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, cent
     return null;
 }
 
-/// Resolves the player spawn feet position. Phase 1 (no persisted spawn)
-/// picks the canonical world spawn once and saves it; later joins jitter
-/// around it so island worlds keep everyone in the same area. The
-/// generator proposes columns; exact feet Y comes from the host's column
-/// scan.
+/// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
 fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, folder: []const u8, world_options: *WorldOptions) !@Vector(3, f64) {
     if (!game.spawn.found) {
-        const center = [3]f64{
-            game.spawn.center[0],
-            game.spawn.center[1],
-            game.spawn.center[2],
-        };
+        const center: [3]f64 = game.spawn.center;
         if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase1_attempts, 1)) |pos| {
             std.log.info("spawn phase 1 accepted {d:.1}, {d:.1}, {d:.1}", .{ pos[0], pos[1], pos[2] });
             game.spawn.pos = pos;
@@ -646,11 +618,7 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
         });
         return error.GeneratorSpawnFailed;
     }
-    const center = [3]f64{
-        game.spawn.pos[0],
-        game.spawn.pos[1],
-        game.spawn.pos[2],
-    };
+    const center: [3]f64 = game.spawn.pos;
     // Same radius on retry: growing it would abandon the island.
     if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
     // No fallback spawn exists; degrade to the canonical point itself.
@@ -683,9 +651,8 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.* = undefined;
 }
 
-/// Discards all generated and edited chunks, then opens a fresh world using the
-/// current generator configuration. The caller must wait for the GPU before
-/// calling this because the renderer is fully recreated.
+/// Discards chunks and reopens the world with the current generator configuration.
+/// The caller waits for the GPU first because the renderer is fully recreated.
 pub fn recreateWorld(
     self: *@This(),
     io: std.Io,
@@ -775,8 +742,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
     defer z.end();
-    // Snapshot frequencies under one short shared hold; the awaits and
-    // spawns below run lock-free.
+    // Hold the shared lock once for all frequencies; the awaits and spawns below run lock-free.
     self.options_lock.lockSharedUncancelable(io);
     const loader_frequency_ms = self.options.loader_frequency_ms;
     const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
@@ -883,8 +849,9 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     const first_hotbar = @intFromEnum(Key.Action.hotbar_key_0);
-    inline for (0..10) |i| {
-        if (actions.contains(@enumFromInt(first_hotbar + i))) self.selected_inventory_col.store(i, .seq_cst);
+    const hotbar_key_count = 10;
+    inline for (0..hotbar_key_count) |slot| {
+        if (actions.contains(@enumFromInt(first_hotbar + slot))) self.selected_inventory_col.store(slot, .seq_cst);
     }
     if (actions.contains(.hotbar_scroll_up)) _ = self.selected_inventory_row.fetchAdd(1, .seq_cst);
     if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
@@ -895,7 +862,8 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     defer z.end();
     const player_pos = self.getPlayerPos(io);
     const looking = self.getCameraFront(io);
-    const pos = player_pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(2));
+    const spawn_distance: f64 = 2;
+    const pos = player_pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(spawn_distance));
     const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive.init(
         pos,
         looking,
@@ -917,11 +885,13 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
-    const cone: Cone(f32) = .init(@floatCast(player_pos), looking, 100, 10, 10);
-    if (actions.contains(.use_item_primary)) try editor.placeSamplerShape(.air, cone, 0);
-    if (actions.contains(.use_item_secondary)) try editor.placeSamplerShape(.stone, cone, 0);
+    const cone_length: f32 = 100;
+    const cone_radius: f32 = 10;
+    const cone: Cone(f32) = .init(@floatCast(player_pos), looking, cone_length, cone_radius, cone_radius);
+    if (actions.contains(.use_item_primary)) try editor.placeSamplerShape(.air, cone, World.standard_level);
+    if (actions.contains(.use_item_secondary)) try editor.placeSamplerShape(.stone, cone, World.standard_level);
     if (actions.contains(.use_item_tertiary)) {
-        try editor.placeSamplerShape(sphere_block, Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), 0);
+        try editor.placeSamplerShape(sphere_block, Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), World.standard_level);
     }
     try editor.flush(io, self.allocator);
 }
@@ -1017,32 +987,20 @@ fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
     return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
 }
 
-fn getLevels(self: *@This(), io: std.Io) struct { i32, i32 } {
+const Levels = struct {
+    lowest: i32,
+    highest: i32,
+};
+
+fn getLevels(self: *@This(), io: std.Io) Levels {
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "getLevels" });
     defer z.end();
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return .{ self.options.lowest_level, self.options.highest_level };
+    return .{ .lowest = self.options.lowest_level, .highest = self.options.highest_level };
 }
 
-fn getRenderDistance(self: *@This(), io: std.Io) @Vector(2, u32) {
-    const z = tracy.Zone.begin(.{ .src = @src() });
-    defer z.end();
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return .{ self.options.render_distance_x, self.options.render_distance_y };
-}
-
-fn getLodOverlap(self: *@This(), io: std.Io) i32 {
-    const z = tracy.Zone.begin(.{ .src = @src() });
-    defer z.end();
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return self.options.lod_overlap;
-}
-
-/// Consistent snapshot of everything geometry culling depends on. Taken once
-/// per bulk pass so per-entry checks are lock-free pure functions.
+/// Snapshots everything geometry culling depends on. Bulk passes take it once so per-entry checks stay lock-free.
 const ViewSnapshot = struct {
     lowest_level: i32,
     highest_level: i32,
@@ -1059,14 +1017,7 @@ const ViewSnapshot = struct {
     }
 };
 
-/// Levels refine their children, so a generation ring stops short of the child
-/// ring it feeds by the configured LOD overlap. A negative overlap opens a
-/// visible gap instead, which outlines each level's boundary. Holes are
-/// proportional: every holed level excludes the same fraction, so shells nest
-/// inside each other and adjacent levels meet only at the overlap margin.
-/// Detail levels never mark coverage, so the refinement floor stays at 0: with
-/// detail active level 0 draws its full disk, keeping every holed level above
-/// it coverable.
+/// Stops each generation ring short of the child ring it feeds by the overlap. Detail levels never mark coverage, so the refinement floor stays at 0.
 fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), lod_overlap: i32, level: i32) @Vector(2, u32) {
     if (level <= lowest_level or (lowest_level < 0 and level == 0)) return @splat(0);
     const half: @Vector(2, i32) = @intCast(gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor });
@@ -1108,23 +1059,13 @@ fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
     };
 }
 
-/// Adds a chunk to the render list replacing it if it already exists, generates it or its neighbors if it doesn't exist.
+/// Generates a missing chunk and its neighbors, then adds or replaces its mesh.
 fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool, view: ViewSnapshot) !void {
-    const GenMeshAndAdd = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
-    defer GenMeshAndAdd.end();
-    // A task that dies before the mark block below would strand is_queued set,
-    // and needs_load would skip the chunk forever. Always release the flag so
-    // failures and cancels retry on a later pass; a newer in-flight task only
-    // causes one harmless duplicate pass.
+    const gen_mesh_add = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
+    defer gen_mesh_add.end();
+    // A dying task would strand the queued flag and skip the chunk forever, so always release it. Failures then retry on a later pass.
     defer self.clearQueuedFlag(io, chunk_pos);
-    // Queued tasks capture the spiral's segment-boundary snapshot by value, but
-    // the spiral only resets on a player-chunk crossing, so movement and
-    // settings drift can stale the capture by task start: a stale "drop" would
-    // unload what the current view needs (transient hole), a stale "keep"
-    // would load what it drops (waste). Re-snapshot the keep/unload gate here
-    // so the decision observes the current view; the passed view survives only
-    // as the markSubtree cutoff below. One snapshot per task keeps the
-    // steady-state lock cost unchanged in spirit.
+    // Queued tasks capture a stale segment snapshot, so re-snapshot the keep gate here. The passed view remains only the coverage cutoff.
     const gate_view = self.snapshotView(io);
     if (!gate_view.keepChunkLoaded(chunk_pos) and self.canUnloadMeshView(io, gate_view, chunk_pos)) {
         try self.renderer.removeChunk(io, chunk_pos);
@@ -1135,11 +1076,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
 
-    // Invisible uniform chunks produce no faces against any neighbor, so the
-    // extraction and renderer round-trip are pure overhead unless an old mesh
-    // must be cleared.
-    // A concurrent edit that turns this chunk non-air queues its own pass, so
-    // reading the encoding outside the meshing lock cannot strand a missing mesh.
+    // Uniform invisible chunks produce no faces, so skip extraction unless an old mesh needs clearing. A concurrent edit queues its own pass, so this read cannot strand a mesh.
     if (!try isUniformInvisible(io, chunk) or self.renderer.hasMesh(io, chunk_pos)) {
         var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
         {
@@ -1208,9 +1145,7 @@ fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f6
     if (lowest_level) |l| if (chunk_pos.level < l) return false;
     if (highest_level) |h| if (chunk_pos.level > h) return false;
 
-    // Player chunk via the same integer path the loader uses. A float divide
-    // here can land on the wrong side of a chunk boundary from pow dust when
-    // the quotient is exactly integral, disagreeing with the spiral's pick.
+    // Derive the player chunk through the same integer path as the loader. A float divide can disagree at exact boundaries from pow dust.
     const player_block: World.BlockPos = @intFromFloat(@floor(player_pos));
     const player_chunk_pos: @Vector(3, f64) = World.ChunkPos.fromGlobalBlockPos(player_block, chunk_pos.level).position;
     const chunk_center: @Vector(3, f64) = chunk_pos.position;
@@ -1235,17 +1170,16 @@ fn isOutside(point: @Vector(3, f64), center: @Vector(3, f64), radius: @Vector(3,
     return @reduce(.Or, point < center - radius) or @reduce(.Or, point > center + radius);
 }
 
-///Loads all chunks in render distance
 fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
     defer z.end();
     defer self.chunk_load_is_running.store(false, .seq_cst);
     var levels = self.getLevels(io);
-    var level = levels[0];
+    var level = levels.lowest;
     var group: std.Io.Group = .init;
     defer group.cancel(io);
     var error_int: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError));
-    while (level <= levels[1]) : (level += 1) {
+    while (level <= levels.highest) : (level += 1) {
         levels = self.getLevels(io);
         group.async(io, loadChunksSpiral, .{ self, io, allocator, level, &error_int });
     }
@@ -1259,7 +1193,7 @@ fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     }
 }
 
-///loads chunks from top to bottom and in a spiral on a y level
+/// Walks one level top to bottom in a spiral around the player chunk.
 fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, level: i32, error_int: *std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)))) Io.Cancelable!void {
     const spiral_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "loadChunksSpiral" });
     defer spiral_zone.end();
@@ -1273,17 +1207,15 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
     var amount_loaded: u64 = 0;
     var amount_tested: u64 = 0;
 
-    var xz: [2]i32 = .{ 0, 0 };
-    var c: usize = 0;
+    var spiral_pos: [2]i32 = .{ 0, 0 };
+    var segment_index: usize = 0;
     var first_segment = true;
 
     while (true) {
         if (!game.running.load(.unordered)) return;
         if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
 
-        // One snapshot per segment boundary covers center, radii, and levels
-        // for the whole segment, so the queue filter and the tasks it queues
-        // share center/radii/bounds. A player-chunk crossing resets the spiral.
+        // One snapshot per segment keeps the filter and its tasks on the same center and radii. A player-chunk crossing resets the spiral.
         if (first_segment) {
             first_segment = false;
         } else {
@@ -1295,8 +1227,8 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
                 player_chunk_pos = fresh_chunk_pos;
                 outer_radius = fresh.render_distance;
                 inner_radius = fresh.innerGenRadius(level);
-                c = 0;
-                xz = .{ 0, 0 };
+                segment_index = 0;
+                spiral_pos = .{ 0, 0 };
                 amount_tested = 0;
                 continue;
             }
@@ -1308,15 +1240,15 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
 
         try io.checkCancel();
 
-        const m = move(xz, &c);
-        var cc: i32 = 0;
-        while (line(&xz, &cc, m)) {
+        const segment_end = spiralSegmentEnd(spiral_pos, &segment_index);
+        var line_step: i32 = 0;
+        while (advanceSpiralLine(&spiral_pos, &line_step, segment_end)) {
             if (!game.running.load(.unordered)) return;
             amount_tested += 1;
 
             var y: i32 = -@as(i32, @intCast(outer_radius[1]));
             while (y <= outer_radius[1]) : (y += 1) {
-                const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ xz[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], xz[1] + player_chunk_pos.position[2] }, .level = level };
+                const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ spiral_pos[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], spiral_pos[1] + player_chunk_pos.position[2] }, .level = level };
 
                 if (!keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius)) continue;
 
@@ -1399,6 +1331,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
     const default_game_mode = game.spawn.mode;
+    const initial_view_direction: @Vector(3, f32) = .{ 0.0001, -0.4, 0.001 };
     const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
         .player_name = .fromString("squid"),
         .physics = .{
@@ -1419,13 +1352,12 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
             .last_update = .now(io, .awake),
         },
         .game_mode = .init(default_game_mode),
-        .view_direction = @Vector(3, f32){ 0.0001, -0.4, 0.001 },
+        .view_direction = initial_view_direction,
         .main_inventory = undefined,
     });
     game.player_entity = player_entity;
     game.player = @ptrCast(@alignCast(player_entity.ptr));
-    // The literal physics flags above match Spectator; normalize them to
-    // whatever mode was configured.
+    // The literal physics flags above match Spectator, so normalize them to the configured mode.
     game.player.switchGameMode(default_game_mode);
     game.player.main_inventory = .initBuffer(
         10,
@@ -1438,23 +1370,23 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
     game.renderer.updateCameraDirection(view_direction);
 }
 
-fn move(xz_in: [2]i32, c: *usize) [2]i32 {
+fn spiralSegmentEnd(start: [2]i32, segment_index: *usize) [2]i32 {
     const directions = [_][2]i32{ .{ 0, 1 }, .{ 1, 0 }, .{ 0, -1 }, .{ -1, 0 } };
-    const mov: i32 = @intCast(c.* / 2 + 1);
-    const dir = directions[c.* % 4];
-    c.* += 1;
-    return .{ xz_in[0] + dir[0] * mov, xz_in[1] + dir[1] * mov };
+    const segment_length: i32 = @intCast(segment_index.* / 2 + 1);
+    const direction = directions[segment_index.* % 4];
+    segment_index.* += 1;
+    return .{ start[0] + direction[0] * segment_length, start[1] + direction[1] * segment_length };
 }
 
-fn line(xz: *[2]i32, c: *i32, end: [2]i32) bool {
-    defer c.* += 1;
-    if (c.* == 0) return true;
-    if (xz[0] == end[0] and xz[1] == end[1]) return false;
-    std.debug.assert(xz[0] == end[0] or xz[1] == end[1]);
-    if (xz[0] == end[0]) {
-        xz[1] += if (xz[1] < end[1]) 1 else -1;
+fn advanceSpiralLine(position: *[2]i32, step: *i32, target: [2]i32) bool {
+    defer step.* += 1;
+    if (step.* == 0) return true;
+    if (position[0] == target[0] and position[1] == target[1]) return false;
+    std.debug.assert(position[0] == target[0] or position[1] == target[1]);
+    if (position[0] == target[0]) {
+        position[1] += if (position[1] < target[1]) 1 else -1;
     } else {
-        xz[0] += if (xz[0] < end[0]) 1 else -1;
+        position[0] += if (position[0] < target[0]) 1 else -1;
     }
-    return !(xz[0] == end[0] and xz[1] == end[1]);
+    return !(position[0] == target[0] and position[1] == target[1]);
 }

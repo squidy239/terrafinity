@@ -3,7 +3,6 @@ const std = @import("std");
 const tracy = @import("tracy");
 const zm = @import("zm");
 
-const Block = @import("../world/Block.zig").Block;
 const Sphere = @import("../world/structures/Sphere.zig").Sphere;
 const World = @import("../world/World.zig");
 const Entity = @import("Entity.zig");
@@ -99,8 +98,7 @@ pub const Player = struct {
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
     pos: @Vector(3, f64),
-    /// Unit travel direction, fixed at spawn by `init` (zero stays zero).
-    /// Never re-normalized or mutated by `update`; only integrated into `pos`.
+    /// Unit travel direction fixed at spawn; `update` integrates it into `pos` without renormalizing.
     dir: @Vector(3, f32),
     timestamp: i96,
     lock: std.Io.RwLock = .init,

@@ -1,18 +1,8 @@
 const std = @import("std");
 
-/// Creates a SIMD N-linear interpolator type over a coarse control grid.
-///
-/// `dims[k]` is the control-grid density along axis `k`, `samples[k]` the
-/// number of samples along it. Axis 0 is stored along the SIMD lanes, so
-/// interpolation along it is one vector operation per remaining-axis slice.
-/// The per-sample lerp factors are precomputed at compile time; axes 1..N-1
-/// use the FMA-friendly `v0 + t * (v1 - v0)` form, axis 0 uses masked vector
-/// multiplies, and every stage runs fused inside the loop of the stage before
-/// it, so no intermediate result round-trips through memory.
-///
-/// Layout conventions (identical to the hand-written 3D version):
-///   `Grid`    = `[dims[N-1]]...[dims[1]][dims[0]]Float`  (axis 0 innermost)
-///   `Samples` = `[samples[1]]...[samples[N-1]]@Vector(samples[0], Float)`
+/// SIMD N-linear interpolator over a coarse control grid. Axis 0 runs along the SIMD lanes, so it reduces with one vector operation per slice.
+/// Lerp factors are precomputed at comptime and stages fuse without memory round-trips.
+/// Grid is `[dims[N-1]]...[dims[0]]Float` (axis 0 innermost); Samples is `[samples[1]]...@Vector(samples[0], Float)`.
 pub fn MultilinearInterpolator(
     comptime Float: type,
     comptime N: usize,
@@ -61,7 +51,7 @@ pub fn MultilinearInterpolator(
             break :blk T;
         };
 
-        /// Row stride of each axis; axis 1 is fastest-varying. `[0]` unused.
+        /// Row stride of each axis. Axis 1 varies fastest; index 0 is unused.
         const row_stride = blk: {
             var s: [N]usize = undefined;
             s[0] = 0;
@@ -109,23 +99,7 @@ pub fn MultilinearInterpolator(
 
         /// Sample at normalized coordinates in [0, 1]^N.
         ///
-        /// Association note: this accumulates per-corner weights
-        /// (`w * w0 * corner`, the expanded `(1-f)*a + f*b` product form),
-        /// while `reduceLaneAxis`/`reduceAxis` evaluate the FMA-friendly
-        /// `a + f*(b-a)` lane form. The two are algebraically identical but
-        /// reassociated, so floating-point results can differ by a few ULPs;
-        /// the `sampleGrid` cross-check tests compare with an absolute
-        /// tolerance for exactly this reason. Neither form is bit-level
-        /// reference; do not tighten those tests to exact equality without
-        /// re-associating one path to match the other.
-        ///
-        /// Tolerances absorb the numeric gap, not exact-threshold branches:
-        /// an input landing exactly on a downstream comparison (blade
-        /// `scaled_f >= 1` in `fillBlades`, `slope <= 0` in
-        /// `bladeHeightScale`, cave `value < threshold` in
-        /// `carveCavesApply`, snow cover against `snow_line + gain * slope`
-        /// in `randGround`, all fed via `sampleGrid`) can flip sides versus
-        /// the pre-patch order.
+        /// This uses corner-weight products, while `reduceLaneAxis`/`reduceAxis` use the FMA form `a + f*(b-a)`. The forms match algebraically but differ by a few ULPs, so cross-check tests use absolute tolerance. Inputs on exact downstream thresholds can still flip sides.
         pub fn sample(self: *const Self, t: [N]Float) Float {
             const corners = 1 << N;
             var cell: [N]usize = undefined;
@@ -152,13 +126,7 @@ pub fn MultilinearInterpolator(
             return result;
         }
 
-        /// Reduce one control-point row along axis 0 into `samples[0]` lanes.
-        ///
-        /// Association note: evaluates `a + f*(b-a)` (FMA-friendly), reassociated
-        /// relative to `sample`'s corner-weight product form. The forms agree
-        /// algebraically and differ by a few ULPs in floating point, which the
-        /// `sampleGrid` cross-check tolerances absorb. Kept as-is deliberately:
-        /// re-associating to match `sample` bit-for-bit would cost the FMA.
+        /// Reduce one control-point row along axis 0 into `samples[0]` lanes. Uses the FMA form; see `sample` for the ULP note.
         inline fn reduceLaneAxis(self: *const Self, row: usize) Lane {
             @setFloatMode(.optimized);
             const lerp = comptime computeAxisLerpData(Float, dims[0], samples[0]);
@@ -172,11 +140,7 @@ pub fn MultilinearInterpolator(
             return acc;
         }
 
-        /// Reduce `axis` (the innermost index of `in`) and recurse; the last
-        /// axis writes straight into `out`, so it is fused with its parent.
-        ///
-        /// Same association as `reduceLaneAxis` (`a + f*(b-a)`); see `sample`
-        /// for why this differs by a few ULPs from the scalar product form.
+        /// Reduce `axis` and recurse; the last axis writes straight into `out`. Same FMA association as `reduceLaneAxis`; see `sample`.
         fn reduceAxis(
             comptime axis: usize,
             in: *const [gridCount(axis)]Lane,
@@ -208,8 +172,7 @@ pub fn MultilinearInterpolator(
         pub fn sampleGrid(self: *const Self) Samples {
             @setFloatMode(.optimized);
             var result: Samples = undefined;
-            // result and a flat lane array share one contiguous layout; a flat
-            // view lets reduceAxis write each lane in place, with no extra copy.
+            // Result shares layout with a flat lane array, so reduceAxis writes lanes in place.
             const out: *[total_samples]Lane = @ptrCast(&result);
 
             var stage: [rows]Lane = undefined;
@@ -400,4 +363,26 @@ test "sampleGrid reproduces linear fields" {
             }
         }
     }
+}
+
+test "benchmark sampleGrid" {
+    // Sample counts stay at 32^3 or below: larger grids return multi-MiB `Samples`
+    // values from `sampleGrid` and overflow the Debug test stack.
+    const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;
+    const io = std.testing.io;
+
+    inline for (@as([2][4]usize, .{
+        .{ 4, 4, 32, 32 },
+        .{ 8, 8, 128, 128 },
+    })) |cfg| {
+        benchGrid(f32, 2, cfg[0..2].*, cfg[2..4].*, iterations, io);
+    }
+    inline for (@as([3][6]usize, .{
+        .{ 4, 4, 4, 32, 32, 32 },
+        .{ 32, 32, 32, 32, 32, 32 },
+        .{ 8, 16, 8, 32, 32, 32 },
+    })) |cfg| {
+        benchGrid(f32, 3, cfg[0..3].*, cfg[3..6].*, iterations, io);
+    }
+    benchGrid(f32, 4, .{ 4, 4, 4, 4 }, .{ 8, 8, 8, 8 }, iterations, io);
 }

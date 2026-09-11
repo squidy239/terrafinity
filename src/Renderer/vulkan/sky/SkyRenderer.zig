@@ -83,10 +83,7 @@ pub const SkyConfig = struct {
 };
 
 /// std430 storage-block layout mirrored by sky.frag. All vector members are vec4s so Zig
-/// and GLSL agree on 16-byte slots (Zig would round a `@Vector(3, f32) align(16)` to size 16,
-/// while GLSL std430 vec3 is size 12 — a guaranteed mismatch). The shader uses `.xyz`.
-/// The camera block replaces an inverse view-projection matrix: the view is a pure rotation
-/// about the origin, so the sky ray is a combination of the camera basis vectors.
+/// and GLSL agree on 16-byte slots; the shader uses `.xyz`.
 pub const SkyParams = extern struct {
     camera_front: @Vector(4, f32),
     camera_side: @Vector(4, f32),

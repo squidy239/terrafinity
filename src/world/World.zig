@@ -8,7 +8,6 @@ pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
 pub const DefaultGenerator = @import("generators/Terrain.zig").DefaultGenerator;
-pub const PlanetGenerator = @import("generators/Planet.zig").Generator;
 pub const WorldStorage = @import("WorldStorage.zig");
 
 const World = @This();
@@ -34,10 +33,6 @@ pub const ChunkPos = struct {
         return @exp2(@as(f32, @floatFromInt(level - chunk_level)));
     }
 
-    pub inline fn levelToBlockRatioF64(level: i32) f64 {
-        return @exp2(@as(f64, @floatFromInt(level - chunk_level)));
-    }
-
     pub inline fn levelToLevelRatio(level1: i32, level2: i32) f64 {
         return @exp2(@as(f64, @floatFromInt(level1 - level2)));
     }
@@ -57,19 +52,6 @@ pub const ChunkPos = struct {
         return @intCast(@mod(self.position, comptime @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
     }
 
-    pub inline fn listChildren(self: ChunkPos) [scale_factor][scale_factor][scale_factor]ChunkPos {
-        var children: [scale_factor][scale_factor][scale_factor]ChunkPos = undefined;
-        inline for (0..scale_factor) |x| {
-            inline for (0..scale_factor) |y| {
-                inline for (0..scale_factor) |z| {
-                    children[x][y][z] = self.toLevel(self.level - 1)
-                        .add(comptime .{ @intCast(x), @intCast(y), @intCast(z) });
-                }
-            }
-        }
-        return children;
-    }
-
     pub inline fn add(self: ChunkPos, delta: @Vector(3, i32)) ChunkPos {
         return .{ .position = self.position + delta, .level = self.level };
     }
@@ -84,9 +66,7 @@ pub const ChunkPos = struct {
         return .{ .position = @trunc(pos_vec * ratio_vec), .level = level };
     }
 
-    /// Chunk origin in world blocks. Only exact for level >= chunk_level:
-    /// below that a chunk spans less than one block, so its origin is
-    /// fractional; compare via fromGlobalBlockPos instead.
+    /// Chunk origin in world blocks. Exact only for level >= chunk_level; finer levels need fromGlobalBlockPos.
     pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
     }
@@ -102,10 +82,7 @@ pub const ChunkPos = struct {
                 .level = level,
             };
         }
-        // Below chunk_level a chunk spans less than one block, so the integer
-        // ratio would underflow: convert blocks to fine voxels first (exact,
-        // powers of two) and divide by the chunk size instead. Capped well
-        // beyond any usable world size or detail level.
+        // Finer levels span less than one block, so convert blocks to fine voxels first. Powers of two keep the conversion exact.
         const depth: u6 = if (level < -30) 30 else @intCast(-level);
         const fine_per_block: i64 = @as(i64, 1) << depth;
         return .{
@@ -122,9 +99,8 @@ pub const ChunkPos = struct {
     }
 };
 
-/// Per-world settings. Spawn configuration lives in
-/// `EntityRegistry.SpawnConfig` instead: spawning is entity-domain and
-/// this file must not depend on the entity layer.
+/// Per-world settings. Spawning stays in EntityRegistry.SpawnConfig: spawning is
+/// entity-domain, so this file must not depend on the entity layer.
 pub const WorldConfig = struct {};
 
 pub const ChunkSource = struct {
@@ -388,6 +364,7 @@ pub const Reader = struct {
 
         self.clear(io);
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
+        errdefer chunk.release();
         try chunk.lockShared(io);
         self.last_chunk_read_cache = .{ .chunk_pos = chunk_pos, .chunk = chunk };
         return readBlockFromEncoding(chunk.encoding, local_pos);
@@ -398,6 +375,7 @@ pub const Reader = struct {
         const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
 
         const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
+        errdefer chunk.release();
         try chunk.lockShared(io);
         defer chunk.releaseAndUnlockShared(io);
         return readBlockFromEncoding(chunk.encoding, local_pos);
@@ -412,10 +390,6 @@ pub const Reader = struct {
 };
 
 pub const Editor = struct {
-    pub const geometry = struct {
-        pub const Cone = @import("structures/Cone.zig").Cone;
-        pub const Sphere = @import("structures/Sphere.zig").Sphere;
-    };
     pub const Tree = @import("structures/Tree.zig").Tree;
 
     world: *World,
@@ -826,8 +800,8 @@ fn getBlocks(
 ) error{ Unrecoverable, OutOfMemory, Canceled }!struct { Chunk.Encoding, ChunkSource.GetBlocksMetadata } {
     var encoding: Chunk.Encoding = .{ .uniform = .null };
     for (self.chunk_sources) |source| {
-        if (source) |s| if (s.getBlocks) |getBlocksFn| {
-            if (try getBlocksFn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
+        if (source) |s| if (s.getBlocks) |get_blocks_fn| {
+            if (try get_blocks_fn(s, io, allocator, self, &encoding, chunk_pos, grid_buffer)) |metadata| {
                 return .{ encoding, metadata };
             }
         };
@@ -843,8 +817,8 @@ fn runPlaceStructures(
     chunk_pos: ChunkPos,
 ) !void {
     for (self.chunk_sources) |source| {
-        if (source) |s| if (s.placeStructures) |placeStructuresFn| {
-            try placeStructuresFn(s, io, allocator, self, chunk, chunk_pos);
+        if (source) |s| if (s.placeStructures) |place_structures_fn| {
+            try place_structures_fn(s, io, allocator, self, chunk, chunk_pos);
         };
     }
 }
@@ -870,8 +844,8 @@ fn save(self: *World, io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
     defer zone.end();
 
     for (self.chunk_sources) |source| {
-        if (source) |s| if (s.save) |saveFn| {
-            try saveFn(s, io, self, chunk, chunk_pos);
+        if (source) |s| if (s.save) |save_fn| {
+            try save_fn(s, io, self, chunk, chunk_pos);
         };
     }
 }
@@ -909,20 +883,6 @@ test "ChunkPos" {
     const pos4 = ChunkPos{ .level = 0, .position = .{ 1, 1, 1 } };
     const pos5 = pos4.toLevel(-5);
     try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));
-}
-
-fn loadChunkTest(
-    self: *World,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chunk_pos: ChunkPos,
-    structures: bool,
-    counter: *std.atomic.Value(usize),
-) void {
-    const test_chunk = self.loadChunk(io, allocator, chunk_pos, structures) catch |err|
-        std.debug.panic("err: {any}\n", .{err});
-    test_chunk.release();
-    _ = counter.fetchAdd(1, .seq_cst);
 }
 
 fn makeTestingWorld(

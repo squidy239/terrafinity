@@ -773,7 +773,11 @@ fn drainOnce(self: *ChunkRenderer, io: std.Io) !void {
 /// dispatch the next one. The frame never waits on a pass that is still running.
 pub fn restartDrain(self: *ChunkRenderer, io: std.Io) !void {
     if (self.drain_is_running.load(.seq_cst)) return;
-    if (self.drain_future) |*future| try future.await(io);
+    if (self.drain_future) |*future| future.await(io) catch |err| {
+        // Drop the poisoned future so one transient drain error cannot wedge every later frame.
+        self.drain_future = null;
+        return err;
+    };
 
     self.drain_is_running.store(true, .seq_cst);
     self.drain_future = io.concurrent(drainOnce, .{ self, io }) catch io.async(drainOnce, .{ self, io });

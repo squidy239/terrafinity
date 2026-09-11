@@ -25,8 +25,7 @@ pub const Generator = struct {
         return std.fmt.allocPrint(allocator, "{s}/{s}_generator.zon", .{ config_dir, lower_name });
     }
 
-    /// Loads the generator's config tree from disk, falling back to defaults
-    /// when the file is missing or unparseable.
+    /// Loads the generator config tree from disk. A missing file uses defaults.
     pub fn loadConfig(self: *Generator, allocator: std.mem.Allocator, io: std.Io, config_dir: []const u8) !*ConfigTree {
         const path = try self.configPath(allocator, config_dir);
         defer allocator.free(path);
@@ -46,34 +45,25 @@ pub const Generator = struct {
         bytes[stat.size] = 0;
 
         if (self.api.config_from_zon(&allocator, bytes[0..stat.size].ptr, stat.size)) |tree| return tree;
-        // Fail loudly instead of replacing the user's config with the preset:
-        // a silent fallback here would get re-saved over the file on the next
-        // boot and destroy the user's settings.
+        // A silent fallback would be re-saved over the user file on next boot.
         std.log.err("generator {s}: invalid config {s}", .{ self.info.name, path });
         return error.InvalidConfig;
     }
 
-    /// Number of presets the generator ships with.
     pub fn presetCount(self: *const Generator) usize {
         return self.api.preset_count();
     }
-
-    /// Name of the preset at `index`.
     pub fn presetName(self: *const Generator, index: usize) []const u8 {
         return self.api.preset_name(index).*;
     }
 
-    /// Index of the preset used as the default.
     pub fn defaultPresetIndex(self: *const Generator) usize {
         return self.api.preset_default_index();
     }
-
-    /// Builds the config tree for the preset at `index`.
     pub fn presetConfig(self: *const Generator, allocator: std.mem.Allocator, index: usize) ?*ConfigTree {
         return self.api.preset_config(&allocator, index);
     }
 
-    /// Builds the config tree for the default preset.
     pub fn defaultConfig(self: *const Generator, allocator: std.mem.Allocator) ?*ConfigTree {
         return self.presetConfig(allocator, self.defaultPresetIndex());
     }
@@ -82,13 +72,21 @@ pub const Generator = struct {
         const path = try self.configPath(allocator, config_dir);
         defer allocator.free(path);
 
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .lock = .exclusive });
-        defer file.close(io);
+        // Replace atomically, so a failed emit keeps the previous config.
+        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+        defer allocator.free(tmp_path);
 
-        var buffer: [512]u8 = undefined;
-        var writer = file.writer(io, &buffer);
-        try generator_api.emitZon(&writer.interface, tree);
-        try writer.end();
+        {
+            const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .lock = .exclusive });
+            defer file.close(io);
+            errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+
+            var buffer: [512]u8 = undefined;
+            var writer = file.writer(io, &buffer);
+            try generator_api.emitZon(&writer.interface, tree);
+            try writer.end();
+            try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
+        }
     }
 };
 
@@ -159,21 +157,16 @@ pub const Registry = struct {
     }
 };
 
-/// A generator instance together with the config tree it was created from.
-/// The host keeps the tree alive so it can be edited and re-applied. The
-/// underlying generator is torn down through the `deinit` callback of
-/// `source`, which `World.deinit` invokes.
+/// Generator instance with its live config tree. Teardown runs through `source`.
 pub const GeneratorInstance = struct {
     generator: *Generator,
     instance: *anyopaque,
     config: *ConfigTree,
     allocator: std.mem.Allocator,
     source: World.ChunkSource,
-    /// Path to the world's config directory, used for config file I/O.
     config_dir: []const u8,
 
-    /// Frees the config tree and path. Does not deinit the generator itself;
-    /// that is the world's responsibility through `chunk_sources`.
+    /// Frees the tree and path only. The world owns the generator itself.
     pub fn deinit(self: *GeneratorInstance) void {
         generator_api.free(self.allocator, self.config);
         self.allocator.free(self.config_dir);

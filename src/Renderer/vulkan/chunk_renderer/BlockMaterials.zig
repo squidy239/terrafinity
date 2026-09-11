@@ -31,9 +31,7 @@ pub const MaterialGpu = extern struct {
     density: f32,
     fresnel_power: f32,
     min_opacity: f32,
-    // align(16) matches GLSL std430 vec3 alignment (16-byte boundary).
-    // Without it, volume_color would sit at offset 12, but GLSL expects
-    // it at offset 16, causing every block's material data to read garbage.
+    // align(16) matches GLSL std430 vec3 slots; without it every block's material reads garbage.
     volume_color: [3]f32 align(16),
 };
 

@@ -7,7 +7,6 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const math = std.math;
 const mem = std.mem;
-const meta = std.meta;
 
 pub const Layout = struct {
     ways: u64 = 16,
@@ -139,13 +138,11 @@ pub fn SetAssociativeCacheType(
 
             const sets = @divExact(value_count_max, layout.ways);
 
-            const counts_size = div_ceil(value_count_max * layout.clock_bits, 8);
+            const counts_size = divCeil(value_count_max * layout.clock_bits, 8);
 
-            // Each clock hand is guaranteed (by comptime asserts) to not span multiple cache lines.
-            // But in order to shrink the lower-bound cache size, we do not require that `clocks`
-            // itself is a multiple of the cache line size. Rounding up to a byte boundary keeps
-            // the documented contract: `value_count_max` only needs to be a multiple of `ways`.
-            const clocks_size = div_ceil(sets * clock_hand_bits, 8);
+            // Clock hands never span cache lines by construction. Rounding clocks
+            // up to a byte keeps the contract: `value_count_max` needs only a multiple of `ways`.
+            const clocks_size = divCeil(sets * clock_hand_bits, 8);
 
             assert(value_count_max % value_count_max_multiple == 0);
 
@@ -159,10 +156,10 @@ pub fn SetAssociativeCacheType(
             );
             errdefer allocator.free(values);
 
-            const counts = try allocator.alloc(u64, div_ceil(counts_size, @sizeOf(u64)));
+            const counts = try allocator.alloc(u64, divCeil(counts_size, @sizeOf(u64)));
             errdefer allocator.free(counts);
 
-            const clocks = try allocator.alloc(u64, div_ceil(clocks_size, @sizeOf(u64)));
+            const clocks = try allocator.alloc(u64, divCeil(clocks_size, @sizeOf(u64)));
             errdefer allocator.free(clocks);
 
             // Explicitly allocated so that get / get_index can be `*const SetAssociativeCache`.
@@ -202,6 +199,7 @@ pub fn SetAssociativeCacheType(
             self.metrics.* = .{};
         }
 
+        /// Returns the slot index of `key` and records the hit or miss.
         pub fn get_index(self: *const SetAssociativeCache, key: Key) ?usize {
             const set = self.associate(key);
             if (self.search(set, key)) |way| {
@@ -223,9 +221,8 @@ pub fn SetAssociativeCacheType(
             pub fn next(it: *Iterator) ?*align(value_alignment) Value {
                 while (it.index < it.cache.values.len) {
                     const current_index = it.index;
-                    it.index += 1; // Always advance the iterator for the next call
+                    it.index += 1;
 
-                    // If the count is > 0, the slot is occupied and valid.
                     if (it.cache.counts.get(current_index) > 0) {
                         return @alignCast(&it.cache.values[current_index]);
                     }
@@ -260,7 +257,7 @@ pub fn SetAssociativeCacheType(
 
         /// If the key is present in the set, returns the way. Otherwise returns null.
         inline fn search(self: *const SetAssociativeCache, set: Set, key: Key) ?u16 {
-            const ways: u16 = search_tags(set.tags, set.tag);
+            const ways: u16 = searchTags(set.tags, set.tag);
             if (ways == 0) return null;
 
             // Iterate over all ways to help the OOO execution.
@@ -279,7 +276,7 @@ pub fn SetAssociativeCacheType(
         /// Where each set bit represents the index of a way that has the same tag.
         const Ways = @Int(.unsigned, layout.ways);
 
-        inline fn search_tags(tags: *const [layout.ways]Tag, tag: Tag) Ways {
+        inline fn searchTags(tags: *const [layout.ways]Tag, tag: Tag) Ways {
             const x: @Vector(layout.ways, Tag) = tags.*;
             const y: @Vector(layout.ways, Tag) = @splat(tag);
 
@@ -297,7 +294,6 @@ pub fn SetAssociativeCacheType(
             const key = key_from_value(value);
             const set = self.associate(key);
             if (self.search(set, key)) |way| {
-                // Overwrite the old entry for this key.
                 self.counts.set(set.offset + way, 1);
                 const evicted = set.values[way];
                 set.values[way] = value.*;
@@ -314,9 +310,8 @@ pub fn SetAssociativeCacheType(
             comptime assert(math.maxInt(@TypeOf(way)) == layout.ways - 1);
             comptime assert(@as(@TypeOf(way), math.maxInt(@TypeOf(way))) +% 1 == 0);
 
-            // The maximum number of iterations happens when every slot in the set has the maximum
-            // count. In this case, the loop will iterate until all counts have been decremented
-            // to 1. Then in the next iteration it will decrement a count to 0 and break.
+            // Worst case: every slot holds the max count, so the loop clears
+            // all counts to 1, then frees one slot on the next pass.
             const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
 
             var evicted: ?Value = null;
@@ -326,12 +321,11 @@ pub fn SetAssociativeCacheType(
                 way +%= 1;
             }) {
                 var count = self.counts.get(set.offset + way);
-                if (count == 0) break; // Way is already free.
+                if (count == 0) break;
 
                 count -= 1;
                 self.counts.set(set.offset + way, count);
                 if (count == 0) {
-                    // Way has become free.
                     evicted = set.values[way];
                     break;
                 }
@@ -359,17 +353,16 @@ pub fn SetAssociativeCacheType(
         pub fn peek_victim(self: *const SetAssociativeCache, key: Key) ?*align(value_alignment) Value {
             const set = self.associate(key);
 
-            // Path 1: The key already exists. This exact entry will be overwritten (updated).
+            // Path 1: the key already exists.
             if (self.search(set, key)) |way| {
                 return @alignCast(&set.values[way]);
             }
 
-            // Path 2: The key does not exist. We must simulate the CLOCK eviction algorithm.
+            // Path 2: the key does not exist; simulate the CLOCK eviction.
             const clock_index = @divExact(set.offset, layout.ways);
             var way = self.clocks.get(clock_index);
 
-            // We cannot mutate the actual cache counts during a "peek", so we copy
-            // the counts for this specific set into a tiny local array to simulate the math.
+            // A peek cannot mutate counts, so simulate on a local copy of this set.
             var local_counts: [layout.ways]Count = undefined;
             for (0..layout.ways) |i| {
                 local_counts[i] = self.counts.get(set.offset + i);
@@ -385,7 +378,6 @@ pub fn SetAssociativeCacheType(
                 var count = local_counts[way];
 
                 if (count == 0) {
-                    // The slot is completely free. No item will be usurped.
                     return null;
                 }
 
@@ -393,7 +385,6 @@ pub fn SetAssociativeCacheType(
                 local_counts[way] = count;
 
                 if (count == 0) {
-                    // This occupied slot will be the one chosen for eviction.
                     return @alignCast(&set.values[way]);
                 }
             } else {
@@ -408,8 +399,7 @@ pub fn SetAssociativeCacheType(
         pub fn skip_victim(self: *SetAssociativeCache, key: Key) void {
             const set = self.associate(key);
 
-            // If the key already exists, an upsert would just update it, not evict anything.
-            // Therefore, there is no victim to skip.
+            // An existing key updates in place, so no victim exists.
             if (self.search(set, key)) |_| {
                 return;
             }
@@ -420,18 +410,16 @@ pub fn SetAssociativeCacheType(
             const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
             var safety_count: usize = 0;
 
-            // Run the actual CLOCK algorithm to decrement counts and find the victim.
             while (safety_count <= clock_iterations_max) : ({
                 safety_count += 1;
                 way +%= 1;
             }) {
                 var count = self.counts.get(set.offset + way);
-                if (count == 0) break; // Way is already free.
+                if (count == 0) break;
 
                 count -= 1;
                 self.counts.set(set.offset + way, count);
                 if (count == 0) {
-                    // Way has become free. This is the victim we want to skip.
                     break;
                 }
             } else {
@@ -439,12 +427,9 @@ pub fn SetAssociativeCacheType(
             }
             assert(self.counts.get(set.offset + way) == 0);
 
-            // To "skip" this victim and protect it from being immediately chosen
-            // by the next operation, we give it another chance.
+            // Grant the victim another chance and move the clock past it.
             self.counts.set(set.offset + way, 1);
 
-            // Advance the clock hand past this protected way so the next
-            // lookup/eviction starts at the next slot.
             self.clocks.set(clock_index, way +% 1);
         }
 
@@ -518,7 +503,7 @@ pub fn SetAssociativeCacheType(
 
 pub const UpdateOrInsert = enum { update, insert };
 
-fn set_associative_cache_test(
+fn SetAssociativeCacheTest(
     comptime Key: type,
     comptime Value: type,
     comptime context: type,
@@ -530,27 +515,26 @@ fn set_associative_cache_test(
 
     const log = false;
 
-    const SAC = SetAssociativeCacheType(
+    const Sac = SetAssociativeCacheType(
         Key,
         Value,
-        context.key_from_value,
+        context.keyFromValue,
         context.hash,
         layout,
     );
 
     return struct {
         fn run() !void {
-            if (log) SAC.inspect();
+            if (log) Sac.inspect();
 
-            var sac = try SAC.init(testing.allocator, SAC.value_count_min, .{ .name = "test" });
+            var sac = try Sac.init(testing.allocator, Sac.value_count_min, .{ .name = "test" });
             defer sac.deinit(testing.allocator);
 
-            for (sac.tags) |tag| try testing.expectEqual(@as(SAC.Tag, 0), tag);
+            for (sac.tags) |tag| try testing.expectEqual(@as(Sac.Tag, 0), tag);
             for (sac.counts.words) |word| try testing.expectEqual(@as(u64, 0), word);
             for (sac.clocks.words) |word| try testing.expectEqual(@as(u64, 0), word);
             try expectEqual(@as(u64, 0), sac.metrics.value_count.raw);
 
-            // Fill up the first set entirely.
             {
                 var i: usize = 0;
                 while (i < layout.ways) : (i += 1) {
@@ -589,7 +573,6 @@ fn set_associative_cache_test(
 
             if (log) sac.associate(0).inspect(sac);
 
-            // Ensure removal works.
             {
                 const key = 5 * sac.sets;
                 assert(sac.get(key).?.* == key);
@@ -603,12 +586,11 @@ fn set_associative_cache_test(
 
             sac.reset();
 
-            for (sac.tags) |tag| try testing.expectEqual(@as(SAC.Tag, 0), tag);
+            for (sac.tags) |tag| try testing.expectEqual(@as(Sac.Tag, 0), tag);
             for (sac.counts.words) |word| try testing.expectEqual(@as(u64, 0), word);
             for (sac.clocks.words) |word| try testing.expectEqual(@as(u64, 0), word);
             try expectEqual(@as(u64, 0), sac.metrics.value_count.raw);
 
-            // Fill up the first set entirely, maxing out the count for each slot.
             {
                 var i: usize = 0;
                 while (i < layout.ways) : (i += 1) {
@@ -618,12 +600,12 @@ fn set_associative_cache_test(
                     _ = sac.upsert(&key);
                     try expect(sac.counts.get(i) == 1);
                     var j: usize = 2;
-                    while (j <= math.maxInt(SAC.Count)) : (j += 1) {
+                    while (j <= math.maxInt(Sac.Count)) : (j += 1) {
                         try expectEqual(key, sac.get(key).?.*);
                         try expect(sac.counts.get(i) == j);
                     }
                     try expectEqual(key, sac.get(key).?.*);
-                    try expect(sac.counts.get(i) == math.maxInt(SAC.Count));
+                    try expect(sac.counts.get(i) == math.maxInt(Sac.Count));
                 }
                 try expect(sac.clocks.get(0) == 0);
                 try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
@@ -660,7 +642,7 @@ test "SetAssociativeCache: eviction" {
     const Value = u64;
 
     const context = struct {
-        inline fn key_from_value(value: *const Value) Key {
+        inline fn keyFromValue(value: *const Value) Key {
             return value.*;
         }
         inline fn hash(key: Key) u64 {
@@ -668,7 +650,7 @@ test "SetAssociativeCache: eviction" {
         }
     };
 
-    try set_associative_cache_test(Key, Value, context, .{}).run();
+    try SetAssociativeCacheTest(Key, Value, context, .{}).run();
 }
 
 test "SetAssociativeCache: hash collision" {
@@ -676,7 +658,7 @@ test "SetAssociativeCache: hash collision" {
     const Value = u64;
 
     const context = struct {
-        inline fn key_from_value(value: *const Value) Key {
+        inline fn keyFromValue(value: *const Value) Key {
             return value.*;
         }
         /// This hash function is intentionally broken to simulate hash collision.
@@ -689,7 +671,7 @@ test "SetAssociativeCache: hash collision" {
         }
     };
 
-    try set_associative_cache_test(Key, Value, context, .{}).run();
+    try SetAssociativeCacheTest(Key, Value, context, .{}).run();
 }
 
 /// A little simpler than PackedIntArray in the std lib, restricted to little endian 64-bit words,
@@ -724,25 +706,25 @@ fn PackedUnsignedIntegerArrayType(comptime UInt: type) type {
         /// Returns the unsigned integer at `index`.
         pub inline fn get(self: PackedUnsignedIntegerArray, index: u64) UInt {
             // This truncate is safe since we want to mask the right-shifted word by exactly a UInt:
-            return @as(UInt, @truncate(self.word(index).* >> bits_index(index)));
+            return @as(UInt, @truncate(self.word(index).* >> bitsIndex(index)));
         }
 
         /// Sets the unsigned integer at `index` to `value`.
         pub inline fn set(self: PackedUnsignedIntegerArray, index: u64, value: UInt) void {
             const w = self.word(index);
             w.* &= ~mask(index);
-            w.* |= @as(Word, value) << bits_index(index);
+            w.* |= @as(Word, value) << bitsIndex(index);
         }
 
         inline fn mask(index: u64) Word {
-            return @as(Word, math.maxInt(UInt)) << bits_index(index);
+            return @as(Word, math.maxInt(UInt)) << bitsIndex(index);
         }
 
         inline fn word(self: PackedUnsignedIntegerArray, index: u64) *Word {
             return &self.words[@divFloor(index, uints_per_word)];
         }
 
-        inline fn bits_index(index: u64) BitsIndex {
+        inline fn bitsIndex(index: u64) BitsIndex {
             // If uint_bits=2, then it's normal for the maximum return value value to be 62, even
             // where BitsIndex allows up to 63 (inclusive) for a 64-bit word. This is because 62 is
             // the bit index of the highest 2-bit UInt (e.g. bit index + bit length == 64).
@@ -805,18 +787,18 @@ inline fn fastrange(word: u64, p: u64) u64 {
     return @truncate(ln >> 64);
 }
 
-inline fn div_ceil(numerator: anytype, denominator: anytype) @TypeOf(numerator, denominator) {
+inline fn divCeil(numerator: anytype, denominator: anytype) @TypeOf(numerator, denominator) {
     comptime {
         switch (@typeInfo(@TypeOf(numerator))) {
             .int => |int| assert(int.signedness == .unsigned),
             .comptime_int => assert(numerator >= 0),
-            else => @compileError("div_ceil: invalid numerator type"),
+            else => @compileError("divCeil: invalid numerator type"),
         }
 
         switch (@typeInfo(@TypeOf(denominator))) {
             .int => |int| assert(int.signedness == .unsigned),
             .comptime_int => assert(denominator > 0),
-            else => @compileError("div_ceil: invalid denominator type"),
+            else => @compileError("divCeil: invalid denominator type"),
         }
     }
 

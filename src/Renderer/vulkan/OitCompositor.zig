@@ -136,11 +136,8 @@ pub const OitCompositor = struct {
         }
     }
 
-    /// Day/night light for the volume scatter term. Mirrors transparent_frag.frag's
-    /// unshadowed light for an upward-facing water surface, mix(ambient, sun_day) +
-    /// ndl * sun_day with ndl = max(sun_dir.y, 0); the constants must match the
-    /// shader's. The absorption itself must stay position-independent for
-    /// entry/exit pair cancellation, so this is where day/night enters the volume.
+    /// Day/night light for the volume scatter term; constants must match transparent_frag.frag.
+    /// Absorption stays position-independent so entry/exit pairs cancel; day/night enters here.
     pub fn volumeScatterLight(sun_dir: @Vector(3, f32)) f32 {
         const sun_day = smoothstep(-0.1, 0.25, sun_dir[1]);
         const ndl_top = @max(sun_dir[1], 0);

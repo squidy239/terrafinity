@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zm = @import("zm");
 
-const Block = @import("../world/Block.zig").Block;
 const World = @import("../world/World.zig");
 
 pub fn Interface(physics_elements: anytype) type {
@@ -82,8 +81,7 @@ pub const Mover = struct {
         }
     }
 
-    /// Half-extent of the block scan cube derived from the bounding box.
-    /// Each probed cell issues a reader load, so cost grows with the cube of this value; it is unclamped, so large boxes issue many loads.
+    /// Half-extent of the block scan cube; cost grows with its cube, so large boxes issue many loads.
     fn checkRange(self: *const @This()) i16 {
         const size = self.bounding_box.size();
         return @intFromFloat(@ceil(@max(size.data[0], size.data[1], size.data[2]) / 2));
@@ -122,8 +120,7 @@ pub const Mover = struct {
         return if (found) best_mtv else null;
     }
 
-    /// Returns the smallest Y penetration against nearby solid blocks, or no_ground when nothing overlaps on Y.
-    /// Overlap is required: exactly touching faces yield a zero MTV, so callers sink the probe position (walkMove subtracts 0.001) to detect standing contact.
+    /// Returns the smallest Y penetration, or no_ground when nothing overlaps on Y. Callers sink the probe to detect standing contact.
     pub fn getShortestGroundDistance(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !f64 {
         const base: World.BlockPos = @round(pos);
         var best: f64 = no_ground;
@@ -140,7 +137,7 @@ pub const Mover = struct {
                     if (!block.isSolid()) continue;
 
                     const mtv = self.penetrationForBlock(block_pos, pos);
-                    // Only vertical resolutions are ground; side contacts resolve on X/Z and touching faces yield zero here.
+                    // Side contacts resolve on X/Z, so only vertical resolutions count as ground.
                     if (mtv[1] != 0) {
                         best = @min(mtv[1], best);
                     }
@@ -162,7 +159,7 @@ pub const Mover = struct {
         return getAabbPenetration(block_aabb, self_aabb);
     }
 
-    /// Touching faces are a miss and yield zero; overlap is required for a nonzero MTV.
+    /// Touching faces miss; overlap is required for a nonzero MTV.
     fn getAabbIntersect(a: zm.AABB(3, f64), b: zm.AABB(3, f64)) @Vector(3, f64) {
         if (a.max.data[0] <= b.min.data[0] or a.min.data[0] >= b.max.data[0] or
             a.max.data[1] <= b.min.data[1] or a.min.data[1] >= b.max.data[1] or
@@ -284,33 +281,19 @@ test "Mover update dispatch" {
         .velocity = .{ 4, 0, 0 },
     };
 
-    // Timer + dispatch + integration: backdate 50ms (below the 0.1s clamp)
-    // so pos must advance by velocity * ~0.05.
-    // SAFE: the `undefined` world is never dereferenced: Mover with
-    // collisions=false integrates and returns before constructing a
-    // World.Reader, so no world access occurs on this path.
+    // Backdate 50ms so pos advances by velocity * ~0.05. Collisions stay off, so the `undefined` world is never dereferenced.
     physics_object.last_update.nanoseconds -|= std.time.ns_per_s / 20;
     const before: std.Io.Timestamp = physics_object.last_update;
     try physics_object.update(undefined, testing.io, testing.allocator);
-
-    // Timer lapped forward.
     try testing.expect(physics_object.last_update.nanoseconds > before.nanoseconds);
-    // Dispatch + integration: unclamped ~50ms step moves pos.x by ~0.2.
-    // Lower bound rejects a zero timer (0.0). Upper bound is the 0.1s clamp
-    // ceiling (velocity * 0.1 = 0.4) plus headroom, so scheduling/preemption
-    // delay only pushes the step toward the clamp and cannot flake. A
-    // hardcoded 0.1s step (0.4) is indistinguishable from a preempted-good
-    // run here by value; unclamped-step mutants (~4.0) are still caught by
-    // the clamp check below.
+
+    // Timer lapped forward; bounds reject a zero timer while tolerating scheduling delay toward the clamp.
     try testing.expect(physics_object.pos[0] > 0.1);
     try testing.expect(physics_object.pos[0] < 0.5);
     try testing.expect(physics_object.pos[1] == 0);
     try testing.expect(physics_object.pos[2] == 0);
 
-    // Clamp: backdate 1s so elapsed far exceeds the 0.1s cap;
-    // pos must advance by velocity * 0.1, not velocity * 1.0.
-    // SAFE: same as above — collisions is still false, so the `undefined`
-    // world below is never dereferenced.
+    // Clamp: backdate 1s so the step uses velocity * 0.1. Collisions stay off, so the world stays undereferenced.
     const clamped_base = physics_object.pos[0];
     physics_object.last_update.nanoseconds -|= std.time.ns_per_s;
     try physics_object.update(undefined, testing.io, testing.allocator);

@@ -16,7 +16,6 @@ pub const Inventory = struct {
         };
     }
 
-    /// Gets an item at the given position in the inventory.
     pub fn get(self: *Inventory, io: std.Io, row: u32, col: u32) ?Item {
         self.lock.lockSharedUncancelable(io);
         defer self.lock.unlockShared(io);
@@ -25,8 +24,6 @@ pub const Inventory = struct {
         return self.items[index];
     }
 
-    /// Sets an item at the given position in the inventory and returns the
-    /// old item, or null if the slot was empty.
     pub fn set(self: *Inventory, io: std.Io, row: u32, col: u32, item: Item) ?Item {
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
@@ -37,7 +34,6 @@ pub const Inventory = struct {
         return previous;
     }
 
-    /// Swaps 2 items in the inventory, can be used as move if one item is null.
     pub fn swap(self: *Inventory, io: std.Io, row1: u32, col1: u32, row2: u32, col2: u32) void {
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);

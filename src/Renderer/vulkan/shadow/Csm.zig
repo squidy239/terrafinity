@@ -275,10 +275,8 @@ fn sceneCorners(scene_min: Vec3d, scene_max: Vec3d) [8]Vec3d {
     return corners;
 }
 
-/// Ortho depth range from the live scene AABB projected on the light axis, extended by
-/// the sphere radius so the whole receiver slice is covered. The projection matrix and
-/// the compute cull share it, so no depth-clamped false occluders paint the map's edges;
-/// the pipeline's depthClamp only affects geometry straddling the range boundary.
+/// Ortho depth range from the live scene AABB on the light axis, extended by the sphere radius.
+/// The projection matrix and the compute cull share it, so no clamped false occluders paint the edges.
 fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: Vec3f, radius: f32, max_depth_range: f32) struct { near: f32, far: f32 } {
     const l: Vec3d = @floatCast(light_dir);
     var z_min: f64 = std.math.inf(f64);

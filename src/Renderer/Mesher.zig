@@ -13,8 +13,7 @@ pub const Face = packed struct(u64) {
     const CoordInChunk = Chunk.Int;
     block_type: Block.Tag,
 
-    // Length in faces is these numbers +1
-    // This extends the face toward higher coords
+    // Each length extends the face toward higher coordinates by that many faces plus one.
     z_length: CoordInChunk = 0,
     y_length: CoordInChunk = 0,
     x_length: CoordInChunk = 0,
@@ -28,14 +27,9 @@ pub const Face = packed struct(u64) {
     _: @Int(.unsigned, 64 - (6 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
-/// Uniform-chunk face bound: one side exposes at most ChunkSize*ChunkSize
-/// faces (one per boundary cell — the uniform path does no greedy merging),
-/// so six rotations emit at most this many faces into a single list. Every
-/// face from an opaque main lands in opaque_faces, every face from a
-/// transparent main in transparent_faces, hence one reserve per list covers
-/// every append in the rotation loop below.
+/// One side exposes at most ChunkSize*ChunkSize faces, since the uniform path merges nothing.
+/// Six rotations emit at most this many faces into one list, so one reserve per list covers the loop.
 const max_uniform_faces_per_list = 6 * ChunkSize * ChunkSize;
-
 pub fn mesh(allocator: std.mem.Allocator, main_grid: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
     switch (main_grid) {
         .uniform => |main_block| {
@@ -117,9 +111,8 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
         true => transparent_faces,
         false => opaque_faces,
     };
-    // Reserve-bound check: the uniform path's up-front reserve must cover
-    // this call's popcount faces. Fails loudly in debug instead of
-    // addOneAssumeCapacity's undefined behavior on overflow.
+    // Reserve-bound check: the up-front reserve must cover this call's popcount faces.
+    // It fails loudly in debug instead of overflowing addOneAssumeCapacity.
     std.debug.assert(faces.capacity - faces.items.len >= @as(usize, @popCount(mask_start)));
     const row: Face.CoordInChunk = @intCast(row_index);
     const x_fixed: Face.CoordInChunk = switch (comptime rotation) {
@@ -153,15 +146,9 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
     }
 }
 
-/// Hoisted grid-path reserve: worst-case faces for one x-slice (fixed x, all y,
-/// all six rotations). Each (y, rotation) row emits at most ChunkSize faces —
-/// one per z lane, since z-greedy merging only fuses runs — so a slice holds at
-/// most 6 * ChunkSize * ChunkSize faces. This only amortizes growth: a dense 3D
-/// checkerboard emits ~ChunkSize^3 / 2 * 6 faces (~98k at ChunkSize 32), so the
-/// lists still grow via fallible appends inside the loop (rolled back on OOM —
-/// see the checkpoints in meshBlockGrid).
+/// Worst-case faces for one x-slice: each (y, rotation) row emits at most ChunkSize faces.
+/// One slice holds at most 6 * ChunkSize * ChunkSize faces, which only amortizes growth.
 const max_faces_per_x_slice = 6 * ChunkSize * ChunkSize;
-
 /// On allocation failure both face lists roll back to their entry lengths, so a
 /// failed grid-path mesh leaves no partial chunk behind.
 /// The uniform path needs no rollback: it reserves up front, then appends infallibly.
@@ -207,7 +194,7 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
 
         var y: u8 = 0;
         while (y < ChunkSize) : (y += 1) {
-            const center_row: @Vector(ChunkSize, Block.Tag) = @bitCast(grid[x][y]); // bitCast is MUCH faster than coerceing for some reason
+            const center_row: @Vector(ChunkSize, Block.Tag) = @bitCast(grid[x][y]); // Measured faster than coercing the row.
             const ones_visible: @Int(.unsigned, ChunkSize) = @bitCast(Block.isVisibleVector(ChunkSize, center_row));
             if (ones_visible == 0) continue;
             const ones_transparent: @Int(.unsigned, ChunkSize) = @bitCast(Block.isTransparentVector(ChunkSize, center_row));
@@ -496,8 +483,10 @@ fn testOne(_: void, smith: *std.testing.Smith) !void {
     const main_grid: Chunk.Encoding = .fuzzerMakeEncoding(&grid, smith);
     const neighbor_faces: [6]Chunk.Encoding.Face = smith.value([6]Chunk.Encoding.Face);
 
-    var alist: std.ArrayList(Face) = .empty;
-    defer alist.deinit(std.testing.allocator);
+    var opaque_faces: std.ArrayList(Face) = .empty;
+    defer opaque_faces.deinit(std.testing.allocator);
+    var transparent_faces: std.ArrayList(Face) = .empty;
+    defer transparent_faces.deinit(std.testing.allocator);
 
-    try Mesher.mesh(std.testing.allocator, main_grid, &neighbor_faces, &alist, &alist);
+    try Mesher.mesh(std.testing.allocator, main_grid, &neighbor_faces, &opaque_faces, &transparent_faces);
 }

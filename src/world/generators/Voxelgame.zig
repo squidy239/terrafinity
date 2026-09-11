@@ -16,13 +16,13 @@ pub const Generator = struct {
     const thc_fragments = 8;
 
     params: Params,
-    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.key_from_value, ChunkHeightsKey.hash, .{}, thc_fragments),
+    terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.keyFromValue, ChunkHeightsKey.hash, .{}, thc_fragments),
 
     const ChunkHeightsValue = struct {
         value: [ChunkSize][ChunkSize]i32,
         key: ChunkHeightsKey,
 
-        pub inline fn key_from_value(v: *const ChunkHeightsValue) ChunkHeightsKey {
+        pub inline fn keyFromValue(v: *const ChunkHeightsValue) ChunkHeightsKey {
             return v.key;
         }
     };
@@ -40,9 +40,7 @@ pub const Generator = struct {
     };
 
     pub const Params = struct {
-        /// If null, a random seed will be generated. Will be set after setSeeds is called.
-        /// Pre-seed saves load with null and are reseeded once on create
-        /// (persisted after), so their terrain shifts one final time.
+        /// Null reseeds once on create, so pre-seed saves shift terrain one final time.
         seed: ?u64 = null,
         terrain_noise: Noise.Noise(f32),
         terrain_noise2: Noise.Noise(f32),
@@ -220,7 +218,7 @@ pub const Generator = struct {
         if (cave_density >= self.params.caveness) return .air;
         if (is_top_chunk) return .stone;
 
-        // Scale density logic natively matching world absolute depth
+        // Absolute depth keeps cover stable across detail levels.
         const gm = @max(1, @as(i32, @intFromFloat(global[1] * self.params.scale)));
 
         const rand = prng.random();
@@ -239,7 +237,7 @@ pub const Generator = struct {
         rand: *std.Random.DefaultPrng,
     ) void {
         const combined_scale = scale * level_scale;
-        if (combined_scale > 16.0) return; // Prevent trees generating at very low detail LODs
+        if (combined_scale > 16.0) return; // Trees stop past very low detail.
 
         const scale_max = @max(1.0, combined_scale);
         const tree_type = @as(u8, @intFromFloat(@as(f32, @floatFromInt(rand.random().intRangeAtMost(u8, 0, 1))) / scale_max));
@@ -278,7 +276,6 @@ pub const Generator = struct {
         }
     }
 
-    /// Fills a square layer of leaves around the trunk, optionally rounded.
     fn setLeafLayer(
         chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         x: usize,
@@ -325,7 +322,6 @@ pub const Generator = struct {
         const chunk_offset_x: f32 = @floatFromInt(chunk_pos[0] * @as(i32, ChunkSize));
         const chunk_offset_z: f32 = @floatFromInt(chunk_pos[1] * @as(i32, ChunkSize));
 
-        // Variance and limits must be evaluated in absolute coordinates
         const terrain_variance = @as(f32, @floatFromInt(self.params.terrain_max - self.params.terrain_min));
         const terrain_min_f = @as(f32, @floatFromInt(self.params.terrain_min));
 
@@ -337,10 +333,8 @@ pub const Generator = struct {
 
                 const noise = self.params.terrain_noise2.genNoise2D(global_x * self.params.scale, global_z * self.params.scale);
 
-                // Calculate the true physical world height
                 const absolute_world_height = (noise * terrain_variance) + terrain_min_f;
 
-                // Map it backwards down to the local chunk's block scale index
                 terrain_heights[xx][zz] = @as(i32, @intFromFloat(absolute_world_height / level_scale));
             }
         }
@@ -387,7 +381,6 @@ const voxelgame_presets = [_]Generator.Params{
     .default,
     blk: {
         var p = Generator.Params.default;
-        // Caves on, carved by strong simplex noise.
         p.caves = true;
         p.caveness = 0.3;
         p.cave_noise.fractal_type = .fbm;
@@ -396,7 +389,6 @@ const voxelgame_presets = [_]Generator.Params{
     },
     blk: {
         var p = Generator.Params.default;
-        // Flat plains: single low-frequency octave, wide variance.
         p.terrain_noise2.octaves = 1;
         p.terrain_noise2.fractal_type = .none;
         p.terrain_min = -128;
@@ -420,26 +412,15 @@ pub fn generator_preset_default_index() callconv(.c) usize {
 }
 
 pub fn generator_preset_config(allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*generator_api.ConfigTree {
-    if (index >= voxelgame_presets.len) return null;
-    return generator_api.fromStruct(Generator.Params, allocator.*, &voxelgame_presets[index], field_specs) catch null;
+    return generator_api.presetConfig(Generator.Params, field_specs, &voxelgame_presets, allocator, index);
 }
 
 pub fn generator_config_from_zon(allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*generator_api.ConfigTree {
-    @setEvalBranchQuota(100000000);
-    var arena = std.heap.ArenaAllocator.init(allocator.*);
-    defer arena.deinit();
-    const params = std.zon.parse.fromSliceAlloc(Generator.Params, arena.allocator(), bytes[0..bytes_len :0], null, .{}) catch return null;
-    return generator_api.fromStruct(Generator.Params, allocator.*, &params, field_specs) catch null;
+    return generator_api.configFromZon(Generator.Params, field_specs, allocator, bytes, bytes_len);
 }
 
 pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.ConfigTree) callconv(.c) void {
-    var random_seed: u64 = undefined;
-    io.*.random(std.mem.asBytes(&random_seed));
-    for (config.params) |*param| {
-        if (param.spec.is_seed and param.value == .u64 and param.value.u64 == 0) {
-            param.value.u64 = random_seed;
-        }
-    }
+    generator_api.configSetSeeds(io, config);
 }
 
 const VoxelgameInstance = struct {
@@ -469,13 +450,10 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
 }
 
 pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
-    const self: *VoxelgameInstance = @ptrCast(@alignCast(instance));
-    return &self.source;
+    return generator_api.getSource(VoxelgameInstance, instance);
 }
 
-/// Single-point terrain height at level 0, mirroring `genTerrainHeight`
-/// without the chunk grid. Close enough to classify land vs water and
-/// slope; the host's block check is authoritative for the final point.
+/// Single-point height for spawn scoring. Approximate: the host verifies the final point.
 fn columnSpawnHeight(self: *const Generator, x: f32, z: f32) f32 {
     const variance: f32 = @floatFromInt(self.params.terrain_max - self.params.terrain_min);
     const min: f32 = @floatFromInt(self.params.terrain_min);

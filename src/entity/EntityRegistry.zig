@@ -8,9 +8,7 @@ pub const Entity = @import("Entity.zig");
 const EntityTypes = @import("EntityTypes.zig");
 const World = @import("../world/World.zig");
 
-/// Where entities appear: user settings (center, range, mode) plus the
-/// resolved canonical spawn (pos, found). Lives here, not in `World`,
-/// because spawning is entity-domain; the GUI edits only the settings.
+/// Where entities appear: user settings plus the resolved canonical spawn. Spawning stays here because the GUI edits only the settings.
 pub const SpawnConfig = struct {
     center: @Vector(3, f64) = .{ 0, 0, 0 },
     range: u32 = 0,
@@ -34,37 +32,26 @@ const EntityMapType = Cache(
     if (builtin.is_test) 1 else 32,
 );
 
-/// Ways per cache set (value_count_max_multiple). Each skip advances the
-/// eviction clock hand one way, so after this many skips every way in the
-/// set is pinned and the insert can never succeed.
+/// Ways per cache set; after this many skips every way is pinned and the insert cannot succeed.
 const max_victim_skips = EntityMapType.Shard.value_count_max_multiple;
 
 const window_size = 64;
 
 map: EntityMapType,
-/// Live entity ids for the update pass; dynamically sized and deliberately
-/// not capped by the cache. The entities form a memory hierarchy: this queue
-/// is the authoritative live set, the cache below it is the bounded resident
-/// tier, and an entity evicted from the cache leaves a stale id here that the
-/// pass drops when the lookup misses.
+/// Live entity ids for the update pass; deliberately uncapped. Evicted entities leave stale ids the pass drops on lookup miss.
 queue: std.ArrayList(u128) = .empty,
-/// Always acquired before a cache shard lock, never after, so spawn (which
-/// inserts into the cache while holding it) cannot deadlock against update.
+/// Acquire before any cache shard lock, never after, so spawn cannot deadlock against update.
 queue_mutex: std.Io.Mutex = .init,
 
 pub fn init(allocator: std.mem.Allocator, value_count_max: u64) !@This() {
     return .{ .map = try .init(allocator, value_count_max, .{ .name = "entity cache" }) };
 }
 
-/// Number of entities currently held by the cache.
 pub fn count(self: *const @This()) u64 {
     return self.map.count();
 }
 
-/// Spawns an entity, inserts it into the cache and queues its id for
-/// updates, evicting an unpinned entity if the target set is full. The
-/// returned entity carries a reference for the caller that must be released
-/// when the caller is done using it.
+/// Spawns an entity, queues it for updates, and returns it with a caller-owned reference. Evicts an unpinned entity when the set is full.
 pub fn spawn(
     self: *@This(),
     io: std.Io,
@@ -86,8 +73,7 @@ pub fn spawn(
     try self.queue_mutex.lock(io);
     defer self.queue_mutex.unlock(io);
 
-    // Reserve before touching the cache so a failed insert leaves the queue
-    // untouched and a successful one commits with an infallible append.
+    // Reserve first so a failed insert leaves the queue untouched.
     try self.queue.ensureUnusedCapacity(allocator, 1);
     const stored = try self.insert(io, allocator, world, .{
         .type = Impl.Type,
@@ -107,12 +93,10 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
     const shard, const lock = self.map.getShardAndLock(entity.uuid);
     var skips: usize = 0;
     while (true) {
-        // Deliberately flat: Zig runs while-body defers on `continue`, so
-        // this unlock still runs on the skip_victim `continue` below. Do
-        // not wrap the body in an extra block scope to "fix" it.
+        // Deliberately flat: Zig runs while-body defers on `continue`, so this
+        // unlock still runs below. Do not wrap the body in an extra block scope.
         try lock.lock(io);
         defer lock.unlock(io);
-
         if (shard.get(entity.uuid) != null) return error.EntityUuidExists;
 
         if (shard.peek_victim(entity.uuid)) |victim| {
@@ -122,7 +106,7 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
                 shard.skip_victim(entity.uuid);
                 continue;
             }
-            // Runs under the shard lock; see unloadEntity's no-reentry contract.
+            // Eviction runs under the shard lock per unloadEntity's contract.
             unloadEntity(io, allocator, world, victim.*);
             victim.* = undefined;
         }
@@ -132,24 +116,14 @@ fn insert(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *Worl
     }
 }
 
-/// Unloads one evicted entity while its shard lock is held (see insert).
-/// This runs arbitrary vtable/allocator/world I/O under the lock, so unload
-/// implementations MUST NOT reenter this registry (spawn, getAndAddRef,
-/// markDeleted, update, deinit): reentry self-deadlocks on the held shard
-/// lock, or inverts the queue_mutex -> shard lock order and deadlocks
-/// against a concurrent spawn/update. Kept under the lock because handing
-/// the victim slot off across an unlock is not race-free: another thread
-/// could pin or replace the victim before it is overwritten.
+/// Unloads an evicted entity under its shard lock. Unload code must not reenter this registry: reentry deadlocks on the held lock or inverts the lock order.
 fn unloadEntity(io: std.Io, allocator: std.mem.Allocator, world: *World, entity: Entity) void {
     const save = !entity.deleted.load(.seq_cst);
     entity.vtable.unload(entity.ptr, io, world, entity.uuid, allocator, save) catch |err|
         std.log.err("error unloading entity: {any}", .{err});
 }
 
-/// Returns the entity for a uuid with an added reference, or null if it is
-/// not cached. The caller must release the reference when done. A deleted
-/// entity may still be returned while it waits to be unloaded; check
-/// isDeleted if that matters.
+/// Returns the cached entity with an added caller-owned reference, or null on miss. Deleted entities may still appear until unloaded.
 pub fn getAndAddRef(self: *@This(), io: std.Io, uuid: u128) ?*Entity {
     const shard, const lock = self.map.getShardAndLock(uuid);
     lock.lockUncancelable(io);
@@ -159,9 +133,7 @@ pub fn getAndAddRef(self: *@This(), io: std.Io, uuid: u128) ?*Entity {
     return entity;
 }
 
-/// Marks a cached entity for deletion. It stops being updated and is
-/// unloaded, deleting any saved state, once no other references remain.
-/// Returns false if the uuid is not cached.
+/// Flags a cached entity for deletion; returns false on miss. Unloads once unreferenced, deleting saved state.
 pub fn markDeleted(self: *@This(), io: std.Io, uuid: u128) bool {
     const shard, const lock = self.map.getShardAndLock(uuid);
     lock.lockUncancelable(io);
@@ -171,9 +143,7 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: u128) bool {
     return true;
 }
 
-/// Updates every queued entity and reaps deleted ones. Entities whose update
-/// requests deletion are reaped on the next pass. Safe to run concurrently
-/// with other update passes, but not with deinit.
+/// Updates every queued entity and reaps deleted ones. Concurrent update passes are safe, but not concurrent deinit.
 pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -185,20 +155,17 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
         var window_len: usize = 0;
         var reap_len: usize = 0;
 
-        // Collect under the lock, then run updates and unloads after release
-        // so spawns are never blocked behind entity work.
+        // Collect under the lock, then update after release so spawns never wait on entity work.
         try self.queue_mutex.lock(io);
         while (i < self.queue.items.len and window_len < window.len and reap_len < reaps.len) {
             const uuid = self.queue.items[i];
             const entity = self.getAndAddRef(io, uuid) orelse {
-                // Evicted from the cache; the id is stale.
+                // Evicted; the id is stale.
                 _ = self.queue.swapRemove(i);
                 continue;
             };
-
             if (entity.deleted.load(.seq_cst)) {
-                // The count includes the ref getAndAddRef just took: 2 means
-                // only the cache and this pass hold it.
+                // Count 2 means only the cache and this pass hold it.
                 if (entity.ref_count.load(.seq_cst) == 2) {
                     if (self.map.remove(io, uuid)) |removed| {
                         reaps[reap_len] = removed;
@@ -207,7 +174,7 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
                         continue;
                     }
                 }
-                // Still referenced elsewhere; retry on a later pass.
+                // Still referenced elsewhere; retry later.
                 entity.release();
                 i += 1;
                 continue;
@@ -242,16 +209,12 @@ pub fn update(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
     }
 }
 
-/// Unloads every entity. All references must have been released and no
-/// update pass may still be running before this. Panics if any entity is
-/// still referenced: that violates the release contract and would otherwise
-/// unload the implementation out from under the outstanding reference.
+/// Unloads every entity. Callers must release all references and stop update passes first; panics on outstanding refs.
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
     for (self.queue.items) |uuid| {
-        // Stale ids (evicted entities) are simply skipped.
         const entity = self.getAndAddRef(io, uuid) orelse continue;
         if (entity.ref_count.load(.seq_cst) != 2)
             std.debug.panic("entity {d} still referenced during shutdown", .{uuid});
@@ -261,7 +224,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
             entity.release();
         }
     }
-    // Every cached entity is queued, so the cache must have drained fully.
     std.debug.assert(self.map.count() == 0);
 
     self.map.deinit(allocator);
@@ -271,7 +233,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
 
 const testing = std.testing;
 
-// No test entity dereferences the world, so an undefined pointer is fine.
 const test_world: *World = undefined;
 
 var test_unloaded: std.atomic.Value(u32) = .init(0);
@@ -386,8 +347,6 @@ test "evicted entities leave stale ids that update drops" {
     var registry = try init(testing.allocator, EntityMapType.value_count_min);
     defer registry.deinit(testing.io, testing.allocator, test_world);
 
-    // Spawning past cache capacity evicts victims while their ids stay
-    // queued, so the queue holds more ids than the cache has slots.
     for (0..EntityMapType.value_count_min + 4) |_| {
         const entity = try registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded });
         entity.release();
@@ -480,7 +439,6 @@ fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
             },
             .update => {
                 if (registry.update(testing.io, testing.allocator, test_world)) |_| {
-                    // After a full pass the queue holds exactly the cached entities.
                     if (registry.queue.items.len != registry.count()) @panic("update queue out of sync with cache");
                 } else |_| {}
             },

@@ -16,11 +16,8 @@ const FrameState = struct {
     submitted: bool = false,
 };
 
-/// Records Vulkan timestamp queries and forwards their completed values to Tracy.
-///
-/// Each in-flight frame owns a fixed query range. The range is reset only after the
-/// graphics timeline has made that frame reusable, so recording never reuses queries
-/// still referenced by the GPU.
+/// Records Vulkan timestamp queries and forwards completed values to Tracy.
+/// Each in-flight frame owns a fixed query range, reset only after the graphics timeline reuses it.
 pub const GpuProfiler = struct {
     dev: DeviceProxy = undefined,
     query_pool: vk.QueryPool = .null_handle,

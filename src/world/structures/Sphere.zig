@@ -18,13 +18,13 @@ pub fn Sphere(comptime t: type) type {
             sphere.updateBoundingBox();
             return sphere;
         }
-
+        /// True when `p` lies inside the sphere surface.
         pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
             const diff = p - self.position;
             const dist2 = utils.dot(diff, diff);
             return dist2 <= self.radius_squared;
         }
-
+        /// Refreshes the cached box. Call again after any move.
         pub fn updateBoundingBox(self: *@This()) void {
             const r = self.radius;
             const lo_x = @floor(self.position[0] - r);

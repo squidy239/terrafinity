@@ -1521,13 +1521,13 @@ pub const IndirectScene = struct {
 };
 
 test "GpuRegionAllocator checkAllAllocationFailures" {
-    const allocFn = struct {
+    const AllocFn = struct {
         fn run(alloc: std.mem.Allocator) !void {
             var allocator = try GpuRegionAllocator.init(alloc, alloc, 1024 * 1024);
             allocator.deinit(alloc);
         }
     }.run;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocFn, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocFn, .{});
 }
 
 test "GpuRegionAllocator safe_graphics propagation" {
@@ -1582,7 +1582,7 @@ test "StagingRing split gap boundary and degenerate full" {
     defer ring.deinit(std.testing.allocator);
     ring.resolve(@enumFromInt(1));
 
-    const off = struct {
+    const Off = struct {
         fn run(r: *const StagingRing, slice: []const u8) vk.DeviceSize {
             return @intCast(@intFromPtr(slice.ptr) - @intFromPtr(r.mapping.ptr));
         }
@@ -1592,10 +1592,10 @@ test "StagingRing split gap boundary and degenerate full" {
     const b = (try ring.alloc(io, 256)).?;
     const c = (try ring.alloc(io, 256)).?;
     const d = (try ring.alloc(io, 256)).?;
-    try std.testing.expectEqual(@as(vk.DeviceSize, 0), off(&ring, a));
-    try std.testing.expectEqual(@as(vk.DeviceSize, 256), off(&ring, b));
-    try std.testing.expectEqual(@as(vk.DeviceSize, 512), off(&ring, c));
-    try std.testing.expectEqual(@as(vk.DeviceSize, 768), off(&ring, d));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 0), Off(&ring, a));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 256), Off(&ring, b));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 512), Off(&ring, c));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 768), Off(&ring, d));
     @memset(a, 0xaa);
     @memset(b, 0xbb);
     @memset(c, 0xcc);
@@ -1613,7 +1613,7 @@ test "StagingRing split gap boundary and degenerate full" {
 
     // Contiguous wrap prefix fit: 256 fits the prefix and wraps to 0, leaving a split ring.
     const e = (try ring.alloc(io, 256)).?;
-    try std.testing.expectEqual(@as(vk.DeviceSize, 0), off(&ring, e));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 0), Off(&ring, e));
     @memset(e, 0xee);
 
     // Split gap is exactly [256, 512): 257 aligns to 512 and is refused ...
@@ -1621,7 +1621,7 @@ test "StagingRing split gap boundary and degenerate full" {
 
     // ... while 256 fits exactly and fills the ring to head == tail with live entries.
     const f = (try ring.alloc(io, 256)).?;
-    try std.testing.expectEqual(@as(vk.DeviceSize, 256), off(&ring, f));
+    try std.testing.expectEqual(@as(vk.DeviceSize, 256), Off(&ring, f));
     @memset(f, 0xff);
 
     // Degenerate full: head == tail with live entries, so even 1 byte is refused.

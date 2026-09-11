@@ -40,8 +40,7 @@ pub const Key = struct {
     key: Keys,
 };
 
-// Single-threaded: written once during init, read on the loop thread only.
-// Do not share across threads without adding synchronization.
+// Written once during init and read only on the loop thread. Add synchronization before sharing across threads.
 pub const Map = struct {
     map: std.AutoHashMap(Key, Action),
 

@@ -10,7 +10,6 @@ const Config = @import("main.zig").Config;
 const EntityRegistry = @import("entity/EntityRegistry.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
-const utils = @import("libs/utils.zig");
 const ShadowConfig = @import("Renderer/vulkan/shadow/Csm.zig").ShadowConfig;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 const Renderer = @import("Renderer.zig");
@@ -78,8 +77,6 @@ pub const main_theme: dvui.Theme = blk: {
     };
 };
 
-pub const menu_theme: dvui.Theme = main_theme;
-
 window: *wio.Window,
 vk_ctx: *VulkanContext,
 config: *Config,
@@ -113,7 +110,7 @@ menu_state: struct {
     pending_world_recreate: bool = false,
     terrain_developer_settings: bool = false,
 
-    /// Returns true if the player is ingame without a menu open
+    /// Reports whether gameplay input is active.
     pub fn is_playing_game(self: @This()) bool {
         return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
     }
@@ -244,18 +241,15 @@ pub fn recordCommandBuffer(
     try self.drawFrame(io, gpa, frame_time);
     self.vk_ctx.dev.cmdEndRendering(cmd);
 
-    // Check if screenshot requested - if so, copy before transitioning to present
+    // Copy the frame for the screenshot before the image transitions to present.
     if (self.vk_ctx.screenshot_requested.load(.acquire)) {
-        // Clear the request flag - we are handling it now
         self.vk_ctx.screenshot_requested.store(false, .release);
-        // Record copy from color_attachment_optimal to staging buffer, then to present_src
         self.vk_ctx.recordScreenshotCopyFromColorAttachment(cmd, image, extent) catch |err| {
             std.log.err("Screenshot copy recording failed: {any}", .{err});
-            // Fallback: just transition to present
             VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
             self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
         };
-        // If recording succeeded, layout is already present_src_khr
+        // Both branches above leave the image in present layout, so this only records it.
         if (self.vk_ctx.screenshot_pending_save) {
             self.vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
         }
@@ -309,8 +303,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
         self.menu_state.pending_game_deinit = true;
-        // Refresh once on menu entry so externally added/removed worlds appear.
-        // Steady-state frames keep hitting the cache (see continueMenu).
+        // External changes may add or remove worlds, so refresh the list on entry.
         self.world_list_dirty = true;
         return true;
     }
@@ -458,8 +451,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     const present_mode_changed = first_config.game_config.render_options.present_mode != options.render_options.present_mode;
     const aa_changed = first_config.game_config.render_options.anti_aliasing != options.render_options.anti_aliasing;
     if (config_changed) {
-        // The working pack is owned here until it moves into self.config below;
-        // free it if the commit-path lock returns early. Lock stays narrow.
+        // The working pack moves into config below; free it if the lock path exits early.
         errdefer allocator.free(working_config.game_config.render_options.selected_pack);
         try self.config_lock.lock(io);
         allocator.free(self.config.game_config.render_options.selected_pack);
@@ -899,8 +891,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     };
     try world_options.save(io, game_path);
     try self.saveGeneratorConfig(allocator, io, game_path);
-    // Mark the cached list stale before the fallible open tail so a failed
-    // open still refreshes and the newly created world becomes visible.
+    // Mark the list stale before the fallible open so a failed open still refreshes.
     self.world_list_dirty = true;
     try self.openGame(io, allocator, game_path);
     self.menu_state.ingame = true;
@@ -937,20 +928,15 @@ fn spawnFloatRow(label: []const u8, value: *f64, id: u64) void {
     value.* = as_f32;
 }
 
-fn spawnUintRow(label: []const u8, value: *u32, id: u64) void {
-    var as_u64: u64 = value.*;
-    configTextU64(label, &as_u64, id);
-    value.* = @intCast(@min(as_u64, std.math.maxInt(u32)));
-}
-
-/// Spawn settings for the new-game menu. Only the settings are editable;
-/// the resolved pos/found stay hidden here.
+/// Only the settings are editable; the resolved pos/found stay hidden here.
 fn drawSpawnConfig(spawn: *EntityRegistry.SpawnConfig) void {
     dvui.labelNoFmt(@src(), "Spawn", .{}, .{ .font = .{ .size = 24 } });
     spawnFloatRow("Center X", &spawn.center[0], newgameSpawnId("center_x"));
     spawnFloatRow("Center Y", &spawn.center[1], newgameSpawnId("center_y"));
     spawnFloatRow("Center Z", &spawn.center[2], newgameSpawnId("center_z"));
-    spawnUintRow("Range", &spawn.range, newgameSpawnId("range"));
+    var as_u64: u64 = spawn.range;
+    configTextU64("Range", &as_u64, newgameSpawnId("range"));
+    spawn.range = @intCast(@min(as_u64, std.math.maxInt(u32)));
     settingsEnum("Game Mode", EntityTypes.Player.GameMode, &spawn.mode, newgameSpawnId("mode"));
 }
 
@@ -1016,8 +1002,7 @@ pub fn sidebar(self: *@This()) bool {
 
     if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
         self.menu_state = .{ .main = true };
-        // Refresh once on menu entry so externally added/removed worlds appear.
-        // Steady-state frames keep hitting the cache (see continueMenu).
+        // External changes may add or remove worlds, so refresh the list on entry.
         self.world_list_dirty = true;
         return true;
     }

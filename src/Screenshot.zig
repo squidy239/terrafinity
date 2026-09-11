@@ -1,7 +1,6 @@
-const std = @import("std");
 const vk = @import("vulkan");
 
-/// Selectable screenshot resolutions. Native uses current swapchain size.
+/// Lists screenshot resolutions. Native keeps the current swapchain size.
 pub const Resolution = enum {
     native,
     @"720p",

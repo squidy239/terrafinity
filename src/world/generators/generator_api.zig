@@ -2,13 +2,8 @@ const std = @import("std");
 
 const World = @import("../World.zig");
 
-/// Shared interface between the terrafinity host and generator shared
-/// libraries. Both sides are compiled by the same `zig build` with the same
-/// compiler, so every type here has identical layout across the DLL boundary.
-///
-/// The API version is semver: bump minor for backward-compatible additions
-/// (e.g. appended vtable entries the host guards), major for breaking
-/// changes (removed/changed entries, shared layout changes).
+/// Shared host-generator interface. Both sides share one compiler, so layouts match across the boundary.
+/// Version is semver: minor grows for compatible additions, major for breaking changes.
 pub const ApiVersion: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
 /// Whether a plugin built against `plugin_version` can run on this host.
@@ -88,64 +83,46 @@ pub const Array = struct {
 
 pub const ConfigTree = Group;
 
-/// A generator-proposed spawn position in world blocks. Returned by value
-/// from `propose_spawn`; `found == false` means the generator abstains and
-/// the host must fail the spawn loudly (there is no fallback spawn point).
-/// Deliberately position-only: no view direction, no player identity.
+/// Proposed spawn in world blocks. `found == false` abstains, and the host fails loudly.
 pub const Spawnpoint = extern struct {
     pos: [3]f64,
     found: bool = false,
 };
 
-/// Shared spawn-search tuning: every generator samples, scores, and caps
-/// identically so behavior matches across plugins.
+/// Shared spawn-search tuning, so behavior matches across plugins.
 pub const spawn_samples_per_ring: u32 = 8;
 pub const spawn_max_ring: u32 = 20;
 pub const spawn_ring_step: f64 = 16.0;
-/// Upper bound covering the full ring schedule; the host passes smaller
-/// `attempts` budgets when it wants cheaper, nearer searches.
+/// Full-schedule upper bound. Hosts pass smaller budgets for cheaper searches.
 pub const spawn_attempt_cap: u32 = (spawn_max_ring + 1) * spawn_samples_per_ring;
 pub const spawn_slope_weight: f64 = 64.0;
 pub const spawn_ocean_penalty: f64 = 1e9;
 pub const spawn_steep_penalty: f64 = 1e6;
 pub const spawn_steep_limit: f32 = 1.0;
 pub const spawn_water_margin: f32 = 1.0;
-/// Hint feet sit this far above the estimated ground top; the host resolves
-/// exact feet, so hints only need to land the column scan window.
+/// Feet hint height above the estimated top. The host resolves exact feet.
 pub const spawn_hint_clearance: f32 = 2.6;
 
-/// Deterministic disc sample shared by every `propose_spawn`
-/// implementation, so all generators expand identically. `radius` is soft:
-/// ring 0 samples within `radius` of `center` (exactly `center` when
-/// `radius == 0`), later rings grow by powers of two so a `0` radius still
-/// means "closest to center" while guaranteeing escape from oceans.
-/// Deterministic in `(seed, center, radius, nonce, i)`: per-join variation
-/// comes from the host-supplied `nonce`, never from hidden RNG.
+/// Deterministic disc sample shared by every spawn search. `radius` is soft: ring 0
+/// stays within `radius`, later rings double outward to escape oceans.
 pub fn spawnSample(seed: u64, center: [2]f64, radius: f64, nonce: u64, i: u32) [2]f64 {
     var hasher = std.hash.Wyhash.init(seed ^ nonce ^ 0x9e3779b97f4a7c15);
     std.hash.autoHash(&hasher, i);
     const h = hasher.final();
     const frac_low: f64 = @as(f64, @floatFromInt(h & 0xFFFFFFFF)) / 4294967296.0;
     const frac_high: f64 = @as(f64, @floatFromInt(h >> 32)) / 4294967296.0;
-    // Rings advance with the sample index so a larger `attempts` budget
-    // searches farther, not just denser: ring 12 reaches ~65km, ring 20
-    // the whole world. Reach must not be coupled to a CPU cap, or retries
-    // re-search the same basin forever.
+    // Larger budgets search farther, not denser, so retries escape the basin.
     const ring = @min(i / spawn_samples_per_ring, spawn_max_ring);
     const extra: f64 = spawn_ring_step * (@exp2(@as(f64, @floatFromInt(ring))) - 1.0);
     const r = radius + extra;
     if (r <= 0) return center;
-    // Uniform disc: sqrt distributes area-evenly so near-center candidates
-    // win the distance term more often, keeping island worlds clustered.
+    // Sqrt spreads samples evenly, so near-center candidates win distance terms.
     const dist = r * @sqrt(frac_low);
     const angle = std.math.tau * frac_high + @as(f64, @floatFromInt(i % spawn_samples_per_ring)) * (std.math.tau / @as(f64, spawn_samples_per_ring));
     return .{ center[0] + @cos(angle) * dist, center[1] + @sin(angle) * dist };
 }
 
-/// Analytic column score shared by every `propose_spawn` implementation.
-/// `height_above_water` is height minus sea level (or raw height where the
-/// generator has no sea); slope is blocks per block. Water/steep columns
-/// stay tracked as best-effort so all-ocean seeds still return something.
+/// Shared column score. Water and steep columns stay tracked, so ocean seeds still return a point.
 pub const SpawnScore = struct {
     score: f64,
     wet: bool,
@@ -162,10 +139,7 @@ pub fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnSco
     };
 }
 
-/// Shared pick-test-retry loop for heightfield generators: samples the
-/// disc schedule, scores each column, tracks the best. `columnHeight`
-/// returns the terrain height at world (x, z); `sea_level` gates water.
-/// Pure and deterministic; the host re-validates the winner.
+/// Shared pick-test-retry loop for heightfield generators. Pure; the host re-validates the winner.
 pub fn proposeSpawnField(
     seed: u64,
     center: [3]f64,
@@ -181,8 +155,7 @@ pub fn proposeSpawnField(
     var best_good = false;
     const capped = @min(attempts, spawn_attempt_cap);
     for (0..capped) |i| {
-        // Cheap analytic test per pick; the host re-validates the winner
-        // against real blocks, so misses here only cost retries.
+        // Analytic test only; the host re-validates the winner.
         const sample = spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const sx: f32 = @floatCast(sample[0]);
         const sz: f32 = @floatCast(sample[1]);
@@ -199,49 +172,28 @@ pub fn proposeSpawnField(
             best = .{ .pos = .{ sample[0], @floor(h) + spawn_hint_clearance, sample[1] }, .found = true };
             best_good = !scored.wet and !scored.steep;
         }
-        // Stop after a full first ring once the tracked best passes.
         if (i >= spawn_samples_per_ring - 1 and best_good) break;
     }
     return best;
 }
 
-/// The vtable every generator exports under `api_export_name`.
-///
-/// The functions use the C calling convention, so aggregate types cross the
-/// boundary as pointers. The generator instance is torn down through the
-/// `deinit` callback of the `World.ChunkSource` returned by `get_source`, so
-/// no separate deinit entry is needed.
+/// Vtable each generator exports. Aggregates cross as pointers; teardown runs through `get_source`.
 pub const GeneratorApi = extern struct {
     info: *const fn () callconv(.c) *const GeneratorInfo,
     create: *const fn (opts: *const CreateOptions, config: *const ConfigTree) callconv(.c) ?*anyopaque,
     get_source: *const fn (instance: *anyopaque) callconv(.c) *const World.ChunkSource,
-    /// Number of named presets the generator ships with.
     preset_count: *const fn () callconv(.c) usize,
-    /// Name of the preset at `index`. The returned pointer references a static
-    /// slice owned by the generator; it stays valid for the life of the library.
+    /// Name of the preset at `index`. The slice lives as long as the library.
     preset_name: *const fn (index: usize) callconv(.c) *const []const u8,
-    /// Index of the preset used as the default when no config is supplied.
     preset_default_index: *const fn () callconv(.c) usize,
-    /// Builds the config tree for the preset at `index`. All strings are
-    /// allocated with the given allocator; the host frees the whole tree with
-    /// `generator_api.free`.
+    /// Config tree for the preset at `index`. The host frees it with `generator_api.free`.
     preset_config: *const fn (allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*ConfigTree,
-    /// Returns null if the bytes are not a valid config; the host then falls
-    /// back to the default preset.
+    /// Null on invalid bytes; the host then uses the default preset.
     config_from_zon: *const fn (allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*ConfigTree,
-    /// Returns null on failure. Fills in unspecified seeds (params with `Spec.is_seed`, value 0) and
-    /// must be called before `create` so the chosen seeds can be persisted.
+    /// Fills unset seeds. Runs before `create` so seeds persist.
     config_set_seeds: *const fn (io: *const std.Io, config: *ConfigTree) callconv(.c) void,
-    /// Proposes a spawn position near `center`. `radius` is soft (0 means
-    /// "closest to center"): the generator samples with `spawnSample` and
-    /// roams beyond `radius` when nothing passes. `attempts` bounds the
-    /// inner analytic loop; `nonce` varies per call so joins spread without
-    /// player identity. Pure: no chunk I/O, deterministic in its inputs.
-    /// The returned Y is only a hint — erosion, caves, and structures are
-    /// invisible to the generator, so the host scans the column to resolve
-    /// exact feet. The host must call this when present; `found == false`
-    /// is a hard spawn failure. Returned by value: sound because both
-    /// sides share one compiler, the same guarantee the vtable relies on.
+    /// Spawn near `center` with a soft `radius`. Pure and deterministic; Y is a hint the host resolves.
+    /// `found == false` fails the spawn loudly.
     propose_spawn: *const fn (
         instance: *anyopaque,
         center: *const [3]f64,
@@ -253,16 +205,13 @@ pub const GeneratorApi = extern struct {
 
 pub const api_export_name = "generator_api";
 
-/// Config tree support: shared by the host (free, clone, eql, emitZon) and by
-/// the generators (fromStruct, fromTree reflection).
-/// Frees a config tree. Every string in the tree is owned by the allocator
-/// that created it, so this walks the whole tree.
+/// Config tree helpers shared by host and generators.
+/// Every string belongs to the creating allocator, so `free` walks the whole tree.
 pub fn free(allocator: std.mem.Allocator, tree: *ConfigTree) void {
     freeGroup(allocator, tree);
     allocator.destroy(tree);
 }
 
-/// Deep copy of a config tree; all strings are duplicated.
 pub fn clone(allocator: std.mem.Allocator, tree: *const ConfigTree) error{OutOfMemory}!*ConfigTree {
     const new = try allocator.create(ConfigTree);
     errdefer allocator.destroy(new);
@@ -270,8 +219,7 @@ pub fn clone(allocator: std.mem.Allocator, tree: *const ConfigTree) error{OutOfM
     return new;
 }
 
-/// Content equality; used for change detection. Pointer fields (array
-/// element templates) are compared by pointee, not identity.
+/// Content equality for change detection. Templates compare by pointee.
 pub fn eql(a: *const ConfigTree, b: *const ConfigTree) bool {
     if (a.params.len != b.params.len) return false;
     for (a.params, b.params) |*pa, *pb| {
@@ -319,7 +267,6 @@ fn valueEql(a: *const Value, b: *const Value) bool {
     }
 }
 
-/// Adds a new item to an array param, cloned from the element template.
 pub fn arrayAdd(allocator: std.mem.Allocator, array: *Array) error{OutOfMemory}!void {
     const old_len = array.items.len;
     array.items = try allocator.realloc(array.items, old_len + 1);
@@ -327,7 +274,6 @@ pub fn arrayAdd(allocator: std.mem.Allocator, array: *Array) error{OutOfMemory}!
     array.items[old_len] = try cloneParam(allocator, array.element);
 }
 
-/// Removes an item from an array param, freeing it.
 pub fn arrayRemove(allocator: std.mem.Allocator, array: *Array, index: usize) void {
     std.debug.assert(index < array.items.len);
     freeParam(allocator, &array.items[index]);
@@ -335,8 +281,6 @@ pub fn arrayRemove(allocator: std.mem.Allocator, array: *Array, index: usize) vo
     array.items = allocator.realloc(array.items, array.items.len - 1) catch return;
 }
 
-/// Emits the tree as ZON, in the same format the generators parse back with
-/// `std.zon.parse`.
 pub fn emitZon(w: *std.Io.Writer, tree: *const ConfigTree) !void {
     try emitGroup(w, tree);
 }
@@ -431,8 +375,7 @@ fn fieldSpec(comptime field_specs: anytype, comptime name: []const u8) Spec {
     };
 }
 
-/// Builds a config tree from a struct via comptime reflection. Unhandled
-/// field types are skipped.
+/// Builds a config tree from a struct. Unhandled field types are skipped.
 pub fn fromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const T, comptime field_specs: anytype) error{OutOfMemory}!*ConfigTree {
     const tree = try allocator.create(ConfigTree);
     errdefer allocator.destroy(tree);
@@ -440,8 +383,7 @@ pub fn fromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const 
     return tree;
 }
 
-/// Applies a config tree back onto a struct. Params missing from the tree or
-/// mismatching the field type leave the field at its current value.
+/// Applies a tree onto a struct. Missing or mismatched params keep their values.
 pub fn fromTree(comptime T: type, allocator: std.mem.Allocator, tree: *const ConfigTree, out: *T, comptime field_specs: anytype) error{OutOfMemory}!void {
     inline for (std.meta.fields(T)) |f| {
         if (findParam(tree, f.name)) |param| {
@@ -711,6 +653,37 @@ fn cloneArray(allocator: std.mem.Allocator, src: *const Array) error{OutOfMemory
     return .{ .element = element, .items = items };
 }
 
+/// Shared boilerplate behind the per-generator C wrappers. Addresses still point at static tables.
+pub fn presetConfig(comptime Params: type, comptime field_specs: anytype, comptime presets: anytype, allocator: *const std.mem.Allocator, index: usize) ?*ConfigTree {
+    if (index >= presets.len) return null;
+    return fromStruct(Params, allocator.*, &presets[index], field_specs) catch null;
+}
+
+pub fn configFromZon(comptime Params: type, comptime field_specs: anytype, allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) ?*ConfigTree {
+    @setEvalBranchQuota(100000000);
+    // The parsed params may hold comptime-backed defaults (e.g. tree presets),
+    // so free them as a whole arena instead of walking the struct.
+    var arena = std.heap.ArenaAllocator.init(allocator.*);
+    defer arena.deinit();
+    const params = std.zon.parse.fromSliceAlloc(Params, arena.allocator(), bytes[0..bytes_len :0], null, .{}) catch return null;
+    return fromStruct(Params, allocator.*, &params, field_specs) catch null;
+}
+
+pub fn configSetSeeds(io: *const std.Io, config: *ConfigTree) void {
+    var random_seed: u64 = undefined;
+    io.*.random(std.mem.asBytes(&random_seed));
+    for (config.params) |*param| {
+        if (param.spec.is_seed and param.value == .u64 and param.value.u64 == 0) {
+            param.value.u64 = random_seed;
+        }
+    }
+}
+
+pub fn getSource(comptime Instance: type, instance: *anyopaque) *const World.ChunkSource {
+    const self: *Instance = @ptrCast(@alignCast(instance));
+    return &self.source;
+}
+
 const TestConfig = struct {
     enabled: bool = true,
     scale: f32 = 0.5,
@@ -796,7 +769,6 @@ test "clone and array add remove" {
 }
 
 test "apiCompatible enforces semver" {
-    // At 0.0.0 (pre-1.0) only an exact match loads.
     try std.testing.expect(apiCompatible(ApiVersion));
     try std.testing.expect(!apiCompatible(.{ .major = 1, .minor = 0, .patch = 0 }));
     try std.testing.expect(!apiCompatible(.{ .major = 0, .minor = 1, .patch = 0 }));

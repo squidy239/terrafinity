@@ -110,8 +110,7 @@ screenshot_pending_save: bool = false,
 screenshot_requested: std.atomic.Value(bool) = .init(false),
 screenshot_resolution: Screenshot.Resolution = .native,
 screenshot_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
-screenshot_counter: u32 = 0,
-// Grow-only resize scratch + last-path storage: no per-save allocs, no path dupe.
+// Grow-only resize scratch and last-path storage avoid per-save allocation.
 screenshot_scratch: []u8 = &.{},
 screenshot_path_buf: [256]u8 = undefined,
 
@@ -506,9 +505,8 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
 
     self.dev_handle = try self.instance.createDevice(self.pdev, &device_info, &self.vkalloc);
 
-    // The raw handle must be destroyed even if the wrapper setup below fails, otherwise it would
-    // leak and the instance errdefer would destroy the instance while the device is still alive.
-    // vkDestroyDevice is a device-level command, so reach it through a scratch DeviceWrapper.
+    // The raw handle still needs cleanup if wrapper setup fails below.
+    // A scratch DeviceWrapper reaches vkDestroyDevice for the errdefer.
     var owns_raw_device = true;
     errdefer if (owns_raw_device) {
         var scratch_wrapper = DeviceWrapper.load(self.dev_handle, gdpa);
@@ -1111,11 +1109,6 @@ fn debugCallback(
     const cb_data = p_callback_data orelse return .false;
     const msg = std.mem.span(cb_data.p_message orelse return .false);
 
-    // No suppressions for the latest validation layer version, previous ones have false positives
-    switch (cb_data.message_id_number) {
-        else => {},
-    }
-
     if (message_severity.error_bit_ext) {
         vklog.err("Id: {d}, {s}", .{ cb_data.message_id_number, msg });
     } else if (message_severity.warning_bit_ext) {
@@ -1164,12 +1157,8 @@ pub fn recordScreenshotCopyFromColorAttachment(self: *VulkanContext, cmd: vk.Com
     self.screenshot_pending_save = true;
 }
 
-/// Saves the pending screenshot and returns a BORROWED path: MUST NOT FREE.
-/// The bytes live in the fixed `screenshot_path_buf` (no per-save alloc) and
-/// stay valid only until the next `savePendingScreenshot` call or context
-/// deinit — dupe the path if you need it longer. `Allocator.free` accepts any
-/// slice type, so nothing stops a mistaken free at compile time: that is what
-/// this warning (and the `must_not_free` naming at the return site) is for.
+/// Saves the pending screenshot and returns a borrowed path in the fixed `screenshot_path_buf`.
+/// The path stays valid only until the next call or deinit, so dupe it to keep it longer.
 pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
     if (!self.screenshot_pending_save) return error.NoPendingScreenshot;
     const native_w = self.screenshot_extent.width;
@@ -1205,7 +1194,6 @@ pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.me
     const must_not_free_path = try std.fmt.bufPrint(&self.screenshot_path_buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
     try to_save.save(io, allocator, must_not_free_path);
     self.screenshot_pending_save = false;
-    self.screenshot_counter += 1;
     return must_not_free_path;
 }
 

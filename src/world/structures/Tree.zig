@@ -7,6 +7,7 @@ const WorldEditor = @import("../World.zig").Editor;
 const Cone = @import("Cone.zig").Cone;
 const utils = @import("utils.zig");
 
+/// Procedural tree stamped into the world through an editor.
 pub const Tree = struct {
     pos: @Vector(3, i64),
     config: Config,
@@ -21,7 +22,6 @@ pub const Tree = struct {
         radius_percent_randomness: f32 = 0.0,
         branch_count_min: usize = 2,
         branch_count_max: usize = 4,
-        min_branch_width: ?f32 = null,
         branch_randomness: f32 = 0.0,
         branch_range: @Vector(3, f32) = @splat(0.2),
         block_type: Block = Block.wood,
@@ -36,12 +36,11 @@ pub const Tree = struct {
         trunk_height: f32,
         trunk_height_variation: f32,
 
-        branch_variation: f32 = 0.2,
         max_recursion_depth: usize = 8,
 
         leaf_size: f32 = 2.0,
         leaf_density: f32 = 0.75,
-        ///must be at least max_recursion_depth
+        /// Steps must cover every recursion level.
         steps: []const StepConfig,
         min_radius: f32 = 0.5,
         min_length: f32 = 2.0,
@@ -55,6 +54,7 @@ pub const Tree = struct {
     };
 
     threadlocal var index: usize = 0;
+    /// Stamps the tree at its position. Returns the branch count.
     pub fn place(self: *const @This(), seed: u64, editor: *WorldEditor, level: i32) !u64 {
         @setFloatMode(.optimized);
         var step_buffer: [64]StepGenData = undefined;
@@ -96,7 +96,7 @@ pub const Tree = struct {
                         while (x < half_leaf) : (x += 1) {
                             var z = -half_leaf;
                             while (z < half_leaf) : (z += 1) {
-                                const block: Block = if (getRand(&index) < self.config.leaf_density) step.end_block else .null; // Places null to keep whatever block is currently in the world
+                                const block: Block = if (getRand(&index) < self.config.leaf_density) step.end_block else .null; // Null keeps the current block.
                                 try editor.placeBlock(block, @round(data.pos + @Vector(3, f32){ x, y, z }), level);
                             }
                         }
@@ -127,12 +127,13 @@ pub const Tree = struct {
         const vec = @Vector(3, t){ getRand(&index), getRand(&index), getRand(&index) };
         return normalizeInRange(@Vector(3, t), vec, @splat(0), @splat(1), @splat(range_base), @splat(range_top));
     }
+    /// Maps `num` from the old bounds to the new bounds.
     pub fn normalizeInRange(comptime t: type, num: t, old_lower_bound: t, old_upper_bound: t, new_lower_bound: t, new_upper_bound: t) t {
         if (std.meta.eql(old_upper_bound, old_lower_bound)) return new_lower_bound;
         return (num - old_lower_bound) / (old_upper_bound - old_lower_bound) * (new_upper_bound - new_lower_bound) + new_lower_bound;
     }
 
-    ///range is per-axis angular range: 0–2 mapped to 0–360° each
+    /// Spreads branches over a sphere. Range sets the per-axis angular width.
     pub fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
         @setFloatMode(.optimized);
         const pi = std.math.pi;

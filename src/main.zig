@@ -12,17 +12,12 @@ pub const Entity = @import("entity/Entity.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
 const Key = @import("Key.zig");
-pub const Cache = @import("libs/Cache.zig").Cache;
-pub const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
+pub const SpatialHash = @import("libs/spatial_hash.zig").SpatialHash;
 const utils = @import("libs/utils.zig");
 const Renderer = @import("Renderer.zig");
 const Ui = @import("Ui.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
-pub const Block = @import("world/Block.zig").Block;
-pub const Chunk = @import("world/Chunk.zig");
-pub const ChunkSize = Chunk.ChunkSize;
 pub const generator_loader = @import("world/generator_loader.zig");
-pub const World = @import("world/World.zig");
 
 pub const tracy_options: tracy.Options = .{
     .on_demand = true,
@@ -159,7 +154,6 @@ pub fn main(init: std.process.Init) !void {
         vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
     }
 
-    // Screenshot auto handling
     var screenshot_after_triggered: bool = false;
     var screenshot_after_should_exit: bool = false;
     var screenshot_after_saved: bool = false;
@@ -204,15 +198,15 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // Auto screenshot after N seconds (similar to test_play)
+        // Take an automatic screenshot once the timeout elapses.
         if (options.screenshot_after) |screenshot_timeout| {
             if (!screenshot_after_triggered and start_time.untilNow(io, .awake).toSeconds() >= screenshot_timeout) {
                 std.log.info("Screenshot after timeout reached ({d}s), requesting screenshot", .{screenshot_timeout});
-                // Use current resolution setting
+                // Use the configured resolution for the automatic shot.
                 const res = config.game_config.render_options.screenshot_resolution;
                 vk_ctx.requestScreenshot(res);
                 screenshot_after_triggered = true;
-                // If test_play is not set, we will exit after screenshot is saved
+                // Exit after the save completes when no play session owns the loop.
                 if (options.test_play == null) {
                     screenshot_after_should_exit = true;
                 }
@@ -265,9 +259,8 @@ pub fn main(init: std.process.Init) !void {
             else => std.log.err("present failed: {}", .{err}),
         };
 
-        // Handle screenshot saving after GPU work completes
+        // Save only after the GPU finishes the frame.
         if (vk_ctx.screenshot_pending_save) {
-            // Wait for the frame to finish (timeline semaphore)
             const current_frame_val = vk_ctx.frame_number.load(.acquire);
             const wait_info: vk.SemaphoreWaitInfo = .{
                 .semaphore_count = 1,
@@ -278,7 +271,6 @@ pub fn main(init: std.process.Init) !void {
                 std.log.err("Failed to wait for screenshot frame: {any}", .{err});
             };
 
-            // Save screenshot
             if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
                 std.log.info("Screenshot saved: {s}", .{saved_path});
                 if (screenshot_after_should_exit and !screenshot_after_saved) {
@@ -373,6 +365,8 @@ const embedded_generators = [_]struct { file_name: []const u8, bytes: []const u8
     .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
     .{ .file_name = "voxelgame.generator", .bytes = @embedFile("voxelgame_generator_bin") },
     .{ .file_name = "planet.generator", .bytes = @embedFile("planet_generator_bin") },
+    .{ .file_name = "fractal.generator", .bytes = @embedFile("fractal_generator_bin") },
+    .{ .file_name = "sponge.generator", .bytes = @embedFile("sponge_generator_bin") },
 };
 
 fn writeEmbeddedGenerators(io: std.Io) !void {

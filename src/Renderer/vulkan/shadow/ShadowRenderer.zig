@@ -17,10 +17,7 @@ const shadow_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embed
 const movement_smoothing: f32 = 0.3;
 /// Cosine threshold below which the light direction is treated as a new basis (~25°).
 const light_change_cos_threshold: f32 = 0.9;
-/// How many near-cascade texels the light axis advances per re-orientation: texel/radius =
-/// 2/map_size is constant, so `light_step_texels * 2/map_size` radians moves a boundary
-/// ~`light_step_texels` texels at any resolution, the remainder scaling with texel size
-/// (raise shadow_map_size to shrink it). 1 texel is the smallest step the map can make.
+/// Near-cascade texels the light axis advances per re-orientation; 1 texel is the smallest step the map can make.
 const light_step_texels: f32 = 1.0;
 
 /// std430 storage-block layout mirrored by shadow.glsl. Per-cascade members are fixed
@@ -120,13 +117,10 @@ param_buffers: []ParamBuffer = &.{},
 /// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
 /// per-frame matrix by `viewProjAtOrigin`.
 committed: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
-/// Latched light direction (direction light travels) the shadow maps are rasterized with:
-/// held frozen and stepped in `light_step_texels` increments so re-rasterizations land on
-/// an identical texel grid (see `latchLight`).
+/// Latched light direction the shadow maps use, stepped in `light_step_texels` increments (see `latchLight`).
 light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
-/// Per-cascade commit validity. The params cascade_count is the largest contiguous
-/// valid prefix (0, 1, …, k-1), so a stale or never-committed cascade beyond the prefix
-/// is never classified into — the shader's cascade_count early-outs before it.
+/// Per-cascade commit validity. The params cascade_count is the largest contiguous valid prefix,
+/// so a stale cascade beyond it never classifies; the shader early-outs before it.
 valid: [Csm.max_cascades]bool = @splat(false),
 /// Cascades computed this frame, used only by the end-of-frame raster. Promoted into
 /// `committed` (the sampled state) at the start of the next prepareFrame, so a refreshed
@@ -138,9 +132,7 @@ pending_valid: [Csm.max_cascades]bool = @splat(false),
 /// Whether shadows were active last frame; a false->true transition means the sun just
 /// rose and the committed state belongs to the pre-night light direction.
 was_active: bool = false,
-/// Smoothed camera movement in blocks per frame, measured from the view_pos delta.
-/// Used for staleness padding so a stationary player keeps a tight, stable box (the max
-/// fly speed would grow the box while standing still and cause texel-swimming flicker).
+/// Smoothed camera movement in blocks per frame; pads staleness so a still player keeps a tight box.
 per_frame_dist: f32 = 0.0,
 last_view_pos: @Vector(3, f64) = .{ 0, 0, 0 },
 have_movement_sample: bool = false,

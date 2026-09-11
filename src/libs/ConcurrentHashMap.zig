@@ -111,20 +111,17 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
 
             pub fn next(it: *Iterator, io: std.Io) !?Bkt.Map.Entry {
                 while (true) {
-                    // If we have an active bucket iterator, use it
                     if (it.bkt_iter) |*iter| {
                         if (iter.next()) |entry| {
                             return entry;
                         }
 
-                        // Bucket exhausted
                         it.map.buckets[it.bkt_index].lock.unlockShared(io);
                         it.bkt_iter = null;
                         it.bkt_index += 1;
                         continue;
                     }
 
-                    // Move to next bucket
                     if (it.bkt_index >= it.map.buckets.len)
                         return null;
 

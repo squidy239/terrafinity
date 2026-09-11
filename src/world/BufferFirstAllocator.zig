@@ -1,5 +1,4 @@
-//! An allocator that attempts to allocate from the given buffer, falling back to
-//! `fallback_allocator` if this fails.
+//! Allocates from the given buffer first, falling back to `fallback_allocator`.
 
 const std = @import("std");
 const heap = std.heap;
@@ -89,47 +88,40 @@ fn free(
 }
 
 test "BufferFirstAllocator" {
-    // Buffer first specific tests
+    // Buffer-first path below, standard allocator checks after.
     {
         var buffer: [10]u8 = undefined;
         var bfa_state: BufferFirstAllocator = .init(&buffer, std.testing.allocator);
         const bfa = bfa_state.allocator();
 
-        // We're under the limit, so we should be allocated in the buffer
         const txt0 = "hellowrld";
         const buf0 = try bfa.create(@TypeOf(txt0.*));
         buf0.* = txt0.*;
         try testing.expect(bfa_state.fixed_buffer_allocator.ownsPtr(buf0.ptr));
 
-        // We're now over the limit, so we should be allocated from the fallback
         const txt1 = "test!";
         const buf1 = try bfa.create(@TypeOf(txt1.*));
         buf1.* = txt1.*;
         try testing.expect(!bfa_state.fixed_buffer_allocator.ownsPtr(buf1.ptr));
 
-        // Free the allocation that took up space in the buffer
         try testing.expectEqualStrings(txt0, buf0);
         bfa.destroy(buf0);
 
-        // The next allocation would go in the buffer, but it's too big so it doesn't
         const txt2 = "qwertyqwerty";
         const buf2 = try bfa.create(@TypeOf(txt2.*));
         buf2.* = txt2.*;
         try testing.expect(!bfa_state.fixed_buffer_allocator.ownsPtr(buf2.ptr));
 
-        // The next allocation is smaller and fits in the buffer
         const txt3 = "dvorak";
         const buf3 = try bfa.create(@TypeOf(txt3.*));
         buf3.* = txt3.*;
         try testing.expect(bfa_state.fixed_buffer_allocator.ownsPtr(buf3.ptr));
 
-        // The remainder in the buffer is too small for the following allocation so it falls back
         const txt4 = "moretext";
         const buf4 = try bfa.create(@TypeOf(txt4.*));
         buf4.* = txt4.*;
         try testing.expect(!bfa_state.fixed_buffer_allocator.ownsPtr(buf4.ptr));
 
-        // Check equality on the remaining buffers and free them
         try testing.expectEqualStrings(txt1, buf1);
         bfa.destroy(buf1);
         try testing.expectEqualStrings(txt2, buf2);
@@ -142,7 +134,6 @@ test "BufferFirstAllocator" {
         try testing.expectEqual(0, bfa_state.fixed_buffer_allocator.end_index);
     }
 
-    // Standard allocator tests
     {
         var buf: [4096]u8 = undefined;
         {

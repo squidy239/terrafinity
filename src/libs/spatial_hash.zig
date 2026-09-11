@@ -50,16 +50,11 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
         pub fn upsert(self: *Map, io: std.Io, allocator: std.mem.Allocator, id: Id, box: Aabb) !void {
             assertValid(box);
             const home = keyFor(box);
+            const entry: Entry = .{ .id = id, .box = box, .home = home.level };
             if (self.index.get(io, id)) |old| {
                 if (std.meta.eql(old, home)) {
                     // Same chain: refresh boxes in place; counts and index stand.
-                    const entry: Entry = .{ .id = id, .box = box, .home = home.level };
-                    var key = home;
-                    while (true) {
-                        try self.attach(io, allocator, key, entry);
-                        if (key.level + 1 >= max_levels) break;
-                        key = parentKey(key);
-                    }
+                    try self.attachChain(io, allocator, home, entry);
                     return;
                 }
                 self.detach(io, allocator, id, old);
@@ -70,13 +65,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
                 self.detach(io, allocator, id, home);
                 _ = self.index.fetchRemove(io, id);
             };
-            const entry: Entry = .{ .id = id, .box = box, .home = home.level };
-            var key = home;
-            while (true) {
-                try self.attach(io, allocator, key, entry);
-                if (key.level + 1 >= max_levels) break;
-                key = parentKey(key);
-            }
+            try self.attachChain(io, allocator, home, entry);
             try self.index.put(io, allocator, id, home);
             committed = true;
         }
@@ -133,6 +122,15 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
                 bucket.lock.lockUncancelable(io);
                 bucket.hash_map.clearAndFree(allocator);
                 bucket.lock.unlock(io);
+            }
+        }
+
+        fn attachChain(self: *Map, io: std.Io, allocator: std.mem.Allocator, home: CellKey, entry: Entry) !void {
+            var key = home;
+            while (true) {
+                try self.attach(io, allocator, key, entry);
+                if (key.level + 1 >= max_levels) break;
+                key = parentKey(key);
             }
         }
 
@@ -278,6 +276,9 @@ fn fillHits(map: *TestMap, io: std.Io, allocator: std.mem.Allocator, box: TestMa
 }
 
 fn hitIds(hits: []const TestMap.Hit) [16]TestMap.Id {
+    // Test-only convenience: fails loudly when a test outgrows the capacity
+    // instead of writing past the stack buffer.
+    std.debug.assert(hits.len <= 16);
     var ids: [16]TestMap.Id = @splat(std.math.maxInt(TestMap.Id));
     for (hits, 0..) |hit, i| ids[i] = hit.id;
     std.mem.sort(TestMap.Id, ids[0..hits.len], {}, std.sort.asc(TestMap.Id));

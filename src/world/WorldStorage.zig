@@ -9,11 +9,11 @@ const ChunkSize = Chunk.ChunkSize;
 const World = @import("World.zig");
 
 pub const SaveMode = enum {
-    /// Save every chunk in full, whether or not it was modified
+    /// Save every chunk in full, whether modified or not.
     everything,
-    /// Save modified grids and all uniform chunks
+    /// Save modified grids and all uniform chunks.
     modified_grids_all_uniforms,
-    /// Save only modified chunks
+    /// Save only modified chunks.
     only_modified,
 };
 
@@ -36,7 +36,7 @@ pub fn getSource(self: *@This()) World.ChunkSource {
     };
 }
 
-////opens the database, creates it if it doesnt exist
+/// Open the chunk database, creating it on first use.
 pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode, options_lock: *std.Io.RwLock) !@This() {
     var storage: @This() = undefined;
     storage.is_init = true;
@@ -61,7 +61,7 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode
             .compression = .zstd,
             .block_size = @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block),
         } },
-        .{ .name = "default", .options = .{} }, // unused
+        .{ .name = "default", .options = .{} }, // RocksDB requires a default column.
     };
     storage.database, const columns = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
     storage.chunkdata_column = columns[0];
@@ -80,8 +80,8 @@ const ChunkKey = packed struct {
 
 const ChunkData = packed struct {
     structures_generated: bool,
-    encoding: EncodingTagType,
-    one_block: Block, //This is only valid if encoding is .one_block
+    encoding: std.meta.Tag(Chunk.Encoding),
+    one_block: Block, // Valid only when encoding is .one_block.
 };
 
 fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chunk_pos: World.ChunkPos) error{Unrecoverable}!void {
@@ -89,8 +89,6 @@ fn save(source: World.ChunkSource, io: std.Io, world: *World, chunk: *Chunk, chu
     const self: *@This() = @ptrCast(@alignCast(source.data));
     self.saveChunk(io, chunk, chunk_pos) catch return error.Unrecoverable;
 }
-
-const EncodingTagType = std.meta.Tag(Chunk.Encoding); //get the type of the tagged unions tag
 
 /// Removes every persisted chunk from both storage column families using RocksDB range tombstones.
 pub fn clear(self: *@This()) !void {
@@ -129,13 +127,6 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
     const was_modified = chunk.modified.swap(false, .acq_rel);
     errdefer if (was_modified) chunk.modified.store(true, .release);
 
-    // Null is "no data", never content: persisting it would pin an empty row
-    // that shadows live generation on every later load. Drop it in all modes,
-    // clearing the flag so the background saver does not retry it forever.
-    if (chunk.encoding == .uniform and chunk.encoding.uniform == .null) {
-        return;
-    }
-
     const key: ChunkKey = .{ .x = chunk_pos.position[0], .y = chunk_pos.position[1], .z = chunk_pos.position[2], .level = chunk_pos.level };
     const data: ChunkData = .{
         .encoding = chunk.encoding,
@@ -147,6 +138,11 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
         std.log.err("{s}", .{s.data});
         s.deinit();
     };
+
+    // Null marks no data, never content: a saved null row pins an empty chunk
+    // that shadows live generation on every later load. Drop it in all modes,
+    // which clears the modified flag so the saver stops retrying it.
+    if (chunk.encoding == .uniform and chunk.encoding.uniform == .null) return;
     switch (chunk.encoding) {
         .grid => |blocks| {
             var write: rocksdb.WriteBatch = .init();
@@ -156,7 +152,12 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
             try self.database.write(write, &err_str);
         },
         .uniform => {
-            try self.database.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data), &err_str);
+            // Uniform loads skip the grid, so drop any stale grid row.
+            var write: rocksdb.WriteBatch = .init();
+            defer write.deinit();
+            write.put(self.chunkdata_column.handle, std.mem.asBytes(&key), std.mem.asBytes(&data));
+            write.delete(self.chunk_grid_column.handle, std.mem.asBytes(&key));
+            try self.database.write(write, &err_str);
         },
     }
     chunk.saved.store(true, .unordered);
@@ -184,20 +185,21 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     }
     var data = std.mem.bytesToValue(ChunkData, data_bytes.data);
     data_bytes.deinit();
+    if (!rowHasContent(data)) return null;
 
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
     if (data.encoding == .uniform) {
         blocks.mergeUniform(data.one_block);
     } else {
-        // Single retry: assumes any storage race settles after one re-read;
-        // a still-missing grid is treated as corruption (Unrecoverable), not retried.
+        // Retry the read once. A grid that stays missing signals corruption.
         grid_bytes = self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable;
-        if (grid_bytes == null) { // encoding may have changed; refetch data once
+        if (grid_bytes == null) { // The encoding may have changed; refetch once.
             const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
             defer new_data_bytes.deinit();
             if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
             data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
+            if (!rowHasContent(data)) return null;
             if (data.encoding == .uniform) {
                 blocks.mergeUniform(data.one_block);
                 return .{ .from_disk = true, .structures = data.structures_generated };
@@ -209,6 +211,13 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
     }
 
     return .{ .from_disk = true, .structures = data.structures_generated };
+}
+
+/// A uniform row holds content only when it holds a real block. A null block
+/// means "no data": the caller must fall through to the generator, or the
+/// chunk stays empty forever.
+fn rowHasContent(data: ChunkData) bool {
+    return data.encoding != .uniform or data.one_block != .null;
 }
 
 fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {

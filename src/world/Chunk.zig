@@ -13,10 +13,9 @@ ref_count: std.atomic.Value(u32) = .init(1),
 
 structures_generated: std.atomic.Value(bool) = .init(false),
 
-/// if this is false it means the chunk has not been modified after its load, otherwise it has
+/// True if the chunk changed since load.
 modified: std.atomic.Value(bool) = .init(false),
-///if this is false, the chunk has not been saved ever, if it is true a version of this chunk has been saved.
-///This may not be the current version and modified should be used to check this
+/// True if storage holds a version of this chunk. Use modified to test the current version.
 saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum(u1)) {
@@ -188,7 +187,7 @@ pub const Encoding = union(enum(u1)) {
     const simplified_size = ChunkSize / scale_factor;
 
     const area_factor = scale_factor * scale_factor;
-    // The u8 vote score packs exposed-first ordering as exp * (area_factor + 1) + tot, so its max must fit in u8.
+    // The u8 score packs exposed-first order, so its maximum must fit in u8.
     comptime {
         if ((area_factor + 1) * area_factor + area_factor > std.math.maxInt(u8)) @compileError("findBestBlock u8 score overflows; widen score or lower scale_factor");
     }
@@ -197,15 +196,12 @@ pub const Encoding = union(enum(u1)) {
         const center_trans = Block.isTransparentVector(ChunkSize, center);
         var exposure_mask: @Vector(ChunkSize, bool) = @splat(false);
 
-        // Z-Axis
         exposure_mask |= std.simd.shiftElementsRight(center_trans, 1, true);
         exposure_mask |= std.simd.shiftElementsLeft(center_trans, 1, true);
 
-        // X-Axis
         exposure_mask |= if (x == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x - 1][y]));
         exposure_mask |= if (x == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x + 1][y]));
 
-        // Y-Axis
         exposure_mask |= if (y == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y - 1]));
         exposure_mask |= if (y == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y + 1]));
 
@@ -224,7 +220,7 @@ pub const Encoding = union(enum(u1)) {
             break :blk m;
         };
 
-        // Downsample first: odd lanes are discarded by the stride anyway, so vote in half-width vectors.
+        // Odd lanes fall out in the stride, so vote in half-width vectors.
         var r: [area_factor]@Vector(ds_len, Block.Tag) = undefined;
         var e: [area_factor]@Vector(ds_len, bool) = undefined;
         inline for (0..area_factor) |i| {
@@ -232,7 +228,7 @@ pub const Encoding = union(enum(u1)) {
             e[i] = @shuffle(bool, exposures[i], undefined, stride_mask);
         }
 
-        // Exposed-first, then total; tot <= area_factor so one u8 orders both. Min score 1 beats the zero init.
+        // One u8 orders exposed count first, then total count. Minimum score 1 beats the zero start.
         const weight: @Vector(ds_len, u8) = @splat(area_factor + 1);
         var best_v = r[0];
         var best_score: @Vector(ds_len, u8) = @splat(0);
@@ -291,13 +287,12 @@ pub const Encoding = union(enum(u1)) {
     }
 };
 
-///checks if the block array is all the same block
+/// The shared block if every cell matches, else null.
 pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
     const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(block_array[0][0][0]));
     var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
     const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(block_array);
-    // Early-out in batches of 8 rows: amortizes the horizontal reduce while still
-    // bailing long before the full 1024-row fold on any mismatch.
+    // Check 8 rows per test. This amortizes the reduce and still exits early on mismatch.
     for (linear_block_array, 0..) |blocks, idx| {
         uniform &= (blocks == first_block_vec);
         if ((idx & 7) == 7 and !@reduce(.And, uniform)) return null;
@@ -343,25 +338,14 @@ pub fn unlockShared(self: *@This(), io: std.Io) void {
 }
 
 pub fn addAndLockShared(self: *@This(), io: std.Io) !void {
-    _ = self.ref_count.fetchAdd(1, .seq_cst);
-    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
+    self.addRef();
+    errdefer self.release();
     try self.lockShared(io);
-}
-
-pub fn addAndLock(self: *@This(), io: std.Io) !void {
-    _ = self.ref_count.fetchAdd(1, .seq_cst);
-    errdefer _ = self.ref_count.fetchSub(1, .seq_cst);
-    try self.lockExclusive(io);
-}
-
-pub fn releaseAndUnlock(self: *@This(), io: std.Io) void {
-    self.unlockExclusive(io);
-    _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
 pub fn releaseAndUnlockShared(self: *@This(), io: std.Io) void {
     self.unlockShared(io);
-    _ = self.ref_count.fetchSub(1, .seq_cst);
+    self.release();
 }
 
 test "getUniform" {

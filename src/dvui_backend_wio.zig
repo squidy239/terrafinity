@@ -149,10 +149,6 @@ pub fn clipboardTextSet(self: *@This(), text: []const u8) !void {
     self.window.setClipboardText(text);
 }
 
-pub fn openUrl(_: *@This(), url: []const u8, _: bool) !void {
-    wio.openUri(url);
-}
-
 pub fn preferredColorScheme(_: *@This()) ?dvui.enums.ColorScheme {
     return null;
 }
@@ -316,8 +312,6 @@ pub fn textInputRect(self: *@This(), rect: ?dvui.Rect.Natural) void {
 }
 
 pub fn renderPresent(_: *@This()) void {}
-
-// Rendering methods (called by dvui.Backend when render_backend.kind == .default)
 
 pub fn drawClippedTriangles(self: *@This(), texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const dvui.Vertex.Index, clipr: ?dvui.Rect.Physical) !void {
     if (self.cmd_buffer == .null_handle) return;

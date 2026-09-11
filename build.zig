@@ -171,12 +171,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-const GeneratorKind = enum { terrain, planet, voxelgame };
+const GeneratorKind = enum { terrain, planet, voxelgame, sponge, fractal };
 
 const generator_sources = [_]struct { kind: GeneratorKind, name: []const u8, file_name: []const u8, embed_name: []const u8 }{
     .{ .kind = .terrain, .name = "terrain_generator", .file_name = "terrain.generator", .embed_name = "terrain_generator_bin" },
     .{ .kind = .voxelgame, .name = "voxelgame_generator", .file_name = "voxelgame.generator", .embed_name = "voxelgame_generator_bin" },
     .{ .kind = .planet, .name = "planet_generator", .file_name = "planet.generator", .embed_name = "planet_generator_bin" },
+    .{ .kind = .fractal, .name = "fractal_generator", .file_name = "fractal.generator", .embed_name = "fractal_generator_bin" },
+    .{ .kind = .sponge, .name = "sponge_generator", .file_name = "sponge.generator", .embed_name = "sponge_generator_bin" },
 };
 
 const Deps = struct {

@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// Parses a zon file into `T` and ignores unknown fields.
 pub fn loadZon(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: std.mem.Allocator, allocator: std.mem.Allocator) !T {
     var buf: [1024]u8 = undefined;
     const stat = try file.stat(io);

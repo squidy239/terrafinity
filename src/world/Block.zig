@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const Block = enum(Tag) {
     pub const Tag = u16;
@@ -11,7 +10,7 @@ pub const Block = enum(Tag) {
     leaves = normal_start + 5,
     sand = normal_start + 6,
 
-    water = transparent_end - 1, //position is 7 hardcoded for waves, TODO make this a property
+    water = transparent_end - 1, // Wave shader hardcodes this position. TODO: expose it as a property.
 
     air = invis_end - 1,
     null = invis_end - 2,
@@ -78,6 +77,6 @@ test "Block properties" {
 
 test "water dense index matches shader" {
     const testing = std.testing;
-    // vertexshader.vert hardcodes this dense index for waves; shifting water's tag value must fail here.
+    // The wave shader hardcodes the water dense index. This test fails if the tag value shifts.
     try testing.expectEqual(3, std.enums.EnumIndexer(Block).indexOf(.water));
 }

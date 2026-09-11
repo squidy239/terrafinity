@@ -1,10 +1,7 @@
 const std = @import("std");
 
-/// Tiles N-dimensional space into box_size cells; each cell deterministically
-/// holds one structure at a jittered offset. getStructure returns the
-/// structure of the cell containing `position` only for positions within
-/// `2^level` units of it, so each structure is owned by one cell per level.
-/// `T` is the integer coordinate type (signed or unsigned).
+/// Tiles space into `box_size` cells with one jittered structure each. Only positions
+/// within `2^level` units past the structure see it, so one cell owns it per level.
 pub fn JitteredGrid(comptime N: usize, comptime T: type) type {
     if (N == 0) @compileError("JitteredGrid needs at least one dimension");
     if (@typeInfo(T) != .int) @compileError("JitteredGrid coordinate type must be an integer");

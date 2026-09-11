@@ -21,29 +21,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-// .'',;:cldxkO00KKXXNNWWWNNXKOkxdollcc::::::;:::ccllloooolllllllllooollc:,'...        ...........',;cldxkO000Okxdlc::;;;,,;;;::cclllllll
-// ..',;:ldxO0KXXNNNNNNNNXXK0kxdolcc::::::;;;,,,,,,;;;;;;;;;;:::cclllllc:;'....       ...........',;:ldxO0KXXXK0Okxdolc::;;;;::cllodddddo
-// ...',:loxO0KXNNNNNXXKK0Okxdolc::;::::::::;;;,,'''''.....''',;:clllllc:;,'............''''''''',;:loxO0KXNNNNNXK0Okxdollccccllodxxxxxxd
-// ....';:ldkO0KXXXKK00Okxdolcc:;;;;;::cclllcc:;;,''..... ....',;clooddolcc:;;;;,,;;;;;::::;;;;;;:cloxk0KXNWWWWWWNXKK0Okxddoooddxxkkkkkxx
-// .....';:ldxkOOOOOkxxdolcc:;;;,,,;;:cllooooolcc:;'...      ..,:codxkkkxddooollloooooooollcc:::::clodkO0KXNWWWWWWNNXK00Okxxxxxxxxkkkkxxx
-// . ....';:cloddddo___________,,,,;;:clooddddoolc:,...      ..,:ldx__00OOOkkk___kkkkkkxxdollc::::cclodkO0KXXNNNNNNXXK0OOkxxxxxxxxxxxxddd
-// .......',;:cccc:|           |,,,;;:cclooddddoll:;'..     ..';cox|  \KKK000|   |KK00OOkxdocc___;::clldxxkO0KKKKK00Okkxdddddddddddddddoo
-// .......'',,,,,''|   ________|',,;;::cclloooooolc:;'......___:ldk|   \KK000|   |XKKK0Okxolc|   |;;::cclodxxkkkkxxdoolllcclllooodddooooo
-// ''......''''....|   |  ....'',,,,;;;::cclloooollc:;,''.'|   |oxk|    \OOO0|   |KKK00Oxdoll|___|;;;;;::ccllllllcc::;;,,;;;:cclloooooooo
-// ;;,''.......... |   |_____',,;;;____:___cllo________.___|   |___|     \xkk|   |KK_______ool___:::;________;;;_______...'',;;:ccclllloo
-// c:;,''......... |         |:::/     '   |lo/        |           |      \dx|   |0/       \d|   |cc/        |'/       \......',,;;:ccllo
-// ol:;,'..........|    _____|ll/    __    |o/   ______|____    ___|   |   \o|   |/   ___   \|   |o/   ______|/   ___   \ .......'',;:clo
-// dlc;,...........|   |::clooo|    /  |   |x\___   \KXKKK0|   |dol|   |\   \|   |   |   |   |   |d\___   \..|   |  /   /       ....',:cl
-// xoc;'...  .....'|   |llodddd|    \__|   |_____\   \KKK0O|   |lc:|   |'\       |   |___|   |   |_____\   \.|   |_/___/...      ...',;:c
-// dlc;'... ....',;|   |oddddddo\          |          |Okkx|   |::;|   |..\      |\         /|   |          | \         |...    ....',;:c
-// ol:,'.......',:c|___|xxxddollc\_____,___|_________/ddoll|___|,,,|___|...\_____|:\ ______/l|___|_________/...\________|'........',;::cc
-// c:;'.......';:codxxkkkkxxolc::;::clodxkOO0OOkkxdollc::;;,,''''',,,,''''''''''',,'''''',;:loxkkOOkxol:;,'''',,;:ccllcc:;,'''''',;::ccll
-// ;,'.......',:codxkOO0OOkxdlc:;,,;;:cldxxkkxxdolc:;;,,''.....'',;;:::;;,,,'''''........,;cldkO0KK0Okdoc::;;::cloodddoolc:;;;;;::ccllooo
-// .........',;:lodxOO0000Okdoc:,,',,;:clloddoolc:;,''.......'',;:clooollc:;;,,''.......',:ldkOKXNNXX0Oxdolllloddxxxxxxdolccccccllooodddd
-// .    .....';:cldxkO0000Okxol:;,''',,;::cccc:;,,'.......'',;:cldxxkkxxdolc:;;,'.......';coxOKXNWWWNXKOkxddddxxkkkkkkxdoollllooddxxxxkkk
-//       ....',;:codxkO000OOxdoc:;,''',,,;;;;,''.......',,;:clodkO00000Okxolc::;,,''..',;:ldxOKXNWWWNNK0OkkkkkkkkkkkxxddooooodxxkOOOOO000
-//       ....',;;clodxkkOOOkkdolc:;,,,,,,,,'..........,;:clodxkO0KKXKK0Okxdolcc::;;,,,;;:codkO0XXNNNNXKK0OOOOOkkkkxxdoollloodxkO0KKKXXXXX
-//
 // VERSION: 1.1.1
 // https://github.com/Auburn/FastNoiseLite
 // This has been modified from the original source.
@@ -57,7 +34,6 @@ const prime_z: i32 = 1720413743;
 const prime_x_shl1 = std.math.shl(i32, prime_x, 1);
 const prime_y_shl1 = std.math.shl(i32, prime_y, 1);
 const prime_z_shl1 = std.math.shl(i32, prime_z, 1);
-/// FastNoise2's hash multiplier.
 const hash_multiplier: i32 = @bitCast(@as(u32, 0xB7E0A5F5));
 
 /// Deterministic 2D hash of a lattice coordinate. Exposed for modules that
@@ -76,7 +52,6 @@ pub fn hash2DVec(comptime N: usize, seed: i32, x: @Vector(N, i32), y: @Vector(N,
     return (seed_v ^ (x *% px) ^ (y *% py)) *% mult;
 }
 
-/// Describes a noise-generating algorithm.
 pub const NoiseType = enum {
     /// Simplex is the successor of and comparable to Perlin noise, but with fewer
     /// directional artifacts in higher dimensions, and a lower computational overhead.
@@ -131,12 +106,9 @@ pub const DomainWarpType = enum {
     basic_grid,
 };
 
-/// Structure containing the noise-generater state.
+/// State for one noise generator.
 ///
-/// The generator behaves as a state-machine, and all of its functions are "pure" in
-/// the regard that they do not modify the internal state of the generator.
-/// Configuration of the generator is done via the struct's fields, which are intended
-/// to be modified directly as-needed.
+/// Sampler calls read this state and never write it. Set fields directly to configure.
 // Lookup tables are module-level so every Noise(Float) instantiation
 // shares one copy; the values are FastNoise's f32 tables. `f64` uses
 // them via `@floatCast` (exact for these values); not duplicated per-Float.
@@ -262,7 +234,6 @@ inline fn vpermpsF32(idx: @Vector(8, i32), table: @Vector(8, f32)) @Vector(8, f3
 }
 
 pub fn Noise(comptime Float: type) type {
-    // Compile-error if a non-float is specified
     switch (@typeInfo(Float)) {
         .float => |f| switch (f.bits) {
             32, 64 => {},
@@ -330,8 +301,8 @@ pub fn Noise(comptime Float: type) type {
         ///
         /// Default: `.distance`
         cellular_return: CellularReturnType = .distance,
-        /// The maximum distance a cellular point can move from it's grid position.
-        /// Setting this higher than `1.0` will cause artifacts.
+        /// The maximum distance a cellular point can move from its grid position.
+        /// Values above `1.0` cause artifacts.
         ///
         /// Default: `1.0`
         cellular_jitter_mod: Float = 1.0,
@@ -345,7 +316,7 @@ pub fn Noise(comptime Float: type) type {
         domain_warp_amp: Float = 1.0,
         const Dim = enum { d2, d3 };
         /// Lanes processed per SIMD chunk, tuned to the target's vector width.
-        const GridLanes = std.simd.suggestVectorLength(Float) orelse 1;
+        const grid_lanes = std.simd.suggestVectorLength(Float) orelse 1;
 
         const CoordSource = union(enum) {
             /// Samples a regular grid: index `(z * height + y) * width + x` is sampled at
@@ -394,7 +365,7 @@ pub fn Noise(comptime Float: type) type {
         pub fn fillGrid2D(state: *const State, out: []Float, width: usize, x0: Float, y0: Float, spacing: Float) void {
             std.debug.assert(width != 0);
             std.debug.assert(out.len % width == 0);
-            fillGridDispatch(GridLanes, .d2, state, out, .{ .grid = .{ .width = width, .depth = 1, .x0 = x0, .y0 = y0, .z0 = 0, .spacing = spacing } });
+            fillGridDispatch(grid_lanes, .d2, state, out, .{ .grid = .{ .width = width, .depth = 1, .x0 = x0, .y0 = y0, .z0 = 0, .spacing = spacing } });
         }
 
         /// Fills `out` with 2D noise samples at explicit coordinates.
@@ -402,7 +373,7 @@ pub fn Noise(comptime Float: type) type {
         /// `out[i]` is the noise at `(xs[i], ys[i])`; the slices must have equal lengths.
         pub fn fillNoise2DGrid(state: *const State, out: []Float, xs: []const Float, ys: []const Float) void {
             std.debug.assert(out.len == xs.len and out.len == ys.len);
-            fillGridDispatch(GridLanes, .d2, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = &.{} } });
+            fillGridDispatch(grid_lanes, .d2, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = &.{} } });
         }
 
         /// Generates 2D noise at given position using the currently configured state.
@@ -412,19 +383,6 @@ pub fn Noise(comptime Float: type) type {
             return mapNoiseToRange(state.genNoise2D(x, y), T, min, max);
         }
 
-        /// Generates 2D noise at given position using the currently configured state.
-        /// The return value is mapped to the range of the specified numeric type.
-        pub fn genNoise2DAsType(state: *const State, x: Float, y: Float, comptime T: type) T {
-            return switch (@typeInfo(T)) {
-                .int => {
-                    const min = comptime std.math.minInt(T);
-                    const max = comptime std.math.maxInt(T);
-                    return genNoise2DRange(state, x, y, T, min, max);
-                },
-                .float => @floatCast(genNoise2D(state, x, y)),
-                else => @compileError(@typeName(T) ++ " is not a numeric type"),
-            };
-        }
         /// Generates 3D noise at given position using the currently configured state.
         /// The return value is normalized to the range of `-1.0` to `1.0`.
         inline fn genNoise3DFractal(comptime noise: NoiseType, state: *const State, seed: i32, xv: @Vector(1, Float), yv: @Vector(1, Float), zv: @Vector(1, Float)) @Vector(1, Float) {
@@ -466,7 +424,7 @@ pub fn Noise(comptime Float: type) type {
             std.debug.assert(width != 0);
             std.debug.assert(depth != 0);
             std.debug.assert(out.len % (width * depth) == 0);
-            fillGridDispatch(GridLanes, .d3, state, out, .{ .grid = .{ .width = width, .depth = depth, .x0 = x0, .y0 = y0, .z0 = z0, .spacing = spacing } });
+            fillGridDispatch(grid_lanes, .d3, state, out, .{ .grid = .{ .width = width, .depth = depth, .x0 = x0, .y0 = y0, .z0 = z0, .spacing = spacing } });
         }
 
         /// Fills `out` with 3D noise samples at explicit coordinates.
@@ -474,7 +432,7 @@ pub fn Noise(comptime Float: type) type {
         /// `out[i]` is the noise at `(xs[i], ys[i], zs[i])`; the slices must have equal lengths.
         pub fn fillNoise3DGrid(state: *const State, out: []Float, xs: []const Float, ys: []const Float, zs: []const Float) void {
             std.debug.assert(out.len == xs.len and out.len == ys.len and out.len == zs.len);
-            fillGridDispatch(GridLanes, .d3, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = zs } });
+            fillGridDispatch(grid_lanes, .d3, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = zs } });
         }
 
         /// Generates 3D noise at given position using the currently configured state.
@@ -484,19 +442,6 @@ pub fn Noise(comptime Float: type) type {
             return mapNoiseToRange(state.genNoise3D(x, y, z), T, min, max);
         }
 
-        /// Generates 3D noise at given position using the currently configured state.
-        /// The return value is mapped to the range of the specified numeric type.
-        pub fn genNoise3DAsType(state: *const State, x: Float, y: Float, z: Float, comptime T: type) T {
-            return switch (@typeInfo(T)) {
-                .int => {
-                    const min = comptime std.math.minInt(T);
-                    const max = comptime std.math.maxInt(T);
-                    return genNoise3DRange(state, x, y, z, T, min, max);
-                },
-                .float => @floatCast(genNoise3D(state, x, y, z)),
-                else => @compileError(@typeName(T) ++ " is not a numeric type"),
-            };
-        }
         pub inline fn domainWarp2D(state: *const State, x: *Float, y: *Float) void {
             var xs: @Vector(1, Float) = .{x.*};
             var ys: @Vector(1, Float) = .{y.*};
@@ -518,9 +463,8 @@ pub fn Noise(comptime Float: type) type {
         /// warp; the slices must have equal lengths.
         pub fn fillWarp2DGrid(state: *const State, out_xs: []Float, out_ys: []Float, xs: []const Float, ys: []const Float) void {
             std.debug.assert(out_xs.len == out_ys.len and out_xs.len == xs.len and out_xs.len == ys.len);
-            warpGrid2DImpl(GridLanes, state, out_xs, out_ys, xs, ys);
+            warpGrid2DImpl(grid_lanes, state, out_xs, out_ys, xs, ys);
         }
-        // End of public API
 
         inline fn doSingleDomainWarp2DVec(state: *const State, comptime N: usize, seed: i32, amp: Float, freq: Float, x: @Vector(N, Float), y: @Vector(N, Float), xp: *@Vector(N, Float), yp: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
@@ -557,12 +501,10 @@ pub fn Noise(comptime Float: type) type {
             return @round(f);
         }
 
-        /// Broadcasts a value to vector type `T`.
         inline fn splat(comptime T: type, value: anytype) T {
             return @splat(value);
         }
 
-        /// Converts an integer to vector type `T`.
         inline fn floatFromInt(comptime T: type, value: anytype) T {
             return @floatFromInt(value);
         }
@@ -2622,21 +2564,21 @@ pub fn Noise(comptime Float: type) type {
             var y0 = yy - @as(Float, @floatFromInt(j));
             var z0 = zz - @as(Float, @floatFromInt(k));
 
-            var xNSign = @as(i32, @trunc(-x0 - 1.0)) | 1;
-            var yNSign = @as(i32, @trunc(-y0 - 1.0)) | 1;
-            var zNSign = @as(i32, @trunc(-z0 - 1.0)) | 1;
+            var x_n_sign = @as(i32, @trunc(-x0 - 1.0)) | 1;
+            var y_n_sign = @as(i32, @trunc(-y0 - 1.0)) | 1;
+            var z_n_sign = @as(i32, @trunc(-z0 - 1.0)) | 1;
 
             // The ±1 sign is tracked as a float too; negating ±1.0 is exact,
             // so one int->float conversion per axis serves both the corner-2
             // offsets and the loop-bottom x0/y0/z0 updates (the bottom would
             // otherwise re-convert the same, not-yet-negated sign).
-            var xNSignf: Float = @floatFromInt(xNSign);
-            var yNSignf: Float = @floatFromInt(yNSign);
-            var zNSignf: Float = @floatFromInt(zNSign);
+            var x_n_sign_f: Float = @floatFromInt(x_n_sign);
+            var y_n_sign_f: Float = @floatFromInt(y_n_sign);
+            var z_n_sign_f: Float = @floatFromInt(z_n_sign);
 
-            var ax0 = xNSignf * -x0;
-            var ay0 = yNSignf * -y0;
-            var az0 = zNSignf * -z0;
+            var ax0 = x_n_sign_f * -x0;
+            var ay0 = y_n_sign_f * -y0;
+            var az0 = z_n_sign_f * -z0;
 
             i *%= prime_x;
             j *%= prime_y;
@@ -2673,17 +2615,17 @@ pub fn Noise(comptime Float: type) type {
                 var y1 = y0;
                 var z1 = z0;
                 if (ax0 >= ay0 and ax0 >= az0) {
-                    x1 += xNSignf;
-                    b = @mulAdd(Float, -(2.0 * xNSignf), x1, b);
-                    ii -= xNSign *% prime_x;
+                    x1 += x_n_sign_f;
+                    b = @mulAdd(Float, -(2.0 * x_n_sign_f), x1, b);
+                    ii -= x_n_sign *% prime_x;
                 } else if (ay0 > ax0 and ay0 >= az0) {
-                    y1 += yNSignf;
-                    b = @mulAdd(Float, -(2.0 * yNSignf), y1, b);
-                    jj -= yNSign *% prime_y;
+                    y1 += y_n_sign_f;
+                    b = @mulAdd(Float, -(2.0 * y_n_sign_f), y1, b);
+                    jj -= y_n_sign *% prime_y;
                 } else {
-                    z1 += zNSignf;
-                    b = @mulAdd(Float, -(2.0 * zNSignf), z1, b);
-                    kk -= zNSign *% prime_z;
+                    z1 += z_n_sign_f;
+                    b = @mulAdd(Float, -(2.0 * z_n_sign_f), z1, b);
+                    kk -= z_n_sign *% prime_z;
                 }
 
                 if (b > 0) {
@@ -2702,22 +2644,22 @@ pub fn Noise(comptime Float: type) type {
                 ay0 = 0.5 - ay0;
                 az0 = 0.5 - az0;
 
-                x0 = xNSignf * ax0;
-                y0 = yNSignf * ay0;
-                z0 = zNSignf * az0;
+                x0 = x_n_sign_f * ax0;
+                y0 = y_n_sign_f * ay0;
+                z0 = z_n_sign_f * az0;
 
                 a += (0.75 - ax0) - (ay0 + az0);
 
-                i += (xNSign >> 1) & prime_x;
-                j += (yNSign >> 1) & prime_y;
-                k += (zNSign >> 1) & prime_z;
+                i += (x_n_sign >> 1) & prime_x;
+                j += (y_n_sign >> 1) & prime_y;
+                k += (z_n_sign >> 1) & prime_z;
 
-                xNSign = -xNSign;
-                yNSign = -yNSign;
-                zNSign = -zNSign;
-                xNSignf = -xNSignf;
-                yNSignf = -yNSignf;
-                zNSignf = -zNSignf;
+                x_n_sign = -x_n_sign;
+                y_n_sign = -y_n_sign;
+                z_n_sign = -z_n_sign;
+                x_n_sign_f = -x_n_sign_f;
+                y_n_sign_f = -y_n_sign_f;
+                z_n_sign_f = -z_n_sign_f;
 
                 seed_value +%= 1293373;
             }

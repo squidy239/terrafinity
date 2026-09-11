@@ -21,6 +21,7 @@ pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytyp
             };
         }
 
+        /// True for points inside the outer sphere and outside the carved noise.
         pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
             if (!self.sphere.isPointInside(p)) return false;
             if (self.inner_sphere.isPointInside(p)) return true;
@@ -32,17 +33,17 @@ pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytyp
         }
     };
 }
-
-pub fn projectEquirectangular(shapeP: @Vector(3, f64), sphere_radius: f64) @Vector(2, f64) {
-    const x = shapeP[0];
-    const y = shapeP[1];
-    const z = shapeP[2];
+/// Maps a sphere-centered offset to flat texture coordinates. Returns origin for a zero offset.
+pub fn projectEquirectangular(shape_p: @Vector(3, f64), sphere_radius: f64) @Vector(2, f64) {
+    const x = shape_p[0];
+    const y = shape_p[1];
+    const z = shape_p[2];
 
     const r = std.math.sqrt(x * x + y * y + z * z);
     if (r == 0) return @Vector(2, f64){ 0.0, 0.0 };
 
-    const phi = std.math.asin(std.math.clamp(y / r, -1.0, 1.0)); // latitude
-    const lambda = std.math.atan2(z, x); // longitude
+    const phi = std.math.asin(std.math.clamp(y / r, -1.0, 1.0));
+    const lambda = std.math.atan2(z, x);
 
     return @Vector(2, f64){ sphere_radius * lambda, sphere_radius * phi };
 }

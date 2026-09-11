@@ -3,8 +3,8 @@ const utils = @import("utils.zig");
 
 pub fn Cone(comptime t: type) type {
     return struct {
-        position: @Vector(3, t), // top center of cone
-        axis: @Vector(3, t), // normalized axis (direction from top → base)
+        position: @Vector(3, t), // Top center of the cone.
+        axis: @Vector(3, t), // Unit axis from top to base.
         one_d_length: t,
         length: t,
         radius_top: t,
@@ -12,7 +12,6 @@ pub fn Cone(comptime t: type) type {
         precalc_radius: t,
         bounding_box: @Vector(6, t),
         pub fn init(pos: @Vector(3, t), axis_vec: @Vector(3, t), cone_length: t, base_r: t, top_r: t) @This() {
-            // normalize axis
             const norm_axis = axis_vec / @as(@Vector(3, t), @splat(@sqrt(utils.dot(axis_vec, axis_vec))));
             var cone: @This() = .{
                 .position = pos,

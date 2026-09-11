@@ -88,10 +88,8 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
         std.math.clamp(fade_steepness / params.fade_slope, 0.0, 1.0)
     else
         1.0;
-    // Detail must stay positive: 0 makes the reciprocal infinite and
-    // pow(1, inf) == 1 silently latches the mask fully open, while a
-    // negative value flips the exponent sign so the mask grows instead of
-    // crushing fine octaves. Assert in debug, clamp for release.
+    // Keep `detail` positive: zero latches the mask open, and a negative
+    // value inverts the crush. Assert in debug; clamp in release.
     if (params.detail <= 0) std.log.warn("erosion: detail {d} <= 0; clamping to {d}", .{ params.detail, min_detail });
     std.debug.assert(params.detail > 0);
     const inv_detail: f32 = 1.0 / @max(params.detail, min_detail);
@@ -224,11 +222,8 @@ fn slopeFadeMask(steepness: f32) f32 {
 /// restricting fine octaves to areas the coarse octaves already carved.
 /// At zero the mask latches closed, which is what keeps flat ground uncarved.
 ///
-/// NOTE: intentional algorithm change (rebake). This previously computed
-/// `@exp(@log(x) / power)` per octave; the hoisted `std.math.pow` form
-/// shifts terrain ~1 ULP per octave, so outputs differ slightly from
-/// pre-patch builds. The smoothstep side is bit-exact: smoothStart(t,
-/// unit_ramp) == the old easeOut(t).
+/// NOTE: rebake — the hoisted `pow` form shifts terrain ~1 ULP per octave.
+/// The smoothstep side stays bit-exact.
 fn powInv(x: f32, inv_power: f32) f32 {
     if (x <= 0) return 0;
     return std.math.pow(f32, x, inv_power);
