@@ -2,14 +2,14 @@
 
 ## Commands
 
-Use these full commands without modification after each change and ensure the play test runs without errors:
+Use these full commands without modification. After each change, run the gates the `verify-change` skill (`.agents/skills/verify-change/SKILL.md`) selects: always `zig fmt .` + `zig build`; filtered or full tests per environment; the play test only when the change is user-visible.
 
 - normal build: `zig build`
 - run and open to menu: `zig build run`
 - run and open to a game: `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=[number of seconds to run, 5-10 is a good default for a short test]`
 - format code: `zig fmt .`
 
-Do not git stash or commit, it can mess up git history.
+Do not git stash, commit, checkout, or reset; it can mess up git history. Read-only git (`diff`, `log`, `status`) is fine.
 
 ## Running tests
 
@@ -26,6 +26,12 @@ When a scout or audit proposes a change, independently verify its claim before i
 ## Adding to this file
 
 Whenever you learn something new that would fit well here and be useful in the future, add it to this file. Keep it tight: state the rule once, compress instances, drop anything that restates a rule already written.
+
+## Skills
+
+Repo skills live in `.agents/skills/`; the trigger list decides, not guesswork. `concurrency-io`: background tasks, locks, upload/staging, entity registry, `Io`. `generator-plugin`: generators, `generator_api`, config trees, config editor UI. `verify-change`: which gates to run after any change. `profile-tracy`: frame times, zones, contention. `prune`: dead-code scan, one candidate per turn. `debate`: competing designs. `fanout-orchestrate`: parallel workers. `simplify` + `style-review`: rewrite discipline and guideline review. `improve-anything`: open-ended improvement modes. `asd-ste100`: disambiguating agent-consumed English.
+
+`ideas.md` is an append-only research log plus periodic triage: `research` mode appends one short entry with links and never reorders; `triage` mode merges duplicates, drops done items, and sorts by benefit-to-effort.
 
 # Naming, Style & Code Quality
 
@@ -201,7 +207,7 @@ row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
 - **Hash deviation:** the reference's `fract` cell jitter loses precision far from origin; `phacelle.zig` uses `fastnoise.hash2D`/`hash2DVec` with low/high 16 bits mapped to [-0.5, 0.5]. Exact at ±100,000-block coordinates.
 - **Benchmark (Debug, Xeon):** base `genTerrainHeight` ≈ 540 µs/chunk; with filter ≈ 6.4 ms/chunk (~12x the base pipeline). Gradient stage ≈ 4 extra batched warp+noise fills; Phacelle's 16 cells × 4 octaves of transcendentals dominate. Done levers: polynomial `exp(-2d^2)` weight (`bellWeight`, ~3e-7), LOD octave drop, `@Vector(16, f32)` cell loop.
 - **Build-stable direction:** `grad_x`/`grad_z` were `undefined` and `addGradientSamples`' first pass reads them (`grad_row + shaped*k`) — uninitialized stack content is build-dependent, so ReleaseFast vs Debug rotated the whole gully pattern. Fixes: zero-init accumulators, `@mulAdd` so accumulation cannot FMA-contract differently per build, blend the seeded direction toward the assumed-slope direction below the 1e-4 gradient noise floor (`gradient_floor` in `erosion.zig`), since fastnoise fills run `@setFloatMode(.optimized)` and are never bit-stable across build modes. FP reassociation anywhere in this pipeline changes the terrain bit pattern; keep operation order when refactoring.
-- **Config compat:** `erosion_strength` stays in `Params` with `.skip = true` in `field_specs` (superseded `erosion_fade_altitude` follows the same pattern). See Config compat below for the declaration-default and `InvalidConfig` rules.
+- **Config compat:** superseded fields (`erosion_strength`, `erosion_fade_altitude`) stay declared with `.skip = true`; see Config compat below.
 
 ## JitteredGrid placement (Planet generator)
 
@@ -235,7 +241,7 @@ Widget ids collide when the same `@src()` line runs for multiple params — pass
 
 # Testing
 
-Run `zig build test --summary all` after each change. Use `-Dtest_filter="substring"` only when running a single test; never as a substitute for the full suite.
+Run the gates the `verify-change` skill selects after each change: `zig build test --summary all` where the environment supports it, else `zig build` plus `-Dtest_filter` for the touched areas (the full suite has pre-existing wio/wayland crashes in headless environments). Use `-Dtest_filter="substring"` for scoped runs; never as a substitute for the suite where the suite runs.
 Write few tests: just enough to cover possible bugs. Every file should have a `refAllDecls` test (forces every decl to compile). Allocation-failure tests are good. Skip useless tests that restate the implementation without covering a real failure mode.
 
 ## Allocation failure testing

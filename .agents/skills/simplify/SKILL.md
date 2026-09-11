@@ -14,15 +14,15 @@ Simplify code while preserving all functionality. The priority order is:
 
 **This is not a review skill.** Do not report violations, do not flag naming issues, do not check style. Actively rewrite code to be simpler. If a simplification principle can be applied, apply it directly — don't just note it.
 
-Stop only when no further simplifications remain that would improve the code without harming readability, performance, or correctness.
+Stop after at most 3 passes, or when the adversarial check reports DONE — whichever comes first.
 
 ## Work Partitioning
 
 Files are the unit of work:
 
 - Spawn one sub-agent per file that needs simplification.
-- Each sub-agent receives the **full file contents** and the simplification principles (sections 1–3 below). It returns the complete rewritten file content.
-- Sub-agents operate on disjoint files, so there are no merge conflicts. The parent agent writes each returned content back to its file.
+- Each sub-agent receives the file path and the simplification principles (sections 1–3 below), reads the file itself, and edits it directly with the edit tool.
+- Sub-agents operate on disjoint files, so there are no merge conflicts.
 
 ## Simplification Principles
 
@@ -50,18 +50,17 @@ Include these principles verbatim in every simplify sub-agent prompt and in the 
 
 ## Iterative Process
 
-This skill runs in a loop until no further simplifications remain:
+This skill runs at most 3 passes, then reports what remains:
 
 ### Step 1: Simplify Pass
 
-Spawn one sub-agent per file. Do it to all code files provided, not just zig. Each sub-agent's prompt must include:
+Spawn one sub-agent per file (disjoint files only, per the `fanout-orchestrate` skill). Do it to all code files provided, not just zig. Each sub-agent edits its file directly with the edit tool and returns a brief summary. Each sub-agent's prompt must include:
 
 - The file path
 - The complete Simplification Principles above (sections 1–3 verbatim)
 - Simplifications MUST reduce net line count, not increase it
-- The instruction: "Edit this file to be simpler using the principles. Use percise, targeted edits. Return a brief summary of what you changed."
-
-Each sub-agent returns the rewritten file. Write each result back to its file.
+- The instruction: "Edit this file to be simpler using the principles. Use precise, targeted edits. Return a brief summary of what you changed."
+- Skip gates, formatters, and tests; the orchestrator verifies once at the end.
 
 ### Step 2: Format
 
@@ -73,11 +72,11 @@ Run `zig build`. If it fails, fix the errors and retry from step 2.
 
 ### Step 4: Unit Tests
 
-Run `zig build test`. If any test fails, fix the regression and retry from step 2.
+Run the `verify-change` skill's test gate (filtered tests for touched areas; full suite where the environment supports it — never the crashing headless full suite as proof). If any test fails, fix the regression and retry from step 2.
 
 ### Step 5: Play Test
 
-Run `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=5`. If it fails, fix and retry from step 2.
+Only when the simplification touches a user-visible path: `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=5`. If it fails, fix and retry from step 2.
 
 ### Step 6: Adversarial Check
 
@@ -100,14 +99,15 @@ Its instructions:
 
 ### Step 7: Loop or Finish
 
-- If the adversary responds with a table of findings, feed those findings into the next simplify pass (go back to step 1). The parent agent reads the table and includes specific findings in the simplify sub-agent prompts so they target those remaining issues.
+- If the adversary responds with a table of findings and fewer than 3 passes have run, feed those findings into the next simplify pass (go back to step 1). The parent agent reads the table and includes specific findings in the simplify sub-agent prompts so they target those remaining issues.
 - If the adversary responds with "DONE", the process is complete.
+- After 3 passes with findings still open, stop and report the remainder — some issues need human judgment.
 
 ## Final Verification
 
-After the adversarial sub-agent says "DONE", run a final verification:
+After the loop ends, run the `verify-change` skill gates:
 
 - `zig fmt .`
 - `zig build`
-- `zig build test`
-- `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=5`
+- the test gate (filtered tests for touched areas; full suite where the environment supports it)
+- the play test only when a user-visible path changed

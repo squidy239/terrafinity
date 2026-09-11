@@ -11,7 +11,7 @@ The `AGENTS.md` file lives at the project root. Resolve its path once and pass i
 
 ## Process
 
-Run an **iterate-until-clean** loop with up to 3 iterations. Each iteration:
+Run an **iterate-until-clean** loop with up to 5 iterations. Each iteration:
 
 1. **Review** — 3 sub-agents in parallel, each checking one section of AGENTS.md against all target files.
 2. **Synthesize** — compile findings. If zero violations, skip to final verification.
@@ -23,11 +23,7 @@ Stop when zero violations are found, or after 5 iterations (report remaining vio
 
 ## Step 1: Determine Target Files
 
-If the user names specific files, use those. Otherwise discover all project `.zig` source files (POSIX-compatible):
-
-```
-find src -name '*.zig' ! -path '*/test*'
-```
+If the user names specific files, use those. Otherwise discover project `.zig` files with the `glob` tool (`src/**/*.zig`); never shell `find`/`ls`.
 
 Only review files under `src/`. Skip `zig-out/`, `zig-cache/`, `.zvm/`.
 
@@ -84,27 +80,27 @@ If none, output `NO VIOLATIONS`.
 
 The `symbol or location` field names the function, struct, variable, or other identifier involved — this survives line-shifting during the fix phase and lets fixers locate the code by name rather than stale line numbers.
 
-#### Phase 1: Naming Conventions & Comments
+#### Phase 1: Naming, Style & Code Quality
 
-> Read `{AGENTS_PATH}` from the heading `# Codebase Naming Conventions & Guidelines` through the end of `## Comments` (stop before `## Quick Reference Cheat Sheet`).
+> Read `{AGENTS_PATH}` under `# Naming, Style & Code Quality`: `## Comments`, `## Naming quick reference`, `## Structural hygiene and function size`, `## Control flow`, `## State and mutation`, `## Capture syntax over index variables`, `## Array literals`.
 >
 > Review the provided files for violations of every rule in those sections, including the comment rules listed above under `## Comment Rules` in this skill.
 >
 > Output one pipe-delimited line per violation, or `NO VIOLATIONS`.
 
-#### Phase 2: Structure and Control Flow
+#### Phase 2: Toolchain Facts
 
-> Read `{AGENTS_PATH}` from the heading `# Code Simplicity and Quality Standards` through the end of `### Use Capture Syntax Over Index Variables` (stop before `## Comptime Pointer Alignment and \`@embedFile\``).
+> Read `{AGENTS_PATH}` under `# Zig 0.16.0 Toolchain Facts`: `## std.Io quick guide`, `## Pointer safety patterns`, `## Toolchain footguns`.
 >
 > Review the provided files for violations of every rule in that section.
 >
 > Output one pipe-delimited line per violation, or `NO VIOLATIONS`.
 
-#### Phase 3: Patterns and Anti-Patterns
+#### Phase 3: Concurrency, GPU & Config Patterns
 
-> Read `{AGENTS_PATH}` from the heading `## Comptime Pointer Alignment and \`@embedFile\`` through the end of `## Per-Frame Fence Wait Pattern` (stop before `# Modify this file`).
+> Read `{AGENTS_PATH}` under `# Concurrency, Vulkan & GPU`, `# Worldgen & Terrain`, and `# Config, Persistence & Plugins`.
 >
-> Review the provided files for violations of every rule in that section.
+> Review the provided files for violations of every rule in those sections.
 >
 > Output one pipe-delimited line per violation, or `NO VIOLATIONS`.
 
@@ -115,13 +111,13 @@ Parse sub-agent outputs by splitting on `|`. Build a per-iteration report:
 ```
 ## Iteration N
 
-### Naming Conventions & Comments (Phase 1)
+### Naming, Style & Code Quality (Phase 1)
 (N violations, or "No violations found")
 
-### Structure and Control Flow (Phase 2)
+### Toolchain Facts (Phase 2)
 ...
 
-### Patterns and Anti-Patterns (Phase 3)
+### Concurrency, GPU & Config Patterns (Phase 3)
 ...
 
 ### Summary — Total violations: N
@@ -150,10 +146,10 @@ Group violations by file. For each file with violations, spawn a fixer sub-agent
 > 1. Read the file.
 > 2. Apply ALL fixes. Make minimal changes — do not refactor unrelated code. Locate code by the `<symbol>` field; line numbers from the original review are stale, so search for the symbol name.
 > 3. **Do not rename public symbols that have callers in other files.** If a fix would require cross-file changes, skip it and note it as deferred with the reason `cross-file`.
-> 4. > Attempt to have as close to net neutral or negitive line count changes as possible with your changes.
+> 4. Keep line-count change net neutral or negative where possible (fixes only, no unrelated refactoring).
 > 5. If a fix renames a symbol that is only used within this file, update all call sites within the file.
-> 5. Run `zig fmt` on the file after editing.
-> 6. Output: `FIXED: <file> — N violations fixed` or `PARTIAL: <file> — N fixed, M deferred (<reason>)`.
+> 6. Run `zig fmt` on the file after editing.
+> 7. Output: `FIXED: <file> — N violations fixed` or `PARTIAL: <file> — N fixed, M deferred (<reason>)`.
 
 Cross-file renames are forbidden in the fix phase. This guarantees the build check in 2d will pass (barring other errors). Violations that require cross-file changes appear as deferred and are re-flagged in the next review iteration with fully updated symbol information.
 
