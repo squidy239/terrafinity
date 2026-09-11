@@ -128,7 +128,7 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
     }
     for (frame_params) |*fp| {
         const slice = try memory.cpuToGpu().alignedAlloc(Params, gpu.cull_buffer_alignment, 1);
-        slice[0] = .{};
+        slice[0] = undefined;
         const info = memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slice.ptr);
         fp.* = .{ .slice = slice, .buffer = info.buffer, .offset = info.offset };
         allocated += 1;
@@ -208,13 +208,7 @@ pub fn recreate(self: *DepthPyramid, io: std.Io, depth_extent: vk.Extent2D) !voi
 /// the same transform the depth buffer was rendered with; `player_pos` is that view's
 /// camera position (w = 1).
 pub fn writeParams(self: *DepthPyramid, frame_idx: u32, projview: [16]f32, player_pos: [4]f32, enabled: bool) void {
-    self.frame_params[frame_idx].slice[0] = .{
-        .projview = projview,
-        .occlusion_player_pos = player_pos,
-        .pyramid_size = .{ @floatFromInt(self.width), @floatFromInt(self.height) },
-        .mip_count = @intCast(self.mip_views.len),
-        .enabled = @intFromBool(enabled),
-    };
+    self.frame_params[frame_idx].slice[0] = .{ .projview = projview, .occlusion_player_pos = player_pos, .pyramid_size = .{ @floatFromInt(self.width), @floatFromInt(self.height) }, .mip_count = @intCast(self.mip_views.len), .enabled = @intFromBool(enabled) };
 }
 
 /// Pushes the occlusion descriptor set (sampled pyramid + params) for a compute

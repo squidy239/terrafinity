@@ -1,18 +1,18 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 
-pub fn Cone(comptime t: type) type {
+pub fn Cone(comptime T: type) type {
     return struct {
-        position: @Vector(3, t), // Top center of the cone.
-        axis: @Vector(3, t), // Unit axis from top to base.
-        one_d_length: t,
-        length: t,
-        radius_top: t,
-        radius_base: t,
-        precalc_radius: t,
-        bounding_box: @Vector(6, t),
-        pub fn init(pos: @Vector(3, t), axis_vec: @Vector(3, t), cone_length: t, base_r: t, top_r: t) @This() {
-            const norm_axis = axis_vec / @as(@Vector(3, t), @splat(@sqrt(utils.dot(axis_vec, axis_vec))));
+        position: @Vector(3, T),
+        axis: @Vector(3, T),
+        one_d_length: T,
+        length: T,
+        radius_top: T,
+        radius_base: T,
+        precalc_radius: T,
+        bounding_box: @Vector(6, T),
+        pub fn init(pos: @Vector(3, T), axis_vec: @Vector(3, T), cone_length: T, base_r: T, top_r: T) @This() {
+            const norm_axis = axis_vec / @as(@Vector(3, T), @splat(@sqrt(utils.dot(axis_vec, axis_vec))));
             var cone: @This() = .{
                 .position = pos,
                 .axis = norm_axis,
@@ -27,7 +27,7 @@ pub fn Cone(comptime t: type) type {
             return cone;
         }
 
-        pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
+        pub fn isPointInside(self: *const @This(), p: @Vector(3, T)) bool {
             const v = p - self.position;
             const dist = utils.dot(v, self.axis);
 
@@ -36,13 +36,13 @@ pub fn Cone(comptime t: type) type {
                 return false;
             }
 
-            const r = @mulAdd(t, self.precalc_radius, dist, self.radius_base);
+            const r = @mulAdd(T, self.precalc_radius, dist, self.radius_base);
             return utils.dot(v, v) - dist * dist < r * r;
         }
 
         pub fn updateBoundingBox(self: *@This()) void {
-            const base = self.position + self.axis * @as(@Vector(3, t), @splat(self.length));
-            const r: @Vector(3, t) = @splat(@max(self.radius_top, self.radius_base));
+            const base = self.position + self.axis * @as(@Vector(3, T), @splat(self.length));
+            const r: @Vector(3, T) = @splat(@max(self.radius_top, self.radius_base));
             const lo = @floor(@min(self.position, base) - r);
             const hi = @ceil(@max(self.position, base) + r);
             self.bounding_box = .{ lo[0], hi[0], lo[1], hi[1], lo[2], hi[2] };

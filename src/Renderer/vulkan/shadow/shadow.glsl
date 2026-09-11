@@ -95,6 +95,7 @@ float sampleShadowCascade(int cascade, vec3 p) {
 
     vec3 uv = vec3(ndc.xy * 0.5 + 0.5, ndc.z);
 
+    // Golden angle pi*(3-sqrt(5)): successive taps spread evenly over the disk.
     const float golden_angle = 2.399963229728653;
     const int tap_count = 16;
     float rot = shadowHash(gl_FragCoord.xy + float(cascade) * 31.0) * 6.283185307179586;

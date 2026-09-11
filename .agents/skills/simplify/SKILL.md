@@ -48,6 +48,8 @@ Include these principles verbatim in every simplify sub-agent prompt and in the 
 
 **Constants Over Magic Values:** Replace magic numbers and hardcoded string literals with named constants.
 
+**Undefined Over Dummy Values:** When a value is always overwritten before any read, declare it `= undefined`, never a dummy zero or random filler. `undefined` signifies "no defined value" and lets safety-checked builds catch a missed write; a plausible placeholder hides that bug.
+
 ## Iterative Process
 
 This skill runs at most 3 passes, then reports what remains:

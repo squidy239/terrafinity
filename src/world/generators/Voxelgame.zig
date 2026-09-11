@@ -441,9 +441,9 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
     instance.source = .{
         .data = instance,
         .getTerrainHeight = null,
-        .getBlocks = &instanceGenBlocks,
+        .getBlocks = generator_api.instanceGenBlocks(VoxelgameInstance),
         .placeStructures = null, // trees are generated inline during block gen
-        .deinit = &instanceDeinit,
+        .deinit = generator_api.instanceDeinit(VoxelgameInstance),
         .save = null,
     };
     return instance;
@@ -463,9 +463,8 @@ fn columnSpawnHeight(self: *const Generator, x: f32, z: f32) f32 {
 
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *VoxelgameInstance = @ptrCast(@alignCast(instance));
-    const seed = self.generator.params.seed orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
     // No sea level: water fills below y = 0, handled by the shared margin.
-    return generator_api.proposeSpawnField(seed, center.*, radius, attempts, nonce, 0, &self.generator, columnSpawnHeight);
+    return generator_api.proposeSpawnField(self.generator.params.seed, center.*, radius, attempts, nonce, 0, &self.generator, columnSpawnHeight);
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
@@ -483,22 +482,6 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
 
 comptime {
     @export(&generator_api_vtable, .{ .name = generator_api.api_export_name });
-}
-
-fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-    _ = allocator;
-    _ = world;
-    const self: *VoxelgameInstance = @ptrCast(@alignCast(source.data));
-    try self.generator.genChunk(io, blocks, chunk_pos, grid_buffer);
-    return .{ .from_disk = false, .structures = false };
-}
-
-fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-    _ = io;
-    _ = world;
-    const self: *VoxelgameInstance = @ptrCast(@alignCast(source.data));
-    self.generator.terrain_height_cache.deinit(allocator);
-    allocator.destroy(self);
 }
 
 test "proposeSpawn is deterministic and plausible" {

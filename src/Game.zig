@@ -698,8 +698,9 @@ pub fn recreateWorld(
 
 fn cancelFuture(io: std.Io, future: anytype) void {
     if (future.*) |*f| {
-        f.cancel(io) catch {};
-        _ = f.await(io) catch {};
+        // Cancel stores the result for await to re-report; ignore it here and log once below.
+        _ = f.cancel(io) catch {};
+        _ = f.await(io) catch |err| std.log.err("background task failed: {any}", .{err});
         future.* = null;
     }
 }
@@ -1371,7 +1372,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
 }
 
 fn spiralSegmentEnd(start: [2]i32, segment_index: *usize) [2]i32 {
-    const directions = [_][2]i32{ .{ 0, 1 }, .{ 1, 0 }, .{ 0, -1 }, .{ -1, 0 } };
+    const directions: [4][2]i32 = .{ .{ 0, 1 }, .{ 1, 0 }, .{ 0, -1 }, .{ -1, 0 } };
     const segment_length: i32 = @intCast(segment_index.* / 2 + 1);
     const direction = directions[segment_index.* % 4];
     segment_index.* += 1;

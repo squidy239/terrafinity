@@ -74,7 +74,7 @@ Detailed rules: non-type/non-namespace/non-callable identifiers are `snake_case`
 ## Control flow
 
 - **Guard clauses, flat hierarchy:** early returns over nesting; the happy path runs down the left side.
-- **Fail fast:** handle errors immediately, never swallow with empty catches; unrecoverable failure fails loudly.
+- **Fail fast:** handle errors immediately, never swallow with empty catches; unrecoverable failure fails loudly. `catch {}` is only for operations whose failure does not matter (e.g. `yield`); anything material must handle or propagate the error. An error that cannot occur (e.g. `Canceled` in an uncancelable block, a `bufPrint` that cannot practically overflow) takes `catch unreachable`, never `catch {}`.
 - **Inlining:** let the compiler decide, except to change stack-frame count for debugging, to force comptime-ness to propagate, or when real measurements demand it. `inline` restricts the compiler and can harm size, compile speed, and runtime.
 
 ## State and mutation
@@ -82,7 +82,14 @@ Detailed rules: non-type/non-namespace/non-callable identifiers are `snake_case`
 - Declare variables in the deepest scope of use, as close to first use as possible. Never rely on hidden state; a mutating function's name and signature must make that obvious. Bind magic numbers/literals to named constants.
 - **Minimize unsafe casts:** `bitcast` is safer and has fewer footguns than `ptrcast`/`aligncast`. `ptrcast` is almost never right — only for things like casting to/from opaque pointers.
 - **Never use `std.mem.zeroes`:** it bypasses field defaults, so adding a non-zero default or field later silently changes every zeroed site. Prefer `.{}` with defaulted fields, `@splat(0)` for arrays, or a named `fn zeroed() T` constructor.
-- **Initialize before use; prefer optionals over undefined.** An optional set to undefined cannot be null-checked.
+- **Initialize before use; prefer optionals over undefined.** An optional set to undefined cannot be null-checked. When a value is always overwritten before any read (scratch buffer, out-param), declare it `= undefined` — it signifies "no defined value", and safety-checked builds (0xAA fill plus runtime check) catch a missed write. Never substitute a dummy zero or random filler to dodge `undefined`; a plausible-looking placeholder hides the exact bug `undefined` exposes.
+- **Handles over pointers in hot structures:** relations between objects live in flat arrays (`ArrayList`, slices) referenced by compact integer handles (`u32`/`u16` offsets), not raw pointers. Halves index overhead, keeps data contiguous for cache, makes realloc invalidation impossible, and serializes/snapshots via plain copy. Pointers are for out-params, `p_next` chains, and C APIs only.
+- **Reserve first, then mutate infallibly:** a mutation touching two or more structures (buffer + lookup table, list + index) reserves all capacity up front (`ensureUnusedCapacity`, fallible) and only then appends/inserts with `...AssumeCapacity` (infallible). A mid-operation OOM must never leave half-updated state.
+- **Intern repeated strings/ids:** one flat byte buffer plus a table mapping slice to index; identical content stored once, compared by handle.
+
+## `std.enums` quick guide
+
+Use the `std.enums` containers for enum-keyed data instead of hash maps or bool bags: `EnumMap(K, V)` (sparse values), `EnumSet(K)` (flag sets with `insert`/`contains`), `EnumArray(K, V)` (dense, indexable). Iterating a menu/state enum's `std.meta.fields` plus an `EnumSet` of active states replaces ad-hoc bool clusters and stays exhaustive when variants are added.
 
 ## Capture syntax over index variables
 

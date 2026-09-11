@@ -19,7 +19,7 @@ pub const Block = enum(Tag) {
     pub const transparent_end = 2 << 11;
     pub const normal_start = transparent_end;
 
-    pub inline fn isTransparent(self: Block) bool {
+    pub fn isTransparent(self: Block) bool {
         return @intFromEnum(self) < transparent_end;
     }
 

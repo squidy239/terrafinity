@@ -247,9 +247,9 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
     instance.source = .{
         .data = instance,
         .getTerrainHeight = null,
-        .getBlocks = &instanceGenBlocks,
+        .getBlocks = generator_api.instanceGenBlocks(FractalInstance),
         .placeStructures = null,
-        .deinit = &instanceDeinit,
+        .deinit = generator_api.instanceDeinit(FractalInstance),
         .save = null,
     };
     return instance;
@@ -259,24 +259,11 @@ pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.Chun
     return generator_api.getSource(FractalInstance, instance);
 }
 
-fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-    const self: *FractalInstance = @ptrCast(@alignCast(source.data));
-    try self.generator.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
-    return .{ .from_disk = false, .structures = false };
-}
-
-fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-    _ = io;
-    _ = world;
-    const self: *FractalInstance = @ptrCast(@alignCast(source.data));
-    allocator.destroy(self);
-}
-
 /// Samples columns near `center` and reports the first solid one. `y_hint` is
 /// the band ceiling; the host scans down from there to resolve exact feet.
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *FractalInstance = @ptrCast(@alignCast(instance));
-    const seed = self.generator.params.seed orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const seed = self.generator.params.seed orelse return generator_api.no_spawn;
     const y_hint: f64 = @floatFromInt(self.generator.params.terrainmax);
     const capped = @min(attempts, generator_api.spawn_attempt_cap);
     for (0..capped) |i| {
@@ -287,7 +274,7 @@ pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radi
             return .{ .pos = .{ sample[0], y_hint, sample[1] }, .found = true };
         }
     }
-    return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    return generator_api.no_spawn;
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{

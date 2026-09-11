@@ -45,11 +45,20 @@ const uvec2 tex_coord_axes[6] = uvec2[](
     uvec2(0, 1)
 );
 
+// WBOIT depth-heuristic bounds (tuned pair): max_weight scales the z^3 falloff
+// so near transparents dominate; min_weight floors far fragments above zero.
 const float max_weight = 3000.0;
 const float min_weight = 1e-2;
+// Clamps the volume integral to f16 range so sky-referenced pairs cancel cleanly.
 const float max_optical_depth = 64000.0;
+// Must match core.zig's projection near (0.01); the near/depth linearization
+// assumes the infinite reverse-Z projection.
 const float near_plane = 0.01;
+// Minimum per-channel absorption so near-white volumes still extinguish slightly.
 const float absorption_floor = 0.01;
+// Surface ambient endpoints mixed by sun_day. The 0.3 night floor runs brighter
+// than opaque's 0.2 (readable through blending) and must match scatter_ambient
+// in OitCompositor.zig so surface and volume day/night track.
 const float ambient_min = 0.3;
 const float ambient_max = 0.5;
 // Reference distance for sky pixels, which hold the cleared depth 0.0 and

@@ -244,11 +244,7 @@ fn sweepRange(params: ErosionParams, count: usize, origin: [2]f32, step: [2]f32,
     for (0..count) |i| {
         const t = @as(f32, @floatFromInt(i));
         const result = erosionFilter(.{ t * step[0] + origin[0], t * step[1] + origin[1] }, hs, steep, params);
-        if (first) |f| {
-            range = @max(range, @abs(result.height_delta - f));
-        } else {
-            first = result.height_delta;
-        }
+        if (first) |f| range = @max(range, @abs(result.height_delta - f)) else first = result.height_delta;
     }
     return range;
 }
@@ -266,11 +262,7 @@ test "erosion filter stripes a slope along the gully direction" {
         for (0..count) |iy| {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.25, @as(f32, @floatFromInt(iy)) * 0.25 };
             const result = erosionFilter(p, .{ 0.25 * p[0], -0.5, 0.0 }, 0.5, params);
-            if (first) |f| {
-                delta_range = @max(delta_range, @abs(result.height_delta - f));
-            } else {
-                first = result.height_delta;
-            }
+            if (first) |f| delta_range = @max(delta_range, @abs(result.height_delta - f)) else first = result.height_delta;
             if (ix + 1 < count and iy + 1 < count) {
                 const east = erosionFilter(.{ p[0] + 0.25, p[1] }, .{ 0.25 * (p[0] + 0.25), -0.5, 0.0 }, 0.5, params);
                 const north = erosionFilter(.{ p[0], p[1] + 0.25 }, .{ 0.25 * p[0], -0.5, 0.0 }, 0.5, params);
@@ -322,8 +314,10 @@ test "flat terrain collapses the pattern to no carving" {
     // no gully cuts a summit or a stream bed, at any altitude or pattern
     // position.
     const params = ErosionParams{};
-    for ([_][2]f32{ .{ 0.3, 0.4 }, .{ 7.7, -3.1 }, .{ -12.5, 88.2 } }) |p| {
-        for ([_]f32{ 0.9, 0.25, 0.0, -0.25, -0.9 }) |height| {
+    const points: [3][2]f32 = .{ .{ 0.3, 0.4 }, .{ 7.7, -3.1 }, .{ -12.5, 88.2 } };
+    const heights: [5]f32 = .{ 0.9, 0.25, 0.0, -0.25, -0.9 };
+    for (points) |p| {
+        for (heights) |height| {
             const result = erosionFilter(p, .{ height, 0.0, 0.0 }, 0.0, params);
             try std.testing.expectEqual(@as(f32, 0.0), result.height_delta);
         }
@@ -341,11 +335,7 @@ test "steep slopes keep the full pattern regardless of altitude" {
         for (0..count) |iy| {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.25, @as(f32, @floatFromInt(iy)) * 0.25 };
             const result = erosionFilter(p, .{ 0.9, -2.0 * params.fade_slope, 0.0 }, 2.0 * params.fade_slope, params);
-            if (first) |f| {
-                delta_range = @max(delta_range, @abs(result.height_delta - f));
-            } else {
-                first = result.height_delta;
-            }
+            if (first) |f| delta_range = @max(delta_range, @abs(result.height_delta - f)) else first = result.height_delta;
         }
     }
     try std.testing.expect(delta_range > 0.05);

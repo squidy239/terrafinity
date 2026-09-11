@@ -395,7 +395,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 
     try self.dev.resetCommandBuffer(frame_ctx.cmd_buffer, .{});
     try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
-    errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch {};
+    errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch |err| std.log.err("VulkanRenderer: endCommandBuffer during unwind failed: {any}", .{err});
     self.vk_ctx.gpu_profiler.resetFrame(frame_ctx.cmd_buffer, current_frame);
 
     const depth_aspect_mask = self.depthAspectMask();

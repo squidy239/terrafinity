@@ -2,33 +2,26 @@ const std = @import("std");
 
 const Sphere = @import("Sphere.zig").Sphere;
 
-pub fn TexturedSphere(comptime t: type, sampler_fn: fn (x: t, y: t, args: anytype) t, sampler_args_type: type) type {
+pub fn TexturedSphere(comptime T: type, sampler_fn: fn (x: T, y: T, args: anytype) T, SamplerArgsType: type) type {
     return struct {
-        sphere: Sphere(t),
-        inner_sphere: Sphere(t),
-        bounding_box: @Vector(6, t),
-        sampler_args: sampler_args_type,
+        sphere: Sphere(T),
+        inner_sphere: Sphere(T),
+        bounding_box: @Vector(6, T),
+        sampler_args: SamplerArgsType,
 
-        pub fn init(pos: @Vector(3, t), radius: t, sampler_args: sampler_args_type, min_radius_fraction: t) @This() {
-            const sphere: Sphere(t) = .init(pos, radius);
-            const inner_sphere: Sphere(t) = .init(pos, radius * min_radius_fraction);
-
-            return .{
-                .sphere = sphere,
-                .inner_sphere = inner_sphere,
-                .sampler_args = sampler_args,
-                .bounding_box = sphere.bounding_box,
-            };
+        pub fn init(pos: @Vector(3, T), radius: T, sampler_args: SamplerArgsType, min_radius_fraction: T) @This() {
+            const sphere = Sphere(T).init(pos, radius);
+            return .{ .sphere = sphere, .inner_sphere = Sphere(T).init(pos, radius * min_radius_fraction), .sampler_args = sampler_args, .bounding_box = sphere.bounding_box };
         }
 
         /// True for points inside the outer sphere and outside the carved noise.
-        pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
+        pub fn isPointInside(self: *const @This(), p: @Vector(3, T)) bool {
             if (!self.sphere.isPointInside(p)) return false;
             if (self.inner_sphere.isPointInside(p)) return true;
             const shape_p = p - self.sphere.position;
             const coords = projectEquirectangular(shape_p, self.sphere.radius);
             const sample_amount = sampler_fn(coords[0], coords[1], self.sampler_args);
-            const sample_block_pos = self.sphere.position + (shape_p / @as(@Vector(3, t), @splat(sample_amount)));
+            const sample_block_pos = self.sphere.position + (shape_p / @as(@Vector(3, T), @splat(sample_amount)));
             return self.sphere.isPointInside(sample_block_pos);
         }
     };

@@ -37,6 +37,8 @@ const uvec2 tex_coord_axes[6] = uvec2[](
 // term; lower values pull it toward a constant, so lit and unlit faces differ less.
 const float normal_effect = 0.5;
 // Ambient (sky) term endpoints mixed by sun_day: the floor brightness at night vs noon.
+// The 0.2 night floor runs darker than the transparent/scatter 0.3 floor; separate
+// quantity, so each stays per-file.
 const float ambient_min = 0.2;
 const float ambient_max = 0.5;
 

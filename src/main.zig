@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     var vk_ctx = try VulkanContext.init(gpa, &window);
     defer vk_ctx.deinit(io);
 
-    vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
+    vk_ctx.setExtentFromWindow(window_size);
     vk_ctx.present_mode = config.game_config.render_options.present_mode;
     try vk_ctx.createSwapchainLocked(io, false);
 
@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         .command_buffer_count = VulkanContext.max_frames_in_flight,
     }, &ui_cmd_buffers);
     defer {
-        vk_ctx.deviceWaitIdleLocked(io) catch {};
+        vk_ctx.deviceWaitIdleLocked(io) catch |err| std.log.err("failed to wait for device idle during shutdown: {any}", .{err});
         vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
     }
 
@@ -185,8 +185,7 @@ pub fn main(init: std.process.Init) !void {
         frame_time = .now(io, .awake);
 
         if (!std.meta.eql(prev_window_size, window_size)) {
-            vk_ctx.swapchain_extent = .{ .width = @as(u32, @intCast(window_size.width)), .height = @as(u32, @intCast(window_size.height)) };
-            vk_ctx.requestSwapchainRecreate();
+            vk_ctx.setExtentFromWindow(window_size);
             prev_window_size = window_size;
         }
 
@@ -287,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (ui.menu_state.pending_game_deinit) {
             ui.menu_state.pending_game_deinit = false;
-            vk_ctx.deviceWaitIdleLocked(io) catch {};
+            vk_ctx.deviceWaitIdleLocked(io) catch |err| std.log.err("failed to wait for device idle before game deinit: {any}", .{err});
             game.deinit(io);
             vk_ctx.swapchain_needs_recreate.store(true, .monotonic);
         }
@@ -317,7 +316,7 @@ pub fn main(init: std.process.Init) !void {
         tracy.frameMark(null);
     }
     window.disableRelativeMouse();
-    vk_ctx.deviceWaitIdleLocked(io) catch {};
+    try vk_ctx.deviceWaitIdleLocked(io);
 }
 
 pub const Config = struct {
@@ -361,7 +360,7 @@ var window_size: wio.Size = .{ .height = 480, .width = 640 };
 var window_logical_size: wio.Size = .{ .height = 480, .width = 640 };
 var window_scale: f32 = 1.0;
 
-const embedded_generators = [_]struct { file_name: []const u8, bytes: []const u8 }{
+const embedded_generators: [5]struct { file_name: []const u8, bytes: []const u8 } = .{
     .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
     .{ .file_name = "voxelgame.generator", .bytes = @embedFile("voxelgame_generator_bin") },
     .{ .file_name = "planet.generator", .bytes = @embedFile("planet_generator_bin") },

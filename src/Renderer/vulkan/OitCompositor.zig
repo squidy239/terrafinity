@@ -12,7 +12,8 @@ const composite_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @em
 
 const RenderTarget = core.RenderTarget;
 
-// Must match ambient_min / ambient_max in transparent_frag.frag.
+// Day/night endpoints for the volume scatter term; must match ambient_min /
+// ambient_max in transparent_frag.frag so surface and volume brightness track.
 const scatter_ambient_min = 0.3;
 const scatter_ambient_max = 0.5;
 

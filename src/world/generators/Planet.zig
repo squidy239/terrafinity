@@ -476,11 +476,10 @@ fn considerPlanetColumn(gen: *const Generator, planet: Planet, center: *const [3
 
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *PlanetInstance = @ptrCast(@alignCast(instance));
-    if (self.generator.params.seed == null) return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const seed = self.generator.params.seed orelse return generator_api.no_spawn;
     const point: @Vector(3, f32) = .{ @floatCast(center[0]), @floatCast(center[1]), @floatCast(center[2]) };
-    const planet = nearestPlanet(&self.generator, point) orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const planet = nearestPlanet(&self.generator, point) orelse return generator_api.no_spawn;
     const anchor = anchorPlanet(planet, point);
-    const seed = self.generator.params.seed.?;
     var best = SpawnBest{};
     // Discs around the anchor honor `radius`; the host re-validates the winner.
     const disc_budget = @min(attempts, 8 * generator_api.spawn_samples_per_ring);
@@ -612,9 +611,9 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
     instance.source = .{
         .data = instance,
         .getTerrainHeight = null,
-        .getBlocks = &instanceGenBlocks,
+        .getBlocks = generator_api.instanceGenBlocks(PlanetInstance),
         .placeStructures = null,
-        .deinit = &instanceDeinit,
+        .deinit = generator_api.instanceDeinit(PlanetInstance),
         .save = null,
     };
     return instance;
@@ -622,21 +621,6 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
 
 pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
     return generator_api.getSource(PlanetInstance, instance);
-}
-
-fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-    _ = allocator;
-    _ = world;
-    const self: *PlanetInstance = @ptrCast(@alignCast(source.data));
-    self.generator.genChunk(io, blocks, chunk_pos, grid_buffer);
-    return .{ .from_disk = false, .structures = false };
-}
-
-fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-    _ = io;
-    _ = world;
-    const self: *PlanetInstance = @ptrCast(@alignCast(source.data));
-    allocator.destroy(self);
 }
 
 test "planet spheres stay inside their cell" {

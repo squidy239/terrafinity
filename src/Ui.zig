@@ -446,7 +446,11 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
     normalizeSettings(options);
 
-    const config_changed = !std.meta.eql(first_config, working_config);
+    var first_no_pack = first_config;
+    var working_no_pack = working_config;
+    first_no_pack.game_config.render_options.selected_pack = "";
+    working_no_pack.game_config.render_options.selected_pack = "";
+    const config_changed = !std.meta.eql(first_no_pack, working_no_pack) or !std.mem.eql(u8, first_config.game_config.render_options.selected_pack, working_config.game_config.render_options.selected_pack);
     const gamma_changed = first_config.game_config.render_options.gamma_correction != options.render_options.gamma_correction;
     const present_mode_changed = first_config.game_config.render_options.present_mode != options.render_options.present_mode;
     const aa_changed = first_config.game_config.render_options.anti_aliasing != options.render_options.anti_aliasing;
@@ -473,20 +477,24 @@ fn settingsId(path: []const u8) u64 {
     return configId(settings_root_id, path);
 }
 
-fn settingsSection(self: *@This(), src: std.builtin.SourceLocation, label: []const u8, id: u64, default_open: bool) ?*dvui.BoxWidget {
-    const expanded = self.config_section_states.get(id) orelse default_open;
-    var title_buffer: [260]u8 = undefined;
-    const title = configSectionTitle(label, expanded, &title_buffer);
-    if (dvui.button(@src(), title, .{}, .{
+fn toggleConfigSection(self: *@This(), src: std.builtin.SourceLocation, title: []const u8, id: u64, expanded: bool) bool {
+    const toggled = dvui.button(src, title, .{}, .{
         .expand = .horizontal,
         .id_extra = @intCast(id),
         .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
         .margin = .{ .y = 8 },
         .padding = .{ .y = 8, .h = 8 },
-    })) {
-        self.config_section_states.put(id, !expanded) catch {};
-        return null;
-    }
+    });
+    if (!toggled) return false;
+    self.config_section_states.put(id, !expanded) catch |err| std.log.warn("Ui: config section state store failed: {any}", .{err});
+    return true;
+}
+
+fn settingsSection(self: *@This(), src: std.builtin.SourceLocation, label: []const u8, id: u64, default_open: bool) ?*dvui.BoxWidget {
+    const expanded = self.config_section_states.get(id) orelse default_open;
+    var title_buffer: [260]u8 = undefined;
+    const title = configSectionTitle(label, expanded, &title_buffer);
+    if (self.toggleConfigSection(@src(), title, id, expanded)) return null;
     if (!expanded) return null;
     return dvui.box(src, .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -958,7 +966,7 @@ fn presetDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
     if (count == 0) return;
     var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
     const n = @min(count, max_generator_dropdown_entries);
-    for (0..n) |i| names_buffer[i] = generator.presetName(i);
+    for (names_buffer[0..n], 0..) |*dest, i| dest.* = generator.presetName(i);
     if (self.new_game.preset_index >= n) self.new_game.preset_index = 0;
     const previous = self.new_game.preset_index;
     dvui.labelNoFmt(@src(), "Preset", .{}, .{ .font = .{ .size = 24 } });
@@ -1225,16 +1233,7 @@ fn drawParam(self: *@This(), allocator: std.mem.Allocator, param: *generator_api
             const expanded = self.config_section_states.get(id) orelse defaultSectionExpanded(param.name);
             var title_buffer: [260]u8 = undefined;
             const title = configSectionTitle(label, expanded, &title_buffer);
-            if (dvui.button(@src(), title, .{}, .{
-                .expand = .horizontal,
-                .id_extra = @intCast(id),
-                .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
-                .margin = .{ .y = 8 },
-                .padding = .{ .y = 8, .h = 8 },
-            })) {
-                self.config_section_states.put(id, !expanded) catch {};
-                return;
-            }
+            if (self.toggleConfigSection(@src(), title, id, expanded)) return;
             if (!expanded) return;
             const box = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .expand = .horizontal,
@@ -1269,16 +1268,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
     const expanded = self.config_section_states.get(id) orelse true;
     var title_buffer: [300]u8 = undefined;
     const title = configArrayTitle(name, expanded, array.items.len, &title_buffer);
-    if (dvui.button(@src(), title, .{}, .{
-        .expand = .horizontal,
-        .id_extra = @intCast(id),
-        .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
-        .margin = .{ .y = 8 },
-        .padding = .{ .y = 8, .h = 8 },
-    })) {
-        self.config_section_states.put(id, !expanded) catch {};
-        return;
-    }
+    if (self.toggleConfigSection(@src(), title, id, expanded)) return;
     if (!expanded) return;
 
     const contents = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -1303,7 +1293,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
             .margin = .{ .y = 4 },
             .padding = .{ .y = 6, .h = 6 },
         })) {
-            self.config_section_states.put(item_id, !item_expanded) catch {};
+            self.config_section_states.put(item_id, !item_expanded) catch |err| std.log.warn("Ui: config section state store failed: {any}", .{err});
             continue;
         }
         if (!item_expanded) continue;
@@ -1324,7 +1314,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
         }
     }
 
-    if (dvui.button(@src(), "Add item", .{}, .{ .id_extra = @intCast(configId(id, "add")), .margin = .{ .y = 6 } })) generator_api.arrayAdd(allocator, array) catch {};
+    if (dvui.button(@src(), "Add item", .{}, .{ .id_extra = @intCast(configId(id, "add")), .margin = .{ .y = 6 } })) generator_api.arrayAdd(allocator, array) catch |err| std.log.warn("Ui: adding array item failed: {any}", .{err});
 }
 
 fn configArrayTitle(name: []const u8, expanded: bool, count: usize, buffer: *[300]u8) []const u8 {

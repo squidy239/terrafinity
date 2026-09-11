@@ -2,13 +2,13 @@ const std = @import("std");
 
 /// Tiles space into `box_size` cells with one jittered structure each. Only positions
 /// within `2^level` units past the structure see it, so one cell owns it per level.
-pub fn JitteredGrid(comptime N: usize, comptime T: type) type {
-    if (N == 0) @compileError("JitteredGrid needs at least one dimension");
+pub fn JitteredGrid(comptime n: usize, comptime T: type) type {
+    if (n == 0) @compileError("JitteredGrid needs at least one dimension");
     if (@typeInfo(T) != .int) @compileError("JitteredGrid coordinate type must be an integer");
 
     return struct {
         const Self = @This();
-        pub const Vector = @Vector(N, T);
+        pub const Vector = @Vector(n, T);
         const U = @Int(.unsigned, @bitSizeOf(T));
 
         /// Grid cell size in world units at level 0.
@@ -35,11 +35,10 @@ pub fn JitteredGrid(comptime N: usize, comptime T: type) type {
         }
 
         fn findStructureInBox(self: *const Self, box_position: Vector) Vector {
-            const box_pos_int: @Int(.unsigned, N * @bitSizeOf(T)) = @bitCast(box_position);
-            const box_pos_hash_vec: @Vector(N, U) = @bitCast(std.hash.int(box_pos_int));
+            const box_pos_int: @Int(.unsigned, n * @bitSizeOf(T)) = @bitCast(box_position);
+            const hashed: @Vector(n, U) = @bitCast(std.hash.int(box_pos_int));
             const inner: U = @intCast(self.inner_box_size);
-            const pos_in_cell = box_pos_hash_vec % @as(@Vector(N, U), @splat(inner));
-            return @bitCast(pos_in_cell);
+            return @bitCast(hashed % @as(@Vector(n, U), @splat(inner)));
         }
     };
 }

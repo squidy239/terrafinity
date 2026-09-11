@@ -119,7 +119,7 @@ fn getProcAddr(instance: vk.Instance, procname: [*:0]const u8) ?*const fn () voi
 }
 
 fn selectPhysicalDevice(self: *VulkanContext, allocator: std.mem.Allocator) !vk.PhysicalDevice {
-    var pdev_count: u32 = 0;
+    var pdev_count: u32 = undefined;
     _ = try self.instance.enumeratePhysicalDevices(&pdev_count, null);
     const pdevs = try allocator.alloc(vk.PhysicalDevice, pdev_count);
     defer allocator.free(pdevs);
@@ -615,8 +615,8 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
         std.log.err("deviceWaitIdle failed during VulkanContext.deinit: {}", .{err});
     };
 
-    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
-    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+    self.dev.resetCommandPool(self.command_pool, .{}) catch |err| std.log.err("resetCommandPool failed during VulkanContext.deinit: {any}", .{err});
+    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch |err| std.log.err("resetCommandPool (ui) failed during VulkanContext.deinit: {any}", .{err});
 
     self.destroySwapchainResources();
 
@@ -776,8 +776,8 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     _ = self.dev.deviceWaitIdle() catch |err| {
         std.log.err("deviceWaitIdle failed during swapchain creation: {}", .{err});
     };
-    self.dev.resetCommandPool(self.command_pool, .{}) catch {};
-    if (self.ui_command_pool != .null_handle) self.dev.resetCommandPool(self.ui_command_pool, .{}) catch {};
+    try self.dev.resetCommandPool(self.command_pool, .{});
+    if (self.ui_command_pool != .null_handle) try self.dev.resetCommandPool(self.ui_command_pool, .{});
 
     const old_swapchain = self.swapchain;
     self.destroySwapchainResources();
@@ -924,6 +924,11 @@ pub fn currentFrame(self: *VulkanContext) u32 {
 pub fn requestSwapchainRecreate(self: *VulkanContext) void {
     self.suboptimal_recreate_requested.store(false, .release);
     self.swapchain_needs_recreate.store(true, .release);
+}
+
+pub fn setExtentFromWindow(self: *VulkanContext, size: wio.Size) void {
+    self.swapchain_extent = .{ .width = @as(u32, @intCast(size.width)), .height = @as(u32, @intCast(size.height)) };
+    self.requestSwapchainRecreate();
 }
 
 pub const FrameContext = struct {

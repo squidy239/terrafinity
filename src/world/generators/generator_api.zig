@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const Block = @import("../Block.zig").Block;
+const Chunk = @import("../Chunk.zig");
+const ChunkSize = Chunk.ChunkSize;
 const World = @import("../World.zig");
 
 /// Shared host-generator interface. Both sides share one compiler, so layouts match across the boundary.
@@ -141,7 +144,7 @@ pub fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnSco
 
 /// Shared pick-test-retry loop for heightfield generators. Pure; the host re-validates the winner.
 pub fn proposeSpawnField(
-    seed: u64,
+    seed: ?u64,
     center: [3]f64,
     radius: f64,
     attempts: u32,
@@ -150,13 +153,14 @@ pub fn proposeSpawnField(
     context: anytype,
     comptime columnHeight: anytype,
 ) Spawnpoint {
+    const live_seed = seed orelse return no_spawn;
     var best: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
     var best_score: f64 = std.math.inf(f64);
     var best_good = false;
     const capped = @min(attempts, spawn_attempt_cap);
     for (0..capped) |i| {
         // Analytic test only; the host re-validates the winner.
-        const sample = spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
+        const sample = spawnSample(live_seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const sx: f32 = @floatCast(sample[0]);
         const sz: f32 = @floatCast(sample[1]);
         const h = columnHeight(context, sx, sz);
@@ -679,9 +683,47 @@ pub fn configSetSeeds(io: *const std.Io, config: *ConfigTree) void {
     }
 }
 
+/// Abstention every `propose_spawn` returns when its seed is unset. The host fails loudly.
+pub const no_spawn: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
+
 pub fn getSource(comptime Instance: type, instance: *anyopaque) *const World.ChunkSource {
     const self: *Instance = @ptrCast(@alignCast(instance));
     return &self.source;
+}
+
+/// Vtable slot types behind each `generator_create` source table.
+const BlocksFn = @TypeOf(@as(World.ChunkSource, undefined).getBlocks);
+const DeinitFn = @TypeOf(@as(World.ChunkSource, undefined).deinit);
+const BlocksRet = error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata;
+const GridBuf = *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block;
+
+/// Shared getBlocks: `.getBlocks = instanceGenBlocks(Foo)`. Picks full/short `genChunk` args by arity, `try` by fallibility.
+pub fn instanceGenBlocks(comptime Instance: type) BlocksFn {
+    return &struct {
+        fn f(source: World.ChunkSource, io: std.Io, alloc: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, pos: World.ChunkPos, grid: GridBuf) BlocksRet {
+            const self: *Instance = @ptrCast(@alignCast(source.data));
+            const Gen = @TypeOf(self.generator);
+            const info = @typeInfo(@TypeOf(Gen.genChunk)).@"fn";
+            const fallible = @typeInfo(info.return_type orelse void) == .error_union;
+            if (comptime info.params.len > 5) {
+                if (comptime fallible) try self.generator.genChunk(io, alloc, pos, blocks, world, grid) else self.generator.genChunk(io, alloc, pos, blocks, world, grid);
+            } else if (comptime fallible) try self.generator.genChunk(io, blocks, pos, grid) else self.generator.genChunk(io, blocks, pos, grid);
+            return .{ .from_disk = false, .structures = false };
+        }
+    }.f;
+}
+
+/// Shared deinit: `.deinit = instanceDeinit(Foo)`. Drops the height cache/arena when present, then frees the instance.
+pub fn instanceDeinit(comptime Instance: type) DeinitFn {
+    return &struct {
+        fn f(source: World.ChunkSource, io: std.Io, alloc: std.mem.Allocator, world: *World) void {
+            _ = .{ io, world };
+            const self: *Instance = @ptrCast(@alignCast(source.data));
+            if (@hasField(@TypeOf(self.generator), "terrain_height_cache")) self.generator.terrain_height_cache.deinit(alloc);
+            if (@hasField(Instance, "arena")) self.arena.deinit();
+            alloc.destroy(self);
+        }
+    }.f;
 }
 
 const TestConfig = struct {

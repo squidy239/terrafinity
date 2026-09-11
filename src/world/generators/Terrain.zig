@@ -1398,8 +1398,7 @@ fn columnSpawnHeight(params: *const DefaultGenerator.Params, x: f32, z: f32) f32
 
 pub fn generatorProposeSpawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *TerrainInstance = @ptrCast(@alignCast(instance));
-    const seed = self.generator.params.seed orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
-    return generator_api.proposeSpawnField(seed, center.*, radius, attempts, nonce, @floatFromInt(self.generator.params.sea_level), &self.generator.params, columnSpawnHeight);
+    return generator_api.proposeSpawnField(self.generator.params.seed, center.*, radius, attempts, nonce, @floatFromInt(self.generator.params.sea_level), &self.generator.params, columnSpawnHeight);
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
@@ -1596,9 +1595,9 @@ pub fn generatorCreate(opts: *const generator_api.CreateOptions, config: *const 
         .source = .{
             .data = instance,
             .getTerrainHeight = null,
-            .getBlocks = &instanceGenBlocks,
+            .getBlocks = generator_api.instanceGenBlocks(TerrainInstance),
             .placeStructures = instanceGenStructures,
-            .deinit = &instanceDeinit,
+            .deinit = generator_api.instanceDeinit(TerrainInstance),
             .save = null,
         },
     };
@@ -1609,22 +1608,9 @@ pub fn generatorGetSource(instance: *anyopaque) callconv(.c) *const World.ChunkS
     return generator_api.getSource(TerrainInstance, instance);
 }
 
-fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-    const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
-    try self.generator.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
-    return .{ .from_disk = false, .structures = false };
-}
-
 fn instanceGenStructures(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) error{ OutOfMemory, Canceled, Unrecoverable }!void {
     const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
     self.generator.generateStructures(io, allocator, world, chunk, chunk_pos) catch |err| return mapStructureError(err);
-}
-
-fn instanceDeinit(source: World.ChunkSource, _: std.Io, allocator: std.mem.Allocator, _: *World) void {
-    const self: *TerrainInstance = @ptrCast(@alignCast(source.data));
-    self.generator.terrain_height_cache.deinit(allocator);
-    self.arena.deinit();
-    allocator.destroy(self);
 }
 
 fn benchHeights(io: std.Io, label: []const u8, heights: [ChunkSize][ChunkSize]f32, iterations: usize) void {

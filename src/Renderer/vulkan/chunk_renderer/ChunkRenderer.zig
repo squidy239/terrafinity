@@ -279,8 +279,9 @@ pub fn init(
 pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
     // Stop the background drain before touching any state it shares with the queues.
     if (self.drain_future) |*future| {
-        future.cancel(io) catch {};
-        _ = future.await(io) catch {};
+        // Cancel stores the drain result for await to re-report; ignore it here and log once below.
+        _ = future.cancel(io) catch {};
+        _ = future.await(io) catch |err| std.log.err("ChunkRenderer: background drain failed during deinit: {any}", .{err});
         self.drain_future = null;
     }
     if (self.peeked_upload) |pending| self.destroyPendingUpload(io, pending);

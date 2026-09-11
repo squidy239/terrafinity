@@ -210,7 +210,7 @@ fn considerSpongeColumn(params: *const InfiniteMengerGenerator.Params, center: *
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *SpongeInstance = @ptrCast(@alignCast(instance));
     const params = &self.generator.params;
-    const seed = params.seed orelse return .{ .pos = .{ 0, 0, 0 }, .found = false };
+    const seed = params.seed orelse return generator_api.no_spawn;
     var best = SpawnBest{};
     // Disc samples honor `radius`; later rings expand to escape hollow columns.
     const capped = @min(attempts, generator_api.spawn_attempt_cap);
@@ -317,9 +317,9 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
     instance.source = .{
         .data = instance,
         .getTerrainHeight = null,
-        .getBlocks = &instanceGenBlocks,
+        .getBlocks = generator_api.instanceGenBlocks(SpongeInstance),
         .placeStructures = null,
-        .deinit = &instanceDeinit,
+        .deinit = generator_api.instanceDeinit(SpongeInstance),
         .save = null,
     };
     return instance;
@@ -327,17 +327,4 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
 
 pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
     return generator_api.getSource(SpongeInstance, instance);
-}
-
-fn instanceGenBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-    const self: *SpongeInstance = @ptrCast(@alignCast(source.data));
-    self.generator.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
-    return .{ .from_disk = false, .structures = false };
-}
-
-fn instanceDeinit(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-    _ = io;
-    _ = world;
-    const self: *SpongeInstance = @ptrCast(@alignCast(source.data));
-    allocator.destroy(self);
 }

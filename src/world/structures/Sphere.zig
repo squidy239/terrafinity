@@ -1,13 +1,13 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 
-pub fn Sphere(comptime t: type) type {
+pub fn Sphere(comptime T: type) type {
     return struct {
-        position: @Vector(3, t),
-        radius: t,
-        radius_squared: t,
-        bounding_box: @Vector(6, t),
-        pub fn init(pos: @Vector(3, t), radius: t) @This() {
+        position: @Vector(3, T),
+        radius: T,
+        radius_squared: T,
+        bounding_box: @Vector(6, T),
+        pub fn init(pos: @Vector(3, T), radius: T) @This() {
             std.debug.assert(radius >= 0);
             var sphere: @This() = .{
                 .position = pos,
@@ -19,21 +19,17 @@ pub fn Sphere(comptime t: type) type {
             return sphere;
         }
         /// True when `p` lies inside the sphere surface.
-        pub fn isPointInside(self: *const @This(), p: @Vector(3, t)) bool {
+        pub fn isPointInside(self: *const @This(), p: @Vector(3, T)) bool {
             const diff = p - self.position;
             const dist2 = utils.dot(diff, diff);
             return dist2 <= self.radius_squared;
         }
         /// Refreshes the cached box. Call again after any move.
         pub fn updateBoundingBox(self: *@This()) void {
-            const r = self.radius;
-            const lo_x = @floor(self.position[0] - r);
-            const hi_x = @ceil(self.position[0] + r);
-            const lo_y = @floor(self.position[1] - r);
-            const hi_y = @ceil(self.position[1] + r);
-            const lo_z = @floor(self.position[2] - r);
-            const hi_z = @ceil(self.position[2] + r);
-            self.bounding_box = @Vector(6, t){ @min(lo_x, hi_x), @max(lo_x, hi_x), @min(lo_y, hi_y), @max(lo_y, hi_y), @min(lo_z, hi_z), @max(lo_z, hi_z) };
+            const r3: @Vector(3, T) = @splat(self.radius);
+            const lo = @floor(self.position - r3);
+            const hi = @ceil(self.position + r3);
+            self.bounding_box = @Vector(6, T){ lo[0], hi[0], lo[1], hi[1], lo[2], hi[2] };
         }
     };
 }
