@@ -310,34 +310,59 @@ pub const GpuRegionAllocator = struct {
     }
 
     fn findFreeRegion(self: *GpuRegionAllocator, length: vk.DeviceSize) ?struct { offset: vk.DeviceSize, safe_graphics: u64 } {
+        // Best-fit: reuse the smallest gap that holds the request, so small
+        // meshes stop stranding large gaps at the head of the list.
+        var best: ?usize = null;
         for (self.free_regions.items, 0..) |region, i| {
             if (region.length < length) continue;
-
-            const result = region.offset;
-            if (region.length == length) {
-                _ = self.free_regions.orderedRemove(i);
-            } else {
-                self.free_regions.items[i] = .{
-                    .offset = region.offset + length,
-                    .length = region.length - length,
-                    .safe_graphics = region.safe_graphics,
-                };
+            if (best) |b| {
+                if (region.length >= self.free_regions.items[b].length) continue;
             }
-            return .{ .offset = result, .safe_graphics = region.safe_graphics };
+            best = i;
         }
-        return null;
+        const i = best orelse return null;
+        const region = self.free_regions.items[i];
+        if (region.length == length) {
+            _ = self.free_regions.orderedRemove(i);
+        } else {
+            self.free_regions.items[i] = .{
+                .offset = region.offset + length,
+                .length = region.length - length,
+                .safe_graphics = region.safe_graphics,
+            };
+        }
+        return .{ .offset = region.offset, .safe_graphics = region.safe_graphics };
     }
 
     pub fn freeRegion(self: *GpuRegionAllocator, io: std.Io, offset: vk.DeviceSize, length: vk.DeviceSize, current_graphics_val: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const insertion_index = for (self.free_regions.items, 0..) |region, i| {
-            if (offset < region.offset + region.length and region.offset < offset + length) {
+        // Sorted by offset, so the insert point is a binary search and only the
+        // two neighbors can overlap the freed range.
+        var lo: usize = 0;
+        var hi: usize = self.free_regions.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.free_regions.items[mid].offset > offset) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        const insertion_index = lo;
+        if (insertion_index > 0) {
+            const prev = self.free_regions.items[insertion_index - 1];
+            if (offset < prev.offset + prev.length and prev.offset < offset + length) {
                 std.debug.panic("GpuRegionAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
             }
-            if (region.offset > offset) break i;
-        } else self.free_regions.items.len;
+        }
+        if (insertion_index < self.free_regions.items.len) {
+            const next = self.free_regions.items[insertion_index];
+            if (offset < next.offset + next.length and next.offset < offset + length) {
+                std.debug.panic("GpuRegionAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
+            }
+        }
 
         self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length, .safe_graphics = current_graphics_val }) catch @panic("GpuRegionAllocator.freeRegion: insert OOM");
 
@@ -1548,6 +1573,23 @@ test "GpuRegionAllocator safe_graphics propagation" {
     allocator.freeRegion(io, fresh.offset + 32, 32, 13);
     const merged = allocator.allocRegion(io, 64).?;
     try std.testing.expectEqual(@as(u64, 13), merged.safe_graphics);
+}
+test "GpuRegionAllocator out-of-order frees merge" {
+    const io = std.testing.io;
+    var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
+    defer allocator.deinit(std.testing.allocator);
+    allocator.resolve(@enumFromInt(1), 0);
+
+    const a = allocator.allocRegion(io, 64).?;
+    const b = allocator.allocRegion(io, 64).?;
+    const c = allocator.allocRegion(io, 64).?;
+    // Free out of order: the list must stay sorted so all three merge.
+    allocator.freeRegion(io, b.offset, 64, 2);
+    allocator.freeRegion(io, c.offset, 64, 3);
+    allocator.freeRegion(io, a.offset, 64, 1);
+    const merged = allocator.allocRegion(io, 192).?;
+    try std.testing.expectEqual(a.offset, merged.offset);
+    try std.testing.expectEqual(@as(u64, 3), merged.safe_graphics);
 }
 
 test "MeshData size" {

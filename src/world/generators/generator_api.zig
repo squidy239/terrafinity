@@ -273,16 +273,26 @@ fn valueEql(a: *const Value, b: *const Value) bool {
 
 pub fn arrayAdd(allocator: std.mem.Allocator, array: *Array) error{OutOfMemory}!void {
     const old_len = array.items.len;
+    // Clone before growing so both failure points leave the array untouched and
+    // its length always matches its allocation (a shrunk-back slice would not).
+    const item = try cloneParam(allocator, array.element);
+    errdefer freeParam(allocator, &item);
     array.items = try allocator.realloc(array.items, old_len + 1);
-    errdefer array.items = allocator.realloc(array.items, old_len) catch array.items[0..old_len];
-    array.items[old_len] = try cloneParam(allocator, array.element);
+    array.items[old_len] = item;
 }
 
 pub fn arrayRemove(allocator: std.mem.Allocator, array: *Array, index: usize) void {
     std.debug.assert(index < array.items.len);
-    freeParam(allocator, &array.items[index]);
-    std.mem.copyForwards(Param, array.items[index..], array.items[index + 1 ..]);
-    array.items = allocator.realloc(array.items, array.items.len - 1) catch return;
+    // Allocate the shrink first so a failed removal leaves the array whole: the
+    // in-place realloc used to strand a duplicate of the tail, which `free`
+    // then freed twice.
+    const new_items = allocator.alloc(Param, array.items.len - 1) catch return;
+    const removed = array.items[index];
+    @memcpy(new_items[0..index], array.items[0..index]);
+    @memcpy(new_items[index..], array.items[index + 1 ..]);
+    allocator.free(array.items);
+    array.items = new_items;
+    freeParam(allocator, &removed);
 }
 
 pub fn emitZon(w: *std.Io.Writer, tree: *const ConfigTree) !void {
@@ -808,6 +818,36 @@ test "clone and array add remove" {
     try std.testing.expectEqual(@as(usize, 1), array.items.len);
     arrayRemove(allocator, array, 0);
     try std.testing.expectEqual(@as(usize, 0), array.items.len);
+}
+
+test "arrayAdd allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn testFn(allocator: std.mem.Allocator) !void {
+            var config: TestConfig = .{ .items = &.{} };
+            const tree = try fromStruct(TestConfig, allocator, &config, test_specs);
+            defer free(allocator, tree);
+            const array = &tree.params[6].value.array;
+            try arrayAdd(allocator, array);
+            try arrayAdd(allocator, array);
+        }
+    }.testFn, .{});
+}
+
+test "arrayRemove keeps both items owned when its allocation fails" {
+    const allocator = std.testing.allocator;
+    var config: TestConfig = .{ .items = &.{} };
+    const tree = try fromStruct(TestConfig, allocator, &config, test_specs);
+    defer free(allocator, tree);
+    const array = &tree.params[6].value.array;
+    try arrayAdd(allocator, array);
+    try arrayAdd(allocator, array);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    arrayRemove(failing.allocator(), array, 0);
+
+    // The failed removal must leave the array whole: freeing the tree below
+    // detects a leaked tail or a double-freed duplicate item.
+    try std.testing.expectEqual(@as(usize, 2), array.items.len);
 }
 
 test "apiCompatible enforces semver" {
