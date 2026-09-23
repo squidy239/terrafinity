@@ -795,7 +795,7 @@ fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.vk_ctx.graphics_timeline_semaphore);
 
     self.uploader.processRetiredFaceBuffers(io, current_graphics_val);
-    self.scene.processRetired(current_graphics_val);
+    self.scene.processRetired(io, current_graphics_val);
 
     const items = &self.retired_meshes;
     self.retired_meshes_mutex.lockUncancelable(io);

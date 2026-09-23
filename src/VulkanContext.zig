@@ -343,7 +343,9 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     };
 
     self.instance_handle = try self.vkb.createInstance(&instance_create_info, &self.vkalloc);
-    errdefer if (self.instance_wrapper == null) {
+    // The wrapper errdefer below owns the raw handle once it exists.
+    var owns_raw_instance = true;
+    errdefer if (owns_raw_instance) {
         var local_wrapper = InstanceWrapper.load(self.instance_handle, getProcAddr);
         const local_instance = InstanceProxy.init(self.instance_handle, &local_wrapper);
         local_instance.destroyInstance(&self.vkalloc);
@@ -354,6 +356,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     instance_wrapper_ptr.* = .load(self.instance_handle, getProcAddr);
     self.instance_wrapper = instance_wrapper_ptr;
     self.instance = .init(self.instance_handle, instance_wrapper_ptr);
+    owns_raw_instance = false;
     errdefer {
         self.instance.destroyInstance(&self.vkalloc);
         allocator.destroy(instance_wrapper_ptr);
@@ -1139,8 +1142,11 @@ pub fn ensureScreenshotBuffer(self: *VulkanContext, width: u32, height: u32) !vo
         self.dev.unmapMemory(self.screenshot_memory);
         self.screenshot_mapped = null;
     }
+    // Clear the fields before the fallible reallocation below, so a failure cannot double-free.
     if (self.screenshot_buffer != .null_handle) self.dev.destroyBuffer(self.screenshot_buffer, &self.vkalloc);
     if (self.screenshot_memory != .null_handle) self.dev.freeMemory(self.screenshot_memory, &self.vkalloc);
+    self.screenshot_buffer = .null_handle;
+    self.screenshot_memory = .null_handle;
     self.screenshot_buffer = try self.dev.createBuffer(&.{ .size = needed, .usage = .{ .transfer_dst_bit = true }, .sharing_mode = .exclusive }, &self.vkalloc);
     const reqs = self.dev.getBufferMemoryRequirements(self.screenshot_buffer);
     const mem_type = try core.findMemoryType(self.mem_props, reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true });
@@ -1174,11 +1180,12 @@ pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.me
         error.PathAlreadyExists => {},
         else => return err,
     };
-    // In-place BGRA->RGBA swizzle; the next copy overwrites staging, so src_img borrows it.
+    // In-place BGRA->RGBA swizzle for the BGRA swapchain formats only: the r8g8b8a8
+    // fallback already stores the bytes in the order zignal writes out.
     const pixel_count = @as(usize, native_w) * @as(usize, native_h);
     const src_bytes = self.screenshot_mapped.?[0 .. pixel_count * 4];
-    for (0..pixel_count) |p| {
-        std.mem.swap(u8, &src_bytes[p * 4], &src_bytes[p * 4 + 2]);
+    if (self.swapchain_format == .b8g8r8a8_srgb or self.swapchain_format == .b8g8r8a8_unorm) {
+        for (0..pixel_count) |p| std.mem.swap(u8, &src_bytes[p * 4], &src_bytes[p * 4 + 2]);
     }
     const src_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(native_h, native_w, src_bytes);
     var to_save = src_img;

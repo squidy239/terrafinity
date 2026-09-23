@@ -134,16 +134,15 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             /// Pauses the iterator. Iteration may not be complete or ordered if the map
             /// is modified while paused. Should be followed by unpause.
             pub fn pause(it: *Iterator, io: std.Io) void {
-                if (it.bkt_index < it.map.buckets.len) {
-                    it.map.buckets[it.bkt_index].lock.unlockShared(io);
-                }
+                // Releasing a lock this iterator does not hold wedges the bucket.
+                if (it.paused or it.bkt_iter == null) return;
+                it.map.buckets[it.bkt_index].lock.unlockShared(io);
                 it.paused = true;
             }
 
             pub fn unpause(it: *Iterator, io: std.Io) !void {
-                if (it.bkt_index < it.map.buckets.len) {
-                    try it.map.buckets[it.bkt_index].lock.lockShared(io);
-                }
+                if (!it.paused) return;
+                try it.map.buckets[it.bkt_index].lock.lockShared(io);
                 it.paused = false;
             }
 

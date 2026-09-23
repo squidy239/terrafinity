@@ -99,7 +99,10 @@ pub fn phacelleNoise(p: [2]f32, norm_dir: [2]f32, freq: f32, offset: f32, normal
     // Orthogonal to the stripe direction; the magnitude carries the cell
     // scale and the wave count per unit.
     const side: [2]f32 = .{ -norm_dir[1] * freq * tau, norm_dir[0] * freq * tau };
-    const scaled: [2]f32 = .{ p[0] * freq, p[1] * freq };
+    // Clamp before the cell floor: config-legal frequencies outrun i32 and f32's
+    // exact-integer range at large coordinates, and the cast would then be illegal.
+    const cell_limit: f32 = @floatFromInt(1 << 24);
+    const scaled: [2]f32 = .{ std.math.clamp(p[0] * freq, -cell_limit, cell_limit), std.math.clamp(p[1] * freq, -cell_limit, cell_limit) };
     const base: [2]i32 = .{ @intFromFloat(@floor(scaled[0])), @intFromFloat(@floor(scaled[1])) };
     const acc = blendWaves(cellDiffs(scaled, base), side, offset * tau);
     // Dividing by max(1 - normalization, |acc|) crisps the ridges: wherever

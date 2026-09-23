@@ -189,27 +189,26 @@ pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloc
 
     var grid_bytes: ?rocksdb.Data = null;
     defer if (grid_bytes) |b| b.deinit();
-    if (data.encoding == .uniform) {
-        blocks.mergeUniform(data.one_block);
-    } else {
-        // Retry the read once. A grid that stays missing signals corruption.
-        grid_bytes = self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable;
-        if (grid_bytes == null) { // The encoding may have changed; refetch once.
-            const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
-            defer new_data_bytes.deinit();
-            if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
-            data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
-            if (!rowHasContent(data)) return null;
-            if (data.encoding == .uniform) {
-                blocks.mergeUniform(data.one_block);
-                return .{ .from_disk = true, .structures = data.structures_generated };
-            }
-            grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return error.Unrecoverable;
-        }
-        if (grid_bytes.?.data.len != @sizeOf([ChunkSize][ChunkSize][ChunkSize]World.Block)) return error.Unrecoverable;
-        blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
+    if (data.encoding == .uniform) return mergeUniformResult(blocks, data);
+    // Retry the read once. A grid that stays missing signals corruption.
+    grid_bytes = self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable;
+    if (grid_bytes == null) { // The encoding may have changed; refetch once.
+        const new_data_bytes = (self.database.get(self.chunkdata_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return null;
+        defer new_data_bytes.deinit();
+        if (new_data_bytes.data.len != @sizeOf(ChunkData)) return error.Unrecoverable;
+        data = std.mem.bytesToValue(ChunkData, new_data_bytes.data);
+        if (!rowHasContent(data)) return null;
+        if (data.encoding == .uniform) return mergeUniformResult(blocks, data);
+        grid_bytes = (self.database.get(self.chunk_grid_column.handle, std.mem.asBytes(&key), &err_str) catch return error.Unrecoverable) orelse return error.Unrecoverable;
     }
+    if (grid_bytes.?.data.len != @sizeOf([ChunkSize][ChunkSize][ChunkSize]World.Block)) return error.Unrecoverable;
+    blocks.mergeGrid(@ptrCast(@alignCast(grid_bytes.?.data)), grid_buffer);
+    return .{ .from_disk = true, .structures = data.structures_generated };
+}
 
+/// Merges a uniform row into `blocks`. Both `getBlocks` exits share it.
+fn mergeUniformResult(blocks: *Chunk.Encoding, data: ChunkData) World.ChunkSource.GetBlocksMetadata {
+    blocks.mergeUniform(data.one_block);
     return .{ .from_disk = true, .structures = data.structures_generated };
 }
 

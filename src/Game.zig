@@ -551,29 +551,28 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     var y: i64 = @intFromFloat(@floor(y_hint + spawn_scan_above));
     const bottom: i64 = @intFromFloat(@floor(y_hint - spawn_scan_below));
     var air_run: u32 = 0;
+    var air_wet: u32 = 0;
     var saw_water = false;
     while (y >= bottom) : (y -= 1) {
         const block = try reader.getBlock(io, allocator, .{ bx, y, bz }, World.standard_level);
         if (block == .water) saw_water = true;
         if (!block.isSolid()) {
             air_run += 1;
+            air_wet = (air_wet << 1 | @intFromBool(block == .water)) & 0xf;
             continue;
         }
         if (air_run >= spawn_required_air) {
-            for (1..spawn_required_air + 1) |off| {
-                if ((try reader.getBlock(io, allocator, .{ bx, y + @as(i64, @intCast(off)), bz }, World.standard_level)) == .water) return .ocean;
-            }
+            if (air_wet != 0) return .ocean;
             // The box overlaps neighbor columns, so nudge up on slopes instead of rejecting the spot.
             var feet = @Vector(3, f64){ x, @as(f64, @floatFromInt(y)) + 0.5 + 2 + 0.01, z };
-            var nudges: u32 = 0;
-            while (try mover.checkCollision(io, allocator, feet, &reader) != null) {
-                nudges += 1;
-                if (nudges > spawn_max_nudges) return .blocked;
+            for (0..spawn_max_nudges + 1) |_| {
+                if (try mover.checkCollision(io, allocator, feet, &reader) == null) break;
                 feet[1] += 1.0;
-            }
+            } else return .blocked;
             return .{ .ok = feet };
         }
         air_run = 0;
+        air_wet = 0;
     }
     return if (saw_water) .ocean else .no_ground;
 }
@@ -600,30 +599,28 @@ fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, cent
 
 /// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
 fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, folder: []const u8, world_options: *WorldOptions) !@Vector(3, f64) {
-    if (!game.spawn.found) {
-        const center: [3]f64 = game.spawn.center;
-        if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase1_attempts, 1)) |pos| {
-            std.log.info("spawn phase 1 accepted {d:.1}, {d:.1}, {d:.1}", .{ pos[0], pos[1], pos[2] });
-            game.spawn.pos = pos;
-            game.spawn.found = true;
-            world_options.spawn = game.spawn;
-            try world_options.save(io, folder);
-            return pos;
-        }
-        std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{
-            spawn_rounds,
-            game.spawn.center[0],
-            game.spawn.center[1],
-            game.spawn.center[2],
-        });
-        return error.GeneratorSpawnFailed;
+    if (game.spawn.found) {
+        // Same radius on retry: growing it would abandon the island.
+        if (try game.trySpawnRounds(io, allocator, game.spawn.pos, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
+        // No fallback spawn exists; degrade to the canonical point itself.
+        std.log.warn("spawn phase 2 exhausted, degrading to canonical spawn", .{});
+        return game.spawn.pos;
     }
-    const center: [3]f64 = game.spawn.pos;
-    // Same radius on retry: growing it would abandon the island.
-    if (try game.trySpawnRounds(io, allocator, center, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
-    // No fallback spawn exists; degrade to the canonical point itself.
-    std.log.warn("spawn phase 2 exhausted, degrading to canonical spawn", .{});
-    return game.spawn.pos;
+    if (try game.trySpawnRounds(io, allocator, game.spawn.center, @floatFromInt(game.spawn.range), spawn_phase1_attempts, 1)) |pos| {
+        std.log.info("spawn phase 1 accepted {d:.1}, {d:.1}, {d:.1}", .{ pos[0], pos[1], pos[2] });
+        game.spawn.pos = pos;
+        game.spawn.found = true;
+        world_options.spawn = game.spawn;
+        try world_options.save(io, folder);
+        return pos;
+    }
+    std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{
+        spawn_rounds,
+        game.spawn.center[0],
+        game.spawn.center[1],
+        game.spawn.center[2],
+    });
+    return error.GeneratorSpawnFailed;
 }
 
 fn stopBackgroundWork(self: *@This(), io: std.Io) void {
@@ -897,10 +894,23 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     try editor.flush(io, self.allocator);
 }
 
-fn strafeDirection(camera_front: @Vector(3, f32)) ?zm.Vec3f {
+/// Frame wish direction from held keys. Y carries only fly up/down; walk ignores it.
+fn wishDirection(camera_front: @Vector(3, f32), speed: @Vector(3, f32), actions: *const Key.ActionSet, flying: bool) @Vector(3, f64) {
+    var vel: @Vector(3, f64) = .{ 0, 0, 0 };
+    if (actions.contains(.forward)) vel += @as(@Vector(3, f64), @floatCast(speed * camera_front));
+    if (actions.contains(.backward)) vel += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
+    if (flying) {
+        if (actions.contains(.up)) vel += .{ 0, speed[1], 0 };
+        if (actions.contains(.down)) vel += .{ 0, -speed[1], 0 };
+    }
     const cross = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
-    if (std.meta.eql(cross.data, @Vector(3, f64){ 0, 0, 0 })) return null;
-    return cross.norm();
+    // Zero exactly when front is parallel to up, so strafe is undefined.
+    if (cross.lenSq() > 0) {
+        const r = cross.norm().data;
+        if (actions.contains(.right)) vel += @as(@Vector(3, f64), @floatCast(speed * r));
+        if (actions.contains(.left)) vel += @as(@Vector(3, f64), @floatCast(-speed * r));
+    }
+    return vel;
 }
 
 fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
@@ -908,24 +918,12 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     defer z.end();
     const camera_front = self.getCameraFront(io);
     const speed: @Vector(3, f32) = @splat(self.player.fly_speed.load(.unordered));
-    const right_dir = strafeDirection(camera_front);
 
     self.player.physics.mutex.lockUncancelable(io);
     defer self.player.physics.mutex.unlock(io);
 
     // Reset velocity so fly input is frame-independent.
-    self.player.physics.velocity = .{ 0, 0, 0 };
-
-    var vel: @Vector(3, f64) = .{ 0, 0, 0 };
-    if (actions.contains(.forward)) vel += @as(@Vector(3, f64), @floatCast(speed * camera_front));
-    if (actions.contains(.backward)) vel += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
-    if (actions.contains(.up)) vel += .{ 0, speed[1], 0 };
-    if (actions.contains(.down)) vel += .{ 0, -speed[1], 0 };
-    if (right_dir) |r| {
-        if (actions.contains(.right)) vel += @as(@Vector(3, f64), @floatCast(speed * r.data));
-        if (actions.contains(.left)) vel += @as(@Vector(3, f64), @floatCast(-speed * r.data));
-    }
-    self.player.physics.velocity = vel;
+    self.player.physics.velocity = wishDirection(camera_front, speed, actions, true);
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
@@ -933,10 +931,9 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     defer z.end();
     const now = std.Io.Timestamp.now(io, .awake);
     const dt_ns = now.nanoseconds -| self.last_frametime.nanoseconds;
-    const delta_time_seconds = @as(f32, @floatFromInt(dt_ns)) / std.time.ns_per_s;
+    const dt_f64 = @as(f64, @floatFromInt(dt_ns)) / std.time.ns_per_s;
     const camera_front = self.getCameraFront(io);
     const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
-    const right_dir = strafeDirection(camera_front);
 
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
@@ -944,7 +941,7 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const player_pos = self.getPlayerPos(io);
     const ground_dist = try self.player.physics.elements.mover.getShortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
     const on_ground = ground_dist <= 0;
-    const speed_multiplier: @Vector(3, f32) = @splat(if (on_ground) 1.0 else 0.35);
+    const speed_multiplier: @Vector(3, f64) = @splat(if (on_ground) 1.0 else 0.35);
 
     self.player.physics.mutex.lockUncancelable(io);
     defer self.player.physics.mutex.unlock(io);
@@ -953,20 +950,12 @@ fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
         self.player.physics.velocity[1] = self.player.jump_strength.load(.unordered);
     }
 
-    var vel_diff: @Vector(3, f64) = @splat(0.0);
-    if (actions.contains(.forward)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * camera_front));
-    if (actions.contains(.backward)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * camera_front));
-    if (right_dir) |r| {
-        if (actions.contains(.right)) vel_diff += @as(@Vector(3, f64), @floatCast(speed * r.data));
-        if (actions.contains(.left)) vel_diff += @as(@Vector(3, f64), @floatCast(-speed * r.data));
-    }
-    vel_diff = vel_diff * speed_multiplier;
+    const vel_diff = wishDirection(camera_front, speed, actions, false) * speed_multiplier;
 
     if (on_ground) {
         self.player.physics.velocity[0] = vel_diff[0];
         self.player.physics.velocity[2] = vel_diff[2];
     } else {
-        const dt_f64 = @as(f64, @floatCast(delta_time_seconds));
         self.player.physics.velocity[0] += vel_diff[0] * dt_f64;
         self.player.physics.velocity[2] += vel_diff[2] * dt_f64;
     }
@@ -1122,7 +1111,10 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
 
 fn clearQueuedFlag(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) void {
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    if (bucket.getPtr(io, chunk_pos)) |state| state.is_queued = false;
+    // getPtr drops its lock before returning, so the write needs its own.
+    bucket.lock.lockUncancelable(io);
+    defer bucket.lock.unlock(io);
+    if (bucket.hash_map.getPtr(chunk_pos)) |state| state.is_queued = false;
 }
 
 fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool, view: ViewSnapshot) !void {

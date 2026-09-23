@@ -283,29 +283,12 @@ pub fn SetAssociativeCacheType(
             const result: @Vector(layout.ways, bool) = x == y;
             return @bitCast(result);
         }
-
-        /// Upsert a value, evicting an older entry if needed. The evicted value, if an update or
-        /// insert was performed and the index at which the value was inserted is returned.
-        pub fn upsert(self: *SetAssociativeCache, value: *const Value) struct {
-            index: usize,
-            updated: UpdateOrInsert,
+        /// Runs one CLOCK pass from the set's clock hand, decrementing counts until
+        /// a free slot appears. Returns the victim way and the displaced value, if any.
+        fn findVictim(self: *SetAssociativeCache, set: Set, clock_index: u64) struct {
+            way: Clock,
             evicted: ?Value,
         } {
-            const key = key_from_value(value);
-            const set = self.associate(key);
-            if (self.search(set, key)) |way| {
-                self.counts.set(set.offset + way, 1);
-                const evicted = set.values[way];
-                set.values[way] = value.*;
-                return .{
-                    .index = set.offset + way,
-                    .updated = .update,
-                    .evicted = evicted,
-                };
-            }
-
-            const clock_index = @divExact(set.offset, layout.ways);
-
             var way = self.clocks.get(clock_index);
             comptime assert(math.maxInt(@TypeOf(way)) == layout.ways - 1);
             comptime assert(@as(@TypeOf(way), math.maxInt(@TypeOf(way))) +% 1 == 0);
@@ -333,6 +316,35 @@ pub fn SetAssociativeCacheType(
                 unreachable;
             }
             assert(self.counts.get(set.offset + way) == 0);
+
+            return .{ .way = way, .evicted = evicted };
+        }
+
+        /// Upsert a value, evicting an older entry if needed. The evicted value, if an update or
+        /// insert was performed and the index at which the value was inserted is returned.
+        pub fn upsert(self: *SetAssociativeCache, value: *const Value) struct {
+            index: usize,
+            updated: UpdateOrInsert,
+            evicted: ?Value,
+        } {
+            const key = key_from_value(value);
+            const set = self.associate(key);
+            if (self.search(set, key)) |way| {
+                self.counts.set(set.offset + way, 1);
+                const evicted = set.values[way];
+                set.values[way] = value.*;
+                return .{
+                    .index = set.offset + way,
+                    .updated = .update,
+                    .evicted = evicted,
+                };
+            }
+
+            const clock_index = @divExact(set.offset, layout.ways);
+
+            const victim = self.findVictim(set, clock_index);
+            const way = victim.way;
+            const evicted = victim.evicted;
 
             set.tags[way] = set.tag;
             set.values[way] = value.*;
@@ -405,27 +417,8 @@ pub fn SetAssociativeCacheType(
             }
 
             const clock_index = @divExact(set.offset, layout.ways);
-            var way = self.clocks.get(clock_index);
 
-            const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
-            var safety_count: usize = 0;
-
-            while (safety_count <= clock_iterations_max) : ({
-                safety_count += 1;
-                way +%= 1;
-            }) {
-                var count = self.counts.get(set.offset + way);
-                if (count == 0) break;
-
-                count -= 1;
-                self.counts.set(set.offset + way, count);
-                if (count == 0) {
-                    break;
-                }
-            } else {
-                unreachable;
-            }
-            assert(self.counts.get(set.offset + way) == 0);
+            const way = self.findVictim(set, clock_index).way;
 
             // Grant the victim another chance and move the clock past it.
             self.counts.set(set.offset + way, 1);

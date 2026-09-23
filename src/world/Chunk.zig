@@ -78,13 +78,12 @@ pub const Encoding = union(enum(u1)) {
     }
 
     pub fn toGrid(blocks: *Encoding, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
-        if (blocks.* == .grid) return;
         switch (blocks.*) {
+            .grid => return,
             .uniform => |block| {
                 grid_buffer.* = @splat(@splat(@splat(block)));
                 blocks.* = .{ .grid = grid_buffer };
             },
-            .grid => {},
         }
     }
 

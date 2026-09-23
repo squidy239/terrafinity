@@ -446,11 +446,10 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
     normalizeSettings(options);
 
-    var first_no_pack = first_config;
+    // eql matches slices by pointer, so share the pack slice and compare its content separately.
     var working_no_pack = working_config;
-    first_no_pack.game_config.render_options.selected_pack = "";
-    working_no_pack.game_config.render_options.selected_pack = "";
-    const config_changed = !std.meta.eql(first_no_pack, working_no_pack) or !std.mem.eql(u8, first_config.game_config.render_options.selected_pack, working_config.game_config.render_options.selected_pack);
+    working_no_pack.game_config.render_options.selected_pack = first_config.game_config.render_options.selected_pack;
+    const config_changed = !std.meta.eql(first_config, working_no_pack) or !std.mem.eql(u8, first_config.game_config.render_options.selected_pack, working_config.game_config.render_options.selected_pack);
     const gamma_changed = first_config.game_config.render_options.gamma_correction != options.render_options.gamma_correction;
     const present_mode_changed = first_config.game_config.render_options.present_mode != options.render_options.present_mode;
     const aa_changed = first_config.game_config.render_options.anti_aliasing != options.render_options.anti_aliasing;
@@ -1394,7 +1393,8 @@ fn configTextf32(name: []const u8, value: *f32, id: u64) void {
     const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
     defer row.deinit();
     dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
-    var buffer: [24]u8 = undefined;
+    // "{d}" prints full decimal: the longest f32 expansion is 47 characters.
+    var buffer: [64]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
     buffer[text.len] = 0;
     var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });

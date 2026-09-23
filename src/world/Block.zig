@@ -36,14 +36,8 @@ pub const Block = enum(Tag) {
     }
 
     pub inline fn isSolid(self: Block) bool {
-        return switch (self) {
-            .null => unreachable,
-            .air,
-            .water,
-            .fine_grass,
-            => false,
-            else => true,
-        };
+        if (self == .null) unreachable;
+        return self.isVisible() and self != .water;
     }
 
     pub inline fn plantsCanGrow(self: Block) bool {

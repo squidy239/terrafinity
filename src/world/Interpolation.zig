@@ -134,8 +134,7 @@ pub fn MultilinearInterpolator(
             var acc: Lane = undefined;
             inline for (0..samples[0]) |i| {
                 const c = lerp.cell[i];
-                const f = lerp.frac[i];
-                acc[i] = points[c] + f * (points[c + 1] - points[c]);
+                acc[i] = @mulAdd(Float, lerp.frac[i], points[c + 1] - points[c], points[c]);
             }
             return acc;
         }
@@ -152,19 +151,13 @@ pub fn MultilinearInterpolator(
                 const c = lerp.cell[i];
                 const f: Lane = @splat(lerp.frac[i]);
                 if (axis == N - 1) {
-                    out[i] = in[c] + f * (in[c + 1] - in[c]);
-                } else {
-                    const stride = dims[axis];
-                    const inner = comptime gridCount(axis + 1);
-                    const chunk = sampleCount(axis + 1);
-                    var buf: [inner]Lane = undefined;
-                    for (0..inner) |j| {
-                        const lo = in[j * stride + c];
-                        const hi = in[j * stride + c + 1];
-                        buf[j] = lo + f * (hi - lo);
-                    }
-                    reduceAxis(axis + 1, &buf, out[i * chunk ..][0..chunk]);
+                    out[i] = @mulAdd(Lane, f, in[c + 1] - in[c], in[c]);
+                    continue;
                 }
+                const chunk = sampleCount(axis + 1);
+                var buf: [gridCount(axis + 1)]Lane = undefined;
+                for (&buf, 0..) |*dest, j| dest.* = @mulAdd(Lane, f, in[j * dims[axis] + c + 1] - in[j * dims[axis] + c], in[j * dims[axis] + c]);
+                reduceAxis(axis + 1, &buf, out[i * chunk ..][0..chunk]);
             }
         }
 

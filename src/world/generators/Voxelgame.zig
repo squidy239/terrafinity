@@ -178,14 +178,10 @@ pub const Generator = struct {
                     if (block_grid[xx][yy][zz] != .air) has_terrain = true;
                 }
 
-                if (self.params.trees and
-                    Pos[1] >= 0 and
-                    !is_top_chunk and
-                    block_grid[xx][@intCast(height)][zz] == .grass and
-                    rand_impl.random().float(f32) < tree_chance)
-                {
-                    generateTree(&block_grid, xx, zz, height, self.params.scale, level_scale, &rand_impl);
-                }
+                if (!self.params.trees or is_top_chunk or Pos[1] < 0) continue;
+                if (block_grid[xx][@intCast(height)][zz] != .grass) continue;
+                if (rand_impl.random().float(f32) >= tree_chance) continue;
+                generateTree(&block_grid, xx, zz, height, self.params.scale, level_scale, &rand_impl);
             }
         }
 

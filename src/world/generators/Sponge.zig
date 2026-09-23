@@ -174,49 +174,27 @@ fn columnTopSolid(params: *const InfiniteMengerGenerator.Params, bx: i64, bz: i6
     return null;
 }
 
-const SpawnBest = struct {
-    point: generator_api.Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false },
-    score: f64 = std.math.inf(f64),
-    good: bool = false,
-};
-
-/// Scores one sampled column, keeping the best even when it is wet or steep.
-fn considerSpongeColumn(params: *const InfiniteMengerGenerator.Params, center: *const [3]f64, sample: [2]f64, best: *SpawnBest) void {
-    // Round to the block the host resolves for this column (`@round` there).
-    const bx: i64 = @intFromFloat(@round(sample[0]));
-    const bz: i64 = @intFromFloat(@round(sample[1]));
-    const top = columnTopSolid(params, bx, bz) orelse return;
-    // Neighbouring tops two blocks out read as the local slope.
-    const top_x = columnTopSolid(params, bx + 2, bz) orelse top;
-    const top_z = columnTopSolid(params, bx, bz + 2) orelse top;
-    const slope: f32 = @floatFromInt(@max(@abs(top_x - top), @abs(top_z - top)));
-    const dx = sample[0] - center[0];
-    const dz = sample[1] - center[2];
-    const height_above_water: f32 = @floatFromInt(top - @as(i64, params.sea_level));
-    const scored = generator_api.scoreSpawnColumn(@sqrt(dx * dx + dz * dz), height_above_water, slope / 2.0);
-    // Prefer floors at the ceiling: the hint then matches the flat play layer.
-    const ceiling_gap: f64 = @floatFromInt(@as(i64, params.max_height) - top);
-    const score = scored.score + ceiling_gap * 0.5;
-    if (score < best.score) {
-        best.score = score;
-        best.point = .{
-            .pos = .{ sample[0], @as(f64, @floatFromInt(top)) + generator_api.spawn_hint_clearance, sample[1] },
-            .found = true,
-        };
-        best.good = !scored.wet and !scored.steep and ceiling_gap <= 4.0;
-    }
-}
-
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *SpongeInstance = @ptrCast(@alignCast(instance));
     const params = &self.generator.params;
     const seed = params.seed orelse return generator_api.no_spawn;
-    var best = SpawnBest{};
+    var best = generator_api.SpawnBest{};
     // Disc samples honor `radius`; later rings expand to escape hollow columns.
     const capped = @min(attempts, generator_api.spawn_attempt_cap);
     for (0..capped) |i| {
         const sample = generator_api.spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
-        considerSpongeColumn(params, center, sample, &best);
+        // Round to the block the host resolves for this column (`@round` there).
+        const bx: i64 = @intFromFloat(@round(sample[0]));
+        const bz: i64 = @intFromFloat(@round(sample[1]));
+        const top = columnTopSolid(params, bx, bz) orelse continue;
+        // Neighbouring tops two blocks out read as the local slope.
+        const top_x = columnTopSolid(params, bx + 2, bz) orelse top;
+        const top_z = columnTopSolid(params, bx, bz + 2) orelse top;
+        const slope: f32 = @floatFromInt(@max(@abs(top_x - top), @abs(top_z - top)));
+        const height_above_water: f32 = @floatFromInt(top - @as(i64, params.sea_level));
+        // Prefer floors at the ceiling: the hint then matches the flat play layer.
+        const ceiling_gap: f64 = @floatFromInt(@as(i64, params.max_height) - top);
+        generator_api.considerSpawnColumn(center, sample, height_above_water, slope / 2.0, @floatFromInt(top), ceiling_gap * 0.5, ceiling_gap <= 4.0, &best);
         if (i >= generator_api.spawn_samples_per_ring - 1 and best.good) break;
     }
     return best.point;

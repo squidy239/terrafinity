@@ -68,7 +68,7 @@ vec3 drawStars(vec3 dir) {
     vec3 jitter = vec3(hash13(c * 7.31), hash13(c * 13.7), hash13(c * 3.17));
     vec3 star_dir = normalize(c + jitter);
     float ang = acos(clamp(dot(dir, star_dir), -1.0, 1.0));
-    float disc = smoothstep(radius, 0.0, ang);
+    float disc = 1.0 - smoothstep(0.0, radius, ang);
     float brightness = mix(sky.star_brightness_min, sky.star_brightness_max, hash13(c * 5.0));
     col += starColor(hash13(c * 9.0)) * disc * disc * brightness;
     return col;
@@ -117,13 +117,13 @@ vec3 drawPlanets(vec3 dir, vec3 sdir) {
 vec3 gradient(vec3 dir, vec3 sdir, float day_factor) {
     float h = dir.y;
     vec3 day_col = mix(sky.horizon_color.xyz, sky.zenith_color.xyz, pow(clamp(h, 0.0, 1.0), 1.0 / max(sky.transition_power, 0.001)));
-    day_col = mix(day_col, sky.ground_color.xyz, smoothstep(0.0, -0.2, h));
+    day_col = mix(day_col, sky.ground_color.xyz, 1.0 - smoothstep(-0.2, 0.0, h));
 
     float sun_elev = sdir.y;
     float twilight = 1.0 - smoothstep(0.02, 0.4, abs(sun_elev));
 
     vec3 night_col = mix(vec3(0.012, 0.016, 0.03), vec3(0.05, 0.08, 0.17), pow(clamp(h, 0.0, 1.0), 1.5));
-    night_col = mix(night_col, vec3(0.008, 0.008, 0.012), smoothstep(0.0, -0.1, h));
+    night_col = mix(night_col, vec3(0.008, 0.008, 0.012), 1.0 - smoothstep(-0.1, 0.0, h));
 
     vec3 col = mix(night_col, day_col, day_factor);
 

@@ -229,41 +229,34 @@ fn addGridFaces(comptime len: usize, allocator: std.mem.Allocator, noalias mask:
         true => transparent_faces,
         false => opaque_faces,
     };
-    const face = Face{
-        .z = undefined,
-        .rotation = rotation,
-        .y = y,
-        .x = x,
-        .block_type = undefined,
-    };
     const greedy_z = comptime switch (rotation) {
         .zminus, .zplus => false,
         else => true,
     };
 
-    var last: Face = face;
-    var last_exists: bool = false;
-    var last_z_len: u8 = undefined;
+    const water_tag = @intFromEnum(Block.water);
+    var last: Face = undefined;
+    var pending = false;
     while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
         const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
         const block = center_row[z];
-        if (last_exists) {
-            const extend: bool = greedy_z and last.block_type == block and z == last.z + last_z_len + 1 and block != @intFromEnum(Block.water);
-            if (extend) {
-                @branchHint(.unpredictable);
-                last_z_len += 1;
-                continue;
-            }
-            last.z_length = @intCast(last_z_len);
-            try faces_list.append(allocator, last);
+        if (pending and greedy_z and last.block_type == block and block != water_tag and z == last.z + last.z_length + 1) {
+            @branchHint(.unpredictable);
+            last.z_length += 1;
+            continue;
         }
-        last_z_len = 0;
-        last_exists = true;
-        last.block_type = block;
-        last.z = z;
+        if (pending) try faces_list.append(allocator, last);
+        last = .{
+            .z = z,
+            .z_length = 0,
+            .rotation = rotation,
+            .y = y,
+            .x = x,
+            .block_type = block,
+        };
+        pending = true;
     }
-    std.debug.assert(last_exists); //mask can't be 0
-    last.z_length = @intCast(last_z_len);
+    std.debug.assert(pending); // mask can't be 0
     try faces_list.append(allocator, last);
 }
 

@@ -309,16 +309,19 @@ pub const GpuRegionAllocator = struct {
         return null;
     }
 
+    fn overlaps(offset: vk.DeviceSize, length: vk.DeviceSize, region: Region) bool {
+        return offset < region.offset + region.length and region.offset < offset + length;
+    }
+
     fn findFreeRegion(self: *GpuRegionAllocator, length: vk.DeviceSize) ?struct { offset: vk.DeviceSize, safe_graphics: u64 } {
         // Best-fit: reuse the smallest gap that holds the request, so small
         // meshes stop stranding large gaps at the head of the list.
         var best: ?usize = null;
+        var best_len: vk.DeviceSize = std.math.maxInt(vk.DeviceSize);
         for (self.free_regions.items, 0..) |region, i| {
-            if (region.length < length) continue;
-            if (best) |b| {
-                if (region.length >= self.free_regions.items[b].length) continue;
-            }
+            if (region.length < length or region.length >= best_len) continue;
             best = i;
+            best_len = region.length;
         }
         const i = best orelse return null;
         const region = self.free_regions.items[i];
@@ -340,49 +343,36 @@ pub const GpuRegionAllocator = struct {
 
         // Sorted by offset, so the insert point is a binary search and only the
         // two neighbors can overlap the freed range.
-        var lo: usize = 0;
-        var hi: usize = self.free_regions.items.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (self.free_regions.items[mid].offset > offset) {
-                hi = mid;
-            } else {
-                lo = mid + 1;
+        const insertion_index = std.sort.lowerBound(Region, self.free_regions.items, offset, struct {
+            fn order(context: vk.DeviceSize, region: Region) std.math.Order {
+                return std.math.order(context, region.offset);
             }
-        }
-        const insertion_index = lo;
-        if (insertion_index > 0) {
-            const prev = self.free_regions.items[insertion_index - 1];
-            if (offset < prev.offset + prev.length and prev.offset < offset + length) {
-                std.debug.panic("GpuRegionAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
-            }
-        }
-        if (insertion_index < self.free_regions.items.len) {
-            const next = self.free_regions.items[insertion_index];
-            if (offset < next.offset + next.length and next.offset < offset + length) {
-                std.debug.panic("GpuRegionAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
-            }
+        }.order);
+        if ((insertion_index > 0 and overlaps(offset, length, self.free_regions.items[insertion_index - 1])) or
+            (insertion_index < self.free_regions.items.len and overlaps(offset, length, self.free_regions.items[insertion_index])))
+        {
+            std.debug.panic("GpuRegionAllocator.freeRegion: overlapping free of [{d}, {d})", .{ offset, offset + length });
         }
 
         self.free_regions.insert(self.free_list_allocator, insertion_index, .{ .offset = offset, .length = length, .safe_graphics = current_graphics_val }) catch @panic("GpuRegionAllocator.freeRegion: insert OOM");
 
+        // The list stays sorted and merged, so at most one neighbor touches each side.
         var merge_index = insertion_index;
-        while (merge_index > 0) {
-            if (self.free_regions.items[merge_index - 1].offset + self.free_regions.items[merge_index - 1].length == self.free_regions.items[merge_index].offset) {
-                self.free_regions.items[merge_index - 1].safe_graphics = @max(self.free_regions.items[merge_index - 1].safe_graphics, self.free_regions.items[merge_index].safe_graphics);
-                self.free_regions.items[merge_index - 1].length += self.free_regions.items[merge_index].length;
-                _ = self.free_regions.orderedRemove(merge_index);
-                merge_index -= 1;
-            } else break;
+        if (merge_index > 0 and self.free_regions.items[merge_index - 1].offset + self.free_regions.items[merge_index - 1].length == self.free_regions.items[merge_index].offset) {
+            mergeRegions(&self.free_regions, merge_index - 1);
+            merge_index -= 1;
         }
+        if (merge_index + 1 < self.free_regions.items.len and self.free_regions.items[merge_index].offset + self.free_regions.items[merge_index].length == self.free_regions.items[merge_index + 1].offset) {
+            mergeRegions(&self.free_regions, merge_index);
+        }
+    }
 
-        while (merge_index + 1 < self.free_regions.items.len) {
-            if (self.free_regions.items[merge_index].offset + self.free_regions.items[merge_index].length == self.free_regions.items[merge_index + 1].offset) {
-                self.free_regions.items[merge_index].safe_graphics = @max(self.free_regions.items[merge_index].safe_graphics, self.free_regions.items[merge_index + 1].safe_graphics);
-                self.free_regions.items[merge_index].length += self.free_regions.items[merge_index + 1].length;
-                _ = self.free_regions.orderedRemove(merge_index + 1);
-            } else break;
-        }
+    /// Folds `regions.items[index + 1]` into `regions.items[index]`, keeping the
+    /// later safe-graphics value. Caller proves the pair is adjacent.
+    fn mergeRegions(regions: *std.ArrayList(Region), index: usize) void {
+        regions.items[index].safe_graphics = @max(regions.items[index].safe_graphics, regions.items[index + 1].safe_graphics);
+        regions.items[index].length += regions.items[index + 1].length;
+        _ = regions.orderedRemove(index + 1);
     }
 
     pub fn grow(self: *GpuRegionAllocator, io: std.Io, gpu_allocator: std.mem.Allocator) !GrowInfo {
@@ -1154,6 +1144,8 @@ pub const IndirectScene = struct {
     persistent: PersistentCandidates = .{},
     index_pool: IndexPool = undefined,
     max_allocated_index: std.atomic.Value(u32) = .init(0),
+    /// Guards both retirement lists: the drain task sweeps while the frame thread appends.
+    retired_slices_mutex: std.Io.Mutex = .init,
     retired_candidate_slices: std.ArrayList(RetiredCandidateSlice) = .empty,
     retired_visibility_slices: std.ArrayList(RetiredVisibilitySlice) = .empty,
     frame_buffers: PerFrameBuffers = .{},
@@ -1302,13 +1294,14 @@ pub const IndirectScene = struct {
         if (total_candidates > self.draw_capacity) try self.growDrawCapacity(io, total_candidates);
     }
 
-    pub fn processRetired(self: *IndirectScene, current_graphics_val: u64) void {
-        self.sweepRetired(self.memory.cpuToGpu(), &self.retired_candidate_slices, current_graphics_val);
-        self.sweepRetired(self.memory.gpuOnly(), &self.retired_visibility_slices, current_graphics_val);
+    pub fn processRetired(self: *IndirectScene, io: std.Io, current_graphics_val: u64) void {
+        self.retired_slices_mutex.lockUncancelable(io);
+        defer self.retired_slices_mutex.unlock(io);
+        sweepRetired(self.memory.cpuToGpu(), &self.retired_candidate_slices, current_graphics_val);
+        sweepRetired(self.memory.gpuOnly(), &self.retired_visibility_slices, current_graphics_val);
     }
 
-    fn sweepRetired(self: *IndirectScene, alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
-        _ = self;
+    fn sweepRetired(alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
         var i: usize = items.items.len;
         while (i > 0) {
             i -= 1;
@@ -1471,6 +1464,9 @@ pub const IndirectScene = struct {
         // Reserve both retirement slots before touching any live state: the render
         // thread reads these fields without a shared lock, so a failure after partial
         // mutation would strand an old slice or pair a slice length with a stale buffer.
+        // The drain task sweeps these lists concurrently, so the mutations take its lock.
+        self.retired_slices_mutex.lockUncancelable(io);
+        defer self.retired_slices_mutex.unlock(io);
         try self.retired_visibility_slices.ensureTotalCapacity(self.allocator, self.retired_visibility_slices.items.len + 1);
         try self.retired_candidate_slices.ensureTotalCapacity(self.allocator, self.retired_candidate_slices.items.len + 1);
 

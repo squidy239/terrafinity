@@ -331,9 +331,9 @@ pub fn Noise(comptime Float: type) type {
         inline fn genNoise2DFractal(comptime noise: NoiseType, state: *const State, seed: i32, xv: @Vector(1, Float), yv: @Vector(1, Float)) @Vector(1, Float) {
             return switch (state.fractal_type) {
                 .none, .progressive, .independent => genNoiseSingle2D(1, noise, state, seed, xv, yv),
-                .fbm => genFractalFBm2D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv),
-                .ridged => genFractalRidged2D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv),
-                .ping_pong => genFractalPingPong2D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv),
+                .fbm => genFractal2D(1, noise, .fbm, state, seed, state.calculateFractalBounding(), xv, yv),
+                .ridged => genFractal2D(1, noise, .ridged, state, seed, state.calculateFractalBounding(), xv, yv),
+                .ping_pong => genFractal2D(1, noise, .ping_pong, state, seed, state.calculateFractalBounding(), xv, yv),
             };
         }
 
@@ -388,9 +388,9 @@ pub fn Noise(comptime Float: type) type {
         inline fn genNoise3DFractal(comptime noise: NoiseType, state: *const State, seed: i32, xv: @Vector(1, Float), yv: @Vector(1, Float), zv: @Vector(1, Float)) @Vector(1, Float) {
             return switch (state.fractal_type) {
                 .none, .progressive, .independent => genNoiseSingle3D(1, noise, state, seed, xv, yv, zv),
-                .fbm => genFractalFBm3D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv, zv),
-                .ridged => genFractalRidged3D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv, zv),
-                .ping_pong => genFractalPingPong3D(1, noise, state, seed, state.calculateFractalBounding(), xv, yv, zv),
+                .fbm => genFractal3D(1, noise, .fbm, state, seed, state.calculateFractalBounding(), xv, yv, zv),
+                .ridged => genFractal3D(1, noise, .ridged, state, seed, state.calculateFractalBounding(), xv, yv, zv),
+                .ping_pong => genFractal3D(1, noise, .ping_pong, state, seed, state.calculateFractalBounding(), xv, yv, zv),
             };
         }
 
@@ -491,7 +491,11 @@ pub fn Noise(comptime Float: type) type {
                 // Integer ranges (especially i32/i64) exceed the f32 mantissa,
                 // so widen to f64 for the mapping; f64 represents every i32
                 // exactly and i64 up to 2^53.
-                .int => @intFromFloat(@as(f64, @floatFromInt(min)) + @as(f64, n) * (@as(f64, @floatFromInt(max)) - @as(f64, @floatFromInt(min)))),
+                // The endpoint rounds outward, so a full-range hit would convert out of range.
+                .int => if (n < 1.0)
+                    @intFromFloat(@as(f64, @floatFromInt(min)) + @as(f64, n) * (@as(f64, @floatFromInt(max)) - @as(f64, @floatFromInt(min))))
+                else
+                    max,
                 .float => min + @as(T, @floatCast(n)) * (max - min),
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
@@ -688,9 +692,7 @@ pub fn Noise(comptime Float: type) type {
 
                 const result: FloatV = switch (fractal) {
                     .none, .progressive, .independent => genNoiseSingle2D(N, noise, state, state.seed, x, y),
-                    .fbm => genFractalFBm2D(N, noise, state, state.seed, bounding, x, y),
-                    .ridged => genFractalRidged2D(N, noise, state, state.seed, bounding, x, y),
-                    .ping_pong => genFractalPingPong2D(N, noise, state, state.seed, bounding, x, y),
+                    .fbm, .ridged, .ping_pong => genFractal2D(N, noise, fractal, state, state.seed, bounding, x, y),
                 };
                 // Single 32-byte store; the full_len bound makes it provable.
                 out[start..][0..N].* = @as([N]Float, @bitCast(result));
@@ -720,9 +722,7 @@ pub fn Noise(comptime Float: type) type {
                 }
                 const result: FloatV = switch (fractal) {
                     .none, .progressive, .independent => genNoiseSingle2D(N, noise, state, state.seed, x, y),
-                    .fbm => genFractalFBm2D(N, noise, state, state.seed, bounding, x, y),
-                    .ridged => genFractalRidged2D(N, noise, state, state.seed, bounding, x, y),
-                    .ping_pong => genFractalPingPong2D(N, noise, state, state.seed, bounding, x, y),
+                    .fbm, .ridged, .ping_pong => genFractal2D(N, noise, fractal, state, state.seed, bounding, x, y),
                 };
                 storeChunk(N, start, out, result);
             }
@@ -863,9 +863,7 @@ pub fn Noise(comptime Float: type) type {
 
                 const result: FloatV = switch (fractal) {
                     .none, .progressive, .independent => genNoiseSingle3D(N, noise, state, state.seed, x, y, z),
-                    .fbm => genFractalFBm3D(N, noise, state, state.seed, bounding, x, y, z),
-                    .ridged => genFractalRidged3D(N, noise, state, state.seed, bounding, x, y, z),
-                    .ping_pong => genFractalPingPong3D(N, noise, state, state.seed, bounding, x, y, z),
+                    .fbm, .ridged, .ping_pong => genFractal3D(N, noise, fractal, state, state.seed, bounding, x, y, z),
                 };
                 out[start..][0..N].* = @as([N]Float, @bitCast(result));
             }
@@ -905,9 +903,7 @@ pub fn Noise(comptime Float: type) type {
 
                 const result: FloatV = switch (fractal) {
                     .none, .progressive, .independent => genNoiseSingle3D(N, noise, state, state.seed, x, y, z),
-                    .fbm => genFractalFBm3D(N, noise, state, state.seed, bounding, x, y, z),
-                    .ridged => genFractalRidged3D(N, noise, state, state.seed, bounding, x, y, z),
-                    .ping_pong => genFractalPingPong3D(N, noise, state, state.seed, bounding, x, y, z),
+                    .fbm, .ridged, .ping_pong => genFractal3D(N, noise, fractal, state, state.seed, bounding, x, y, z),
                 };
                 storeChunk(N, start, out, result);
             }
@@ -2037,8 +2033,12 @@ pub fn Noise(comptime Float: type) type {
         // sum/amp latency and overlaps the two noise evaluations; `fractal` is
         // comptime so the per-octave transform, tail sum form, and final
         // combine fold to the same codegen as the hand-written copies.
+        // Ridged factors (1 - 2*n_i)*amp_i across octaves:
+        // sum(amp_i) - 2*sum(n_i*amp_i) = 1.0 - 2*(sum0 + sum1).
         fn fractalEvenOdd2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
+            // An empty chain sums to zero, not to the ridged/ping-pong offset.
+            if (state.octaves == 0) return @splat(0);
             const FloatV = @Vector(N, Float);
             const gain: FloatV = @splat(state.gain);
             const lac: FloatV = @splat(state.lacunarity);
@@ -2086,6 +2086,7 @@ pub fn Noise(comptime Float: type) type {
 
         fn fractalEvenOdd3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
+            if (state.octaves == 0) return @splat(0);
             const FloatV = @Vector(N, Float);
             const gain: FloatV = @splat(state.gain);
             const lac: FloatV = @splat(state.lacunarity);
@@ -2204,60 +2205,23 @@ pub fn Noise(comptime Float: type) type {
             return sum;
         }
 
-        fn genFractalFBm2D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
+        // Unweighted/weighted octave chains shared by the fbm/ridged/
+        // ping-pong fractal types. `fractal` is comptime so each
+        // instantiation folds to the same codegen as the former per-type wrappers.
+        fn genFractal2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             if (state.weighted_strength == 0) {
-                return fractalEvenOdd2D(N, noise, .fbm, state, seed, bounding, x, y);
+                return fractalEvenOdd2D(N, noise, fractal, state, seed, bounding, x, y);
             }
-            return fractalWeighted2D(N, noise, .fbm, state, seed, bounding, x, y);
+            return fractalWeighted2D(N, noise, fractal, state, seed, bounding, x, y);
         }
 
-        fn genFractalFBm3D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
+        fn genFractal3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             if (state.weighted_strength == 0) {
-                return fractalEvenOdd3D(N, noise, .fbm, state, seed, bounding, x, y, z);
+                return fractalEvenOdd3D(N, noise, fractal, state, seed, bounding, x, y, z);
             }
-            return fractalWeighted3D(N, noise, .fbm, state, seed, bounding, x, y, z);
-        }
-
-        fn genFractalRidged2D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                // (1 - 2*n_i)*amp_i is factored across octaves:
-                // sum(amp_i) - 2*sum(n_i*amp_i) = 1.0 - 2*(sum0 + sum1).
-                return fractalEvenOdd2D(N, noise, .ridged, state, seed, bounding, x, y);
-            }
-            return fractalWeighted2D(N, noise, .ridged, state, seed, bounding, x, y);
-        }
-
-        fn genFractalRidged3D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                return fractalEvenOdd3D(N, noise, .ridged, state, seed, bounding, x, y, z);
-            }
-            return fractalWeighted3D(N, noise, .ridged, state, seed, bounding, x, y, z);
-        }
-
-        fn genFractalPingPong2D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                // (n - 0.5) * 2 * amp = 2*n*amp - amp. Factoring across
-                // octaves gives 2*(sum0 + sum1) - sum(amp_i) = 2*(sum0 + sum1) - 1.0.
-                return fractalEvenOdd2D(N, noise, .ping_pong, state, seed, bounding, x, y);
-            }
-            return fractalWeighted2D(N, noise, .ping_pong, state, seed, bounding, x, y);
-        }
-
-        fn genFractalPingPong3D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                // Even/odd chains halve the serial sum latency and overlap the
-                // two noise evaluations (see Ridged2D). sum(amp_i) = 1.0, so
-                // 2*(sum0 + sum1) - 1.0 matches the single-chain result up to
-                // reassociation order.
-                return fractalEvenOdd3D(N, noise, .ping_pong, state, seed, bounding, x, y, z);
-            }
-            return fractalWeighted3D(N, noise, .ping_pong, state, seed, bounding, x, y, z);
+            return fractalWeighted3D(N, noise, fractal, state, seed, bounding, x, y, z);
         }
 
         // Domain Warp Coordinate Transforms
@@ -2617,15 +2581,15 @@ pub fn Noise(comptime Float: type) type {
                 if (ax0 >= ay0 and ax0 >= az0) {
                     x1 += x_n_sign_f;
                     b = @mulAdd(Float, -(2.0 * x_n_sign_f), x1, b);
-                    ii -= x_n_sign *% prime_x;
+                    ii -%= x_n_sign *% prime_x;
                 } else if (ay0 > ax0 and ay0 >= az0) {
                     y1 += y_n_sign_f;
                     b = @mulAdd(Float, -(2.0 * y_n_sign_f), y1, b);
-                    jj -= y_n_sign *% prime_y;
+                    jj -%= y_n_sign *% prime_y;
                 } else {
                     z1 += z_n_sign_f;
                     b = @mulAdd(Float, -(2.0 * z_n_sign_f), z1, b);
-                    kk -= z_n_sign *% prime_z;
+                    kk -%= z_n_sign *% prime_z;
                 }
 
                 if (b > 0) {
@@ -2650,9 +2614,9 @@ pub fn Noise(comptime Float: type) type {
 
                 a += (0.75 - ax0) - (ay0 + az0);
 
-                i += (x_n_sign >> 1) & prime_x;
-                j += (y_n_sign >> 1) & prime_y;
-                k += (z_n_sign >> 1) & prime_z;
+                i +%= (x_n_sign >> 1) & prime_x;
+                j +%= (y_n_sign >> 1) & prime_y;
+                k +%= (z_n_sign >> 1) & prime_z;
 
                 x_n_sign = -x_n_sign;
                 y_n_sign = -y_n_sign;

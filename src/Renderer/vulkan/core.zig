@@ -255,14 +255,13 @@ pub const VulkanBackingAllocator = struct {
         var it = self.blocks[@intFromEnum(pool)].valueIterator();
         while (it.next()) |block| {
             const start = @intFromPtr(block.raw_alloc.ptr);
-            if (addr >= start and addr < start + block.raw_alloc.len) {
-                // gpu_only blocks have no real CPU mapping; their alignment padding is a
-                // sentinel artifact of the dummy allocation, so the data always sits at
-                // buffer offset 0. cpu_to_gpu blocks share the mapping with the buffer,
-                // making the pointer delta the true offset.
-                const offset: vk.DeviceSize = if (pool == .gpu_only) 0 else @intCast(addr - start);
-                return .{ .buffer = block.buffer, .offset = offset };
-            }
+            if (addr < start or addr >= start + block.raw_alloc.len) continue;
+            // gpu_only blocks have no real CPU mapping; their alignment padding is a
+            // sentinel artifact of the dummy allocation, so the data always sits at
+            // buffer offset 0. cpu_to_gpu blocks share the mapping with the buffer,
+            // making the pointer delta the true offset.
+            const offset: vk.DeviceSize = if (pool == .gpu_only) 0 else @intCast(addr - start);
+            return .{ .buffer = block.buffer, .offset = offset };
         }
         std.debug.panic("Pointer 0x{x} is not part of any VulkanBackingAllocator block", .{addr});
     }
@@ -669,12 +668,17 @@ pub const SingleTime = struct {
     pool: vk.CommandPool,
     queue: vk.Queue,
     queue_mutex: *std.Io.Mutex,
+    /// Guards `pool`, which requires external synchronization; leaf lock.
+    pool_mutex: std.Io.Mutex = .init,
+    io: std.Io,
     vkalloc: vk.AllocationCallbacks,
     fence: vk.Fence = .null_handle,
 
     pub fn begin(self: *SingleTime) !vk.CommandBuffer {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "beginSingleTimeCommands" });
         defer zone.end();
+        self.pool_mutex.lockUncancelable(self.io);
+        defer self.pool_mutex.unlock(self.io);
         var cmd: vk.CommandBuffer = undefined;
         try self.dev.allocateCommandBuffers(&.{ .level = .primary, .command_pool = self.pool, .command_buffer_count = 1 }, (&cmd)[0..1]);
         errdefer self.dev.freeCommandBuffers(self.pool, &.{cmd});
@@ -685,11 +689,13 @@ pub const SingleTime = struct {
     }
 
     pub fn free(self: *SingleTime, cmd: vk.CommandBuffer) void {
+        self.pool_mutex.lockUncancelable(self.io);
+        defer self.pool_mutex.unlock(self.io);
         self.dev.freeCommandBuffers(self.pool, &.{cmd});
     }
 
     pub fn endLocked(self: *SingleTime, cmd: vk.CommandBuffer) !void {
-        defer self.dev.freeCommandBuffers(self.pool, &.{cmd});
+        defer self.free(cmd);
 
         try self.dev.endCommandBuffer(cmd);
 

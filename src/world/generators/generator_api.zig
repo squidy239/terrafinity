@@ -106,33 +106,39 @@ pub const spawn_water_margin: f32 = 1.0;
 /// Feet hint height above the estimated top. The host resolves exact feet.
 pub const spawn_hint_clearance: f32 = 2.6;
 
+/// Splits a 64-bit hash into two uniform [0, 1) fractions.
+pub fn hashFracs(h: u64) [2]f64 {
+    return .{
+        @as(f64, @floatFromInt(h & 0xFFFFFFFF)) / 4294967296.0,
+        @as(f64, @floatFromInt(h >> 32)) / 4294967296.0,
+    };
+}
+
 /// Deterministic disc sample shared by every spawn search. `radius` is soft: ring 0
 /// stays within `radius`, later rings double outward to escape oceans.
 pub fn spawnSample(seed: u64, center: [2]f64, radius: f64, nonce: u64, i: u32) [2]f64 {
     var hasher = std.hash.Wyhash.init(seed ^ nonce ^ 0x9e3779b97f4a7c15);
     std.hash.autoHash(&hasher, i);
-    const h = hasher.final();
-    const frac_low: f64 = @as(f64, @floatFromInt(h & 0xFFFFFFFF)) / 4294967296.0;
-    const frac_high: f64 = @as(f64, @floatFromInt(h >> 32)) / 4294967296.0;
+    const fracs = hashFracs(hasher.final());
     // Larger budgets search farther, not denser, so retries escape the basin.
     const ring = @min(i / spawn_samples_per_ring, spawn_max_ring);
     const extra: f64 = spawn_ring_step * (@exp2(@as(f64, @floatFromInt(ring))) - 1.0);
     const r = radius + extra;
     if (r <= 0) return center;
     // Sqrt spreads samples evenly, so near-center candidates win distance terms.
-    const dist = r * @sqrt(frac_low);
-    const angle = std.math.tau * frac_high + @as(f64, @floatFromInt(i % spawn_samples_per_ring)) * (std.math.tau / @as(f64, spawn_samples_per_ring));
+    const dist = r * @sqrt(fracs[0]);
+    const angle = std.math.tau * fracs[1] + @as(f64, @floatFromInt(i % spawn_samples_per_ring)) * (std.math.tau / @as(f64, spawn_samples_per_ring));
     return .{ center[0] + @cos(angle) * dist, center[1] + @sin(angle) * dist };
 }
 
-/// Shared column score. Water and steep columns stay tracked, so ocean seeds still return a point.
-pub const SpawnScore = struct {
+/// Column score. Water and steep columns stay tracked, so ocean seeds still return a point.
+const SpawnScore = struct {
     score: f64,
     wet: bool,
     steep: bool,
 };
 
-pub fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnScore {
+fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnScore {
     const wet = height_above_water <= spawn_water_margin;
     const steep = slope >= spawn_steep_limit;
     return .{
@@ -140,6 +146,27 @@ pub fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnSco
         .wet = wet,
         .steep = steep,
     };
+}
+
+/// Shared best-candidate tracker for the pick-test-retry loops.
+pub const SpawnBest = struct {
+    point: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false },
+    score: f64 = std.math.inf(f64),
+    good: bool = false,
+};
+
+/// Folds one sampled column into `best`. Scores distance from `center` plus
+/// `extra_score` (a generator-specific penalty, 0 when unused); `extra_good`
+/// joins the shared wet/steep gate for early exit.
+pub fn considerSpawnColumn(center: *const [3]f64, sample: [2]f64, height_above_water: f32, slope: f32, top: f64, extra_score: f64, extra_good: bool, best: *SpawnBest) void {
+    const dx = sample[0] - center[0];
+    const dz = sample[1] - center[2];
+    const scored = scoreSpawnColumn(@sqrt(dx * dx + dz * dz), height_above_water, slope);
+    const score = scored.score + extra_score;
+    if (score >= best.score) return;
+    best.score = score;
+    best.point = .{ .pos = .{ sample[0], top + spawn_hint_clearance, sample[1] }, .found = true };
+    best.good = !scored.wet and !scored.steep and extra_good;
 }
 
 /// Shared pick-test-retry loop for heightfield generators. Pure; the host re-validates the winner.
@@ -154,9 +181,7 @@ pub fn proposeSpawnField(
     comptime columnHeight: anytype,
 ) Spawnpoint {
     const live_seed = seed orelse return no_spawn;
-    var best: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
-    var best_score: f64 = std.math.inf(f64);
-    var best_good = false;
+    var best = SpawnBest{};
     const capped = @min(attempts, spawn_attempt_cap);
     for (0..capped) |i| {
         // Analytic test only; the host re-validates the winner.
@@ -167,18 +192,11 @@ pub fn proposeSpawnField(
         const hx = columnHeight(context, sx + 2, sz);
         const hz = columnHeight(context, sx, sz + 2);
         const slope = @max(@abs(hx - h), @abs(hz - h)) / 2.0;
-        const dx = sample[0] - center[0];
-        const dz = sample[1] - center[2];
-        const scored = scoreSpawnColumn(@sqrt(dx * dx + dz * dz), h - sea_level, slope);
-        if (scored.score < best_score) {
-            best_score = scored.score;
-            // Top solid block is floor(h); the hint only needs the column.
-            best = .{ .pos = .{ sample[0], @floor(h) + spawn_hint_clearance, sample[1] }, .found = true };
-            best_good = !scored.wet and !scored.steep;
-        }
-        if (i >= spawn_samples_per_ring - 1 and best_good) break;
+        // Top solid block is floor(h); the hint only needs the column.
+        considerSpawnColumn(&center, sample, h - sea_level, slope, @floor(h), 0, true, &best);
+        if (i >= spawn_samples_per_ring - 1 and best.good) break;
     }
-    return best;
+    return best.point;
 }
 
 /// Vtable each generator exports. Aggregates cross as pointers; teardown runs through `get_source`.
@@ -273,8 +291,7 @@ fn valueEql(a: *const Value, b: *const Value) bool {
 
 pub fn arrayAdd(allocator: std.mem.Allocator, array: *Array) error{OutOfMemory}!void {
     const old_len = array.items.len;
-    // Clone before growing so both failure points leave the array untouched and
-    // its length always matches its allocation (a shrunk-back slice would not).
+    // Clone first so either failure leaves the array untouched.
     const item = try cloneParam(allocator, array.element);
     errdefer freeParam(allocator, &item);
     array.items = try allocator.realloc(array.items, old_len + 1);
@@ -283,9 +300,7 @@ pub fn arrayAdd(allocator: std.mem.Allocator, array: *Array) error{OutOfMemory}!
 
 pub fn arrayRemove(allocator: std.mem.Allocator, array: *Array, index: usize) void {
     std.debug.assert(index < array.items.len);
-    // Allocate the shrink first so a failed removal leaves the array whole: the
-    // in-place realloc used to strand a duplicate of the tail, which `free`
-    // then freed twice.
+    // Copy into a fresh shrink so a failed alloc leaves the array whole.
     const new_items = allocator.alloc(Param, array.items.len - 1) catch return;
     const removed = array.items[index];
     @memcpy(new_items[0..index], array.items[0..index]);
@@ -574,12 +589,16 @@ fn findParam(group: *const ConfigTree, name: []const u8) ?*const Param {
 
 fn dupeSpec(allocator: std.mem.Allocator, spec: *const Spec) error{OutOfMemory}!Spec {
     return .{
+        // label/description/advanced stay borrowed from the loaded generator library.
+        .label = spec.label,
+        .description = spec.description,
         .min = spec.min,
         .max = spec.max,
         .step = spec.step,
         .entries = try dupeEntries(allocator, spec.entries),
         .is_seed = spec.is_seed,
         .skip = spec.skip,
+        .advanced = spec.advanced,
     };
 }
 
@@ -654,16 +673,7 @@ fn cloneArray(allocator: std.mem.Allocator, src: *const Array) error{OutOfMemory
     errdefer allocator.destroy(element);
     element.* = try cloneParam(allocator, src.element);
     errdefer freeParam(allocator, element);
-    const items = try allocator.alloc(Param, src.items.len);
-    var count: usize = 0;
-    errdefer {
-        for (items[0..count]) |*p| freeParam(allocator, p);
-        allocator.free(items);
-    }
-    for (src.items, items) |*s, *d| {
-        d.* = try cloneParam(allocator, s);
-        count += 1;
-    }
+    const items = try cloneParams(allocator, src.items);
     return .{ .element = element, .items = items };
 }
 

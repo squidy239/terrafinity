@@ -3,25 +3,18 @@ const ConcurrentHashMap = @import("ConcurrentHashMap.zig").ConcurrentHashMap;
 
 /// Exact hierarchical spatial hash over AABBs (a hash-mapped linear octree).
 ///
-/// Each box is stored once at its home level `ceil(log2(extent))` in the cell
+/// Each box is stored at its home level `ceil(log2(extent))` in the cell
 /// containing its minimum corner, plus one replica in every coarser ancestor
-/// cell. A query therefore never descends into fine levels: it scans its own
-/// level (which holds every smaller box via replicas) and each coarser level
-/// that currently holds boxes. Empty space costs hash lookups, never cell
-/// enumeration, so a 1e12 query over a sparse field stays flat.
+/// cell. A query scans its own level and each occupied coarser level, so
+/// empty space costs hash lookups, never cell enumeration. Updates cost
+/// O(levels) hash ops; queries visit at most 64 cells per involved level.
+/// Clustering inside one cell degrades that cell linearly.
 ///
-/// Bounds (`max_levels` is a fixed 48): insert/remove/move cost O(levels) hash
-/// ops; a query visits at most 64 cells per involved level plus one constant-
-/// time narrowphase test per entry found there. Per-cell entry lists are
-/// output-sensitive: adversarial clustering inside one cell degrades that
-/// cell linearly. Updates hold one bucket lock at a time and are linearizable
-/// per cell, not atomic across cells; concurrent queries may observe a move
-/// mid-update. Concurrent mutations of the SAME id are unsound (the
-/// index-then-chain sequence can double-detach and corrupt counts): partition
-/// mutations by id across threads, as across any other shared structure.
-/// A failed `upsert` leaves no orphans and no stale index: the id ends absent,
-/// so retrying the `upsert` heals the map. `move` is remove-then-upsert and
-/// shares that contract: if the upsert half fails, the id is absent.
+/// Updates hold one bucket lock at a time: linearizable per cell, not atomic
+/// across cells, so queries may observe a move mid-update. Concurrent
+/// mutations of the SAME id are unsound; partition mutations by id across
+/// threads. A failed `upsert` leaves the id absent (retry heals the map);
+/// `move` shares that contract.
 pub fn SpatialHash(comptime bucket_amount: u32) type {
     return struct {
         const Map = @This();
@@ -45,8 +38,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
         home_count: [max_levels]std.atomic.Value(usize) = .{std.atomic.Value(usize).init(0)} ** max_levels,
 
         /// Inserts or replaces the box for `id`. On allocation failure the id
-        /// ends absent (never stale): the partial chain unwinds and any entry
-        /// detached from a previous box is not restored.
+        /// ends absent (never stale); retrying heals the map.
         pub fn upsert(self: *Map, io: std.Io, allocator: std.mem.Allocator, id: Id, box: Aabb) !void {
             assertValid(box);
             const home = keyFor(box);
@@ -91,12 +83,10 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             assertValid(box);
             const own = levelFor(extentOf(box));
             try self.scanLevel(io, allocator, box, own, false, out, stats);
-            var level = own + 1;
+            var level: u8 = own + 1;
             while (level < max_levels) : (level += 1) {
-                // Pruning hint only: fetchSub runs after the chain is fully
-                // detached, so zero means no committed entries from any
-                // completed update. Races with in-flight updates follow the
-                // per-cell contract above; relaxed ordering suffices.
+                // Zero means no completed update left entries here; races with
+                // in-flight updates follow the per-cell contract above.
                 if (self.home_count[level].load(.monotonic) == 0) continue;
                 try self.scanLevel(io, allocator, box, level, true, out, stats);
             }
@@ -129,8 +119,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             var key = home;
             while (true) {
                 try self.attach(io, allocator, key, entry);
-                if (key.level + 1 >= max_levels) break;
-                key = parentKey(key);
+                key = parentKey(key) orelse break;
             }
         }
 
@@ -140,14 +129,12 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             defer bucket.lock.unlock(io);
             const slot = try bucket.hash_map.getOrPut(allocator, key);
             if (!slot.found_existing) slot.value_ptr.* = .{};
-            // Idempotent by id: replaces on re-attach (same-chain refresh,
-            // allocation-failure retry), appends otherwise. `upsert` always
-            // detaches the old chain first, so duplicates cannot accumulate.
+            // Idempotent by id: replaces on refresh or retry, appends
+            // otherwise. `upsert` detaches the old chain first, so no duplicates.
             for (slot.value_ptr.entries.items) |*old| {
-                if (old.id == entry.id) {
-                    old.* = entry;
-                    return;
-                }
+                if (old.id != entry.id) continue;
+                old.* = entry;
+                return;
             }
             try slot.value_ptr.entries.append(allocator, entry);
         }
@@ -155,35 +142,33 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
         fn detach(self: *Map, io: std.Io, allocator: std.mem.Allocator, id: Id, home: CellKey) void {
             var key = home;
             while (true) {
-                const bucket = self.cells.getBucket(key);
-                bucket.lock.lockUncancelable(io);
-                if (bucket.hash_map.getPtr(key)) |cell| {
-                    for (cell.entries.items, 0..) |candidate, i| {
-                        if (candidate.id != id) continue;
-                        _ = cell.entries.swapRemove(i);
-                        break;
-                    }
-                    if (cell.entries.items.len == 0) {
-                        cell.entries.deinit(allocator);
-                        _ = bucket.hash_map.remove(key);
-                    }
-                }
-                bucket.lock.unlock(io);
-                if (key.level + 1 >= max_levels) break;
-                key = parentKey(key);
+                self.detachCell(io, allocator, id, key);
+                key = parentKey(key) orelse break;
             }
             const prev = self.home_count[home.level].fetchSub(1, .monotonic);
             std.debug.assert(prev > 0);
         }
 
+        fn detachCell(self: *Map, io: std.Io, allocator: std.mem.Allocator, id: Id, key: CellKey) void {
+            const bucket = self.cells.getBucket(key);
+            bucket.lock.lockUncancelable(io);
+            defer bucket.lock.unlock(io);
+            const cell = bucket.hash_map.getPtr(key) orelse return;
+            for (cell.entries.items, 0..) |candidate, i| {
+                if (candidate.id != id) continue;
+                _ = cell.entries.swapRemove(i);
+                break;
+            }
+            if (cell.entries.items.len == 0) {
+                cell.entries.deinit(allocator);
+                _ = bucket.hash_map.remove(key);
+            }
+        }
+
         fn scanLevel(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, level: u8, homes_only: bool, out: *std.ArrayListUnmanaged(Hit), stats: ?*Stats) !void {
-            const size = sizeFor(level);
-            // Own level: overlapped cells plus the neighbor shell, since a
-            // min-anchored box can spill one cell past its anchor in +xyz.
-            // Coarser levels hold bigger boxes directly and need the shell for
-            // the same reason. At most 4 cells per axis (64 total): the query
-            // spans at most 2 cells at any visited level.
-            const pad: Vec = @splat(size);
+            // Min-anchored boxes can spill one cell past their anchor in +xyz,
+            // so scan the overlapped cells plus a one-cell shell (at most 4 per axis).
+            const pad: Vec = @splat(sizeFor(level));
             const range_lo = box.min - pad;
             const range_hi = box.max + pad;
             const x0 = cellOf(range_lo[0], level);
@@ -245,7 +230,8 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             return .{ .level = level, .x = cellOf(box.min[0], level), .y = cellOf(box.min[1], level), .z = cellOf(box.min[2], level) };
         }
 
-        fn parentKey(key: CellKey) CellKey {
+        fn parentKey(key: CellKey) ?CellKey {
+            if (key.level + 1 >= max_levels) return null;
             return .{ .level = key.level + 1, .x = @divFloor(key.x, 2), .y = @divFloor(key.y, 2), .z = @divFloor(key.z, 2) };
         }
 
@@ -276,8 +262,7 @@ fn fillHits(map: *TestMap, io: std.Io, allocator: std.mem.Allocator, box: TestMa
 }
 
 fn hitIds(hits: []const TestMap.Hit) [16]TestMap.Id {
-    // Test-only convenience: fails loudly when a test outgrows the capacity
-    // instead of writing past the stack buffer.
+    // Test-only: fail loudly instead of overflowing the stack buffer.
     std.debug.assert(hits.len <= 16);
     var ids: [16]TestMap.Id = @splat(std.math.maxInt(TestMap.Id));
     for (hits, 0..) |hit, i| ids[i] = hit.id;

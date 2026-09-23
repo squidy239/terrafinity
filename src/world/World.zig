@@ -745,7 +745,6 @@ fn putChunk(
             defer victim.chunk.encoding_lock.unlockShared(io);
             try self.save(io, &victim.chunk, victim.pos);
             if (victim.chunk.encoding == .grid) self.freeGrid(io, victim.pos);
-            victim.* = undefined;
         }
 
         _ = shard.upsert(&.{ .chunk = chunk, .pos = chunk_pos });
@@ -782,7 +781,6 @@ fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chu
         std.debug.assert(victim.chunk.encoding == .grid);
         save(self, io, victim.chunk, victim.pos) catch |err|
             std.log.err("Failed to save chunk: {}", .{err});
-        victim.chunk.* = undefined;
         _ = chunks_shard.remove(victim.pos);
         break;
     }

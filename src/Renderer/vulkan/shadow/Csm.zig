@@ -293,7 +293,8 @@ fn depthRange(scene_min: Vec3d, scene_max: Vec3d, center: Vec3d, light_dir: Vec3
     // the range must stay centered on the camera (depth 0): centering on the unclamped
     // range's midpoint would push it to wherever the farthest occluder is, leaving the
     // receivers themselves out of range.
-    const half: f64 = @as(f64, max_depth_range) / 2.0;
+    // A zero range collapses near onto far, and the projection divides by their difference.
+    const half: f64 = @as(f64, @max(max_depth_range, 1.0)) / 2.0;
     if (far - near > 2.0 * half) {
         near = -half;
         far = half;

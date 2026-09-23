@@ -126,6 +126,7 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
         .pool = vk_ctx.upload_command_pool,
         .queue = vk_ctx.graphics_queue,
         .queue_mutex = &vk_ctx.queue_mutex,
+        .io = io,
         .vkalloc = vk_ctx.vkalloc,
     };
 
@@ -374,19 +375,18 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     self.readCullStats(current_frame);
 
     self.render_options_lock.lockSharedUncancelable(io);
-    defer self.render_options_lock.unlockShared(io);
     const aspect = @as(f32, @floatFromInt(target.width)) / @as(f32, @floatFromInt(target.height));
     const fov = std.math.degreesToRadians(self.render_options.fov);
     const day_length_sec = self.render_options.day_length_sec;
     const inside_transparent = self.render_options.inside_transparent;
     const occlusion_culling = self.render_options.occlusion_culling;
     const sky_config = self.render_options.sky;
-
+    const shadow_config = self.render_options.shadow;
+    self.render_options_lock.unlockShared(io);
     const vp = self.camera.computeViewProjection(aspect, fov);
 
-    // Shadow config changes recreate the depth array before any command buffer records;
-    // recreate is a no-op when nothing changed.
-    self.shadow.recreate(io, self.render_options.shadow) catch |err| {
+    // No-op when unchanged; must run before any command buffer records.
+    self.shadow.recreate(io, shadow_config) catch |err| {
         std.log.err("VulkanRenderer: shadow recreate failed: {any}", .{err});
     };
 

@@ -433,45 +433,23 @@ fn planetColumnTop(self: *const Generator, planet: Planet, x: f32, z: f32) ?stru
     }
     return null;
 }
-
-const SpawnBest = struct {
-    point: generator_api.Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false },
-    score: f64 = std.math.inf(f64),
-    good: bool = false,
-};
-
-/// Surface point nearest the request. Blind discs rarely hit small spheres, so the search anchors here.
-fn anchorPlanet(planet: Planet, point: @Vector(3, f32)) @Vector(3, f32) {
-    const to_point = point - planet.center;
-    const dist = @max(@sqrt(@reduce(.Add, to_point * to_point)), 1e-6);
-    return planet.center + to_point / @as(@Vector(3, f32), @splat(dist)) * @as(@Vector(3, f32), @splat(planet.radius));
-}
-
 /// Near-side uniform sample. The anchor cap can be all ocean, so hit odds equal land fraction.
 fn sphereSample(seed: u64, nonce: u64, i: u32, planet: Planet, facing: @Vector(3, f32)) [2]f64 {
     var hasher = std.hash.Wyhash.init(seed ^ nonce ^ 0x51ab129de09339a3 ^ @as(u64, i));
-    const hu = hasher.final();
-    const frac_a: f64 = @as(f64, @floatFromInt(hu & 0xFFFFFFFF)) / 4294967296.0;
-    const frac_b: f64 = @as(f64, @floatFromInt(hu >> 32)) / 4294967296.0;
-    const z_dir: f32 = @floatCast(2.0 * frac_a - 1.0);
+    const fracs = generator_api.hashFracs(hasher.final());
+    const z_dir: f32 = @floatCast(2.0 * fracs[0] - 1.0);
     const ring_r: f32 = @sqrt(@max(1.0 - z_dir * z_dir, 0.0));
-    const phi: f32 = @floatCast(std.math.tau * frac_b);
+    const phi: f32 = @floatCast(std.math.tau * fracs[1]);
     var dir = @Vector(3, f32){ ring_r * @cos(phi), z_dir, ring_r * @sin(phi) };
     if (@reduce(.Add, dir * facing) < 0) dir = -dir;
     const surf = planet.center + dir * @as(@Vector(3, f32), @splat(planet.radius));
     return .{ surf[0], surf[2] };
 }
 
-fn considerPlanetColumn(gen: *const Generator, planet: Planet, center: *const [3]f64, sample: [2]f64, best: *SpawnBest) void {
+/// Scores one sampled planet column into `best`, keeping wet/steep losers so ocean seeds still return a point.
+fn considerPlanetColumn(gen: *const Generator, planet: Planet, center: *const [3]f64, sample: [2]f64, best: *generator_api.SpawnBest) void {
     const column = planetColumnTop(gen, planet, @floatCast(sample[0]), @floatCast(sample[1])) orelse return;
-    const dx = sample[0] - center[0];
-    const dz = sample[1] - center[2];
-    const scored = generator_api.scoreSpawnColumn(@sqrt(dx * dx + dz * dz), if (column.wet) -1.0 else 2.0, 0);
-    if (scored.score < best.score) {
-        best.score = scored.score;
-        best.point = .{ .pos = .{ sample[0], @as(f64, column.top) + generator_api.spawn_hint_clearance, sample[1] }, .found = true };
-        best.good = !scored.wet and !scored.steep;
-    }
+    generator_api.considerSpawnColumn(center, sample, if (column.wet) -1.0 else 2.0, 0, column.top, 0, true, best);
 }
 
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
@@ -479,8 +457,11 @@ pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radi
     const seed = self.generator.params.seed orelse return generator_api.no_spawn;
     const point: @Vector(3, f32) = .{ @floatCast(center[0]), @floatCast(center[1]), @floatCast(center[2]) };
     const planet = nearestPlanet(&self.generator, point) orelse return generator_api.no_spawn;
-    const anchor = anchorPlanet(planet, point);
-    var best = SpawnBest{};
+    // Blind discs rarely hit small spheres, so anchor the search on the surface point nearest the request.
+    const to_point = point - planet.center;
+    const dist = @max(@sqrt(@reduce(.Add, to_point * to_point)), 1e-6);
+    const anchor = planet.center + to_point / @as(@Vector(3, f32), @splat(dist)) * @as(@Vector(3, f32), @splat(planet.radius));
+    var best = generator_api.SpawnBest{};
     // Discs around the anchor honor `radius`; the host re-validates the winner.
     const disc_budget = @min(attempts, 8 * generator_api.spawn_samples_per_ring);
     for (0..disc_budget) |i| {
@@ -490,7 +471,7 @@ pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radi
     if (!best.good) {
         const sphere_budget = @min(attempts, generator_api.spawn_attempt_cap);
         for (0..sphere_budget) |i| {
-            considerPlanetColumn(&self.generator, planet, center, sphereSample(seed, nonce, @intCast(i), planet, point - planet.center), &best);
+            considerPlanetColumn(&self.generator, planet, center, sphereSample(seed, nonce, @intCast(i), planet, to_point), &best);
         }
     }
     return best.point;

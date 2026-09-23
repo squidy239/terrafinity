@@ -164,13 +164,12 @@ pub fn main(init: std.process.Init) !void {
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
-                window.setMode(pre_fullscreen_window_mode);
                 current_window_mode = pre_fullscreen_window_mode;
             } else {
                 pre_fullscreen_window_mode = current_window_mode;
                 current_window_mode = .fullscreen;
-                window.setMode(current_window_mode);
             }
+            window.setMode(current_window_mode);
             vk_ctx.requestSwapchainRecreate();
         }
         if (action_set.contains(.screenshot)) {

@@ -53,16 +53,11 @@ pub const ErosionResult = struct {
     slope_dy: f32,
     /// Total strength summed over the octaves.
     magnitude: f32,
-    /// −1 in creases and +1 on ridges where the filter is active; currently
-    /// informational only, no terrain feature consumes it yet.
-    ridge_map: f32,
 };
 
 /// Wave offset of the Phacelle pattern; 0.25 lands the flat-pattern null at
 /// cos(0.25 * tau) ≈ 0 so featureless ground is left undisturbed.
 const wave_offset: f32 = 0.25;
-/// Slope multiplier gating the ridge-map fade per octave.
-const ridge_onset: f32 = 2.0;
 /// Per-octave decay of the mask rounding width.
 const rounding_decay: f32 = 0.5;
 /// Unit smoothing width: smoothStart(t, 1.0) is exactly the old easeOut(t),
@@ -109,7 +104,6 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
         .slope_dx = state.slope[0] - height_and_slope[1],
         .slope_dy = state.slope[1] - height_and_slope[2],
         .magnitude = state.magnitude,
-        .ridge_map = state.ridge_fade * (1.0 - state.ridge_mask),
     };
 }
 
@@ -133,8 +127,6 @@ const State = struct {
     slope: [2]f32,
     target: f32 = 0.0,
     mask: f32,
-    ridge_fade: f32 = 0.0,
-    ridge_mask: f32 = 1.0,
     magnitude: f32 = 0.0,
     fn apply(self: *State, p: [2]f32, octave: Octave, params: ErosionParams, inv_detail: f32) void {
         const wave = phacelle.phacelleNoise(
@@ -177,11 +169,6 @@ const State = struct {
             std.math.clamp(wave.cos + 0.5, 0.0, 1.0),
         ) * octave.rounding;
         self.mask = powInv(self.mask, inv_detail) * smoothStart(smoothStart(sloping, rounding), unit_ramp);
-
-        // Ridge map: tracks the wave where the terrain is sloped. Ported for
-        // completeness; its tuning is pending the ridge-map terrain features.
-        self.ridge_fade = std.math.lerp(self.ridge_fade, gullies[0], self.ridge_mask);
-        self.ridge_mask *= smoothStart(sloping * ridge_onset, unit_ramp);
     }
 };
 
@@ -304,7 +291,7 @@ test "erosion filter runs with zero crease rounding" {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.7 - 1.0, @as(f32, @floatFromInt(iy)) * 0.7 - 1.0 };
             const result = erosionFilter(p, .{ 0.0, -0.5, 0.0 }, 0.5, params);
             try std.testing.expect(std.math.isFinite(result.height_delta));
-            try std.testing.expect(std.math.isFinite(result.ridge_map));
+            try std.testing.expect(std.math.isFinite(result.magnitude));
         }
     }
 }
