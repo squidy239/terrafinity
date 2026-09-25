@@ -464,28 +464,22 @@ pub const DefaultGenerator = struct {
         const slope_scale = self.params.grass_detail_slope_scale;
         const slope_interp = self.params.grass_detail_gradient_interp;
         var level_slopes = LevelSlopes{ .generator = self, .io = io, .interp = slope_interp };
-        var any_filled = false;
-        if (self.params.grass_detail_gradient_source == .fine) {
-            var fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
-            for (&fine_slopes) |*row| {
-                for (row) |*slope| slope.* = bladeHeightScale(slope.*, slope_scale);
+        const batch: BladeBatch = blk: {
+            if (self.params.grass_detail_gradient_source == .fine) {
+                var fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
+                for (&fine_slopes) |*row| {
+                    for (row) |*slope| slope.* = bladeHeightScale(slope.*, slope_scale);
+                }
+                break :blk .{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = &fine_slopes };
             }
-            const batch = BladeBatch{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = &fine_slopes };
-            any_filled = try fanBladeColumns(&reader, io, allocator, batch, block_min, block_max, &level_slopes, slope_scale);
-        } else {
-            const batch = BladeBatch{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = null };
-            any_filled = try fanBladeColumns(&reader, io, allocator, batch, block_min, block_max, &level_slopes, slope_scale);
-        }
-        if (!any_filled) {
-            // Air skips meshing directly while null pays the face-extraction round-trip.
-            blocks.merge(.{ .uniform = .air }, grid_buffer);
-            return;
-        }
-        blocks.merge(.{ .grid = &detail_grid }, grid_buffer);
+            break :blk .{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = null };
+        };
+        try fanBladeColumns(&reader, io, allocator, batch, block_min, block_max, &level_slopes, slope_scale, blocks, grid_buffer);
     }
 
-    /// Fans stamped level-0 columns out to fine voxels, scaling per-voxel from the fine grid when present.
-    fn fanBladeColumns(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, batch: BladeBatch, block_min: World.BlockPos, block_max: World.BlockPos, parent_slopes: *LevelSlopes, slope_scale: f32) !bool {
+    /// Fans stamped level-0 columns out to fine voxels, scaling per-voxel from the fine grid when present,
+    /// then merges the result: air when nothing was stamped, else the detail grid.
+    fn fanBladeColumns(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, batch: BladeBatch, block_min: World.BlockPos, block_max: World.BlockPos, parent_slopes: *LevelSlopes, slope_scale: f32, blocks: *Chunk.Encoding, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         var any_filled = false;
         var block_x = block_min[0];
         while (block_x <= block_max[0]) : (block_x += 1) {
@@ -498,7 +492,12 @@ pub const DefaultGenerator = struct {
                 if (fillBlades(batch, .{ .block_x = block_x, .block_z = block_z, .layers = layers[0..layer_count], .slope = slope })) any_filled = true;
             }
         }
-        return any_filled;
+        if (!any_filled) {
+            // Air skips meshing directly while null pays the face-extraction round-trip.
+            blocks.merge(.{ .uniform = .air }, grid_buffer);
+            return;
+        }
+        blocks.merge(.{ .grid = @alignCast(batch.detail_grid) }, grid_buffer);
     }
 
     /// Slope grid at this chunk's own level; runs the height pipeline on the lattice and bypasses the height cache.

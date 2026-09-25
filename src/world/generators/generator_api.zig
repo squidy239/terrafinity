@@ -416,7 +416,7 @@ pub fn fromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const 
 pub fn fromTree(comptime T: type, allocator: std.mem.Allocator, tree: *const ConfigTree, out: *T, comptime field_specs: anytype) error{OutOfMemory}!void {
     inline for (std.meta.fields(T)) |f| {
         if (findParam(tree, f.name)) |param| {
-            _ = try applyField(f.type, allocator, &@field(out, f.name), param, fieldSpec(field_specs, f.name), field_specs);
+            try applyField(f.type, allocator, &@field(out, f.name), param, fieldSpec(field_specs, f.name), field_specs);
         }
     }
 }
@@ -517,11 +517,11 @@ fn valueFromField(comptime T: type, allocator: std.mem.Allocator, field_value: a
     }
 }
 
-fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, param: *const Param, comptime spec: Spec, comptime field_specs: anytype) error{OutOfMemory}!bool {
-    if (spec.skip) return false;
+fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, param: *const Param, comptime spec: Spec, comptime field_specs: anytype) error{OutOfMemory}!void {
+    if (spec.skip) return;
     switch (@typeInfo(T)) {
         .float => {
-            if (param.value != .f32) return false;
+            if (param.value != .f32) return;
             field_ptr.* = param.value.f32;
         },
         .int => {
@@ -529,40 +529,40 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
                 .i32 => |v| v,
                 .u32 => |v| v,
                 .u64 => |v| @as(i128, @intCast(v)),
-                else => return false,
+                else => return,
             };
-            field_ptr.* = std.math.cast(T, source) orelse return false;
+            field_ptr.* = std.math.cast(T, source) orelse return;
         },
         .bool => {
-            if (param.value != .bool) return false;
+            if (param.value != .bool) return;
             field_ptr.* = param.value.bool;
         },
         .@"enum" => {
-            if (param.value != .choice) return false;
-            if (param.value.choice >= std.meta.fields(T).len) return false;
+            if (param.value != .choice) return;
+            if (param.value.choice >= std.meta.fields(T).len) return;
             field_ptr.* = @enumFromInt(param.value.choice);
         },
         .optional => |info| {
-            if (param.value != .u64) return false;
-            if (@typeInfo(info.child) != .int) return false;
+            if (param.value != .u64) return;
+            if (@typeInfo(info.child) != .int) return;
             if (param.value.u64 == 0) {
                 field_ptr.* = null;
             } else {
-                field_ptr.* = std.math.cast(info.child, param.value.u64) orelse return false;
+                field_ptr.* = std.math.cast(info.child, param.value.u64) orelse return;
             }
         },
         .@"struct" => {
-            if (param.value != .group) return false;
+            if (param.value != .group) return;
             inline for (std.meta.fields(T)) |f| {
                 if (findParam(&param.value.group, f.name)) |child| {
-                    _ = try applyField(f.type, allocator, &@field(field_ptr, f.name), child, fieldSpec(field_specs, f.name), field_specs);
+                    try applyField(f.type, allocator, &@field(field_ptr, f.name), child, fieldSpec(field_specs, f.name), field_specs);
                 }
             }
         },
         .pointer => |info| {
-            if (param.value != .array) return false;
-            if (info.size != .slice) return false;
-            if (@typeInfo(info.child) != .@"struct") return false;
+            if (param.value != .array) return;
+            if (info.size != .slice) return;
+            if (@typeInfo(info.child) != .@"struct") return;
             const Child = info.child;
             const items = param.value.array.items;
             const new_items = try allocator.alloc(Child, items.len);
@@ -570,14 +570,13 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
             for (new_items) |*item| item.* = .{};
             for (items, new_items) |*item, *dst| {
                 if (item.value == .group) {
-                    _ = try applyField(Child, allocator, dst, item, .{}, field_specs);
+                    try applyField(Child, allocator, dst, item, .{}, field_specs);
                 }
             }
             field_ptr.* = new_items;
         },
-        else => return false,
+        else => return,
     }
-    return true;
 }
 
 fn findParam(group: *const ConfigTree, name: []const u8) ?*const Param {

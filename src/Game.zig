@@ -58,6 +58,12 @@ last_save: std.Io.Timestamp = .zero,
 save_is_running: std.atomic.Value(bool) = .init(false),
 save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) = null,
 
+/// Background entity-drain task, started when idle like the chunk loader. The
+/// previous pass is joined before a new one starts; the new pass then runs
+/// concurrently with draw. The player runs on the synchronous pinned lane.
+entity_update_is_running: std.atomic.Value(bool) = .init(false),
+entity_drain_future: ?std.Io.Future(@typeInfo(@TypeOf(updateEntities)).@"fn".return_type.?) = null,
+
 group: std.Io.Group = .init,
 /// The next frame handles this error and closes the game.
 deferred_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError)),
@@ -629,6 +635,7 @@ fn stopBackgroundWork(self: *@This(), io: std.Io) void {
     cancelFuture(io, &self.mesh_unload_future);
     cancelFuture(io, &self.save_future);
     cancelFuture(io, &self.load_future);
+    cancelFuture(io, &self.entity_drain_future);
     self.group.cancel(io);
     self.group.await(io) catch {};
 }
@@ -715,10 +722,11 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 
     const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
 
-    var entities_future = io.async(EntityRegistry.update, .{ &self.entity_registry, io, allocator, &self.world });
-    defer entities_future.cancel(io) catch {};
     try restartFutures(self, io, allocator);
-    try entities_future.await(io);
+    try startEntityDrain(self, io, allocator);
+    // Pinned lane: the player updates synchronously every frame so the camera
+    // never waits on the background drain.
+    try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
     asyncs.end();
     self.debug_menu.entities.store(self.entity_registry.count(), .unordered);
     const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
@@ -773,6 +781,34 @@ fn restartFuture(
 fn saveFuture(self: *@This(), io: std.Io) !void {
     defer self.save_is_running.store(false, .seq_cst);
     try self.world.trySaveAll(io);
+}
+
+/// Background entity-drain body: runs every due timer once, then clears the
+/// running flag so the next frame starts it again.
+fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+
+    defer self.entity_update_is_running.store(false, .seq_cst);
+    try self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io));
+}
+
+/// Starts the drain when the previous pass finished, mirroring restartFuture
+/// without a frequency gate: at most one drain runs, and a slow drain simply
+/// skips frames instead of overlapping.
+fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    if (self.entity_update_is_running.load(.seq_cst)) return;
+    // Never spawn into teardown; stopBackgroundWork owns shutdown from here.
+    if (!self.running.load(.unordered)) return;
+    if (self.entity_drain_future) |*f| try f.await(io);
+
+    self.entity_update_is_running.store(true, .seq_cst);
+    self.entity_drain_future = io.concurrent(updateEntities, .{ self, io, allocator }) catch io.async(updateEntities, .{ self, io, allocator });
+}
+
+/// Runs the player on the pinned per-frame lane outside the wheel.
+fn updatePlayer(self: *@This(), io: std.Io, allocator: std.mem.Allocator, now_ns: u64) !void {
+    try self.entity_registry.updatePinned(io, allocator, &self.world, self.player_entity, now_ns);
 }
 
 fn handleErrors(self: *@This()) !void {
@@ -866,7 +902,7 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
         pos,
         looking,
         std.Io.Timestamp.now(io, .awake).toNanoseconds(),
-    ));
+    ), 0);
     entity.release();
 }
 
@@ -1347,8 +1383,10 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         .game_mode = .init(default_game_mode),
         .view_direction = initial_view_direction,
         .main_inventory = undefined,
-    });
+    }, null);
     game.player_entity = player_entity;
+    // The wheel refuses the pinned uuid, so the per-frame lane owns the player alone.
+    game.entity_registry.setPinned(io, player_entity.uuid);
     game.player = @ptrCast(@alignCast(player_entity.ptr));
     // The literal physics flags above match Spectator, so normalize them to the configured mode.
     game.player.switchGameMode(default_game_mode);

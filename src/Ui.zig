@@ -667,7 +667,7 @@ fn drawTerrainDeveloperSettings(self: *@This(), io: std.Io, allocator: std.mem.A
         if (generator.generator.info.description.len > 0) {
             dvui.labelNoFmt(@src(), generator.generator.info.description, .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 8 } });
         }
-        _ = drawConfigTree(self, allocator, generator.config);
+        drawConfigTree(self, allocator, generator.config);
     } else {
         dvui.labelNoFmt(@src(), "No generator is loaded.", .{}, .{ .gravity_x = 0.5 });
     }
@@ -866,7 +866,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
 
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
-    if (self.new_game.config) |config| _ = drawConfigTree(self, allocator, config);
+    if (self.new_game.config) |config| drawConfigTree(self, allocator, config);
 
     return menu_changed;
 }
@@ -1190,12 +1190,10 @@ fn hovered(wd: *const dvui.WidgetData, opts: HoverOptions) bool {
     return false;
 }
 
-fn drawConfigTree(self: *@This(), allocator: std.mem.Allocator, tree: *generator_api.ConfigTree) bool {
-    const before = tree.*;
+fn drawConfigTree(self: *@This(), allocator: std.mem.Allocator, tree: *generator_api.ConfigTree) void {
     const box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
     defer box.deinit();
     drawParams(self, allocator, &tree.params, config_root_id);
-    return !generator_api.eql(&before, tree);
 }
 
 const config_root_id: u64 = 0x7465727261696e;

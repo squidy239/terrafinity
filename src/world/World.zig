@@ -395,6 +395,9 @@ pub const Editor = struct {
     world: *World,
     temp_allocator: std.mem.Allocator,
     propagate_changes: bool = true,
+    /// False runs flush tasks inline instead of fanning out across threads,
+    /// e.g. for deterministic profiles.
+    concurrent: bool = true,
 
     last_chunk_cache: ?struct {
         chunk_pos: ChunkPos,
@@ -475,6 +478,8 @@ pub const Editor = struct {
         defer zone.end();
         defer self.clear();
 
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "flush_lock_edit_buffer" });
+        defer zone_lock.end();
         self.edit_buffer.lockPointers();
         defer self.edit_buffer.unlockPointers();
 
@@ -487,25 +492,49 @@ pub const Editor = struct {
 
         var err_store: std.atomic.Value(EditErrorStruct) = .init(.{});
 
-        var it = self.edit_buffer.iterator();
-        while (it.next()) |diff_chunk| {
-            const chunk_pos = diff_chunk.key_ptr.*;
-            const encoding: Chunk.Encoding = .fromBlocks(&diff_chunk.value_ptr.grid);
-            group.async(io, editChunk, .{ self, io, allocator, chunk_pos, encoding, &remesh_neighbors, &remesh_mutex, &err_store });
+        {
+            const edit = tracy.Zone.begin(.{ .src = @src(), .name = "edit" });
+            defer edit.end();
+            var it = self.edit_buffer.iterator();
+            while (it.next()) |diff_chunk| {
+                const chunk_pos = diff_chunk.key_ptr.*;
+                const encoding: Chunk.Encoding = .fromBlocks(&diff_chunk.value_ptr.grid);
+                if (self.concurrent) {
+                    group.async(io, editChunk, .{ self, io, allocator, chunk_pos, encoding, &remesh_neighbors, &remesh_mutex, &err_store });
+                } else {
+                    try editChunk(self, io, allocator, chunk_pos, encoding, &remesh_neighbors, &remesh_mutex, &err_store);
+                }
+            }
+            if (self.concurrent) try group.await(io);
+            if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
         }
-        try group.await(io);
-        if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
 
-        it.index = 0;
-        while (it.next()) |pos| {
-            if (self.world.edit_callback) |cb| group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
+        {
+            const callbacks = tracy.Zone.begin(.{ .src = @src(), .name = "callbacks" });
+            defer callbacks.end();
+            var it = self.edit_buffer.iterator();
+            while (it.next()) |pos| {
+                if (self.world.edit_callback) |cb| {
+                    if (self.concurrent) {
+                        group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
+                    } else {
+                        try runEditCallback(cb, io, allocator, pos.key_ptr.*, &err_store);
+                    }
+                }
+            }
+            var rit = remesh_neighbors.iterator();
+            while (rit.next()) |pos| {
+                if (self.world.edit_callback) |cb| {
+                    if (self.concurrent) {
+                        group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
+                    } else {
+                        try runEditCallback(cb, io, allocator, pos.key_ptr.*, &err_store);
+                    }
+                }
+            }
+            if (self.concurrent) try group.await(io);
+            if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
         }
-        var rit = remesh_neighbors.iterator();
-        while (rit.next()) |pos| {
-            if (self.world.edit_callback) |cb| group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
-        }
-        try group.await(io);
-        if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
     }
 
     pub fn clear(self: *Editor) void {
@@ -529,6 +558,8 @@ pub const Editor = struct {
         var simplified: [simplified_size][simplified_size][simplified_size]Block = undefined;
         var is_uniform = false;
 
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "propagateToParent_lock_shared" });
+        defer zone_lock.end();
         try chunk.lockShared(io);
         switch (chunk.encoding) {
             .grid => |blocks| simplified = Chunk.Encoding.simplifyBlocks(blocks),
@@ -588,6 +619,8 @@ pub const Editor = struct {
         var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         var sides_changed: [6]bool = @splat(false);
 
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "mergeChunk_lock_exclusive" });
+        defer zone_lock.end();
         try chunk.lockExclusive(io);
         defer chunk.unlockExclusive(io);
 
@@ -600,6 +633,8 @@ pub const Editor = struct {
         if (was_grid and chunk.encoding != .grid) world.freeGrid(io, chunk_pos);
         if (!was_grid and chunk.encoding == .grid) {
             const shard, const lock = world.chunks.getShardAndLock(chunk_pos);
+            const zone_shard = tracy.Zone.begin(.{ .src = @src(), .name = "mergeChunk_lock_shard" });
+            defer zone_shard.end();
             lock.lockUncancelable(io);
             defer lock.unlock(io);
             world.ownGrid(io, chunk, chunk_pos, shard);
@@ -651,6 +686,8 @@ pub const Editor = struct {
         for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
             if (!changed) continue;
             const neighbor_pos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
+            const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "editChunk_lock_remesh" });
+            defer zone_lock.end();
             try remesh_mutex.lock(io);
             defer remesh_mutex.unlock(io);
             remesh_neighbors.put(neighbor_pos, {}) catch |err|
@@ -674,6 +711,7 @@ pub const Editor = struct {
 
         var propagation_editor: Editor = .{
             .propagate_changes = false,
+            .concurrent = self.concurrent,
             .world = self.world,
             .temp_allocator = self.temp_allocator,
         };
@@ -701,6 +739,8 @@ fn fetchChunk(self: *World, io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
     defer zone.end();
 
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
+    const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "fetchChunk_lock_shard" });
+    defer zone_lock.end();
     try lock.lock(io);
     defer lock.unlock(io);
 
@@ -729,6 +769,8 @@ fn putChunk(
 
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
     while (true) {
+        const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "putChunk_lock_shard" });
+        defer zone_lock.end();
         try lock.lock(io);
         defer lock.unlock(io);
 
@@ -768,6 +810,8 @@ fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chu
     if (chunk_ptr.encoding != .grid) return;
 
     const grid_shard, const lock = self.grids.getShardAndLock(chunk_pos);
+    const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "ownGrid_lock_shard" });
+    defer zone_lock.end();
     lock.lockUncancelable(io);
     defer lock.unlock(io);
 

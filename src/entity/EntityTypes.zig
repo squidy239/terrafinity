@@ -79,14 +79,15 @@ pub const Player = struct {
         self.physics.elements.resistance.enabled.store(!is_spectator, .monotonic);
     }
 
-    pub fn update(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable }!bool {
-        _ = uuid;
+    pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable }!void {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "updatePlayer" });
+        defer zone.end();
+
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.physics.update(world, io, allocator) catch |err| switch (err) {
+        self.physics.update(ctx.world, ctx.io, ctx.allocator) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return error.Unrecoverable,
         };
-        return false;
     }
 
     pub fn getInterface(self: *const @This()) Entity.Interface {
@@ -97,6 +98,11 @@ pub const Player = struct {
 
 pub const Explosive = struct {
     pub const Type: Entity.Type = .Explosive;
+    /// Blocks travelled per second along the unit direction.
+    const travel_speed: f32 = 10;
+    /// Blast sphere radius in blocks.
+    const blast_radius: f32 = 8;
+
     pos: @Vector(3, f64),
     /// Unit travel direction fixed at spawn; `update` integrates it into `pos` without renormalizing.
     dir: @Vector(3, f32),
@@ -111,36 +117,33 @@ pub const Explosive = struct {
         return .{ .pos = pos, .dir = unit, .timestamp = timestamp };
     }
 
-    pub fn update(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator) error{ Canceled, Unrecoverable, OutOfMemory }!bool {
+    pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable, OutOfMemory }!void {
         const u = tracy.Zone.begin(.{ .src = @src(), .name = "updateExplosive" });
         defer u.end();
-        _ = uuid;
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(ctx.io);
+        defer self.lock.unlock(ctx.io);
         const len_sq = @reduce(.Add, self.dir * self.dir);
         std.debug.assert(len_sq == 0 or std.math.approxEqAbs(f32, len_sq, 1, 1e-5));
 
-        const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-        const dt = @as(f32, @floatFromInt(now_ns - self.timestamp)) * 1e-9;
-        self.timestamp = now_ns;
+        var editor = World.Editor{ .world = ctx.world, .temp_allocator = ctx.allocator, .concurrent = false };
+        try editor.placeSamplerShape(.air, Sphere(f32).init(@floatCast(self.pos), blast_radius), World.standard_level);
 
-        const move = self.dir * @as(@Vector(3, f32), @splat(10 * dt));
+        // The drain supplies the watermark; sampling the wall here would drift under late firing.
+        const now_i96: i96 = @intCast(ctx.now_ns);
+        const dt = @as(f32, @floatFromInt(now_i96 - self.timestamp)) / std.time.ns_per_s;
+        self.timestamp = now_i96;
+
+        const move = self.dir * @as(@Vector(3, f32), @splat(travel_speed * dt));
         self.pos += @as(@Vector(3, f64), @floatCast(move));
-        var world_reader = World.Reader{ .world = world };
-        defer world_reader.clear(io);
 
-        if ((try world_reader.getBlockUncached(io, allocator, @floor(self.pos), World.standard_level)) != .air) {
-            var editor = World.Editor{ .world = world, .temp_allocator = allocator };
-            try editor.placeSamplerShape(.grass, Sphere(f32).init(@floatCast(self.pos), 8), World.standard_level);
-            editor.flush(io, allocator) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Unrecoverable,
-            };
-            return true;
-        }
-        return false;
+        try editor.placeSamplerShape(.grass, Sphere(f32).init(@floatCast(self.pos), blast_radius), World.standard_level);
+        editor.flush(ctx.io, ctx.allocator) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Unrecoverable,
+        };
+        ctx.reschedule(0);
     }
 
     pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
