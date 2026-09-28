@@ -679,7 +679,8 @@ pub fn recreateWorld(
     }
 
     self.stopBackgroundWork(io);
-    self.world.trySaveAll(io) catch {
+    // A full save is required before clear(): a skipped shard would be destroyed unsaved.
+    self.world.saveAll(io) catch {
         self.running.store(true, .unordered);
         return error.RecreateChunkSaveFailed;
     };

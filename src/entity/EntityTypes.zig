@@ -126,7 +126,7 @@ pub const Explosive = struct {
         const len_sq = @reduce(.Add, self.dir * self.dir);
         std.debug.assert(len_sq == 0 or std.math.approxEqAbs(f32, len_sq, 1, 1e-5));
 
-        var editor = World.Editor{ .world = ctx.world, .temp_allocator = ctx.allocator, .concurrent = false };
+        var editor = World.Editor{ .world = ctx.world, .temp_allocator = ctx.allocator };
         try editor.placeSamplerShape(.air, Sphere(f32).init(@floatCast(self.pos), blast_radius), World.standard_level);
 
         // The drain supplies the watermark; sampling the wall here would drift under late firing.

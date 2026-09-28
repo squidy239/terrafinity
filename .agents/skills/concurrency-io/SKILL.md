@@ -17,7 +17,7 @@ A wrong order or a held lock here deadlocks or races; every rule below cost a re
 
 - Mutexes suspend via the runtime: `lock(io)`, `tryLock()` for non-blocking probes, `unlock(io)`.
 - `ConcurrentHashMap`: `getPtr`/`get` release the shard lock before returning — never read-modify-write through them. Compound sequences use `getBucket(key)` plus explicit `bucket.lock`, one bucket at a time, never nested.
-- Fixed lock orders, never reversed: `retire_mutex` → `retired_meshes_mutex`; `queue_mutex` → cache shard lock.
+- Fixed lock orders, never reversed: `retire_mutex` → `retired_meshes_mutex`; `scheduler_mutex` → cache shard lock.
 
 ## Upload admission (MeshUploader)
 

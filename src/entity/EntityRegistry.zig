@@ -47,10 +47,16 @@ const drain_splices_max: u32 = 64;
 const retry_ns: u64 = 5 * std.time.ns_per_ms;
 /// Sentinel for empty link fields.
 const none: u32 = std.math.maxInt(u32);
-/// Bucket marker for the overflow chain holding beyond-horizon deadlines.
-const overflow_mark: u32 = wheel_buckets;
-/// Bucket marker for parked (dormant or detached) timers linked nowhere.
-const parked_mark: u32 = wheel_buckets + 1;
+/// Where a timer node is linked: a wheel bucket, the overflow chain, or nowhere.
+const Bucket = union(enum) {
+    wheel: u10,
+    overflow,
+    parked,
+};
+
+comptime {
+    if (wheel_buckets > 1 << 10) @compileError("wheel_buckets must fit in Bucket.wheel");
+}
 
 /// One scheduler timer. A slot is held for every resident entity and freed on
 /// eviction or reap, so the slab never exceeds cache capacity. Eviction cancels
@@ -61,13 +67,12 @@ const TimerNode = struct {
     deadline_ns: u64 = 0,
     next: u32 = none,
     prev: u32 = none,
-    /// Wheel index, overflow_mark, or parked_mark.
-    bucket: u32 = parked_mark,
+    /// Wheel bucket, overflow chain, or parked (linked nowhere).
+    bucket: Bucket = .parked,
     /// Drain generation that armed this timer; only older generations pop, so a
     /// re-arm inside a drain waits for the next pass.
     armed_gen: u64 = 0,
     in_flight: bool = false,
-    cancel_pending: bool = false,
     pending_armed: bool = false,
     pending_deadline_ns: u64 = 0,
 };
@@ -303,11 +308,12 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: u128) bool {
     if (!node.used or node.uuid != uuid) return true;
     if (node.in_flight) {
         node.pending_armed = true;
-        node.pending_deadline_ns = now +| retry_ms *| std.time.ns_per_ms;
+        node.pending_deadline_ns = now +| retry_ns;
         return true;
     }
-    if (node.bucket == parked_mark) {
-        self.linkLocked(slot, uuid, now +| retry_ms *| std.time.ns_per_ms, self.drain_seq -| 1, now);
+    switch (node.bucket) {
+        .parked => self.linkLocked(slot, uuid, now +| retry_ns, self.drain_seq -| 1, now),
+        else => {},
     }
     return true;
 }
@@ -352,7 +358,7 @@ pub fn rescheduleAt(self: *@This(), io: std.Io, uuid: u128, base_ns: u64, delay_
 
 /// Runs the pinned per-frame lane for entities the wheel never owns, like the
 /// player. Pinned entities always reschedule by lane contract; deletion and
-/// dormancy are ignored, and deletion is logged as a contract breach.
+/// dormancy are ignored because the lane owns its entity's liveness.
 pub fn updatePinned(
     self: *@This(),
     io: std.Io,
@@ -408,6 +414,7 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
             }
             self.runDue(ctx, due.slot, due.uuid);
         }
+        if (update_error != null) break;
     }
 
     if (update_error) |err| return err;
@@ -510,7 +517,7 @@ fn reapDeleted(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: 
     }
     // Still referenced elsewhere; retry later.
     entity.release();
-    self.settleClaim(ctx, slot, uuid, .{ .link = ctx.watermark +| retry_ms *| std.time.ns_per_ms });
+    self.settleClaim(ctx, slot, uuid, .{ .link = ctx.watermark +| retry_ns });
 }
 
 fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: u128) void {
@@ -531,7 +538,7 @@ fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: u1
     };
     update_fn(entity.ptr, update_ctx) catch |err| {
         entity.release();
-        self.settleClaim(ctx, slot, uuid, .{ .link = ctx.watermark +| retry_ms *| std.time.ns_per_ms });
+        self.settleClaim(ctx, slot, uuid, .{ .link = ctx.watermark +| retry_ns });
         if (ctx.update_error.* == null) ctx.update_error.* = err;
         return;
     };
@@ -554,12 +561,6 @@ fn settleClaim(self: *@This(), ctx: DrainCtx, slot: u32, uuid: u128, action: Set
     const node = &self.timers[slot];
     if (!node.used or node.uuid != uuid or !node.in_flight) return;
     node.in_flight = false;
-    if (node.cancel_pending) {
-        node.cancel_pending = false;
-        node.pending_armed = false;
-        self.freeSlotLocked(slot);
-        return;
-    }
     if (node.pending_armed) {
         node.pending_armed = false;
         const pending = node.pending_deadline_ns;
@@ -590,7 +591,6 @@ fn freeSlotLocked(self: *@This(), slot: u32) void {
     self.unlinkLocked(slot);
     node.used = false;
     node.in_flight = false;
-    node.cancel_pending = false;
     node.pending_armed = false;
     node.next = self.free_head;
     self.free_head = slot;
@@ -600,12 +600,9 @@ fn freeSlotLocked(self: *@This(), slot: u32) void {
 fn unlinkLocked(self: *@This(), slot: u32) void {
     const node = &self.timers[slot];
     const head: *u32 = switch (node.bucket) {
-        overflow_mark => &self.overflow_head,
-        parked_mark => return,
-        else => |b| blk: {
-            std.debug.assert(b < wheel_buckets);
-            break :blk &self.buckets[b];
-        },
+        .overflow => &self.overflow_head,
+        .parked => return,
+        .wheel => |b| &self.buckets[b],
     };
     if (node.prev != none) {
         self.timers[node.prev].next = node.next;
@@ -617,7 +614,7 @@ fn unlinkLocked(self: *@This(), slot: u32) void {
     }
     node.next = none;
     node.prev = none;
-    node.bucket = parked_mark;
+    node.bucket = .parked;
 }
 
 fn linkLocked(self: *@This(), slot: u32, uuid: u128, deadline_ns: u64, armed_gen: u64, now_ns: u64) void {
@@ -628,10 +625,9 @@ fn linkLocked(self: *@This(), slot: u32, uuid: u128, deadline_ns: u64, armed_gen
     node.deadline_ns = deadline_ns;
     node.armed_gen = armed_gen;
     node.in_flight = false;
-    node.cancel_pending = false;
     node.pending_armed = false;
     if (deadline_ns -| now_ns > horizon_ns) {
-        node.bucket = overflow_mark;
+        node.bucket = .overflow;
         self.pushFrontLocked(&self.overflow_head, slot);
     } else {
         self.pushWheelLocked(slot);
@@ -640,8 +636,8 @@ fn linkLocked(self: *@This(), slot: u32, uuid: u128, deadline_ns: u64, armed_gen
 
 fn pushWheelLocked(self: *@This(), slot: u32) void {
     const node = &self.timers[slot];
-    const bucket: u32 = @intCast((node.deadline_ns / tick_ns) % wheel_buckets);
-    node.bucket = bucket;
+    const bucket: u10 = @intCast((node.deadline_ns / tick_ns) % wheel_buckets);
+    node.bucket = .{ .wheel = bucket };
     self.pushFrontLocked(&self.buckets[bucket], slot);
 }
 
@@ -657,12 +653,9 @@ fn applyDeferredLocked(self: *@This(), deferred: ?DeferredCancel) void {
     const cancel = deferred orelse return;
     const node = &self.timers[cancel.slot];
     if (!node.used or node.uuid != cancel.uuid) return;
-    if (node.in_flight) {
-        // The claim holder frees on settle. This only ever coincides with the
-        // victim's destruction here, so no orphaned resident survives it.
-        node.cancel_pending = true;
-        return;
-    }
+    // Freeing an in-flight slot is safe: the victim is already out of the cache,
+    // so its claim can only miss the lookup and no-op on settle, and any slot
+    // reuse fails the claim's uuid check.
     self.freeSlotLocked(cancel.slot);
 }
 
@@ -891,7 +884,9 @@ test "update requesting deletion is reaped on a later drain" {
     try registry.drain(testing.io, testing.allocator, test_world, t0 + ms);
     try testing.expectEqual(@as(u64, 1), registry.count());
 
-    try registry.drain(testing.io, testing.allocator, test_world, t0 + 10 * ms);
+    // Sample after the retry armed, so its deadline provably precedes t1 + 10ms.
+    const t1 = nowNs(testing.io);
+    try registry.drain(testing.io, testing.allocator, test_world, t1 + 10 * ms);
     try testing.expectEqual(@as(u64, 0), registry.count());
     try testing.expectEqual(@as(u32, 1), test_unloaded.load(.seq_cst));
 }
@@ -1112,8 +1107,9 @@ test "mid-flight wakes apply as pending" {
     var batch: [drain_batch]Due = undefined;
     try testing.expectEqual(@as(usize, 1), try registry.spliceDue(ctx, &batch, true));
 
-    // A wake now records pending instead of racing the detached claim.
-    try testing.expect(registry.schedule(testing.io, uuid, 50));
+    // A wake now records pending instead of racing the detached claim. The base
+    // is the fixed t0 so the pending deadline cannot outrun the drain watermark.
+    try testing.expect(registry.rescheduleAt(testing.io, uuid, t0, 50));
 
     // Settling honors the pending wake over the park fallback.
     registry.settleClaim(ctx, batch[0].slot, uuid, .park);
@@ -1122,6 +1118,46 @@ test "mid-flight wakes apply as pending" {
     try testing.expectEqual(@as(u32, 0), updates.load(.seq_cst));
     try registry.drain(testing.io, testing.allocator, test_world, t0 + 60 * std.time.ns_per_ms);
     try testing.expectEqual(@as(u32, 1), updates.load(.seq_cst));
+    try testing.expectEqual(null, update_error);
+}
+
+test "evicting an in-flight timer reclaims its slot at once" {
+    test_unloaded.store(0, .seq_cst);
+    var updates: std.atomic.Value(u32) = .init(0);
+    var registry = try init(testing.allocator, EntityMapType.value_count_min);
+    defer registry.deinit(testing.io, testing.allocator, test_world);
+
+    // Fill the cache with due timers so the next spawn must evict a resident.
+    for (0..EntityMapType.value_count_min) |_| {
+        const entity = try registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded, .updates = &updates }, 0);
+        entity.release();
+    }
+
+    // Detach every timer by hand and leave the claims in flight.
+    const t0 = nowNs(testing.io);
+    var update_error: ?Entity.UpdateError = null;
+    const seq = registry.beginDrain(testing.io);
+    const ctx: DrainCtx = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .world = test_world,
+        .watermark = t0,
+        .seq = seq,
+        .update_error = &update_error,
+    };
+    var batch: [drain_batch]Due = undefined;
+    const detached = try registry.spliceDue(ctx, &batch, true);
+    try testing.expectEqual(@as(usize, EntityMapType.value_count_min), detached);
+
+    // The victim is in flight, so the spawn itself must reclaim its slot; wait
+    // for settle and the spare is gone with a resident evicted.
+    const spawner = try registry.spawn(testing.io, testing.allocator, test_world, TestEntity{ .unloaded = &test_unloaded, .updates = &updates }, null);
+    spawner.release();
+    try testing.expectEqual(registry.count(), registry.timer_used);
+
+    // Settling the stale claims must not disturb the reused slots.
+    for (batch[0..detached]) |due| registry.settleClaim(ctx, due.slot, due.uuid, .park);
+    try testing.expectEqual(registry.count(), registry.timer_used);
     try testing.expectEqual(null, update_error);
 }
 

@@ -191,18 +191,42 @@ pub const Encoding = union(enum(u1)) {
         if ((area_factor + 1) * area_factor + area_factor > std.math.maxInt(u8)) @compileError("findBestBlock u8 score overflows; widen score or lower scale_factor");
     }
 
-    fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, center: @Vector(ChunkSize, Block.Tag)) @Vector(ChunkSize, bool) {
-        const center_trans = Block.isTransparentVector(ChunkSize, center);
+    const TransparencyRow = @Vector(ChunkSize, bool);
+
+    /// Transparency of one grid row, memoized so each row is classified at most
+    /// once per simplifyBlocks call. Neighbor rows repeat across the masks of a
+    /// single cell and across adjacent cells, so a raw recompute paid ~5-20x.
+    fn rowTransparent(
+        grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag,
+        x: usize,
+        y: usize,
+        cache: *[ChunkSize][ChunkSize]TransparencyRow,
+        done: *[ChunkSize][ChunkSize]bool,
+    ) TransparencyRow {
+        if (done[x][y]) return cache[x][y];
+        const t = Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y]));
+        cache[x][y] = t;
+        done[x][y] = true;
+        return t;
+    }
+
+    fn getExposureMask(
+        x: usize,
+        y: usize,
+        grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag,
+        cache: *[ChunkSize][ChunkSize]TransparencyRow,
+        done: *[ChunkSize][ChunkSize]bool,
+    ) @Vector(ChunkSize, bool) {
+        const center_trans = rowTransparent(grid, x, y, cache, done);
         var exposure_mask: @Vector(ChunkSize, bool) = @splat(false);
 
         exposure_mask |= std.simd.shiftElementsRight(center_trans, 1, true);
         exposure_mask |= std.simd.shiftElementsLeft(center_trans, 1, true);
 
-        exposure_mask |= if (x == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x - 1][y]));
-        exposure_mask |= if (x == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x + 1][y]));
-
-        exposure_mask |= if (y == 0) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y - 1]));
-        exposure_mask |= if (y == ChunkSize - 1) center_trans else Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y + 1]));
+        exposure_mask |= if (x == 0) center_trans else rowTransparent(grid, x - 1, y, cache, done);
+        exposure_mask |= if (x == ChunkSize - 1) center_trans else rowTransparent(grid, x + 1, y, cache, done);
+        exposure_mask |= if (y == 0) center_trans else rowTransparent(grid, x, y - 1, cache, done);
+        exposure_mask |= if (y == ChunkSize - 1) center_trans else rowTransparent(grid, x, y + 1, cache, done);
 
         return exposure_mask;
     }
@@ -251,6 +275,8 @@ pub const Encoding = union(enum(u1)) {
 
     pub fn simplifyBlocks(grid: *align(GridAlignment) const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
         var simplified_grid: [simplified_size][simplified_size][simplified_size]Block align(GridAlignment) = undefined;
+        var trans_cache: [ChunkSize][ChunkSize]TransparencyRow = undefined;
+        var trans_done: [ChunkSize][ChunkSize]bool = @splat(@splat(false));
         for (0..simplified_size) |nx| {
             const x = nx * scale_factor;
 
@@ -275,7 +301,7 @@ pub const Encoding = union(enum(u1)) {
                 inline for (0..scale_factor) |dx| {
                     inline for (0..scale_factor) |dy| {
                         const idx = dx * scale_factor + dy;
-                        exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), rows[idx]);
+                        exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), &trans_cache, &trans_done);
                     }
                 }
 
