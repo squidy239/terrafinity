@@ -7,59 +7,49 @@ const Entity = @This();
 
 pub const Implementation = opaque {};
 
+/// Canceled unwinds the pass as a cancellation; any other error is fatal to the game.
 pub const UpdateError = error{ Canceled, Unrecoverable, OutOfMemory };
 
-/// Handed to every update. An entity drives its own continuation: call
-/// reschedule to run again after a delay (zero fires on the next drain, never
-/// the current one) or delete to be reaped. Returning without either parks the
-/// entity dormant until an external schedule wakes it.
+/// Handed to every update. Call reschedule to run again later (zero fires on the
+/// next drain) or delete to be reaped; returning parks the entity dormant.
 pub const UpdateContext = struct {
     io: std.Io,
     world: *World,
     allocator: std.mem.Allocator,
-    /// Watermark of the running drain, in nanoseconds.
+    /// Watermark of the running drain.
     now_ns: u64,
-    uuid: u128,
+    uuid: Handle,
     registry: *EntityRegistry,
 
-    /// Re-arm this entity's timer delay_ms from the drain watermark. Safe from
-    /// inside update: the in-flight claim records it and settle applies it
-    /// after the return, so zero lands on the next drain, never this one.
+    /// Re-arm from the drain watermark; recorded on the in-flight claim and
+    /// applied after the update returns, so zero lands on the next drain.
     pub fn reschedule(self: UpdateContext, delay_ms: u64) void {
         _ = self.registry.rescheduleAt(self.io, self.uuid, self.now_ns, delay_ms);
     }
 
-    /// Flag this entity for deletion; the drain reaps it once unreferenced.
     pub fn delete(self: UpdateContext) void {
         _ = self.registry.markDeleted(self.io, self.uuid);
     }
 };
 
 type: Type,
-uuid: u128,
+uuid: Handle,
 ptr: *Implementation,
 ref_count: std.atomic.Value(u32),
-/// Flags deletion; unloads once only the cache-owned ref remains. Safe from any thread.
 deleted: std.atomic.Value(bool) = .init(false),
-/// Index into the registry's timer slab, or no_timer while the slot is free.
-/// Written under the scheduler mutex plus the entity shard lock; readable with
-/// either held while a reference is pinned.
-timer_slot: u32 = no_timer,
+/// Index into the registry's timer slab; every resident entity owns one.
+timer_slot: u32,
 vtable: Interface,
 
-/// Sentinel for timer_slot: the entity holds no timer-slab slot.
-pub const no_timer: u32 = std.math.maxInt(u32);
-
 pub const Interface = struct {
-    /// Runs one due update. Call ctx.reschedule to keep the entity running or
-    /// ctx.delete to remove it; return to park.
+    /// Call ctx.reschedule to keep running or ctx.delete to remove; return parks.
     update: ?*const fn (ptr: *Implementation, ctx: UpdateContext) UpdateError!void = null,
-    /// Frees the implementation after this call. Must not acquire locks held where the entity system runs.
-    unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
+    /// Frees the implementation. Must not acquire locks held where the entity system runs.
+    unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
     getPos: ?*const fn (ptr: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
-pub inline fn keyFromValue(self: *const @This()) u128 {
+pub inline fn keyFromValue(self: *const @This()) Handle {
     return self.uuid;
 }
 
@@ -76,16 +66,11 @@ pub fn markDeleted(self: *@This()) void {
     self.deleted.store(true, .seq_cst);
 }
 
-pub fn isDeleted(self: *const @This()) bool {
-    return self.deleted.load(.seq_cst);
-}
-
-pub fn getPos(self: *@This(), io: std.Io) ?@Vector(3, f64) {
-    if (self.vtable.getPos) |getPosFn| {
-        return getPosFn(self.ptr, io);
-    }
-    return null;
-}
+/// Weak reference to a resident entity, keyed by uuid. Resolve it with
+/// `EntityRegistry.getAndAddRef`: a miss means the entity was evicted, and the
+/// returned `*Entity` carries a caller-owned reference the caller must release.
+/// A handle does not keep its entity resident; some owner must hold that ref.
+pub const Handle = u64;
 
 pub const Type = enum(u32) {
     Player = 0,

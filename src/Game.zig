@@ -9,6 +9,7 @@ const zm = @import("zm");
 const Entity = @import("entity/Entity.zig");
 const EntityRegistry = @import("entity/EntityRegistry.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
+const Item = @import("entity/Item.zig");
 const Physics = @import("entity/Physics.zig");
 const Key = @import("Key.zig");
 const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
@@ -31,7 +32,7 @@ world: World,
 /// View into the player implementation. Only valid while player_entity holds
 /// its reference.
 player: *EntityTypes.Player,
-/// Holds the reference that keeps the player entity pinned in the cache.
+/// Holds the reference that keeps the player entity resident in the cache.
 player_entity: *Entity,
 vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
@@ -60,7 +61,7 @@ save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) 
 
 /// Background entity-drain task, started when idle like the chunk loader. The
 /// previous pass is joined before a new one starts; the new pass then runs
-/// concurrently with draw. The player runs on the synchronous pinned lane.
+/// concurrently with draw. The player runs synchronously on the frame thread instead.
 entity_update_is_running: std.atomic.Value(bool) = .init(false),
 entity_drain_future: ?std.Io.Future(@typeInfo(@TypeOf(updateEntities)).@"fn".return_type.?) = null,
 
@@ -703,9 +704,13 @@ pub fn recreateWorld(
 
 fn cancelFuture(io: std.Io, future: anytype) void {
     if (future.*) |*f| {
-        // Cancel stores the result for await to re-report; ignore it here and log once below.
-        _ = f.cancel(io) catch {};
-        _ = f.await(io) catch |err| std.log.err("background task failed: {any}", .{err});
+        // Cancel waits for the task and reports its final result. A task that
+        // stopped because of the cancel reports error.Canceled, which is expected.
+        _ = f.cancel(io) catch |err| {
+            if (@intFromError(err) != @intFromError(error.Canceled)) {
+                std.log.err("background task failed: {any}", .{err});
+            }
+        };
         future.* = null;
     }
 }
@@ -725,8 +730,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 
     try restartFutures(self, io, allocator);
     try startEntityDrain(self, io, allocator);
-    // Pinned lane: the player updates synchronously every frame so the camera
-    // never waits on the background drain.
+    // The player is updated synchronously every frame so the camera never waits
+    // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
     asyncs.end();
     self.debug_menu.entities.store(self.entity_registry.count(), .unordered);
@@ -791,7 +796,11 @@ fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     defer zone.end();
 
     defer self.entity_update_is_running.store(false, .seq_cst);
-    try self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io));
+    // Cancellation is teardown, not a fault; every other update error is fatal.
+    self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io)) catch |err| switch (err) {
+        error.Canceled => {},
+        else => return err,
+    };
 }
 
 /// Starts the drain when the previous pass finished, mirroring restartFuture
@@ -807,9 +816,13 @@ fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
     self.entity_drain_future = io.concurrent(updateEntities, .{ self, io, allocator }) catch io.async(updateEntities, .{ self, io, allocator });
 }
 
-/// Runs the player on the pinned per-frame lane outside the wheel.
+/// Runs the player on the frame thread, outside the wheel.
 fn updatePlayer(self: *@This(), io: std.Io, allocator: std.mem.Allocator, now_ns: u64) !void {
-    try self.entity_registry.updatePinned(io, allocator, &self.world, self.player_entity, now_ns);
+    // Cancellation is teardown, not a fault; every other update error is fatal.
+    self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, now_ns) catch |err| switch (err) {
+        error.Canceled => {},
+        else => return err,
+    };
 }
 
 fn handleErrors(self: *@This()) !void {
@@ -883,13 +896,33 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
 }
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
+    const inventory = &self.player.main_inventory;
     const first_hotbar = @intFromEnum(Key.Action.hotbar_key_0);
     const hotbar_key_count = 10;
     inline for (0..hotbar_key_count) |slot| {
-        if (actions.contains(@enumFromInt(first_hotbar + slot))) self.selected_inventory_col.store(slot, .seq_cst);
+        if (actions.contains(@enumFromInt(first_hotbar + slot))) self.selectSlot(self.selectedRow(), @intCast(slot));
     }
-    if (actions.contains(.hotbar_scroll_up)) _ = self.selected_inventory_row.fetchAdd(1, .seq_cst);
-    if (actions.contains(.hotbar_scroll_down)) _ = self.selected_inventory_row.fetchSub(1, .seq_cst);
+    const row = self.selectedRow();
+    const col = self.selectedCol();
+    if (actions.contains(.hotbar_left)) self.selectSlot(row, if (col == 0) inventory.width - 1 else col - 1);
+    if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % inventory.width);
+    if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) self.selectSlot(if (row == 0) inventory.height - 1 else row - 1, col);
+    if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) self.selectSlot((row + 1) % inventory.height, col);
+}
+
+pub fn selectedRow(self: *const @This()) u32 {
+    return self.selected_inventory_row.load(.seq_cst);
+}
+
+pub fn selectedCol(self: *const @This()) u32 {
+    return self.selected_inventory_col.load(.seq_cst);
+}
+
+/// Moves the selection, clamping to the inventory grid.
+pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
+    const inventory = &self.player.main_inventory;
+    self.selected_inventory_row.store(@min(row, inventory.height - 1), .seq_cst);
+    self.selected_inventory_col.store(@min(col, inventory.width - 1), .seq_cst);
 }
 
 fn spawnExplosive(self: *@This(), io: std.Io) !void {
@@ -903,7 +936,7 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
         pos,
         looking,
         std.Io.Timestamp.now(io, .awake).toNanoseconds(),
-    ), 0);
+    ), .{ .initial_delay_ms = 0 });
     entity.release();
 }
 
@@ -1384,10 +1417,9 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         .game_mode = .init(default_game_mode),
         .view_direction = initial_view_direction,
         .main_inventory = undefined,
-    }, null);
+    }, .{});
     game.player_entity = player_entity;
-    // The wheel refuses the pinned uuid, so the per-frame lane owns the player alone.
-    game.entity_registry.setPinned(io, player_entity.uuid);
+    // The held reference keeps the player resident; the frame lane drives it.
     game.player = @ptrCast(@alignCast(player_entity.ptr));
     // The literal physics flags above match Spectator, so normalize them to the configured mode.
     game.player.switchGameMode(default_game_mode);
@@ -1396,6 +1428,13 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         16,
         &game.player.inventory_buffer,
     );
+    // Placeholder starter row so the hotbar has icons to show; real item grants come later.
+    inline for (0..std.meta.fields(Item.ItemType).len) |col| {
+        if (col < game.player.main_inventory.width) {
+            const item_type: Item.ItemType = @enumFromInt(col);
+            _ = game.player.main_inventory.set(io, 0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
+        }
+    }
     game.player.view_direction_mutex.lockUncancelable(io);
     const view_direction = game.player.view_direction;
     game.player.view_direction_mutex.unlock(io);

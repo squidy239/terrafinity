@@ -56,7 +56,7 @@ pub const BlockMaterials = struct {
     descriptor_set: vk.DescriptorSet = .null_handle,
 
     pub fn load(self: *BlockMaterials, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
-        const pack = try textures.openPackBlocksDir(io, allocator, selected_pack);
+        const pack = try utils.openPackDir(io, allocator, selected_pack, "blocks");
         defer allocator.free(pack.path);
         defer pack.dir.close(io);
 

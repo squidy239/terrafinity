@@ -7,6 +7,7 @@ const DeviceProxy = vk.DeviceProxy;
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
 const core = @import("../core.zig");
 const gpu = @import("../gpu.zig");
+const utils = @import("../../../libs/utils.zig");
 const Block = @import("../../../world/Block.zig").Block;
 
 const visible_block_count = Block.visible_count;
@@ -73,25 +74,6 @@ pub const Services = struct {
     single_time: *core.SingleTime,
 };
 
-pub const PackBlocksDir = struct {
-    path: []u8,
-    dir: std.Io.Dir,
-    is_default: bool,
-};
-
-/// Opens (creating it for the built-in `default` pack) the selected pack's blocks
-/// directory. The returned `path` must be freed by the caller.
-pub fn openPackBlocksDir(io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !PackBlocksDir {
-    const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/blocks/", .{selected_pack});
-    errdefer allocator.free(pack_path);
-    const is_default = std.mem.eql(u8, selected_pack, "default");
-    const dir = if (is_default)
-        try std.Io.Dir.cwd().createDirPathOpen(io, pack_path, .{ .open_options = .{ .iterate = true } })
-    else
-        try std.Io.Dir.cwd().openDir(io, pack_path, .{ .iterate = true });
-    return .{ .path = pack_path, .dir = dir, .is_default = is_default };
-}
-
 pub const TextureManager = struct {
     services: Services,
     gamma_correction: bool,
@@ -107,7 +89,7 @@ pub const TextureManager = struct {
     }
 
     pub fn loadTextures(self: *TextureManager, io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8) !void {
-        const pack = try openPackBlocksDir(io, allocator, selected_pack);
+        const pack = try utils.openPackDir(io, allocator, selected_pack, "blocks");
         defer allocator.free(pack.path);
         defer pack.dir.close(io);
 

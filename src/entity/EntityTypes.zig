@@ -50,7 +50,7 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
         _ = io;
         _ = world;
         _ = uuid;
@@ -146,7 +146,7 @@ pub const Explosive = struct {
         ctx.reschedule(0);
     }
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: u128, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
         _ = io;
         _ = world;
         _ = uuid;

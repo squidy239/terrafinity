@@ -9,7 +9,9 @@ const zignal = @import("zignal");
 const Config = @import("main.zig").Config;
 const EntityRegistry = @import("entity/EntityRegistry.zig");
 const EntityTypes = @import("entity/EntityTypes.zig");
+const Item = @import("entity/Item.zig");
 const Game = @import("Game.zig");
+const utils = @import("libs/utils.zig");
 const ShadowConfig = @import("Renderer/vulkan/shadow/Csm.zig").ShadowConfig;
 const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 const Renderer = @import("Renderer.zig");
@@ -86,6 +88,9 @@ generators: *generator_loader.Registry,
 config_path: []const u8,
 worlds_path: []const u8,
 menu_background: dvui.Texture,
+/// One icon per item type, null when the pack has no file (draw the missing texture).
+hotbar_item_textures: std.enums.EnumArray(Item.ItemType, ?dvui.Texture) = .initFill(null),
+hotbar_missing_texture: ?dvui.Texture = null,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
 config_section_states: std.AutoHashMap(u64, bool),
@@ -121,7 +126,7 @@ menu_state: struct {
     }
 },
 
-pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
+pub fn initAssets(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
     defer image.deinit(allocator);
     self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
@@ -130,10 +135,67 @@ pub fn initAssets(self: *@This(), allocator: std.mem.Allocator) !void {
         .format = .rgba_32,
         .interpolation = .linear,
     });
+    try self.loadItemTextures(io, allocator);
+}
+
+/// Loads `packs/<pack>/items/<ItemType>.png`. A missing or undecodable file falls
+/// back to the 1x1 magenta missing texture, so dropping a file in just works.
+fn loadItemTextures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+    const selected_pack = self.config.game_config.render_options.selected_pack;
+    const pack = try utils.openPackDir(io, allocator, selected_pack, "items");
+    defer allocator.free(pack.path);
+    defer pack.dir.close(io);
+
+    const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
+    self.hotbar_missing_texture = try self.ui_window.backend.textureCreate(@ptrCast(&missing_pixels), .{
+        .width = 1,
+        .height = 1,
+        .format = .rgba_32,
+        .interpolation = .nearest,
+    });
+
+    inline for (std.meta.fields(Item.ItemType)) |field| {
+        const item_type: Item.ItemType = @enumFromInt(field.value);
+        const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{field.name});
+        defer allocator.free(filename);
+        self.hotbar_item_textures.getPtr(item_type).* = try self.loadItemTexture(io, allocator, pack.dir, filename);
+    }
+}
+
+fn loadItemTexture(self: *@This(), io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?dvui.Texture {
+    const file = dir.openFile(io, filename, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => |e| return e,
+    };
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(bytes);
+    var buf: [1024]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    try reader.interface.readSliceAll(bytes);
+
+    var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, bytes) catch |err| {
+        std.log.warn("hotbar: could not decode items/{s}: {any}", .{ filename, err });
+        return null;
+    };
+    defer image.deinit(allocator);
+
+    return try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
+        .width = @intCast(image.cols),
+        .height = @intCast(image.rows),
+        .format = .rgba_32,
+        .interpolation = .nearest,
+    });
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
+    for (&self.hotbar_item_textures.values) |*texture| {
+        if (texture.*) |t| self.ui_window.backend.textureDestroy(t);
+    }
+    if (self.hotbar_missing_texture) |t| self.ui_window.backend.textureDestroy(t);
     if (self.new_game.config) |config| generator_api.free(allocator, config);
     if (self.new_game.generator_name_allocated) allocator.free(self.new_game.generator_name);
     if (self.delete_world_name) |name| allocator.free(name);
@@ -183,6 +245,7 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
             std.log.err("debugInfo failed: {}", .{err});
         };
         if (self.menu_state.crosshair and self.menu_state.ingame and !menu_changed) self.crossHair();
+        if (self.menu_state.ingame and !menu_changed) self.hotbar(io);
         if (self.menu_state.esc and !menu_changed) menu_changed = self.escMenu(io) catch false;
         if (self.menu_state.main and !menu_changed) menu_changed = self.mainPage(io, gpa) catch |err| blk: {
             showWorldError(frame_time, err);
@@ -802,6 +865,71 @@ fn normalizeSettings(options: *Game.Options) void {
 pub fn crossHair(self: *@This()) void {
     _ = self;
     _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
+}
+
+const selected_slot_color: dvui.Color = .{ .r = 90, .g = 140, .b = 220, .a = 255 };
+const hotbar_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 160 };
+
+/// Hotbar along the bottom. Arrow keys move the selection; a slot click selects it
+/// when DVUI has a cursor (relative-mouse play sends none, so slots ignore clicks then).
+fn hotbar(self: *@This(), io: std.Io) void {
+    const inventory = &self.game.player.main_inventory;
+    const selected_row = self.game.selectedRow();
+    const selected_col = self.game.selectedCol();
+    const interactive = !self.menu_state.is_playing_game();
+
+    const bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .gravity_x = 0.5,
+        .gravity_y = 1.0,
+        .margin = .{ .y = 12 },
+        .padding = .all(2),
+        .border = .all(2),
+        .color_border = hotbar_border_color,
+    });
+    defer bar.deinit();
+
+    for (0..inventory.width) |index| {
+        const col: u32 = @intCast(index);
+        const item = inventory.get(io, selected_row, col);
+        if (self.hotbarSlot(col, item, col == selected_col, interactive)) {
+            self.game.selectSlot(selected_row, col);
+        }
+    }
+}
+
+fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool, interactive: bool) bool {
+    var opts: dvui.Options = .{
+        .id_extra = index,
+        .min_size_content = .{ .w = 40, .h = 40 },
+        .padding = .all(2),
+        .margin = .all(2),
+        .border = .all(2),
+        .color_border = hotbar_border_color,
+        .background = true,
+    };
+    if (selected) opts.color_fill = selected_slot_color;
+
+    var button: dvui.ButtonWidget = undefined;
+    button.init(@src(), .{}, opts);
+    if (interactive) button.processEvents();
+    button.drawBackground();
+
+    if (item) |it| {
+        const texture = self.hotbar_item_textures.get(it.item_type) orelse self.hotbar_missing_texture;
+        if (texture) |tex| {
+            _ = dvui.image(@src(), .{ .source = .{ .texture = tex } }, .{
+                .id_extra = index,
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = 36, .h = 36 },
+            });
+        }
+    }
+
+    if (interactive) button.drawFocus();
+    const clicked = button.clicked();
+    button.deinit();
+    return clicked;
 }
 
 fn selectNewGameGenerator(self: *@This(), allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {

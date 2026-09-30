@@ -93,6 +93,11 @@ pub fn main(init: std.process.Init) !void {
     single_press.insert(.spawn_explosive);
     single_press.insert(.screenshot);
     single_press.insert(.debug_menu);
+    single_press.insert(.hotbar_left);
+    single_press.insert(.hotbar_right);
+    single_press.insert(.hotbar_up);
+    single_press.insert(.hotbar_down);
+    inline for (0..10) |slot| single_press.insert(@enumFromInt(@intFromEnum(Key.Action.hotbar_key_0) + slot));
 
     inline for (.{
         .{ .key = .w, .action = .forward },
@@ -105,6 +110,20 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = .mouse_right, .action = .use_item_secondary },
         .{ .key = .f, .action = .use_item_tertiary },
         .{ .key = .t, .action = .spawn_explosive },
+        .{ .key = .left, .action = .hotbar_left },
+        .{ .key = .right, .action = .hotbar_right },
+        .{ .key = .up, .action = .hotbar_up },
+        .{ .key = .down, .action = .hotbar_down },
+        .{ .key = .@"1", .action = .hotbar_key_0 },
+        .{ .key = .@"2", .action = .hotbar_key_1 },
+        .{ .key = .@"3", .action = .hotbar_key_2 },
+        .{ .key = .@"4", .action = .hotbar_key_3 },
+        .{ .key = .@"5", .action = .hotbar_key_4 },
+        .{ .key = .@"6", .action = .hotbar_key_5 },
+        .{ .key = .@"7", .action = .hotbar_key_6 },
+        .{ .key = .@"8", .action = .hotbar_key_7 },
+        .{ .key = .@"9", .action = .hotbar_key_8 },
+        .{ .key = .@"0", .action = .hotbar_key_9 },
     }) |bind| {
         try keymap.setActionKey(.{ .key = bind.key }, bind.action);
     }
@@ -131,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         .ui_window = &ui_window,
         .menu_background = undefined,
     };
-    try ui.initAssets(gpa);
+    try ui.initAssets(io, gpa);
     defer ui.deinit(gpa);
     defer if (ui.menu_state.ingame) game.deinit(io);
 
