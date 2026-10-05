@@ -108,7 +108,7 @@ pub fn allocateImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMem
 
     const alloc_info: vk.MemoryAllocateInfo = .{
         .allocation_size = mem_reqs.size,
-        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local_bit = true }),
+        .memory_type_index = try findMemoryType(mem_props, mem_reqs.memory_type_bits, .{ .device_local = true }),
     };
     const memory = try dev.allocateMemory(&alloc_info, vkalloc);
     errdefer dev.freeMemory(memory, vkalloc);
@@ -137,14 +137,14 @@ pub fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect: vk.ImageA
 
 pub fn sampleCountToFlags(count: u32) vk.SampleCountFlags {
     return switch (count) {
-        1 => .{ .@"1_bit" = true },
-        2 => .{ .@"2_bit" = true },
-        4 => .{ .@"4_bit" = true },
-        8 => .{ .@"8_bit" = true },
-        16 => .{ .@"16_bit" = true },
-        32 => .{ .@"32_bit" = true },
-        64 => .{ .@"64_bit" = true },
-        else => .{ .@"1_bit" = true },
+        1 => .{ .@"1" = true },
+        2 => .{ .@"2" = true },
+        4 => .{ .@"4" = true },
+        8 => .{ .@"8" = true },
+        16 => .{ .@"16" = true },
+        32 => .{ .@"32" = true },
+        64 => .{ .@"64" = true },
+        else => .{ .@"1" = true },
     };
 }
 
@@ -172,7 +172,7 @@ pub fn createImageWithMemorySamples(dev: DeviceProxy, mem_props: vk.PhysicalDevi
 }
 
 pub fn createImageWithMemory(dev: DeviceProxy, mem_props: vk.PhysicalDeviceMemoryProperties, vkalloc: *const vk.AllocationCallbacks, extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags, aspect: vk.ImageAspectFlags) !RenderTarget {
-    return createImageWithMemorySamples(dev, mem_props, vkalloc, extent, format, usage, aspect, .{ .@"1_bit" = true });
+    return createImageWithMemorySamples(dev, mem_props, vkalloc, extent, format, usage, aspect, .{ .@"1" = true });
 }
 
 /// Represents a single VkBuffer allocation and its associated resources.
@@ -202,7 +202,7 @@ pub const VulkanBackingAllocator = struct {
 
     vkalloc: vk.AllocationCallbacks,
 
-    blocks: [std.meta.fields(MemoryPool).len]std.AutoHashMapUnmanaged(usize, GpuBlock) = .{ .{}, .{} },
+    blocks: [@typeInfo(MemoryPool).@"enum".field_names.len]std.AutoHashMapUnmanaged(usize, GpuBlock) = @splat(.empty),
     meta_allocator: std.mem.Allocator,
 
     pub fn init(
@@ -228,7 +228,7 @@ pub const VulkanBackingAllocator = struct {
     pub fn deinit(self: *VulkanBackingAllocator) void {
         for (&self.blocks, 0..) |*map, pool_idx| {
             if (map.count() > 0) {
-                const pool: MemoryPool = @enumFromInt(pool_idx);
+                const pool: MemoryPool = @fromBackingInt(@intCast(pool_idx));
                 std.debug.panic("VulkanBackingAllocator.deinit: {d} block(s) still allocated in {s} pool", .{ map.count(), @tagName(pool) });
             }
             map.deinit(self.meta_allocator);
@@ -252,7 +252,7 @@ pub const VulkanBackingAllocator = struct {
         const addr = @intFromPtr(ptr);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        var it = self.blocks[@intFromEnum(pool)].valueIterator();
+        var it = self.blocks[@backingInt(pool)].valueIterator();
         while (it.next()) |block| {
             const start = @intFromPtr(block.raw_alloc.ptr);
             if (addr < start or addr >= start + block.raw_alloc.len) continue;
@@ -289,7 +289,7 @@ pub const VulkanBackingAllocator = struct {
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        try self.blocks[@intFromEnum(pool)].put(self.meta_allocator, @intFromPtr(result.ptr), .{
+        try self.blocks[@backingInt(pool)].put(self.meta_allocator, @intFromPtr(result.ptr), .{
             .memory = memory,
             .buffer = buffer,
             .raw_alloc = raw_cpu,
@@ -306,12 +306,12 @@ pub const VulkanBackingAllocator = struct {
             .flags = .{},
             .size = len,
             .usage = .{
-                .transfer_src_bit = true,
-                .transfer_dst_bit = true,
-                .shader_device_address_bit = true,
-                .storage_buffer_bit = true,
-                .indirect_buffer_bit = true,
-                .vertex_buffer_bit = true,
+                .transfer_src = true,
+                .transfer_dst = true,
+                .shader_device_address = true,
+                .storage_buffer = true,
+                .indirect_buffer = true,
+                .vertex_buffer = true,
             },
             .sharing_mode = if (is_concurrent) .concurrent else .exclusive,
             .queue_family_index_count = if (is_concurrent) 2 else 0,
@@ -326,15 +326,15 @@ pub const VulkanBackingAllocator = struct {
         const mem_reqs = mem_requirements.memory_requirements;
 
         const required_flags = switch (pool) {
-            .gpu_only => vk.MemoryPropertyFlags{ .device_local_bit = true },
-            .cpu_to_gpu => vk.MemoryPropertyFlags{ .host_visible_bit = true, .host_coherent_bit = true },
+            .gpu_only => vk.MemoryPropertyFlags{ .device_local = true },
+            .cpu_to_gpu => vk.MemoryPropertyFlags{ .host_visible = true, .host_coherent = true },
         };
         const mem_type = try findMemoryType(self.mem_props, mem_reqs.memory_type_bits, required_flags);
 
         const memory = try self.dev.allocateMemory(&.{
             .allocation_size = mem_reqs.size,
             .memory_type_index = mem_type,
-            .p_next = @ptrCast(&vk.MemoryAllocateFlagsInfo{ .flags = .{ .device_address_bit = true }, .device_mask = 0 }),
+            .p_next = @ptrCast(&vk.MemoryAllocateFlagsInfo{ .flags = .{ .device_address = true }, .device_mask = 0 }),
         }, &self.vkalloc);
         errdefer self.dev.freeMemory(memory, &self.vkalloc);
         try self.dev.bindBufferMemory(buffer, memory, 0);
@@ -347,7 +347,7 @@ pub const VulkanBackingAllocator = struct {
         defer zone.end();
 
         self.mutex.lockUncancelable(self.io);
-        const fetch_result = self.blocks[@intFromEnum(pool)].fetchRemove(@intFromPtr(buf.ptr)) orelse {
+        const fetch_result = self.blocks[@backingInt(pool)].fetchRemove(@intFromPtr(buf.ptr)) orelse {
             self.mutex.unlock(self.io);
             std.debug.panic("VulkanBackingAllocator.freeBlock: Double-free or invalid pointer free detected on: {*}", .{buf.ptr});
         };
@@ -582,7 +582,7 @@ pub fn renderingAttachmentColorResolve(msaa_view: vk.ImageView, resolve_view: vk
         .s_type = .rendering_attachment_info,
         .image_view = msaa_view,
         .image_layout = .color_attachment_optimal,
-        .resolve_mode = .{ .average_bit = true },
+        .resolve_mode = .{ .average = true },
         .resolve_image_view = resolve_view,
         .resolve_image_layout = .color_attachment_optimal,
         .load_op = load_op,
@@ -684,7 +684,7 @@ pub const SingleTime = struct {
         try self.dev.allocateCommandBuffers(&.{ .level = .primary, .command_pool = self.pool, .command_buffer_count = 1 }, (&cmd)[0..1]);
         errdefer self.dev.freeCommandBuffers(self.pool, &.{cmd});
 
-        try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
+        try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true }, .p_inheritance_info = null });
 
         return cmd;
     }
@@ -797,7 +797,7 @@ pub fn opaqueBlendAttachment() vk.PipelineColorBlendAttachmentState {
         .src_alpha_blend_factor = .one,
         .dst_alpha_blend_factor = .zero,
         .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     };
 }
 
@@ -926,10 +926,10 @@ fn createGraphicsPipeline(
     const result = try dev.createGraphicsPipelines(.null_handle, (&gpci)[0..1], vkalloc, (&pipeline)[0..1]);
     if (result != .success) return error.PipelineCreationFailed;
 
-    if (pipeline_creation_feedback and pipeline_feedback.flags.valid_bit) {
+    if (pipeline_creation_feedback and pipeline_feedback.flags.valid) {
         std.log.debug("Vulkan: Pipeline compilation took {d:.3} ms (cached: {})", .{
             @as(f64, @floatFromInt(pipeline_feedback.duration)) / 1_000_000.0,
-            pipeline_feedback.flags.application_pipeline_cache_hit_bit,
+            pipeline_feedback.flags.application_pipeline_cache_hit,
         });
     }
 
@@ -951,7 +951,7 @@ pub fn buildGraphicsPipeline(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
-    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list, .{ .@"1_bit" = true });
+    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list, .{ .@"1" = true });
 }
 
 pub fn buildGraphicsPipelineWithSamples(
@@ -999,8 +999,8 @@ pub fn buildGraphicsPipelineWithTopologyAndSamples(
         .line_width = 1,
     };
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 2, &.{
-        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
-        .{ .flags = .{ .fragment_bit = true }, .module = frag_module },
+        .{ .flags = .{ .vertex = true }, .module = vert_module },
+        .{ .flags = .{ .fragment = true }, .module = frag_module },
     }, color_formats, depth_format, depth_stencil_state, blend_attachments, prsci, layout, vertex_input_info, topology, samples);
 }
 
@@ -1035,8 +1035,8 @@ pub fn buildDepthOnlyPipelineWithTopology(
     };
     const depth_stencil = depthStencilState(true, .less_or_equal, true);
     return createGraphicsPipeline(dev, vkalloc, pipeline_creation_feedback, 1, &.{
-        .{ .flags = .{ .vertex_bit = true }, .module = vert_module },
-    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology, .{ .@"1_bit" = true });
+        .{ .flags = .{ .vertex = true }, .module = vert_module },
+    }, &.{}, depth_format, depth_stencil, &.{}, prsci, layout, vertex_input_info, topology, .{ .@"1" = true });
 }
 
 pub fn createDescriptorSetLayout(dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks, flags: vk.DescriptorSetLayoutCreateFlags, bindings: []const vk.DescriptorSetLayoutBinding) !vk.DescriptorSetLayout {
@@ -1073,15 +1073,15 @@ pub fn createFrameDescriptorPool(dev: DeviceProxy, allocator: std.mem.Allocator,
 test "findMemoryType" {
     var mem_types: [vk.MAX_MEMORY_TYPES]vk.MemoryType = undefined;
     @memset(&mem_types, vk.MemoryType{ .property_flags = .{}, .heap_index = 0 });
-    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
-    mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
-    mem_types[2] = .{ .property_flags = .{ .host_visible_bit = true, .host_cached_bit = true }, .heap_index = 0 };
+    mem_types[0] = .{ .property_flags = .{ .host_visible = true, .host_coherent = true }, .heap_index = 0 };
+    mem_types[1] = .{ .property_flags = .{ .device_local = true }, .heap_index = 1 };
+    mem_types[2] = .{ .property_flags = .{ .host_visible = true, .host_cached = true }, .heap_index = 0 };
     var mem_props: vk.PhysicalDeviceMemoryProperties = .{ .memory_type_count = 3, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
-    try std.testing.expectEqual(@as(u32, 0), try findMemoryType(mem_props, 0b111, .{ .host_visible_bit = true, .host_coherent_bit = true }));
-    mem_types[0] = .{ .property_flags = .{ .host_visible_bit = true, .host_coherent_bit = true }, .heap_index = 0 };
-    mem_types[1] = .{ .property_flags = .{ .device_local_bit = true }, .heap_index = 1 };
+    try std.testing.expectEqual(@as(u32, 0), try findMemoryType(mem_props, 0b111, .{ .host_visible = true, .host_coherent = true }));
+    mem_types[0] = .{ .property_flags = .{ .host_visible = true, .host_coherent = true }, .heap_index = 0 };
+    mem_types[1] = .{ .property_flags = .{ .device_local = true }, .heap_index = 1 };
     mem_props = .{ .memory_type_count = 2, .memory_types = mem_types, .memory_heap_count = 2, .memory_heaps = undefined };
-    try std.testing.expectEqual(@as(u32, 1), try findMemoryType(mem_props, 0b11, .{ .device_local_bit = true }));
+    try std.testing.expectEqual(@as(u32, 1), try findMemoryType(mem_props, 0b11, .{ .device_local = true }));
 }
 
 test "VulkanBackingAllocator alloc and free both pools" {

@@ -724,7 +724,7 @@ test "refreshIntervals pinned endpoints, monotonic, lambda extremes" {
 }
 
 test "nextRefreshSet budget, ramp, and due-gating" {
-    const intervals: [max_cascades]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ .{0} ** 20;
+    const intervals: [max_cascades]u32 = .{ 1, 3, 6, 16, 40, 101, 256, 645, 1625, 4096, 10321, 26015 } ++ @as([20]u32, @splat(0));
     var last_refresh: [max_cascades]u32 = @splat(never_refreshed);
     var frame: u32 = 0;
 
@@ -772,7 +772,7 @@ test "nextRefreshSet budget, ramp, and due-gating" {
 
     // Phase 2 (due-gating): a huge budget must not pull in not-yet-due
     // cascades, and negative lateness never draws.
-    const gated_intervals: [max_cascades]u32 = .{ 1, 100, 100, 100 } ++ .{0} ** 28;
+    const gated_intervals: [max_cascades]u32 = .{ 1, 100, 100, 100 } ++ @as([28]u32, @splat(0));
     const gated_last: [max_cascades]u32 = @splat(0);
     var set = nextRefreshSet(4, 100, gated_intervals, gated_last, 5);
     try testing.expect(set[0]);
@@ -782,7 +782,7 @@ test "nextRefreshSet budget, ramp, and due-gating" {
     try testing.expectEqual(@as(u32, 1), count);
 
     // All cascades on a slow interval, none overdue: empty set so the pass is skipped.
-    const slow_intervals: [max_cascades]u32 = .{ 100, 100, 100, 100 } ++ .{0} ** 28;
+    const slow_intervals: [max_cascades]u32 = .{ 100, 100, 100, 100 } ++ @as([28]u32, @splat(0));
     set = nextRefreshSet(4, 100, slow_intervals, gated_last, 5);
     count = 0;
     for (set) |picked| count += @intFromBool(picked);

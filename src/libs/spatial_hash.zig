@@ -29,13 +29,13 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
         const max_coord: f64 = 4e18;
         const CellKey = struct { level: u8, x: i64, y: i64, z: i64 };
         const Entry = struct { id: Id, box: Aabb, home: u8 };
-        const CellData = struct { entries: std.ArrayListUnmanaged(Entry) = .empty };
+        const CellData = struct { entries: std.ArrayList(Entry) = .empty };
         const Cells = ConcurrentHashMap(CellKey, CellData, std.hash_map.AutoContext(CellKey), bucket_amount);
         const Index = ConcurrentHashMap(Id, CellKey, std.hash_map.AutoContext(Id), bucket_amount);
 
         cells: Cells = .init,
         index: Index = .init,
-        home_count: [max_levels]std.atomic.Value(usize) = .{std.atomic.Value(usize).init(0)} ** max_levels,
+        home_count: [max_levels]std.atomic.Value(usize) = @splat(.init(0)),
 
         /// Inserts or replaces the box for `id`. On allocation failure the id
         /// ends absent (never stale); retrying heals the map.
@@ -79,7 +79,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
 
         /// Appends every stored box strictly overlapping `box` (touching faces miss).
         /// On allocation failure `out` may hold partial results; discard it.
-        pub fn query(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, out: *std.ArrayListUnmanaged(Hit), stats: ?*Stats) !void {
+        pub fn query(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, out: *std.ArrayList(Hit), stats: ?*Stats) !void {
             assertValid(box);
             const own = levelFor(extentOf(box));
             try self.scanLevel(io, allocator, box, own, false, out, stats);
@@ -165,7 +165,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             }
         }
 
-        fn scanLevel(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, level: u8, homes_only: bool, out: *std.ArrayListUnmanaged(Hit), stats: ?*Stats) !void {
+        fn scanLevel(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, level: u8, homes_only: bool, out: *std.ArrayList(Hit), stats: ?*Stats) !void {
             // Min-anchored boxes can spill one cell past their anchor in +xyz,
             // so scan the overlapped cells plus a one-cell shell (at most 4 per axis).
             const pad: Vec = @splat(sizeFor(level));
@@ -189,7 +189,7 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
             }
         }
 
-        fn scanCell(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, key: CellKey, homes_only: bool, out: *std.ArrayListUnmanaged(Hit), stats: ?*Stats) !void {
+        fn scanCell(self: *Map, io: std.Io, allocator: std.mem.Allocator, box: Aabb, key: CellKey, homes_only: bool, out: *std.ArrayList(Hit), stats: ?*Stats) !void {
             if (stats) |s| s.cells_visited += 1;
             const bucket = self.cells.getBucket(key);
             bucket.lock.lockSharedUncancelable(io);
@@ -254,8 +254,8 @@ pub fn SpatialHash(comptime bucket_amount: u32) type {
 
 const TestMap = SpatialHash(32);
 
-fn fillHits(map: *TestMap, io: std.Io, allocator: std.mem.Allocator, box: TestMap.Aabb) !std.ArrayListUnmanaged(TestMap.Hit) {
-    var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+fn fillHits(map: *TestMap, io: std.Io, allocator: std.mem.Allocator, box: TestMap.Aabb) !std.ArrayList(TestMap.Hit) {
+    var out: std.ArrayList(TestMap.Hit) = .empty;
     errdefer out.deinit(allocator);
     try map.query(io, allocator, box, &out, null);
     return out;
@@ -353,9 +353,9 @@ test "SpatialHash cross-scale differential" {
         }
     }
 
-    var got: std.ArrayListUnmanaged(TestMap.Id) = .empty;
+    var got: std.ArrayList(TestMap.Id) = .empty;
     defer got.deinit(allocator);
-    var want: std.ArrayListUnmanaged(TestMap.Id) = .empty;
+    var want: std.ArrayList(TestMap.Id) = .empty;
     defer want.deinit(allocator);
     for (queries) |q| {
         var hits = try fillHits(&map, io, allocator, q);
@@ -390,7 +390,7 @@ test "SpatialHash sparse bound and level growth" {
     try std.testing.expect(try map.move(io, allocator, 1, .{ .min = .{ 0, 0, 0 }, .max = .{ 300, 10, 10 } }));
     try std.testing.expectEqual(@as(usize, 2), map.count(io));
 
-    var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+    var out: std.ArrayList(TestMap.Hit) = .empty;
     defer out.deinit(allocator);
     var stats: TestMap.Stats = .{};
     // Far-away point: misses everything, and must not enumerate fine cells.
@@ -418,7 +418,7 @@ test "SpatialHash concurrent disjoint smoke" {
                     failed_flag.store(true, .seq_cst);
                     return;
                 };
-                var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+                var out: std.ArrayList(TestMap.Hit) = .empty;
                 defer out.deinit(alloc);
                 m.query(_io, alloc, .{ .min = .{ f, f, f }, .max = .{ f + 1, f + 1, f + 1 } }, &out, null) catch {
                     failed_flag.store(true, .seq_cst);
@@ -453,14 +453,14 @@ test "SpatialHash replace under allocation failure" {
                 if (err != error.OutOfMemory) return err;
                 try std.testing.expectEqual(@as(usize, 0), map.count(io));
                 try std.testing.expect(!map.remove(io, allocator, 1));
-                var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+                var out: std.ArrayList(TestMap.Hit) = .empty;
                 defer out.deinit(allocator);
                 try map.query(io, allocator, huge, &out, null);
                 try std.testing.expectEqual(@as(usize, 0), out.items.len);
                 return error.OutOfMemory;
             };
             try std.testing.expectEqual(@as(usize, 1), map.count(io));
-            var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+            var out: std.ArrayList(TestMap.Hit) = .empty;
             defer out.deinit(allocator);
             try map.query(io, allocator, tiny, &out, null);
             try std.testing.expectEqual(@as(usize, 1), out.items.len);
@@ -477,7 +477,7 @@ test "SpatialHash checkAllAllocationFailures" {
             defer map.deinit(io, allocator);
             try map.upsert(io, allocator, 1, .{ .min = .{ 0, 0, 0 }, .max = .{ 2, 2, 2 } });
             try map.upsert(io, allocator, 2, .{ .min = .{ -100, -100, -100 }, .max = .{ 100, 100, 100 } });
-            var out: std.ArrayListUnmanaged(TestMap.Hit) = .empty;
+            var out: std.ArrayList(TestMap.Hit) = .empty;
             defer out.deinit(allocator);
             try map.query(io, allocator, .{ .min = .{ 1, 1, 1 }, .max = .{ 3, 3, 3 } }, &out, null);
             _ = map.remove(io, allocator, 1);

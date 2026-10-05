@@ -5,7 +5,6 @@ const tracy = @import("tracy");
 
 const Cache = @import("../../libs/Cache.zig").Cache;
 const Block = @import("../Block.zig").Block;
-const Bfa = @import("../BufferFirstAllocator.zig");
 const Chunk = @import("../Chunk.zig");
 const ChunkSize = Chunk.ChunkSize;
 const erosion = @import("../../libs/erosion.zig");
@@ -32,7 +31,7 @@ pub const DefaultGenerator = struct {
         sixteenth,
 
         pub fn size(self: InterpResolution) usize {
-            return @as(usize, ChunkSize) >> @intFromEnum(self);
+            return @as(usize, ChunkSize) >> @backingInt(self);
         }
     };
 
@@ -399,7 +398,7 @@ pub const DefaultGenerator = struct {
         }
         // generateTerrain overwrites every voxel; Debug prefills .null so partial writes trip the assert below.
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
-        if (builtin.mode == .Debug) block_grid = @splat(@splat(@splat(.null)));
+        if (builtin.mode == .debug) block_grid = @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1]) {
             block_grid = @splat(@splat(@splat(.stone)));
         } else {
@@ -409,7 +408,7 @@ pub const DefaultGenerator = struct {
             const gen_terrain_zone = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
             generateTerrain(&block_grid, chunk_pos, heights, .{ .params = &self.params, .rand = &rand, .chunk_scale = chunk_scale_factor });
             gen_terrain_zone.end();
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 for (&block_grid) |*plane| {
                     for (plane) |*column| {
                         for (column) |*cell| std.debug.assert(cell.* != .null);
@@ -760,9 +759,9 @@ pub const DefaultGenerator = struct {
                     continue;
                 }
 
-                const base_tag: TagV = @splat(@intFromEnum(if (bh <= sea_level) Block.water else Block.air));
-                const land_tag: TagV = @splat(@intFromEnum(if (bh <= sea_level) Block.sand else Block.dirt));
-                const stone_tag: TagV = @splat(@intFromEnum(Block.stone));
+                const base_tag: TagV = @splat(@backingInt(if (bh <= sea_level) Block.water else Block.air));
+                const land_tag: TagV = @splat(@backingInt(if (bh <= sea_level) Block.sand else Block.dirt));
+                const stone_tag: TagV = @splat(@backingInt(Block.stone));
                 row.* = @bitCast(@select(Block.Tag, below_or, @select(Block.Tag, below_depth, stone_tag, land_tag), base_tag));
 
                 var surface_bits: u32 = @as(u32, @bitCast(below_or)) & @as(u32, @bitCast(diff < one_v));
@@ -1309,7 +1308,7 @@ pub const DefaultGenerator = struct {
         if (chunk_pos.level < 0) return;
         const editor_buffer_size: usize = 100_000;
         var editor_buffer: [editor_buffer_size]u8 = undefined;
-        var bfa: Bfa = .init(&editor_buffer, allocator);
+        var bfa: std.heap.BufferFirstAllocator = .init(&editor_buffer, allocator);
         var world_editor = World.Editor{ .world = world, .temp_allocator = bfa.allocator(), .propagate_changes = false };
         defer world_editor.clear();
 
@@ -1633,7 +1632,7 @@ fn benchHeights(io: std.Io, label: []const u8, heights: [ChunkSize][ChunkSize]f3
         var rng = std.Random.DefaultPrng.init(i +% 1);
         var rand = rng.random();
         DefaultGenerator.generateTerrain(&grid, pos, heights, .{ .params = &params, .rand = &rand, .chunk_scale = chunk_scale });
-        sink += @intFromEnum(grid[@mod(i, ChunkSize)][0][0]);
+        sink += @backingInt(grid[@mod(i, ChunkSize)][0][0]);
     }
     const end = std.Io.Clock.Timestamp.now(io, .awake);
     const vec_ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
@@ -1642,7 +1641,7 @@ fn benchHeights(io: std.Io, label: []const u8, heights: [ChunkSize][ChunkSize]f3
 }
 
 fn benchTerrainHeights(io: std.Io, params: *const DefaultGenerator.Params, label: []const u8) void {
-    const iterations = if (@import("builtin").mode == .Debug) 50 else 500;
+    const iterations = if (@import("builtin").mode == .debug) 50 else 500;
     var sink: f32 = 0;
     var height: [ChunkSize][ChunkSize]f32 = undefined;
     const start = std.Io.Clock.Timestamp.now(io, .awake);
@@ -1657,7 +1656,7 @@ fn benchTerrainHeights(io: std.Io, params: *const DefaultGenerator.Params, label
 
 test "benchmark generateTerrain" {
     // Random and uniform height fields exercise distinct fill paths; the printed sink keeps the calls live.
-    const iterations = if (builtin.mode == .Debug) 100 else 2000;
+    const iterations = if (builtin.mode == .debug) 100 else 2000;
     const io = std.testing.io;
     var seed_rng = std.Random.DefaultPrng.init(0xC0FFEE);
     const seed_rand = seed_rng.random();
@@ -1686,7 +1685,13 @@ test "legacy config with erosion_strength parses" {
     buf[legacy.len] = 0;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const params = try std.zon.parse.fromSliceAlloc(DefaultGenerator.Params, arena.allocator(), buf[0..legacy.len :0], null, .{});
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const params = try std.zon.parse.fromSlice(DefaultGenerator.Params, .{
+        .gpa = std.testing.allocator,
+        .arena = arena.allocator(),
+        .source = buf[0..legacy.len :0],
+        .diagnostics = &diagnostics,
+    });
     try std.testing.expectEqual(@as(f32, 1.5), params.erosion_strength);
     try std.testing.expectEqual(@as(f32, 2), params.terrain_scale);
     try std.testing.expect(params.erosion_enabled);
@@ -1711,7 +1716,13 @@ test "config tree round trips through zon" {
     var source: [16384]u8 = undefined;
     @memcpy(source[0..emitted.len], emitted);
     source[emitted.len] = 0;
-    const params = try std.zon.parse.fromSliceAlloc(DefaultGenerator.Params, arena.allocator(), source[0..emitted.len :0], null, .{});
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const params = try std.zon.parse.fromSlice(DefaultGenerator.Params, .{
+        .gpa = std.testing.allocator,
+        .arena = arena.allocator(),
+        .source = source[0..emitted.len :0],
+        .diagnostics = &diagnostics,
+    });
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_strength, params.erosion_strength);
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_octaves, params.erosion_octaves);
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_enabled, params.erosion_enabled);
@@ -2002,8 +2013,8 @@ fn testGroundContext(overrides: anytype) DefaultGenerator.GroundContext {
         .snow_slope_gain = p.snow_slope_gain,
         .snow_cliff_slope = p.snow_cliff_slope,
     };
-    inline for (std.meta.fields(@TypeOf(overrides))) |field| {
-        @field(ctx, field.name) = @field(overrides, field.name);
+    inline for (@typeInfo(@TypeOf(overrides)).@"struct".field_names) |name| {
+        @field(ctx, name) = @field(overrides, name);
     }
     return ctx;
 }

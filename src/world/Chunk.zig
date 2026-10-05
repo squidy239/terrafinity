@@ -57,18 +57,18 @@ pub const Encoding = union(enum(u1)) {
             while (i + vlen <= len) : (i += vlen) {
                 const a: VT = flat_array.*[i..][0..vlen].*;
                 const b: VT = flat_merge_array[i..][0..vlen].*;
-                const pred = b == comptime @as(VT, @splat(@intFromEnum(Block.null)));
+                const pred = b == comptime @as(VT, @splat(@backingInt(Block.null)));
                 const result = @select(T, pred, a, b);
                 flat_array.*[i..][0..vlen].* = result;
             }
             while (i < len) : (i += 1) {
-                if (flat_merge_array[i] != comptime @intFromEnum(Block.null)) {
+                if (flat_merge_array[i] != comptime @backingInt(Block.null)) {
                     flat_array.*[i] = flat_merge_array[i];
                 }
             }
         } else {
             for (flat_merge_array[0..len], flat_array.*[0..len]) |src, *dest| {
-                if (src != comptime @intFromEnum(Block.null)) {
+                if (src != comptime @backingInt(Block.null)) {
                     dest.* = src;
                 }
             }
@@ -153,7 +153,7 @@ pub const Encoding = union(enum(u1)) {
     pub fn extractAllFaces(self: Encoding) [6]Face {
         var result: [6]Face = undefined;
         inline for (std.enums.values(FaceRotation)) |side| {
-            result[@intFromEnum(side)] = self.extractFace(side);
+            result[@backingInt(side)] = self.extractFace(side);
         }
         return result;
     }
@@ -291,7 +291,7 @@ pub const Encoding = union(enum(u1)) {
                     }
                 }
                 if (rows_all_eql) {
-                    simplified_grid[nx][ny] = @splat(@enumFromInt(rows[0][0]));
+                    simplified_grid[nx][ny] = @splat(@fromBackingInt(@intCast(rows[0][0])));
                     continue;
                 }
                 var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
@@ -312,7 +312,7 @@ pub const Encoding = union(enum(u1)) {
 
 /// The shared block if every cell matches, else null.
 pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
-    const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@intFromEnum(block_array[0][0][0]));
+    const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@backingInt(block_array[0][0][0]));
     var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
     const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(block_array);
     // Check 8 rows per test. This amortizes the reduce and still exits early on mismatch.

@@ -26,8 +26,8 @@ pub fn Interface(physics_elements: anytype) type {
             const elapsed = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
             const delta_t = @min(elapsed, 0.1);
 
-            inline for (std.meta.fields(@TypeOf(self.elements))) |field| {
-                const field_data = &@field(&self.elements, field.name);
+            inline for (@typeInfo(@TypeOf(self.elements)).@"struct".field_names) |name| {
+                const field_data = &@field(&self.elements, name);
                 try field_data.update(io, self, delta_t, world, allocator);
             }
         }

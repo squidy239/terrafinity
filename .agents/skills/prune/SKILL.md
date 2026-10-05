@@ -32,11 +32,11 @@ Check every one before reporting a candidate. Each has produced a real false pos
 
 - **`refAllDecls`:** `test { std.testing.refAllDecls(@This()); }` compiles every decl; it does not use them. A decl referenced only there is still unused.
 - **Exports and the plugin ABI:** `pub export` / `@export`, and the `generator_api_vtable` path (`comptime { _ = Generator.generator_api_vtable; }` in `generator_root.zig`). Exported symbols are reached by name at runtime through the vtable, invisible to import analysis; the vtable entries are the plugin ABI.
-- **Comptime reflection:** `@typeInfo`, `std.meta.fields`, `inline for` over fields (`generator_api.fromTree` / `fromStruct` walk `std.meta.fields(T)` driven by `field_specs`). Fields and decls reached only this way are used.
+- **Comptime reflection:** `@typeInfo`, `inline for` over `field_names` (`generator_api.fromTree` / `fromStruct` walk `@typeInfo(T).@"struct".field_names` driven by `field_specs`). Fields and decls reached only this way are used.
 - **Config / zon-parsed fields:** `field_specs` entries, `Config.zon`, `config/generator.zon`, `materials.zon`, `Trees/*.zon`, and `std.zon.parse`. A field absent from code but present in a saved `.zon` is load-bearing for config compat.
 - **GPU layouts and offset asserts:** `ShadowParams`, `SkyParams`, `PushConstants`, `CullCount`, `Mesher.Face`, std430/std140 packing, the `//!`-style bit layouts in `shadow/face_decode.glsl`, and the `comptime { if (@offsetOf(...) != ...) @compileError(...); }` blocks. A field can exist solely to hold bits or an offset the shader reads — `Mesher.Face.x_length`/`y_length` are always zero in Zig yet are decoded by the vertex and shadow shaders as "extent 1", so they are layout, not dead code.
 - **C-ABI / `extern struct`:** types crossing the generator boundary (`generator_api.Spec`, `ConfigTree`, vtable structs) are ABI, not code.
-- **Third-party root declarations:** the Tracy package reads `@hasDecl(root, "tracy_impl")` and `root.tracy_options` from `src/main.zig`; deleting those silently disables Tracy. The dvui package names its backend methods by comptime field lookup, so every method in `src/dvui_backend_wio.zig` it names is live even with zero in-repo callers.
+- **Third-party root declarations:** the Tracy package reads `root.tracy_options` (and `@hasDecl` on it) from `src/main.zig`; deleting those silently disables Tracy. The dvui package names its backend methods by comptime field lookup, so every method in `src/dvui_backend_wio.zig` it names is live even with zero in-repo callers.
 - **Re-exports in `src/main.zig`:** e.g. `pub const Chunk = @import("world/Chunk.zig");`. The test root module is `main.zig`, so deleting a re-export can silently drop a file's tests from `zig build test` while `zig build` still passes. Trace re-exports to test reachability before removing.
 - **Reserved work, and the green build:** unreferenced is not dead. A file kept for planned use — `src/world/structures/TexturedSphere.zig` opens `// Will be used later; keep — do not delete as dead code`, with the backlog in `ideas.md` — is reserved; skip it, don't report it. For a genuine candidate, a passing build is not evidence: verify-change records that an unreferenced `.zig` file sits outside every root's import closure, so its removal (or a broken restore) is invisible to every gate. Clear files with the File-level import grep, and a non-file decl by confirming the name occurs only in its own definition — cite that, not the build.
 
@@ -48,7 +48,7 @@ Each candidate report contains:
 
 - **Kind** — unused file / unused decl / stale duplicate / superseded path / unwired feature.
 - **Location** — `path:line`.
-- **Size** — line or byte count.
+- **Size** — the net token drop the deletion would give: run `zig fmt --check --complexity <file>` before and after (for a whole-file candidate, its own counts).
 - **Evidence** — the grep and read results that support the candidate.
 - **Reachability check** — which roots and importer bodies were inspected, and what was not.
 - **Deletion risk** — what breaks if the candidate is actually live (which false-positive trap applies).

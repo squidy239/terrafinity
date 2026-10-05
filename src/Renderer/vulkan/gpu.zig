@@ -190,7 +190,7 @@ pub const StagingRing = struct {
             if ((entry.timeline_value orelse break) > current_transfer_val) break;
             retire_count += 1;
         }
-        if (retire_count > 0) std.mem.copyForwards(@TypeOf(self.entries.items[0]), self.entries.items[0 .. self.entries.items.len - retire_count], self.entries.items[retire_count..]);
+        if (retire_count > 0) @memmove(self.entries.items[0 .. self.entries.items.len - retire_count], self.entries.items[retire_count..]);
         self.entries.items.len -= retire_count;
         if (self.entries.items.len == 0) self.head = 0;
     }
@@ -399,7 +399,7 @@ const reservoir_size = 512;
 
 pub const CommandPoolReservoir = struct {
     pools: [reservoir_size]vk.CommandPool = @splat(@as(vk.CommandPool, .null_handle)),
-    cmds: [reservoir_size]vk.CommandBuffer = @splat(@as(vk.CommandBuffer, .null_handle)),
+    cmds: [reservoir_size]vk.CommandBuffer = undefined,
     used: [reservoir_size]std.atomic.Value(bool) = @splat(std.atomic.Value(bool).init(false)),
     count: usize = 0,
 
@@ -408,7 +408,7 @@ pub const CommandPoolReservoir = struct {
     pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, init_count: usize, vkalloc: *const vk.AllocationCallbacks) !void {
         self.count = init_count;
         for (self.pools[0..init_count], self.cmds[0..init_count]) |*pool, *cmd| {
-            pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer_bit = true }, .queue_family_index = queue_family }, vkalloc);
+            pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer = true }, .queue_family_index = queue_family }, vkalloc);
             try dev.allocateCommandBuffers(&.{ .command_pool = pool.*, .level = .primary, .command_buffer_count = 1 }, (&cmd.*)[0..1]);
         }
     }
@@ -440,11 +440,11 @@ pub const CommandPoolReservoir = struct {
 };
 
 /// Shared GPU allocation pools: device-local and host-visible GPU-visible memory,
-/// each wrapped in a DebugAllocator backed by one VulkanBackingAllocator.
+/// each wrapped in a SafeAllocator backed by one VulkanBackingAllocator.
 pub const GpuMemory = struct {
     backing_allocator: core.VulkanBackingAllocator,
-    gpu_only_gpa: std.heap.DebugAllocator(.{}) = .init,
-    cpu_to_gpu_gpa: std.heap.DebugAllocator(.{}) = .init,
+    gpu_only_gpa: std.heap.SafeAllocator = undefined,
+    cpu_to_gpu_gpa: std.heap.SafeAllocator = undefined,
 
     pub fn init(self: *GpuMemory, io: std.Io, allocator: std.mem.Allocator, vk_ctx: *VulkanContext) !void {
         self.backing_allocator = core.VulkanBackingAllocator.init(
@@ -458,12 +458,10 @@ pub const GpuMemory = struct {
         );
         errdefer self.backing_allocator.deinit();
 
-        self.gpu_only_gpa = .init;
-        self.gpu_only_gpa.backing_allocator = self.backing_allocator.allocator(.gpu_only);
+        self.gpu_only_gpa = .init(self.backing_allocator.allocator(.gpu_only), .{});
         errdefer _ = self.gpu_only_gpa.deinit();
 
-        self.cpu_to_gpu_gpa = .init;
-        self.cpu_to_gpu_gpa.backing_allocator = self.backing_allocator.allocator(.cpu_to_gpu);
+        self.cpu_to_gpu_gpa = .init(self.backing_allocator.allocator(.cpu_to_gpu), .{});
         errdefer _ = self.cpu_to_gpu_gpa.deinit();
     }
 
@@ -858,7 +856,7 @@ pub const MeshUploader = struct {
             .p_wait_semaphore_infos = (&vk.SemaphoreSubmitInfo{
                 .semaphore = self.transfer.graphics_timeline_semaphore,
                 .value = wait_graphics_value,
-                .stage_mask = .{ .all_transfer_bit = true },
+                .stage_mask = .{ .all_transfer = true },
                 .device_index = 0,
             })[0..1],
             .command_buffer_info_count = @intCast(count),
@@ -867,7 +865,7 @@ pub const MeshUploader = struct {
             .p_signal_semaphore_infos = (&vk.SemaphoreSubmitInfo{
                 .semaphore = self.transfer.semaphore,
                 .value = next_val,
-                .stage_mask = .{ .all_transfer_bit = true },
+                .stage_mask = .{ .all_transfer = true },
                 .device_index = 0,
             })[0..1],
         };
@@ -923,13 +921,13 @@ pub const MeshUploader = struct {
     /// Acquire side of the cross-queue memory dependency: makes the upload batch's
     /// transfer writes to the face buffer visible to this frame's vertex reads.
     pub fn cmdAcquireFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
-        self.faceBufferBarrier(cmd_buffer, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .vertex_attribute_input_bit = true }, .{ .vertex_attribute_read_bit = true });
+        self.faceBufferBarrier(cmd_buffer, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true });
     }
 
     /// Release side: makes this frame's vertex reads available before the next upload
     /// batch writes the same regions on the transfer queue.
     pub fn cmdReleaseFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
-        self.faceBufferBarrier(cmd_buffer, .{ .vertex_attribute_input_bit = true }, .{ .vertex_attribute_read_bit = true }, .{ .all_transfer_bit = true }, .{});
+        self.faceBufferBarrier(cmd_buffer, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true }, .{ .all_transfer = true }, .{});
     }
 
     const face_vertex_binding: vk.VertexInputBindingDescription = .{ .binding = 0, .stride = face_stride, .input_rate = .instance };
@@ -1473,7 +1471,7 @@ pub const IndirectScene = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "createMeshDataDescriptorResources" });
         defer zone.end();
         if (self.mesh_data_descriptor_set_layout == .null_handle) {
-            const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex_bit = true }, .p_immutable_samplers = null };
+            const binding = vk.DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .vertex = true }, .p_immutable_samplers = null };
             self.mesh_data_descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);
         }
 
@@ -1511,7 +1509,7 @@ test "GpuRegionAllocator safe_graphics propagation" {
     const io = std.testing.io;
     var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
     defer allocator.deinit(std.testing.allocator);
-    allocator.resolve(@enumFromInt(1), 0);
+    allocator.resolve(@fromBackingInt(@intCast(1)), 0);
 
     const fresh = allocator.allocRegion(io, 64).?;
     try std.testing.expectEqual(@as(u64, 0), fresh.safe_graphics);
@@ -1530,7 +1528,7 @@ test "GpuRegionAllocator out-of-order frees merge" {
     const io = std.testing.io;
     var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
     defer allocator.deinit(std.testing.allocator);
-    allocator.resolve(@enumFromInt(1), 0);
+    allocator.resolve(@fromBackingInt(@intCast(1)), 0);
 
     const a = allocator.allocRegion(io, 64).?;
     const b = allocator.allocRegion(io, 64).?;
@@ -1574,7 +1572,7 @@ test "StagingRing split gap boundary and degenerate full" {
     const io = std.testing.io;
     var ring = try StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
     defer ring.deinit(std.testing.allocator);
-    ring.resolve(@enumFromInt(1));
+    ring.resolve(@fromBackingInt(@intCast(1)));
 
     const Off = struct {
         fn run(r: *const StagingRing, slice: []const u8) vk.DeviceSize {

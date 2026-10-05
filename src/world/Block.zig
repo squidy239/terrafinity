@@ -20,11 +20,11 @@ pub const Block = enum(Tag) {
     pub const normal_start = transparent_end;
 
     pub fn isTransparent(self: Block) bool {
-        return @intFromEnum(self) < transparent_end;
+        return @backingInt(self) < transparent_end;
     }
 
     pub inline fn isVisible(self: Block) bool {
-        return @intFromEnum(self) >= invis_end;
+        return @backingInt(self) >= invis_end;
     }
 
     pub inline fn isTransparentVector(comptime len: usize, vector: @Vector(len, @typeInfo(Block).@"enum".tag_type)) @Vector(len, bool) {
@@ -72,8 +72,8 @@ pub const Block = enum(Tag) {
 
     pub const visible_count: usize = blk: {
         var count: usize = 0;
-        for (std.meta.fields(@This())) |field| {
-            if (@field(@This(), field.name).isVisible()) count += 1;
+        for (@typeInfo(@This()).@"enum".field_names) |name| {
+            if (@field(@This(), name).isVisible()) count += 1;
         }
         break :blk count;
     };

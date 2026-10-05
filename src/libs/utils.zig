@@ -10,8 +10,17 @@ pub fn loadZon(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: 
     try reader.interface.readSliceAll(slice[0..stat.size]);
     slice[stat.size] = 0;
     @setEvalBranchQuota(100000000);
-    const result = try std.zon.parse.fromSliceAlloc(T, allocator, slice[0..stat.size :0], null, .{ .ignore_unknown_fields = true });
-    return result;
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    return std.zon.parse.fromSlice(T, .{
+        .gpa = temp_allocator,
+        .arena = allocator,
+        .source = slice[0..stat.size :0],
+        .diagnostics = &diagnostics,
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        if (err == error.ParseZon) diagnostics.log(@typeName(T));
+        return err;
+    };
 }
 
 pub const PackDir = struct {
@@ -24,7 +33,7 @@ pub const PackDir = struct {
 /// `default` pack so its contents can be authored in place. The returned `path`
 /// must be freed by the caller.
 pub fn openPackDir(io: std.Io, allocator: std.mem.Allocator, selected_pack: []const u8, comptime subdir: []const u8) !PackDir {
-    const pack_path = try std.fmt.allocPrint(allocator, "packs/{s}/{s}/", .{ selected_pack, subdir });
+    const pack_path = try allocator.print("packs/{s}/{s}/", .{ selected_pack, subdir });
     errdefer allocator.free(pack_path);
     const is_default = std.mem.eql(u8, selected_pack, "default");
     const dir = if (is_default)
@@ -40,14 +49,14 @@ pub fn openPackDir(io: std.Io, allocator: std.mem.Allocator, selected_pack: []co
 pub fn joinEnums(comptime Tag: type, comptime enums: []const type) type {
     return comptime blk: {
         var total: usize = 0;
-        for (enums) |E| total += std.meta.fields(E).len;
+        for (enums) |E| total += @typeInfo(E).@"enum".field_names.len;
 
         var names: [total][]const u8 = undefined;
         var values: [total]Tag = undefined;
         var i: usize = 0;
         for (enums) |E| {
-            for (std.meta.fields(E)) |field| {
-                names[i] = field.name;
+            for (@typeInfo(E).@"enum".field_names) |name| {
+                names[i] = name;
                 values[i] = @intCast(i);
                 i += 1;
             }
@@ -61,11 +70,11 @@ test "joinEnums numbers fields sequentially in argument order" {
     const Second = enum(u8) { c, d };
     const Joined = joinEnums(u16, &.{ First, Second });
 
-    try std.testing.expectEqual(@as(usize, 4), std.meta.fields(Joined).len);
-    try std.testing.expectEqual(@as(u16, 0), @intFromEnum(Joined.a));
-    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Joined.b));
-    try std.testing.expectEqual(@as(u16, 2), @intFromEnum(Joined.c));
-    try std.testing.expectEqual(@as(u16, 3), @intFromEnum(Joined.d));
+    try std.testing.expectEqual(@as(usize, 4), @typeInfo(Joined).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(u16, 0), @backingInt(Joined.a));
+    try std.testing.expectEqual(@as(u16, 1), @backingInt(Joined.b));
+    try std.testing.expectEqual(@as(u16, 2), @backingInt(Joined.c));
+    try std.testing.expectEqual(@as(u16, 3), @backingInt(Joined.d));
 }
 
 test "refAllDecls" {

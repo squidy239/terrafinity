@@ -245,7 +245,7 @@ fn axisLabel(comptime sizes: []const usize) []const u8 {
             pos += 1;
         }
         var tmp: [20]u8 = undefined;
-        const text = std.fmt.bufPrint(&tmp, "{d}", .{s}) catch unreachable;
+        const text = std.mem.print(&tmp, "{d}", .{s}) catch unreachable;
         @memcpy(buf[pos..][0..text.len], text);
         pos += text.len;
     }
@@ -361,7 +361,7 @@ test "sampleGrid reproduces linear fields" {
 test "benchmark sampleGrid" {
     // Sample counts stay at 32^3 or below: larger grids return multi-MiB `Samples`
     // values from `sampleGrid` and overflow the Debug test stack.
-    const iterations = if (@import("builtin").mode == .Debug) 100 else 2000;
+    const iterations = if (@import("builtin").mode == .debug) 100 else 2000;
     const io = std.testing.io;
 
     inline for (@as([2][4]usize, .{

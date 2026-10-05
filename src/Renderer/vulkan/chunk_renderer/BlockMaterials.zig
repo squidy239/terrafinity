@@ -20,9 +20,9 @@ const BlockMaterial = extern struct {
 const BlockMaterialsZon = blk: {
     const vis_count = World.Block.visible_count;
     const names = textures.visible_block_names;
-    const types: [vis_count]type = .{BlockMaterial} ** vis_count;
+    const types: [vis_count]type = @splat(BlockMaterial);
     const default_mat: BlockMaterial = .{};
-    var attrs: [vis_count]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [vis_count]std.lang.Type.Struct.FieldAttributes = undefined;
     for (&attrs) |*a| a.* = .{ .default_value_ptr = @as(?*const anyopaque, @ptrCast(&default_mat)) };
     break :blk @Struct(.auto, null, &names, &types, &attrs);
 };
@@ -87,10 +87,10 @@ pub const BlockMaterials = struct {
             defer temp_arena.deinit();
             const parsed = try utils.loadZon(BlockMaterialsZon, io, f, temp_arena.allocator(), allocator);
 
-            inline for (std.meta.fields(World.Block)) |fld| {
-                if (!@field(World.Block, fld.name).isVisible()) continue;
-                const mat = &@field(parsed, fld.name);
-                const material_index = indexer.indexOf(@field(World.Block, fld.name));
+            inline for (@typeInfo(World.Block).@"enum".field_names) |name| {
+                if (!@field(World.Block, name).isVisible()) continue;
+                const mat = &@field(parsed, name);
+                const material_index = indexer.indexOf(@field(World.Block, name));
                 slice[material_index] = .{
                     .density = mat.density,
                     .fresnel_power = mat.fresnel_power,
@@ -119,7 +119,7 @@ pub const BlockMaterials = struct {
                 .binding = 0,
                 .descriptor_type = .storage_buffer,
                 .descriptor_count = 1,
-                .stage_flags = .{ .fragment_bit = true },
+                .stage_flags = .{ .fragment = true },
                 .p_immutable_samplers = null,
             };
             self.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);

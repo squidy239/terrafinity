@@ -5,7 +5,7 @@ description: Async tasks, locks, and upload/drain protocols (std.Io futures, buc
 
 # Concurrency & Io
 
-A wrong order or a held lock here deadlocks or races; every rule below cost a real debugging session. AGENTS.md `# Zig 0.16.0 Toolchain Facts` (std.Io guide) and `# Concurrency, Vulkan & GPU` are the source of truth — this skill is the pre-flight checklist.
+A wrong order or a held lock here deadlocks or races; every rule below cost a real debugging session. AGENTS.md `# Zig Toolchain` (std.Io guide) and `# Concurrency` are the source of truth — this skill is the pre-flight checklist.
 
 ## Futures and cancellation
 

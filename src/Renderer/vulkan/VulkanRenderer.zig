@@ -73,7 +73,7 @@ render_depth: core.RenderTarget = .{},
 render_depth_sampled_view: vk.ImageView = .null_handle,
 msaa_color: core.RenderTarget = .{},
 msaa_depth: core.RenderTarget = .{},
-msaa_samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
+msaa_samples: vk.SampleCountFlags = .{ .@"1" = true },
 msaa_sample_count: u32 = 1,
 depth_resolve_mode: vk.ResolveModeFlags = .{},
 /// True when the MSAA depth resolve is conservative for the Hi-Z MIN-reduce (min mode,
@@ -192,7 +192,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         };
 
         self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
-        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
+        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
         // The UI command pool is owned by main and may be mid-recording when
         // deinit runs from a failed openGame inside the UI record path;
         // resetting it yanks the buffer under the recorder and the next
@@ -259,23 +259,23 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, a
     self.msaa_samples = core.sampleCountToFlags(resolved);
     const use_msaa = resolved > 1;
 
-    self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true, .sampled_bit = true }, .{ .color_bit = true });
+    self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true, .sampled = true }, .{ .color = true });
 
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
     self.depth_format = for (depth_formats) |format| {
         // The transparent pass samples the depth, so both features are required.
         const features = self.vk_ctx.instance.getPhysicalDeviceFormatProperties(self.vk_ctx.pdev, format).optimal_tiling_features;
-        if (features.depth_stencil_attachment_bit and features.sampled_image_bit) break format;
+        if (features.depth_stencil_attachment and features.sampled_image) break format;
     } else return error.DepthFormatNotSupported;
 
-    self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true, .sampled_bit = true }, self.depthAspectMask());
-    self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth_bit = true }), &self.vk_ctx.vkalloc);
+    self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment = true, .sampled = true }, self.depthAspectMask());
+    self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth = true }), &self.vk_ctx.vkalloc);
 
     if (use_msaa) {
-        self.msaa_color = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true }, .{ .color_bit = true }, self.msaa_samples);
-        self.msaa_depth = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true }, self.depthAspectMask(), self.msaa_samples);
+        self.msaa_color = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true }, .{ .color = true }, self.msaa_samples);
+        self.msaa_depth = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment = true }, self.depthAspectMask(), self.msaa_samples);
         self.depth_resolve_mode = self.getDepthResolveMode();
-        self.depth_resolve_conservative = self.depth_resolve_mode.min_bit;
+        self.depth_resolve_conservative = self.depth_resolve_mode.min;
         std.log.info("VulkanRenderer: MSAA enabled {d}x (samples={any}) depth_resolve={any}", .{ resolved, self.msaa_samples, self.depth_resolve_mode });
     } else {
         self.msaa_color = .{};
@@ -296,9 +296,9 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, a
 
 fn depthAspectMask(self: *const VulkanRenderer) vk.ImageAspectFlags {
     return if (self.depth_format == .d32_sfloat_s8_uint or self.depth_format == .d24_unorm_s8_uint)
-        .{ .depth_bit = true, .stencil_bit = true }
+        .{ .depth = true, .stencil = true }
     else
-        .{ .depth_bit = true };
+        .{ .depth = true };
 }
 
 fn sampleCountFromAA(aa: Renderer.AntiAliasing) u32 {
@@ -317,12 +317,12 @@ fn resolveSampleCount(self: *const VulkanRenderer, desired: u32) u32 {
     var target = desired;
     while (target > 1) {
         const supported = switch (target) {
-            2 => counts.@"2_bit",
-            4 => counts.@"4_bit",
-            8 => counts.@"8_bit",
-            16 => counts.@"16_bit",
-            32 => counts.@"32_bit",
-            64 => counts.@"64_bit",
+            2 => counts.@"2",
+            4 => counts.@"4",
+            8 => counts.@"8",
+            16 => counts.@"16",
+            32 => counts.@"32",
+            64 => counts.@"64",
             else => false,
         };
         if (supported) break;
@@ -347,12 +347,12 @@ fn getDepthResolveMode(self: *const VulkanRenderer) vk.ResolveModeFlags {
     // The Hi-Z pyramid MIN-reduces the depth, so only a min resolve is conservative.
     // Average/sample-zero can be nearer than the closest sample; the caller gates
     // occlusion culling off in that case rather than culling visible silhouettes.
-    if (modes.min_bit) {
-        return .{ .min_bit = true };
-    } else if (modes.average_bit) {
-        return .{ .average_bit = true };
+    if (modes.min) {
+        return .{ .min = true };
+    } else if (modes.average) {
+        return .{ .average = true };
     } else {
-        return .{ .sample_zero_bit = true };
+        return .{ .sample_zero = true };
     }
 }
 
@@ -403,7 +403,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     try self.scene.ensureCapacity(io, total_candidates);
 
     try self.dev.resetCommandBuffer(frame_ctx.cmd_buffer, .{});
-    try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
+    try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit = true }, .p_inheritance_info = null });
     errdefer self.dev.endCommandBuffer(frame_ctx.cmd_buffer) catch |err| std.log.err("VulkanRenderer: endCommandBuffer during unwind failed: {any}", .{err});
     self.vk_ctx.gpu_profiler.resetFrame(frame_ctx.cmd_buffer, current_frame);
 

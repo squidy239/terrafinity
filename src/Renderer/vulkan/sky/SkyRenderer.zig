@@ -85,43 +85,39 @@ pub const SkyConfig = struct {
 /// std430 storage-block layout mirrored by sky.frag. All vector members are vec4s so Zig
 /// and GLSL agree on 16-byte slots; the shader uses `.xyz`.
 pub const SkyParams = extern struct {
-    camera_front: @Vector(4, f32),
-    camera_side: @Vector(4, f32),
-    camera_up: @Vector(4, f32),
+    camera_front: [4]f32 align(16),
+    camera_side: [4]f32 align(16),
+    camera_up: [4]f32 align(16),
     tan_factor: f32,
     tan_half: f32,
-    sun_dir: @Vector(4, f32),
-    sun_color: @Vector(4, f32),
-    sun_glow_color: @Vector(4, f32),
+    sun_dir: [4]f32 align(16),
+    sun_color: [4]f32 align(16),
+    sun_glow_color: [4]f32 align(16),
     sun_angular_radius: f32,
     sun_glow_power: f32,
     sun_intensity: f32,
-    moon_dir: @Vector(4, f32),
-    moon_color: @Vector(4, f32),
+    moon_dir: [4]f32 align(16),
+    moon_color: [4]f32 align(16),
     moon_angular_radius: f32,
     moon_phase: f32,
-    planet_dirs: [max_planets]@Vector(4, f32) align(16),
-    planet_colors: [max_planets]@Vector(4, f32) align(16),
+    planet_dirs: [max_planets][4]f32 align(16),
+    planet_colors: [max_planets][4]f32 align(16),
     planet_radii: [max_planets]f32,
     planet_count: f32,
     star_density: f32,
     star_seed: f32,
     star_brightness_min: f32,
     star_brightness_max: f32,
-    zenith_color: @Vector(4, f32),
-    horizon_color: @Vector(4, f32),
-    ground_color: @Vector(4, f32),
-    sun_scatter: @Vector(4, f32),
+    zenith_color: [4]f32 align(16),
+    horizon_color: [4]f32 align(16),
+    ground_color: [4]f32 align(16),
+    sun_scatter: [4]f32 align(16),
     transition_power: f32,
     exposure: f32,
 
     /// GPU-side params from the user config. The camera block, sun, and moon directions are
     /// per-frame data set by `assembleParams` and start as placeholders here.
     pub fn fromConfig(cfg: SkyConfig) SkyParams {
-        var planet_dirs: [max_planets]@Vector(4, f32) = undefined;
-        for (cfg.planet_dirs, &planet_dirs) |dir, *dst| dst.* = dir;
-        var planet_colors: [max_planets]@Vector(4, f32) = undefined;
-        for (cfg.planet_colors, &planet_colors) |color, *dst| dst.* = color;
         return .{
             .camera_front = .{ 0.0, 0.0, 1.0, 0.0 },
             .camera_side = .{ 1.0, 0.0, 0.0, 0.0 },
@@ -138,8 +134,8 @@ pub const SkyParams = extern struct {
             .moon_color = cfg.moon_color,
             .moon_angular_radius = cfg.moon_angular_radius,
             .moon_phase = cfg.moon_phase,
-            .planet_dirs = planet_dirs,
-            .planet_colors = planet_colors,
+            .planet_dirs = cfg.planet_dirs,
+            .planet_colors = cfg.planet_colors,
             .planet_radii = cfg.planet_radii,
             .planet_count = cfg.planet_count,
             .star_density = cfg.star_density,
@@ -298,7 +294,7 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
         .binding = 0,
         .descriptor_type = .storage_buffer,
         .descriptor_count = 1,
-        .stage_flags = .{ .fragment_bit = true },
+        .stage_flags = .{ .fragment = true },
         .p_immutable_samplers = null,
     };
     self.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, (&binding)[0..1]);
@@ -378,7 +374,7 @@ pub fn createPipelines(self: *SkyRenderer, depth_format: vk.Format, samples: vk.
     const depth_stencil = core.depthStencilState(false, .always, false);
     const blend = core.opaqueBlendAttachment();
     const no_vertex_input = core.emptyVertexInput();
-    if (samples.@"1_bit") {
+    if (samples.@"1") {
         self.pipeline = try core.buildGraphicsPipeline(
             self.dev,
             &self.vk_ctx.vkalloc,
@@ -421,28 +417,28 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
     const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "sky" });
     defer gpu_zone.end();
     const cmd_buffer = ctx.cmd_buffer;
-    const color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const color_aspect: vk.ImageAspectFlags = .{ .color = true };
     const first_frame = ctx.frame_sequence == 0;
     const color_old_layout: vk.ImageLayout = if (first_frame) .undefined else .shader_read_only_optimal;
     const depth_old_layout: vk.ImageLayout = if (first_frame) .undefined else .depth_stencil_read_only_optimal;
-    const src_stage: vk.PipelineStageFlags2 = if (first_frame) .{ .top_of_pipe_bit = true } else .{ .fragment_shader_bit = true, .compute_shader_bit = true };
-    const color_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .shader_read_bit = true };
-    const depth_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true };
+    const src_stage: vk.PipelineStageFlags2 = if (first_frame) .{ .top_of_pipe = true } else .{ .fragment_shader = true, .compute_shader = true };
+    const color_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .shader_read = true };
+    const depth_src_access: vk.AccessFlags2 = if (first_frame) .{} else .{ .depth_stencil_attachment_read = true, .shader_read = true };
 
     const msaa_color_enabled = ctx.msaa_color_image != null;
     const msaa_depth_enabled = ctx.msaa_depth_image != null;
     var pre_barriers: [4]vk.ImageMemoryBarrier2 = undefined;
     var barrier_count: usize = 0;
-    pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.color_image, color_old_layout, .color_attachment_optimal, src_stage, color_src_access, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect);
+    pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.color_image, color_old_layout, .color_attachment_optimal, src_stage, color_src_access, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, color_aspect);
     barrier_count += 1;
     if (msaa_color_enabled) {
-        pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.msaa_color_image.?, if (first_frame) .undefined else .color_attachment_optimal, .color_attachment_optimal, if (first_frame) .{ .top_of_pipe_bit = true } else .{ .color_attachment_output_bit = true }, if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .color_attachment_write_bit = true }, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, color_aspect);
+        pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.msaa_color_image.?, if (first_frame) .undefined else .color_attachment_optimal, .color_attachment_optimal, if (first_frame) .{ .top_of_pipe = true } else .{ .color_attachment_output = true }, if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .color_attachment_write = true }, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, color_aspect);
         barrier_count += 1;
     }
-    pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.depth_image, depth_old_layout, .depth_stencil_attachment_optimal, src_stage, depth_src_access, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, ctx.depth_aspect_mask);
+    pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.depth_image, depth_old_layout, .depth_stencil_attachment_optimal, src_stage, depth_src_access, .{ .early_fragment_tests = true, .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true }, ctx.depth_aspect_mask);
     barrier_count += 1;
     if (msaa_depth_enabled) {
-        pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.msaa_depth_image.?, if (first_frame) .undefined else .depth_stencil_attachment_optimal, .depth_stencil_attachment_optimal, if (first_frame) .{ .top_of_pipe_bit = true } else .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .depth_stencil_attachment_write_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, ctx.depth_aspect_mask);
+        pre_barriers[barrier_count] = core.makeImageBarrier2(ctx.msaa_depth_image.?, if (first_frame) .undefined else .depth_stencil_attachment_optimal, .depth_stencil_attachment_optimal, if (first_frame) .{ .top_of_pipe = true } else .{ .early_fragment_tests = true, .late_fragment_tests = true }, if (first_frame) @as(vk.AccessFlags2, .{}) else .{ .depth_stencil_attachment_write = true }, .{ .early_fragment_tests = true, .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true }, ctx.depth_aspect_mask);
         barrier_count += 1;
     }
     core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, pre_barriers[0..barrier_count]);

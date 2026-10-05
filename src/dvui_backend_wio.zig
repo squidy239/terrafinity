@@ -18,9 +18,9 @@ touch: [10]dvui.Point = @splat(.{ .x = std.math.inf(f32), .y = std.math.inf(f32)
 
 renderer: ?vk_renderer = null,
 device: ?vk.DeviceProxy = null,
-cmd_buffer: vk.CommandBuffer = .null_handle,
+cmd_buffer: ?vk.CommandBuffer = null,
 framebuffer_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
-prepass_cmd: vk.CommandBuffer = .null_handle,
+prepass_cmd: ?vk.CommandBuffer = null,
 
 pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, memory: vk_renderer.VkMemory, gpa: std.mem.Allocator, max_frames: u32, swapchain_format: vk.Format, queue_family_index: u32) !void {
     back.device = dev;
@@ -41,7 +41,7 @@ pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, memory: vk_renderer.VkMem
     });
 }
 
-pub fn setCommandBuffer(back: *@This(), cmd: vk.CommandBuffer, extent: vk.Extent2D) void {
+pub fn setCommandBuffer(back: *@This(), cmd: ?vk.CommandBuffer, extent: vk.Extent2D) void {
     back.cmd_buffer = cmd;
     back.framebuffer_extent = extent;
 }
@@ -82,22 +82,22 @@ pub fn nanoTime(self: *@This()) i128 {
     return ret.nanoseconds;
 }
 
-pub fn sleep(_: *@This(), ns: u64) void {
-    std.time.sleep(ns);
+pub fn sleep(self: *@This(), ns: u64) void {
+    self.io.sleep(.fromNanoseconds(ns), .awake) catch {};
 }
 
 pub fn begin(self: *@This(), arena: std.mem.Allocator) !void {
     self.arena = arena;
-    if (self.cmd_buffer != .null_handle) {
+    if (self.cmd_buffer != null) {
         const r = self.getRenderer();
-        r.begin(arena, .{ .w = @floatFromInt(self.framebuffer_extent.width), .h = @floatFromInt(self.framebuffer_extent.height) });
+        try r.beginWithSize(arena, .{ .w = @floatFromInt(self.framebuffer_extent.width), .h = @floatFromInt(self.framebuffer_extent.height) });
     }
 }
 
 pub fn beginFrame(self: *@This()) void {
-    if (self.cmd_buffer != .null_handle) {
+    if (self.cmd_buffer) |cmd_buffer| {
         const r = self.getRenderer();
-        r.beginFrame(self.cmd_buffer, self.framebuffer_extent) catch |err| @panic(@errorName(err));
+        r.beginFrame(cmd_buffer, self.framebuffer_extent) catch |err| @panic(@errorName(err));
     }
 }
 
@@ -107,12 +107,12 @@ pub fn end(self: *@This()) !void {
         std.log.err("DVUI Vulkan renderer failed to end frame: {}", .{err});
         return error.BackendError;
     };
-    self.prepass_cmd = recorded.prepass orelse .null_handle;
+    self.prepass_cmd = recorded.prepass;
 }
 
-pub fn takePrepass(self: *@This()) vk.CommandBuffer {
+pub fn takePrepass(self: *@This()) ?vk.CommandBuffer {
     const prepass = self.prepass_cmd;
-    self.prepass_cmd = .null_handle;
+    self.prepass_cmd = null;
     return prepass;
 }
 
@@ -173,14 +173,6 @@ pub fn waitEventTimeout(_: *@This(), timeout_us: u32) void {
         wio.wait(.{});
     } else {
         wio.wait(.{ .timeout_ns = @as(u64, timeout_us) * std.time.ns_per_us });
-    }
-}
-
-pub fn setTextInputRect(self: *@This(), maybe_rect: ?dvui.Rect.Natural) void {
-    if (maybe_rect) |rect| {
-        self.window.enableTextInput(.{ .cursor = .{ .x = @trunc(rect.x), .y = @trunc(rect.y) } });
-    } else {
-        self.window.disableTextInput();
     }
 }
 
@@ -312,9 +304,9 @@ pub fn textInputRect(self: *@This(), rect: ?dvui.Rect.Natural) void {
 pub fn renderPresent(_: *@This()) void {}
 
 pub fn drawClippedTriangles(self: *@This(), texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const dvui.Vertex.Index, clipr: ?dvui.Rect.Physical) !void {
-    if (self.cmd_buffer == .null_handle) return;
+    if (self.cmd_buffer == null) return;
     const r = self.getRenderer();
-    r.drawClippedTriangles(texture, vtx, idx, clipr);
+    try r.drawClippedTriangles(self.size_physical, texture, vtx, idx, clipr);
 }
 
 pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {

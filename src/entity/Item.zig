@@ -101,8 +101,8 @@ pub const UseContext = struct {
 pub const block_types: [Block.visible_count]Block = blk: {
     var list: [Block.visible_count]Block = undefined;
     var count: usize = 0;
-    for (std.meta.fields(Block)) |field| {
-        const block: Block = @field(Block, field.name);
+    for (@typeInfo(Block).@"enum".field_names) |name| {
+        const block: Block = @field(Block, name);
         if (!block.isVisible()) continue;
         list[count] = block;
         count += 1;
@@ -133,28 +133,28 @@ pub const ExtraItemType = enum(u16) {
 pub const ItemType = utils.joinEnums(u16, &.{ BlockItemType, ExtraItemType });
 
 /// Item form of every extra item, in declaration order.
-pub const extra_item_types: [std.meta.fields(ExtraItemType).len]ItemType = blk: {
-    var list: [std.meta.fields(ExtraItemType).len]ItemType = undefined;
-    for (&list, 0..) |*slot, i| slot.* = @enumFromInt(block_types.len + i);
+pub const extra_item_types: [@typeInfo(ExtraItemType).@"enum".field_names.len]ItemType = blk: {
+    var list: [@typeInfo(ExtraItemType).@"enum".field_names.len]ItemType = undefined;
+    for (&list, 0..) |*slot, i| slot.* = @fromBackingInt(@intCast(block_types.len + i));
     break :blk list;
 };
 
 /// The item form of a placeable block, or null for invisible blocks.
 pub fn fromBlock(block: Block) ?ItemType {
-    const index = std.mem.indexOfScalar(Block, &block_types, block) orelse return null;
-    return @enumFromInt(index);
+    const index = std.mem.findScalar(Block, &block_types, block) orelse return null;
+    return @fromBackingInt(@intCast(index));
 }
 
 /// The block a block item places, or null for extra items.
 pub fn toBlock(item_type: ItemType) ?Block {
-    const index = @intFromEnum(item_type);
+    const index = @backingInt(item_type);
     if (index >= block_types.len) return null;
     return block_types[index];
 }
 
 test "ItemType covers every visible block" {
-    inline for (std.meta.fields(Block)) |field| {
-        const block: Block = @field(Block, field.name);
+    inline for (@typeInfo(Block).@"enum".field_names) |name| {
+        const block: Block = @field(Block, name);
         if (!block.isVisible()) continue;
         const item_type = fromBlock(block) orelse return error.MissingItemType;
         try std.testing.expectEqual(block, toBlock(item_type).?);
@@ -164,7 +164,7 @@ test "ItemType covers every visible block" {
 
 test "ItemType is u16-backed and includes extras" {
     try std.testing.expect(@bitSizeOf(@typeInfo(ItemType).@"enum".tag_type) == 16);
-    try std.testing.expectEqual(@as(u16, @intCast(block_types.len)), @intFromEnum(ItemType.Explosive));
+    try std.testing.expectEqual(@as(u16, @intCast(block_types.len)), @backingInt(ItemType.Explosive));
 }
 
 test "extra item types are the non-block items in order" {

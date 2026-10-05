@@ -10,7 +10,7 @@ const queries_per_frame: u32 = 2048;
 const bootstrap_query: u32 = 0;
 const query_pool_count: u32 = bootstrap_query + VulkanContext.max_frames_in_flight * queries_per_frame;
 
-const timestamp_stage: vk.PipelineStageFlags2 = .{ .all_commands_bit = true };
+const timestamp_stage: vk.PipelineStageFlags2 = .{ .all_commands = true };
 
 const FrameState = struct {
     query_count: u32 = 0,
@@ -135,7 +135,7 @@ pub const GpuProfiler = struct {
             @sizeOf(u64) * query_count,
             &timestamps,
             @sizeOf(u64),
-            .{ .@"64_bit" = true },
+            .{ .@"64" = true },
         ) catch |err| {
             std.log.warn("Tracy GPU timestamp read failed: {s}", .{@errorName(err)});
             return;
@@ -173,11 +173,11 @@ pub const GpuProfiler = struct {
         defer dev.freeCommandBuffers(command_pool, (&command_buffer)[0..1]);
 
         try dev.beginCommandBuffer(command_buffer, &.{
-            .flags = .{ .one_time_submit_bit = true },
+            .flags = .{ .one_time_submit = true },
             .p_inheritance_info = null,
         });
         dev.cmdResetQueryPool(command_buffer, query_pool, 0, query_pool_count);
-        dev.cmdWriteTimestamp2(command_buffer, .{ .top_of_pipe_bit = true }, query_pool, bootstrap_query);
+        dev.cmdWriteTimestamp2(command_buffer, .{ .top_of_pipe = true }, query_pool, bootstrap_query);
         try dev.endCommandBuffer(command_buffer);
 
         const fence = try dev.createFence(&.{}, vkalloc);
@@ -206,7 +206,7 @@ pub const GpuProfiler = struct {
             @sizeOf(u64),
             &timestamp,
             @sizeOf(u64),
-            .{ .@"64_bit" = true, .wait_bit = true },
+            .{ .@"64" = true, .wait = true },
         );
         if (result != .success) return error.TracyGpuTimestampUnavailable;
         return timestamp;
@@ -214,13 +214,13 @@ pub const GpuProfiler = struct {
 
     pub const Zone = struct {
         profiler: ?*GpuProfiler = null,
-        cmd_buffer: vk.CommandBuffer = .null_handle,
+        cmd_buffer: ?vk.CommandBuffer = null,
         query_id: u32 = 0,
         active: bool = false,
 
         pub fn end(self: @This()) void {
             if (!self.active) return;
-            self.profiler.?.endZone(self.cmd_buffer, self.query_id);
+            self.profiler.?.endZone(self.cmd_buffer.?, self.query_id);
         }
     };
 };

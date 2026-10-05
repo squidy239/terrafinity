@@ -451,7 +451,7 @@ pub fn init(
     const generator_plugin = generators.findByName(world_options.generator_name) orelse
         return error.GeneratorNotFound;
 
-    const config_dir = try std.fs.path.join(allocator, &.{ folder, "config" });
+    const config_dir = try std.Io.Dir.path.join(allocator, &.{ folder, "config" });
     errdefer allocator.free(config_dir);
 
     const generator_config = try generator_plugin.loadConfig(allocator, io, config_dir);
@@ -476,7 +476,7 @@ pub fn init(
     };
     try game.generator.?.saveConfig(io);
 
-    const storage_path = try std.fs.path.joinZ(game.allocator, &.{ folder, "storage" });
+    const storage_path = try std.Io.Dir.path.joinZ(game.allocator, &.{ folder, "storage" });
     {
         defer game.allocator.free(storage_path);
         game.world_storage = try .init(storage_path, game.allocator, &game.options.save_mode, game_options_lock);
@@ -890,10 +890,10 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
     const inventory = &self.player.main_inventory;
-    const first_hotbar = @intFromEnum(Key.Action.hotbar_key_0);
+    const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
     const hotbar_key_count = 10;
     inline for (0..hotbar_key_count) |slot| {
-        if (actions.contains(@enumFromInt(first_hotbar + slot))) self.selectSlot(self.selectedRow(), @intCast(slot));
+        if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selectedRow(), @intCast(slot));
     }
     const row = self.selectedRow();
     const col = self.selectedCol();
@@ -1571,7 +1571,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
     // Placeholder starter row so the hotbar has icons to show; real item grants come
     // later. Tool items always get a slot, so block items are capped to fit the row.
     const hotbar_width = game.player.main_inventory.width;
-    const tool_count: u32 = std.meta.fields(Item.ExtraItemType).len;
+    const tool_count: u32 = @typeInfo(Item.ExtraItemType).@"enum".field_names.len;
     const block_slots = @min(@as(u32, @intCast(Item.block_types.len)), hotbar_width -| tool_count);
     for (Item.block_types[0..block_slots], 0..) |block, col| {
         _ = game.player.main_inventory.set(io, 0, @intCast(col), .{ .item_type = Item.fromBlock(block).?, .amount = 1 });

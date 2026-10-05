@@ -7,7 +7,6 @@ const DeviceProxy = vk.DeviceProxy;
 const ConcurrentHashMap = @import("../../../libs/ConcurrentHashMap.zig").ConcurrentHashMap;
 const Renderer = @import("../../../Renderer.zig");
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
-const BFA = @import("../../../world/BufferFirstAllocator.zig");
 const Chunk = @import("../../../world/Chunk.zig");
 const World = @import("../../../world/World.zig");
 const ChunkPos = World.ChunkPos;
@@ -344,7 +343,7 @@ pub fn addChunk(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, encoding:
     defer zone.end();
 
     var buffer: [mesh_scratch_bytes]u8 = undefined;
-    var bfa: BFA = .init(&buffer, self.allocator);
+    var bfa: std.heap.BufferFirstAllocator = .init(&buffer, self.allocator);
     var opaque_faces: std.ArrayList(Mesher.Face) = .empty;
     defer opaque_faces.deinit(bfa.allocator());
     var transparent_faces: std.ArrayList(Mesher.Face) = .empty;
@@ -408,7 +407,7 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
 
     try self.dev.resetCommandPool(pool, .{});
 
-    try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true }, .p_inheritance_info = null });
+    try self.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true }, .p_inheritance_info = null });
 
     var opaque_res: ?gpu.UploadResult = null;
     var transparent_res: ?gpu.UploadResult = null;
@@ -451,7 +450,7 @@ fn recordMeshUpload(self: *ChunkRenderer, faces: []const Mesher.Face, cmd: vk.Co
     const indexer = std.enums.EnumIndexer(World.Block);
     for (faces, std.mem.bytesAsSlice(Mesher.Face, staging_slice)[0..faces.len]) |face, *dest| {
         dest.* = face;
-        dest.block_type = @intCast(indexer.indexOf(@enumFromInt(face.block_type)));
+        dest.block_type = @intCast(indexer.indexOf(@fromBackingInt(@intCast(face.block_type))));
     }
 
     const staging_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, staging_slice.ptr);
@@ -463,7 +462,7 @@ fn recordMeshUpload(self: *ChunkRenderer, faces: []const Mesher.Face, cmd: vk.Co
     // Hazard barrier on the transfer queue: prior transfer writes to this region (which may
     // have been reused) must finish before the copy overwrites it. No ownership transfer:
     // the buffer is concurrent-shared, so both family indices stay QUEUE_FAMILY_IGNORED.
-    core.pipelineBarrier(cmd, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }))[0..1]);
+    core.pipelineBarrier(cmd, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .all_transfer = true }, .{ .transfer_write = true }))[0..1]);
 
     self.dev.cmdCopyBuffer2(cmd, &.{
         .src_buffer = staging_info.buffer,
@@ -478,7 +477,7 @@ fn recordMeshUpload(self: *ChunkRenderer, faces: []const Mesher.Face, cmd: vk.Co
 
     // Release: make the copy's writes available to the graphics queue, which acquires
     // them in cmdAcquireFaceBuffer after the transfer semaphore signals.
-    core.pipelineBarrier(cmd, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .all_transfer_bit = true }, .{}))[0..1]);
+    core.pipelineBarrier(cmd, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(face_buf, face_buf_offset + face_byte_offset, buffer_size, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .all_transfer = true }, .{}))[0..1]);
 
     return .{
         .mesh = .{
@@ -866,7 +865,7 @@ fn createCullResources(self: *ChunkRenderer) !void {
     defer zone.end();
     if (self.cull.descriptor_set_layout == .null_handle) {
         var bindings: [5]vk.DescriptorSetLayoutBinding = undefined;
-        for (&bindings, 0..) |*b, i| b.* = .{ .binding = @intCast(i), .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true }, .p_immutable_samplers = null };
+        for (&bindings, 0..) |*b, i| b.* = .{ .binding = @intCast(i), .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .compute = true }, .p_immutable_samplers = null };
         self.cull.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, &bindings);
     }
 
@@ -875,7 +874,7 @@ fn createCullResources(self: *ChunkRenderer) !void {
     errdefer self.destroyCullDescriptorResources();
 
     const pc_range: vk.PushConstantRange = .{
-        .stage_flags = .{ .compute_bit = true },
+        .stage_flags = .{ .compute = true },
         .offset = 0,
         .size = @sizeOf(CullPushConstants),
     };
@@ -897,7 +896,7 @@ fn createCullResources(self: *ChunkRenderer) !void {
 
     const cpci: vk.ComputePipelineCreateInfo = .{
         .flags = .{},
-        .stage = core.shaderStageCreateInfo(.{ .compute_bit = true }, comp_module),
+        .stage = core.shaderStageCreateInfo(.{ .compute = true }, comp_module),
         .layout = self.cull.pipeline_layout,
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
@@ -948,7 +947,7 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
         const max_off = frame.count_offset + @as(vk.DeviceSize, @offsetOf(gpu.CullCount, "aabb_max_ord"));
         self.dev.cmdFillBuffer(cmd_buffer, frame.count, min_off, @sizeOf([3]u32), gpu.aabb_min_inf_ord);
         self.dev.cmdFillBuffer(cmd_buffer, frame.count, max_off, @sizeOf([3]u32), gpu.aabb_max_inf_ord);
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.count, frame.count_offset, @sizeOf(gpu.CullCount), .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true }))[0..1]);
     }
 
     self.dev.cmdBindPipeline(cmd_buffer, .compute, self.cull.pipeline);
@@ -964,7 +963,7 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
     push_consts.min_chunk_size = min_chunk_size;
     frame.last_cull_player_pos = view_pos;
 
-    self.dev.cmdPushConstants(cmd_buffer, self.cull.pipeline_layout, .{ .compute_bit = true }, 0, @sizeOf(@TypeOf(push_consts)), &push_consts);
+    self.dev.cmdPushConstants(cmd_buffer, self.cull.pipeline_layout, .{ .compute = true }, 0, @sizeOf(@TypeOf(push_consts)), &push_consts);
 
     const group_count = (total_candidates + (cull_workgroup_size - 1)) / cull_workgroup_size;
     self.dev.cmdDispatch(cmd_buffer, group_count, 1, 1);
@@ -988,7 +987,7 @@ fn frameBufferBarriers(self: *ChunkRenderer, current_frame: u32, src_stage: vk.P
 /// without this the reset fill and cull writes race the prior stats copy (transfer
 /// read of the count buffer) and the opaque passes' vertex reads of mesh data.
 fn preCullFrameBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .draw_indirect_bit = true, .vertex_shader_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .shader_read_bit = true, .transfer_read_bit = true, .transfer_write_bit = true }, .{ .compute_shader_bit = true, .all_transfer_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true, .transfer_read_bit = true, .transfer_write_bit = true }));
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .draw_indirect = true, .vertex_shader = true, .all_transfer = true }, .{ .indirect_command_read = true, .shader_read = true, .transfer_read = true, .transfer_write = true }, .{ .compute_shader = true, .all_transfer = true }, .{ .shader_read = true, .shader_write = true, .transfer_read = true, .transfer_write = true }));
 }
 
 /// Zero-fills the visibility buffer when it is fresh, or makes last frame's late-cull
@@ -999,23 +998,23 @@ fn prepareVisibility(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, total_c
     const size: vk.DeviceSize = @as(vk.DeviceSize, total_candidates) * @sizeOf(u32);
     if (scene.visibility_needs_clear.swap(false, .acq_rel)) {
         self.dev.cmdFillBuffer(cmd_buffer, scene.visibility_buffer, scene.visibility_offset, size, 0);
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true }))[0..1]);
         return;
     }
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }))[0..1]);
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .compute_shader = true }, .{ .shader_write = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true }))[0..1]);
 }
 
 /// Makes the early cull's outputs visible to the draws that consume them (early opaque
 /// pass and the shadow raster at the frame tail).
 fn cullDrawBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .vertex_shader_bit = true }, .{ .indirect_command_read_bit = true, .shader_read_bit = true }));
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .compute_shader = true }, .{ .shader_write = true }, .{ .draw_indirect = true, .vertex_shader = true }, .{ .indirect_command_read = true, .shader_read = true }));
 }
 
 /// The late cull rewrites buffers the early passes just consumed and continues the
 /// early cull's atomic counters, so it must wait for those reads and see those writes.
 fn preLateCullBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
     const scene = self.scene;
-    const barriers: [4]vk.BufferMemoryBarrier2 = self.frameBufferBarriers(current_frame, .{ .draw_indirect_bit = true, .vertex_shader_bit = true, .compute_shader_bit = true }, .{ .indirect_command_read_bit = true, .shader_read_bit = true, .shader_write_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true }) ++ [1]vk.BufferMemoryBarrier2{core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, scene.visibility_slice.len * @sizeOf(u32), .{ .compute_shader_bit = true }, .{ .shader_read_bit = true }, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true, .shader_write_bit = true })};
+    const barriers: [4]vk.BufferMemoryBarrier2 = self.frameBufferBarriers(current_frame, .{ .draw_indirect = true, .vertex_shader = true, .compute_shader = true }, .{ .indirect_command_read = true, .shader_read = true, .shader_write = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true }) ++ [1]vk.BufferMemoryBarrier2{core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, scene.visibility_slice.len * @sizeOf(u32), .{ .compute_shader = true }, .{ .shader_read = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true })};
     core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &barriers);
 }
 
@@ -1024,13 +1023,13 @@ fn preLateCullBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, curren
 fn cullBarrierAndCopyStats(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
     const frame = &self.scene.frame_buffers.items[current_frame];
     // Wider masks than strictly needed per buffer; extra dependencies are free here.
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .compute_shader_bit = true }, .{ .shader_write_bit = true }, .{ .draw_indirect_bit = true, .all_transfer_bit = true }, .{ .indirect_command_read_bit = true, .transfer_read_bit = true }));
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .compute_shader = true }, .{ .shader_write = true }, .{ .draw_indirect = true, .all_transfer = true }, .{ .indirect_command_read = true, .transfer_read = true }));
 
     self.dev.cmdCopyBuffer(cmd_buffer, frame.count, frame.stats, (&vk.BufferCopy{ .src_offset = frame.count_offset, .dst_offset = frame.stats_offset, .size = @sizeOf(gpu.CullCount) })[0..1]);
 
     // The copy's write must also be available to later submissions' transfer ops
     // (the next stats copy into this ring slot), not just the host read.
-    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(gpu.CullCount), .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .host_bit = true, .all_transfer_bit = true }, .{ .host_read_bit = true, .transfer_read_bit = true, .transfer_write_bit = true }))[0..1]);
+    core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(frame.stats, frame.stats_offset, @sizeOf(gpu.CullCount), .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .host = true, .all_transfer = true }, .{ .host_read = true, .transfer_read = true, .transfer_write = true }))[0..1]);
 }
 
 pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
@@ -1063,12 +1062,12 @@ fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule,
         self.block_materials.descriptor_set_layout,
     };
     const blend_attachments: [3]vk.PipelineColorBlendAttachmentState = .{
-        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true } },
-        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r_bit = true, .g_bit = false, .b_bit = false, .a_bit = false } },
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .zero, .dst_alpha_blend_factor = .one_minus_src_alpha, .alpha_blend_op = .add, .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true } },
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true } },
+        .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r = true, .g = false, .b = false, .a = false } },
     };
     const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
-    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, core.depthStencilState(true, .greater_or_equal, false), &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline, .{ .@"1_bit" = true });
+    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, core.depthStencilState(true, .greater_or_equal, false), &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline, .{ .@"1" = true });
 }
 
 /// Builds a chunk pipeline layout (shared push constant range) and pipeline from the
@@ -1087,7 +1086,7 @@ fn buildChunkPipeline(
     samples: vk.SampleCountFlags,
 ) !void {
     const pc_range: vk.PushConstantRange = .{
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+        .stage_flags = .{ .vertex = true, .fragment = true },
         .offset = 0,
         .size = push_constants_size,
     };
@@ -1102,8 +1101,8 @@ fn buildChunkPipeline(
     const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, frag_spv);
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-    if (samples.@"1_bit") {
-        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, .{ .@"1_bit" = true });
+    if (samples.@"1") {
+        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, .{ .@"1" = true });
     } else {
         pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, samples);
     }
@@ -1147,13 +1146,13 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     // no Hi-Z test consumes it: the barrier pair is layout-neutral and the late opaque
     // pass already expects the depth in attachment layout.
     if (hiz_enabled) {
-        self.depthToSampledBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
+        self.depthToSampledBarrier(ctx, .{ .compute_shader = true }, .{ .shader_read = true });
         {
             const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
             defer gpu_zone.end();
             self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
         }
-        self.depthToAttachmentBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
+        self.depthToAttachmentBarrier(ctx, .{ .compute_shader = true }, .{ .shader_read = true });
     }
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_late_cull" });
@@ -1166,7 +1165,7 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         self.recordOpaquePass(ctx, pc, .late);
     }
     // Depth is final now; transparent tests against it and samples it in the shader.
-    self.depthToSampledBarrier(ctx, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true, .fragment_shader_bit = true }, .{ .depth_stencil_attachment_read_bit = true, .shader_read_bit = true });
+    self.depthToSampledBarrier(ctx, .{ .early_fragment_tests = true, .late_fragment_tests = true, .fragment_shader = true }, .{ .depth_stencil_attachment_read = true, .shader_read = true });
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "transparent" });
         defer gpu_zone.end();
@@ -1255,8 +1254,8 @@ fn depthToSampledBarrier(self: *ChunkRenderer, ctx: *const PassContext, dst_stag
         ctx.depth_image,
         .depth_stencil_attachment_optimal,
         .depth_stencil_read_only_optimal,
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{ .depth_stencil_attachment_write_bit = true },
+        .{ .early_fragment_tests = true, .late_fragment_tests = true },
+        .{ .depth_stencil_attachment_write = true },
         dst_stage,
         dst_access,
         ctx.depth_aspect_mask,
@@ -1272,8 +1271,8 @@ fn depthToAttachmentBarrier(self: *ChunkRenderer, ctx: *const PassContext, src_s
         .depth_stencil_attachment_optimal,
         src_stage,
         src_access,
-        .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true },
-        .{ .depth_stencil_attachment_read_bit = true, .depth_stencil_attachment_write_bit = true },
+        .{ .early_fragment_tests = true, .late_fragment_tests = true },
+        .{ .depth_stencil_attachment_read = true, .depth_stencil_attachment_write = true },
         ctx.depth_aspect_mask,
     ))[0..1]);
 }
@@ -1301,7 +1300,7 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
 
     self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.graphics_state.pipeline);
 
-    core.setDynamicState(self.dev, ctx.cmd_buffer, .{ .back_bit = true }, .greater, true);
+    core.setDynamicState(self.dev, ctx.cmd_buffer, .{ .back = true }, .greater, true);
 
     core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
 
@@ -1332,14 +1331,14 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
 fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConstants) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordTransparentPass" });
     defer zone.end();
-    const oit_color_aspect: vk.ImageAspectFlags = .{ .color_bit = true };
+    const oit_color_aspect: vk.ImageAspectFlags = .{ .color = true };
     const oit_old_layout: vk.ImageLayout = if (ctx.frame_sequence > 0) .shader_read_only_optimal else .undefined;
-    const oit_src_stage: vk.PipelineStageFlags2 = if (ctx.frame_sequence > 0) .{ .fragment_shader_bit = true } else .{ .top_of_pipe_bit = true };
-    const oit_src_access: vk.AccessFlags2 = if (ctx.frame_sequence > 0) .{ .shader_read_bit = true } else .{};
+    const oit_src_stage: vk.PipelineStageFlags2 = if (ctx.frame_sequence > 0) .{ .fragment_shader = true } else .{ .top_of_pipe = true };
+    const oit_src_access: vk.AccessFlags2 = if (ctx.frame_sequence > 0) .{ .shader_read = true } else .{};
     var oit_pre_barriers: [3]vk.ImageMemoryBarrier2 = undefined;
     const oit_images: [3]vk.Image = .{ self.oit.accum.image, self.oit.reveal.image, self.oit.volume_weight.image };
     for (oit_images, &oit_pre_barriers) |image, *barrier| {
-        barrier.* = core.makeImageBarrier2(image, oit_old_layout, .color_attachment_optimal, oit_src_stage, oit_src_access, .{ .color_attachment_output_bit = true }, .{ .color_attachment_write_bit = true }, oit_color_aspect);
+        barrier.* = core.makeImageBarrier2(image, oit_old_layout, .color_attachment_optimal, oit_src_stage, oit_src_access, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, oit_color_aspect);
     }
     core.pipelineBarrier(ctx.cmd_buffer, self.dev, vk.ImageMemoryBarrier2, &oit_pre_barriers);
 
@@ -1379,7 +1378,7 @@ fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: Push
 fn pushChunkConstants(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, pipeline_layout: vk.PipelineLayout, pc: PushConstants, mesh_base: u32) void {
     var pc_x = pc;
     pc_x.mesh_base = mesh_base;
-    self.dev.cmdPushConstants(cmd_buffer, pipeline_layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, push_constants_size, &pc_x);
+    self.dev.cmdPushConstants(cmd_buffer, pipeline_layout, .{ .vertex = true, .fragment = true }, 0, push_constants_size, &pc_x);
 }
 
 /// Binds the face vertex buffer and issues the indirect count draw for the pass. The

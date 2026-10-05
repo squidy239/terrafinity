@@ -203,11 +203,11 @@ pub fn deinit(self: *ShadowRenderer) void {
 
 fn createSharedSetLayout(self: *ShadowRenderer) !void {
     const bindings: [3]vk.DescriptorSetLayoutBinding = .{
-        .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-        .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment = true }, .p_immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment = true }, .p_immutable_samplers = null },
+        .{ .binding = 2, .descriptor_type = .storage_buffer, .descriptor_count = 1, .stage_flags = .{ .fragment = true }, .p_immutable_samplers = null },
     };
-    self.shadow_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{ .push_descriptor_bit = true }, &bindings);
+    self.shadow_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{ .push_descriptor = true }, &bindings);
 }
 
 fn createSampler(self: *ShadowRenderer) !void {
@@ -222,7 +222,7 @@ fn createSampler(self: *ShadowRenderer) !void {
 
 fn createPipelineLayout(self: *ShadowRenderer) !void {
     const pc_range: vk.PushConstantRange = .{
-        .stage_flags = .{ .vertex_bit = true },
+        .stage_flags = .{ .vertex = true },
         .offset = 0,
         .size = @sizeOf(ShadowPushConstants),
     };
@@ -339,9 +339,9 @@ fn createShadowImage(self: *ShadowRenderer, size: u32, count: u32) !void {
         .format = self.format,
         .tiling = .optimal,
         .initial_layout = .undefined,
-        .usage = .{ .depth_stencil_attachment_bit = true, .sampled_bit = true, .transfer_dst_bit = true },
+        .usage = .{ .depth_stencil_attachment = true, .sampled = true, .transfer_dst = true },
         .sharing_mode = .exclusive,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
     };
     const alloc = try core.allocateImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, &image_info);
     self.image = alloc.image;
@@ -358,7 +358,7 @@ fn pickDepthFormat(self: *ShadowRenderer) !vk.Format {
     };
     for (candidates) |fmt| {
         const features = self.vk_ctx.instance.getPhysicalDeviceFormatProperties(self.vk_ctx.pdev, fmt).optimal_tiling_features;
-        if (features.depth_stencil_attachment_bit and features.sampled_image_bit) return fmt;
+        if (features.depth_stencil_attachment and features.sampled_image) return fmt;
     }
     return error.ShadowDepthFormatNotSupported;
 }
@@ -381,7 +381,7 @@ fn createImageView(self: *ShadowRenderer, view_type: vk.ImageViewType, base_laye
         .format = self.format,
         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
         .subresource_range = .{
-            .aspect_mask = .{ .depth_bit = true },
+            .aspect_mask = .{ .depth = true },
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = base_layer,
@@ -408,13 +408,13 @@ fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
     // These barriers span the whole array; makeImageBarrier2 only covers a single layer.
     const full_range = depthRange(0, self.cascade_count);
 
-    const pre_barrier = core.imageBarrier2Range(self.image, full_range, .undefined, .transfer_dst_optimal, .{ .top_of_pipe_bit = true }, .{}, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true });
+    const pre_barrier = core.imageBarrier2Range(self.image, full_range, .undefined, .transfer_dst_optimal, .{ .top_of_pipe = true }, .{}, .{ .all_transfer = true }, .{ .transfer_write = true });
     core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&pre_barrier)[0..1]);
 
     self.dev.cmdClearDepthStencilImage(cmd, self.image, .transfer_dst_optimal, &.{ .depth = 1.0, .stencil = 0 }, (&full_range)[0..1]);
 
     // transfer dst -> shader read (fragment sampling)
-    const post_barrier = core.imageBarrier2Range(self.image, full_range, .transfer_dst_optimal, .shader_read_only_optimal, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true });
+    const post_barrier = core.imageBarrier2Range(self.image, full_range, .transfer_dst_optimal, .shader_read_only_optimal, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .fragment_shader = true }, .{ .shader_read = true });
     core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&post_barrier)[0..1]);
 
     self.single_time.end(io, cmd) catch |err| {
@@ -426,7 +426,7 @@ fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
 /// Depth-aspect subresource range over `layer_count` layers starting at `base_layer`.
 fn depthRange(base_layer: u32, layer_count: u32) vk.ImageSubresourceRange {
     return .{
-        .aspect_mask = .{ .depth_bit = true },
+        .aspect_mask = .{ .depth = true },
         .base_mip_level = 0,
         .level_count = 1,
         .base_array_layer = base_layer,
@@ -764,7 +764,7 @@ fn recordCascadePass(
     // Within-command-buffer dependency: this frame's fragment reads (opaque/transparent
     // sample the shadow array) precede the write to this cascade's layer. makeImageBarrier2
     // only covers layer 0, so the range is built by hand for the cascade layer.
-    const pre_barrier = core.imageBarrier2Range(self.image, layer_range, .shader_read_only_optimal, .depth_stencil_attachment_optimal, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true }, .{ .early_fragment_tests_bit = true, .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true });
+    const pre_barrier = core.imageBarrier2Range(self.image, layer_range, .shader_read_only_optimal, .depth_stencil_attachment_optimal, .{ .fragment_shader = true }, .{ .shader_read = true }, .{ .early_fragment_tests = true, .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true });
     core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&pre_barrier)[0..1]);
 
     // Standard depth (not reversed-Z): ortho depth is linear, so clear to far (1.0) and
@@ -777,7 +777,7 @@ fn recordCascadePass(
     // handedness to the camera, so the exterior/occluder faces (top faces, sun-facing
     // sides) are the BACK faces there. Culling back faces would keep the cave
     // interior's faces instead and the surface would never reach the map.
-    core.setDynamicState(self.dev, cmd_buffer, .{ .front_bit = true }, .less_or_equal, true);
+    core.setDynamicState(self.dev, cmd_buffer, .{ .front = true }, .less_or_equal, true);
     core.setViewportAndScissor(self.dev, cmd_buffer, extent);
 
     const mesh_desc_set = self.scene.mesh_data_descriptor_sets_per_frame[frame_idx];
@@ -792,7 +792,7 @@ fn recordCascadePass(
         .light_viewproj = Csm.viewProjAtOrigin(pending_commit, self.frame_origin),
         .mesh_base = (gpu.shadow_slot_base + slot) * self.scene.draw_capacity,
     };
-    self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(ShadowPushConstants), &shadow_pc);
+    self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(ShadowPushConstants), &shadow_pc);
 
     self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buffer)[0..1], (&face_buffer_offset)[0..1]);
 
@@ -805,7 +805,7 @@ fn recordCascadePass(
 
     // Trailing transition back to sampled layout; visible to the next frame's fragment
     // reads without any top-of-frame barrier.
-    const post_barrier = core.imageBarrier2Range(self.image, layer_range, .depth_stencil_attachment_optimal, .shader_read_only_optimal, .{ .late_fragment_tests_bit = true }, .{ .depth_stencil_attachment_write_bit = true }, .{ .fragment_shader_bit = true }, .{ .shader_read_bit = true });
+    const post_barrier = core.imageBarrier2Range(self.image, layer_range, .depth_stencil_attachment_optimal, .shader_read_only_optimal, .{ .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true }, .{ .fragment_shader = true }, .{ .shader_read = true });
     core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&post_barrier)[0..1]);
 }
 

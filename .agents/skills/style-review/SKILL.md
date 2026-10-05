@@ -95,7 +95,7 @@ The `symbol or location` field names the function, struct, variable, or other id
 
 #### Phase 2: Toolchain Facts
 
-> Read `{AGENTS_PATH}` under `# Zig 0.16.0 Toolchain Facts`: `## std.Io quick guide`, `## Pointer safety patterns`, `## Toolchain footguns`.
+> Read `{AGENTS_PATH}` under `# Zig Toolchain`: `## Changes in 0.17`, `## std.Io`, `## Pointer safety`, `## Footguns`.
 >
 > Review the provided files for violations of every rule in that section.
 >

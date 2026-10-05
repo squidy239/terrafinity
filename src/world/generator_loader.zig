@@ -22,7 +22,7 @@ pub const Generator = struct {
         const lower_name = try allocator.dupe(u8, self.info.name);
         defer allocator.free(lower_name);
         for (lower_name) |*c| c.* = std.ascii.toLower(c.*);
-        return std.fmt.allocPrint(allocator, "{s}/{s}_generator.zon", .{ config_dir, lower_name });
+        return allocator.print("{s}/{s}_generator.zon", .{ config_dir, lower_name });
     }
 
     /// Loads the generator config tree from disk. A missing file uses defaults.
@@ -73,7 +73,7 @@ pub const Generator = struct {
         defer allocator.free(path);
 
         // Replace atomically, so a failed emit keeps the previous config.
-        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+        const tmp_path = try allocator.print("{s}.tmp", .{path});
         defer allocator.free(tmp_path);
 
         {
@@ -93,7 +93,7 @@ pub const Generator = struct {
 /// Loads every generator shared library found in `dir`.
 pub const Registry = struct {
     allocator: std.mem.Allocator,
-    generators: std.ArrayListUnmanaged(Generator) = .empty,
+    generators: std.ArrayList(Generator) = .empty,
 
     /// A missing directory yields an empty registry; individual libraries
     /// that fail to load are skipped with a logged error.
@@ -112,7 +112,7 @@ pub const Registry = struct {
             // Linux-only: generators are .generator shared libraries; skip anything
             // else (configs, READMEs) so a stray file doesn't spam load errors.
             if (!std.mem.endsWith(u8, entry.name, ".generator")) continue;
-            const path = try std.fs.path.join(allocator, &.{ dir, entry.name });
+            const path = try std.Io.Dir.path.join(allocator, &.{ dir, entry.name });
             defer allocator.free(path);
             registry.loadGenerator(io, path) catch |err|
                 std.log.err("failed to load generator {s}: {s}", .{ path, @errorName(err) });

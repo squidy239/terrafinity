@@ -4,7 +4,7 @@ const dvui = @import("dvui");
 const dvui_vulkan_renderer = @import("dvui_vulkan_renderer");
 const options = @import("options");
 pub const tracy = @import("tracy");
-pub const tracy_impl = @import("tracy_impl");
+pub const tracy_options = @import("tracy_options");
 const vk = @import("vulkan");
 const wio = @import("wio");
 
@@ -18,11 +18,6 @@ const Renderer = @import("Renderer.zig");
 const Ui = @import("Ui.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 pub const generator_loader = @import("world/generator_loader.zig");
-
-pub const tracy_options: tracy.Options = .{
-    .on_demand = true,
-    .verbose = false,
-};
 
 pub fn main(init: std.process.Init) !void {
     var running: std.atomic.Value(bool) = .init(true);
@@ -97,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
     single_press.insert(.hotbar_right);
     single_press.insert(.hotbar_up);
     single_press.insert(.hotbar_down);
-    inline for (0..10) |slot| single_press.insert(@enumFromInt(@intFromEnum(Key.Action.hotbar_key_0) + slot));
+    inline for (0..10) |slot| single_press.insert(@fromBackingInt(@intCast(@backingInt(Key.Action.hotbar_key_0) + slot)));
 
     inline for (.{
         .{ .key = .w, .action = .forward },
@@ -131,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
 
     var game: Game = undefined;
     if (options.test_play != null) {
-        const test_play_folder = try std.fs.path.join(gpa, &.{ worlds_path, "test_play" });
+        const test_play_folder = try std.Io.Dir.path.join(gpa, &.{ worlds_path, "test_play" });
         defer gpa.free(test_play_folder);
         vk_ctx.swapchain_gamma.store(config.game_config.render_options.gamma_correction, .monotonic);
         try game.init(io, gpa, &config.game_config, &config_lock, test_play_folder, vk_ctx, &generators);
@@ -477,12 +472,10 @@ fn handleEvents(
     ui: *Ui,
     vk_ctx: *VulkanContext,
 ) !void {
-    backend.setTextInputRect(ui_window.textInputRequested());
     if (ui.menu_state.is_playing_game()) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();
-        backend.setCursor(ui_window.cursorRequested());
     }
 
     // Latch single-press actions one frame so a same-batch release cannot cancel them.

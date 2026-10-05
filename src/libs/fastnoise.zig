@@ -2625,12 +2625,12 @@ test "range of all 2D noise/fractal combinations" {
     const size = 128;
     var noise = Noise(f32){};
 
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+    inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
 
         @setEvalBranchQuota(size * size * 2);
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
+        inline for (@typeInfo(NoiseType).@"enum".field_names) |noise_type| {
+            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type).?;
             for (0..size * size) |i| {
                 const value = noise.genNoise2D(@floatFromInt(i % size), @floatFromInt(i / size));
                 try std.testing.expect(value >= -1.0001 and value <= 1.0001);
@@ -2644,12 +2644,12 @@ test "range of all 3D noise/fractal combinations" {
     const size = 32;
     var noise = Noise(f32){};
 
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+    inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
 
         @setEvalBranchQuota(size * size * size * 2);
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
+        inline for (@typeInfo(NoiseType).@"enum".field_names) |noise_type| {
+            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type).?;
             for (0..size) |z| for (0..size) |y| for (0..size) |x| {
                 const value = noise.genNoise3D(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z));
                 try std.testing.expect(value >= -1.0001 and value <= 1.0001);
@@ -2665,10 +2665,10 @@ test "range of all 2D cellular return/distance combinations (f64)" {
         .noise_type = .cellular,
     };
 
-    inline for (@typeInfo(CellularDistanceFunc).@"enum".fields) |dist| {
-        noise.cellular_distance = comptime std.meta.stringToEnum(CellularDistanceFunc, dist.name).?;
-        inline for (@typeInfo(CellularReturnType).@"enum".fields) |ret| {
-            noise.cellular_return = std.meta.stringToEnum(CellularReturnType, ret.name).?;
+    inline for (@typeInfo(CellularDistanceFunc).@"enum".field_names) |dist| {
+        noise.cellular_distance = comptime std.meta.stringToEnum(CellularDistanceFunc, dist).?;
+        inline for (@typeInfo(CellularReturnType).@"enum".field_names) |ret| {
+            noise.cellular_return = std.meta.stringToEnum(CellularReturnType, ret).?;
             for (0..size * size) |i| {
                 const value = noise.genNoise2D(@floatFromInt(i % size), @floatFromInt(i / size));
                 try std.testing.expect(value >= -1.0001 and value <= 1.0001);
@@ -2684,10 +2684,10 @@ test "range of all 3D cellular return/distance combinations" {
         .noise_type = .cellular,
     };
 
-    inline for (@typeInfo(CellularDistanceFunc).@"enum".fields) |dist| {
-        noise.cellular_distance = comptime std.meta.stringToEnum(CellularDistanceFunc, dist.name).?;
-        inline for (@typeInfo(CellularReturnType).@"enum".fields) |ret| {
-            noise.cellular_return = std.meta.stringToEnum(CellularReturnType, ret.name).?;
+    inline for (@typeInfo(CellularDistanceFunc).@"enum".field_names) |dist| {
+        noise.cellular_distance = comptime std.meta.stringToEnum(CellularDistanceFunc, dist).?;
+        inline for (@typeInfo(CellularReturnType).@"enum".field_names) |ret| {
+            noise.cellular_return = std.meta.stringToEnum(CellularReturnType, ret).?;
             for (0..size) |z| for (0..size) |y| for (0..size) |x| {
                 const value = noise.genNoise3D(@floatFromInt(x), @floatFromInt(y), @floatFromInt(z));
                 try std.testing.expect(value >= -1.0 and value <= 1.0);
@@ -2707,10 +2707,10 @@ test "domain warp keeps coordinates finite (scalar and batched)" {
         xs[i] = @floatFromInt(i % 8);
         ys[i] = @floatFromInt(i / 8);
     }
-    inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp_type| {
-        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp_type.name).?;
-        inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+    inline for (@typeInfo(DomainWarpType).@"enum".field_names) |warp_type| {
+        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp_type).?;
+        inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
             for (0..64) |i| {
                 var x: f32 = @floatFromInt(i % 8);
                 var y: f32 = @floatFromInt(i / 8);
@@ -2740,10 +2740,10 @@ test "2D batch paths match scalar genNoise2D" {
         ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.53 - @as(f32, @floatFromInt(i / 5)) * 0.07;
     }
     var noise = Noise(f32){};
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
+    inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
+        inline for (@typeInfo(NoiseType).@"enum".field_names) |noise_type| {
+            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type).?;
             var grid: [size * size]f32 = undefined;
             noise.fillGrid2D(&grid, size, 3.0, -7.0, 0.25);
             for (0..size) |y| for (0..size) |x| {
@@ -2775,12 +2775,12 @@ test "3D batch paths match scalar genNoise3D" {
         zs[i] = @as(f32, @floatFromInt(i / 3)) * 0.19;
     }
     var noise = Noise(f32){};
-    inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
-        inline for (@typeInfo(NoiseType).@"enum".fields) |noise_type| {
-            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type.name).?;
-            inline for (@typeInfo(RotationType).@"enum".fields) |rotation| {
-                noise.rotation_type = comptime std.meta.stringToEnum(RotationType, rotation.name).?;
+    inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+        noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
+        inline for (@typeInfo(NoiseType).@"enum".field_names) |noise_type| {
+            noise.noise_type = comptime std.meta.stringToEnum(NoiseType, noise_type).?;
+            inline for (@typeInfo(RotationType).@"enum".field_names) |rotation| {
+                noise.rotation_type = comptime std.meta.stringToEnum(RotationType, rotation).?;
                 var grid: [width * height * depth]f32 = undefined;
                 noise.fillGrid3D(&grid, width, depth, 1.5, -2.0, 4.0, 0.5);
                 for (0..depth) |z| for (0..height) |y| for (0..width) |x| {
@@ -2867,10 +2867,10 @@ test "fillWarp2DGrid matches scalar domainWarp2D" {
         ys[i] = @as(f32, @floatFromInt(i % 5)) * 0.53 - @as(f32, @floatFromInt(i / 5)) * 0.07;
     }
     var noise = Noise(f32){};
-    inline for (@typeInfo(DomainWarpType).@"enum".fields) |warp| {
-        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp.name).?;
-        inline for (@typeInfo(FractalType).@"enum".fields) |fractal| {
-            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal.name).?;
+    inline for (@typeInfo(DomainWarpType).@"enum".field_names) |warp| {
+        noise.domain_warp_type = comptime std.meta.stringToEnum(DomainWarpType, warp).?;
+        inline for (@typeInfo(FractalType).@"enum".field_names) |fractal| {
+            noise.fractal_type = comptime std.meta.stringToEnum(FractalType, fractal).?;
             var out_xs: [count]f32 = undefined;
             var out_ys: [count]f32 = undefined;
             noise.fillWarp2DGrid(&out_xs, &out_ys, &xs, &ys);

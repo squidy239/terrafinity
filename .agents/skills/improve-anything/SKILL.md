@@ -46,7 +46,7 @@ Read all of `ideas.md`, merge duplicates, delete what is done or no longer appli
 
 ### 7. Regressions
 
-Diff recent commits against their parents for added lines and complexity (nesting, helpers, config surface). For each regression: delete or narrow it, keeping behavior identical; final net line count must be neutral or negative — bank deletions first if fixes add lines. Verify with `zig fmt .`, `zig build`, and scoped tests.
+Diff recent commits against their parents for added lines and complexity (nesting, helpers, config surface). To rank files, compare `zig fmt --check --complexity <file>` token counts at HEAD against the parent (`git show HEAD~1:<file> | zig fmt --stdin` reformats only, so write the old version to a temp file and measure it). For each regression: delete or narrow it, keeping behavior identical; the final net token count of the touched files must be neutral or negative (the only hard size requirement) — bank deletions first if fixes add code. Verify with `zig fmt .`, `zig build`, and scoped tests.
 
 ## Fanout Dispatch
 

@@ -359,8 +359,8 @@ fn emitValue(w: *std.Io.Writer, value: *const Value) std.Io.Writer.Error!void {
 
 fn emitFloat(w: *std.Io.Writer, value: f32) std.Io.Writer.Error!void {
     var buffer: [64]u8 = undefined;
-    const s = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable;
-    if (std.mem.indexOfAny(u8, s, ".eE") == null) {
+    const s = std.mem.print(&buffer, "{d}", .{value}) catch unreachable;
+    if (std.mem.findAny(u8, s, ".eE") == null) {
         try w.print("{s}.0", .{s});
     } else {
         try w.print("{s}", .{s});
@@ -414,21 +414,23 @@ pub fn fromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const 
 
 /// Applies a tree onto a struct. Missing or mismatched params keep their values.
 pub fn fromTree(comptime T: type, allocator: std.mem.Allocator, tree: *const ConfigTree, out: *T, comptime field_specs: anytype) error{OutOfMemory}!void {
-    inline for (std.meta.fields(T)) |f| {
-        if (findParam(tree, f.name)) |param| {
-            try applyField(f.type, allocator, &@field(out, f.name), param, fieldSpec(field_specs, f.name), field_specs);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        if (findParam(tree, name)) |param| {
+            try applyField(F, allocator, &@field(out, name), param, fieldSpec(field_specs, name), field_specs);
         }
     }
 }
 
 fn paramsFromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const T, comptime field_specs: anytype) error{OutOfMemory}![]Param {
-    var list: std.ArrayListUnmanaged(Param) = .empty;
+    var list: std.ArrayList(Param) = .empty;
     errdefer {
         for (list.items) |*p| freeParam(allocator, p);
         list.deinit(allocator);
     }
-    inline for (std.meta.fields(T)) |f| {
-        const maybe_param = try paramFromTypeValue(f.type, allocator, f.name, @field(value, f.name), fieldSpec(field_specs, f.name), field_specs);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        const maybe_param = try paramFromTypeValue(F, allocator, name, @field(value, name), fieldSpec(field_specs, name), field_specs);
         if (maybe_param) |param| {
             list.append(allocator, param) catch |err| {
                 freeParam(allocator, &param);
@@ -457,9 +459,10 @@ fn paramFromTypeValue(comptime T: type, allocator: std.mem.Allocator, comptime n
 }
 
 fn dupeEnumEntries(comptime T: type, allocator: std.mem.Allocator) error{OutOfMemory}![]const []const u8 {
-    const names: [std.meta.fields(T).len][]const u8 = blk: {
-        var arr: [std.meta.fields(T).len][]const u8 = undefined;
-        inline for (std.meta.fields(T), 0..) |f, i| arr[i] = f.name;
+    const field_names = @typeInfo(T).@"enum".field_names;
+    const names: [field_names.len][]const u8 = blk: {
+        var arr: [field_names.len][]const u8 = undefined;
+        for (&arr, field_names) |*dst, name| dst.* = name;
         break :blk arr;
     };
     return dupeEntries(allocator, &names);
@@ -479,7 +482,7 @@ fn valueFromField(comptime T: type, allocator: std.mem.Allocator, field_value: a
             return .{ .u64 = @intCast(value) };
         },
         .bool => return .{ .bool = value },
-        .@"enum" => return .{ .choice = @intFromEnum(value) },
+        .@"enum" => return .{ .choice = @backingInt(value) },
         .optional => |info| {
             if (@typeInfo(info.child) != .int) return null;
             if (value) |v| return .{ .u64 = @intCast(v) };
@@ -539,8 +542,8 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
         },
         .@"enum" => {
             if (param.value != .choice) return;
-            if (param.value.choice >= std.meta.fields(T).len) return;
-            field_ptr.* = @enumFromInt(param.value.choice);
+            if (param.value.choice >= @typeInfo(T).@"enum".field_names.len) return;
+            field_ptr.* = @fromBackingInt(@intCast(param.value.choice));
         },
         .optional => |info| {
             if (param.value != .u64) return;
@@ -553,9 +556,10 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
         },
         .@"struct" => {
             if (param.value != .group) return;
-            inline for (std.meta.fields(T)) |f| {
-                if (findParam(&param.value.group, f.name)) |child| {
-                    try applyField(f.type, allocator, &@field(field_ptr, f.name), child, fieldSpec(field_specs, f.name), field_specs);
+            const info = @typeInfo(T).@"struct";
+            inline for (info.field_names, info.field_types) |name, F| {
+                if (findParam(&param.value.group, name)) |child| {
+                    try applyField(F, allocator, &@field(field_ptr, name), child, fieldSpec(field_specs, name), field_specs);
                 }
             }
         },
@@ -688,7 +692,16 @@ pub fn configFromZon(comptime Params: type, comptime field_specs: anytype, alloc
     // so free them as a whole arena instead of walking the struct.
     var arena = std.heap.ArenaAllocator.init(allocator.*);
     defer arena.deinit();
-    const params = std.zon.parse.fromSliceAlloc(Params, arena.allocator(), bytes[0..bytes_len :0], null, .{}) catch return null;
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const params = std.zon.parse.fromSlice(Params, .{
+        .gpa = allocator.*,
+        .arena = arena.allocator(),
+        .source = bytes[0..bytes_len :0],
+        .diagnostics = &diagnostics,
+    }) catch |err| {
+        if (err == error.ParseZon) diagnostics.log("generator config");
+        return null;
+    };
     return fromStruct(Params, allocator.*, &params, field_specs) catch null;
 }
 
@@ -724,7 +737,7 @@ pub fn instanceGenBlocks(comptime Instance: type) BlocksFn {
             const Gen = @TypeOf(self.generator);
             const info = @typeInfo(@TypeOf(Gen.genChunk)).@"fn";
             const fallible = @typeInfo(info.return_type orelse void) == .error_union;
-            if (comptime info.params.len > 5) {
+            if (comptime info.param_types.len > 5) {
                 if (comptime fallible) try self.generator.genChunk(io, alloc, pos, blocks, world, grid) else self.generator.genChunk(io, alloc, pos, blocks, world, grid);
             } else if (comptime fallible) try self.generator.genChunk(io, blocks, pos, grid) else self.generator.genChunk(io, blocks, pos, grid);
             return .{ .from_disk = false, .structures = false };

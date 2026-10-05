@@ -139,7 +139,7 @@ fn createTexture(self: *@This(), pixels: [*]const u8, width: u32, height: u32, i
 }
 
 pub fn initAssets(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
+    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, menu_background_image);
     defer image.deinit(allocator);
     self.menu_background = try self.createTexture(@ptrCast(image.asBytes().ptr), @intCast(image.cols), @intCast(image.rows), .linear);
     try self.loadItemTextures(io, allocator);
@@ -156,9 +156,10 @@ fn loadItemTextures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
     const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
     self.hotbar_missing_texture = try self.createTexture(@ptrCast(&missing_pixels), 1, 1, .nearest);
 
-    inline for (std.meta.fields(Item.ItemType)) |field| {
-        const item_type: Item.ItemType = @enumFromInt(field.value);
-        const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{field.name});
+    const item_info = @typeInfo(Item.ItemType).@"enum";
+    inline for (item_info.field_names, item_info.field_values) |name, value| {
+        const item_type: Item.ItemType = @fromBackingInt(value);
+        const filename = try allocator.print("{s}.png", .{name});
         defer allocator.free(filename);
         self.hotbar_item_textures.getPtr(item_type).* = try self.loadItemTexture(io, allocator, pack.dir, filename);
     }
@@ -178,7 +179,7 @@ fn loadItemTexture(self: *@This(), io: std.Io, allocator: std.mem.Allocator, dir
     var reader = file.reader(io, &buf);
     try reader.interface.readSliceAll(bytes);
 
-    var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, bytes) catch |err| {
+    var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, bytes) catch |err| {
         std.log.warn("hotbar: could not decode items/{s}: {any}", .{ filename, err });
         return null;
     };
@@ -273,7 +274,7 @@ pub fn recordCommandBuffer(
     const view = self.vk_ctx.swapchain_views[image_index];
     const initial_layout = self.vk_ctx.swapchain_image_layouts[image_index];
     try self.vk_ctx.dev.resetCommandBuffer(cmd, .{});
-    try self.vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
+    try self.vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true } });
 
     VulkanContext.transitionImageLayout(self.vk_ctx.dev, cmd, image, initial_layout, .color_attachment_optimal);
     self.vk_ctx.swapchain_image_layouts[image_index] = .color_attachment_optimal;
@@ -296,7 +297,7 @@ pub fn recordCommandBuffer(
     });
 
     backend.setCommandBuffer(cmd, extent);
-    defer backend.setCommandBuffer(.null_handle, .{ .width = 0, .height = 0 });
+    defer backend.setCommandBuffer(null, .{ .width = 0, .height = 0 });
     backend.beginFrame();
     try self.drawFrame(io, gpa, frame_time);
     self.vk_ctx.dev.cmdEndRendering(cmd);
@@ -320,16 +321,16 @@ pub fn recordCommandBuffer(
     try self.vk_ctx.dev.endCommandBuffer(cmd);
 }
 
-fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
+fn menuCard(src: std.lang.SourceLocation, init_opts: dvui.BoxWidget.InitOptions, opts: dvui.Options) *dvui.BoxWidget {
     var options: dvui.Options = .{
         .min_size_content = .all(256),
-        .color_fill = .{ .r = 48, .g = 48, .b = 48, .a = 255 },
+        .color_fill = .{ .color = .{ .r = 48, .g = 48, .b = 48, .a = 255 } },
         .background = true,
         .corners = .all(0),
         .border = .all(8),
         .margin = .all(16),
         .gravity_y = 0.5,
-        .color_border = .{ .r = 48, .g = 77, .b = 48, .a = 225 },
+        .color_border = .{ .color = .{ .r = 48, .g = 77, .b = 48, .a = 225 } },
     };
     var card = dvui.widgetAlloc(dvui.BoxWidget);
     card.init(src, init_opts, options.override(opts));
@@ -356,7 +357,7 @@ pub fn escMenu(self: *@This(), io: std.Io) !bool {
     _ = io;
     std.debug.assert(self.menu_state.ingame);
     const button_width: f32 = 640 * 0.75;
-    const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
+    const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .color = .{ .r = 0, .g = 200, .b = 200, .a = 150 } }, .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(button_width), .gravity_x = 0.5 })) {
         self.menu_state.esc = false;
@@ -393,7 +394,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
         .gravity_y = 1.0,
         .padding = .{ .w = 32, .h = 32 },
         .background = true,
-        .color_fill = .{ .r = 32, .g = 32, .b = 32, .a = 128 },
+        .color_fill = .{ .color = .{ .r = 32, .g = 32, .b = 32, .a = 128 } },
         .border = .all(8),
         .color_border = .green,
     });
@@ -409,7 +410,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
     const player_pos = self.game.getPlayerPos(io);
     const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const spawn: @Vector(3, i64) = @intFromFloat(@round(self.game.spawn.pos));
-    const str = try std.fmt.bufPrint(
+    const str = try std.mem.print(
         &fmt_buffer,
         \\FPS: {d}
         \\meshes loaded: {d}
@@ -465,7 +466,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     const settings = dvui.scrollArea(@src(), .{ .vertical_bar = .auto }, .{
         .expand = .both,
         .background = true,
-        .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 },
+        .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 84, .a = 225 } },
     });
     defer settings.deinit();
 
@@ -505,7 +506,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         .padding = .{ .x = 6, .w = 6, .y = 4, .h = 4 },
         .margin = .{ .y = 8 },
         .font = .{ .size = 10 },
-        .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
+        .color_fill = .{ .color = .{ .r = 44, .g = 77, .b = 44, .a = 255 } },
     })) {
         self.menu_state.terrain_developer_settings = true;
     }
@@ -542,11 +543,11 @@ fn settingsId(path: []const u8) u64 {
     return configId(settings_root_id, path);
 }
 
-fn toggleConfigSection(self: *@This(), src: std.builtin.SourceLocation, title: []const u8, id: u64, expanded: bool) bool {
+fn toggleConfigSection(self: *@This(), src: std.lang.SourceLocation, title: []const u8, id: u64, expanded: bool) bool {
     const toggled = dvui.button(src, title, .{}, .{
         .expand = .horizontal,
         .id_extra = @intCast(id),
-        .color_fill = .{ .r = 44, .g = 77, .b = 44, .a = 255 },
+        .color_fill = .{ .color = .{ .r = 44, .g = 77, .b = 44, .a = 255 } },
         .margin = .{ .y = 8 },
         .padding = .{ .y = 8, .h = 8 },
     });
@@ -556,18 +557,18 @@ fn toggleConfigSection(self: *@This(), src: std.builtin.SourceLocation, title: [
 }
 
 /// Indented, framed container for a config section or array item.
-fn configBox(src: std.builtin.SourceLocation, id: u64, color_fill: dvui.Color, padding: dvui.Rect) *dvui.BoxWidget {
+fn configBox(src: std.lang.SourceLocation, id: u64, color_fill: dvui.Color, padding: dvui.Rect) *dvui.BoxWidget {
     return dvui.box(src, .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .id_extra = @intCast(id),
         .background = true,
-        .color_fill = color_fill,
+        .color_fill = .{ .color = color_fill },
         .margin = .{ .x = 12, .w = 12 },
         .padding = padding,
     });
 }
 
-fn settingsSection(self: *@This(), src: std.builtin.SourceLocation, label: []const u8, id: u64, default_open: bool) ?*dvui.BoxWidget {
+fn settingsSection(self: *@This(), src: std.lang.SourceLocation, label: []const u8, id: u64, default_open: bool) ?*dvui.BoxWidget {
     const expanded = self.config_section_states.get(id) orelse default_open;
     var title_buffer: [260]u8 = undefined;
     const title = configSectionTitle(label, expanded, &title_buffer);
@@ -614,7 +615,7 @@ fn settingsSubheading(label: []const u8, id: u64) void {
 fn settingsComponents(label: []const u8, names: []const []const u8, values: []f32, min: f64, max: f64, id: u64) void {
     for (values, names) |*value, name| {
         var label_buffer: [96]u8 = undefined;
-        const component_label = std.fmt.bufPrint(&label_buffer, "{s} {s}", .{ label, name }) catch unreachable;
+        const component_label = std.mem.print(&label_buffer, "{s} {s}", .{ label, name }) catch unreachable;
         _ = configSlider(component_label, value, .{}, min, max, configId(id, name));
     }
 }
@@ -645,7 +646,7 @@ fn drawAdvancedSkySettings(sky: *SkyConfig, root_id: u64) void {
     for (&sky.planet_dirs, &sky.planet_colors, &sky.planet_radii, 0..) |*direction, *color, *radius, i| {
         const planet_id = configIndexId(configId(root_id, "planet"), i);
         var label_buffer: [32]u8 = undefined;
-        const label = std.fmt.bufPrint(&label_buffer, "Planet {d}", .{i + 1}) catch unreachable;
+        const label = std.mem.print(&label_buffer, "Planet {d}", .{i + 1}) catch unreachable;
         settingsSubheading(label, planet_id);
         settingsVector("Direction", direction, configId(planet_id, "direction"));
         settingsColor("Color", color, configId(planet_id, "color"));
@@ -709,7 +710,7 @@ fn drawTerrainDeveloperSettings(self: *@This(), io: std.Io, allocator: std.mem.A
         const warning = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .background = true,
-            .color_fill = .{ .r = 96, .g = 24, .b = 24, .a = 255 },
+            .color_fill = .{ .color = .{ .r = 96, .g = 24, .b = 24, .a = 255 } },
             .border = .all(4),
             .color_border = .red,
             .padding = .{ .x = 16, .w = 16, .y = 12, .h = 12 },
@@ -898,7 +899,7 @@ fn hotbar(self: *@This(), io: std.Io) void {
         .margin = .{ .y = 12 },
         .padding = .all(2),
         .border = .all(2),
-        .color_border = hotbar_border_color,
+        .color_border = .{ .color = hotbar_border_color },
     });
     defer bar.deinit();
 
@@ -917,8 +918,8 @@ fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool) void
         .padding = .all(2),
         .margin = .all(2),
         .border = .all(2),
-        .color_border = hotbar_border_color,
-        .color_fill = color_fill,
+        .color_border = .{ .color = hotbar_border_color },
+        .color_fill = .{ .color = color_fill },
         .background = true,
     });
     defer slot.deinit();
@@ -970,7 +971,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
 
     const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
 
-    const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
+    const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 84, .a = 225 } } });
     defer options.deinit();
 
     const content = pageContent(1);
@@ -1016,7 +1017,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     if (try worldExists(io, worlds_dir, world_name)) return error.WorldNameExists;
     var world_folder = try worlds_dir.createDirPathOpen(io, world_name, .{});
     defer world_folder.close(io);
-    const game_path = try std.fs.path.join(allocator, &.{ self.worlds_path, world_name });
+    const game_path = try std.Io.Dir.path.join(allocator, &.{ self.worlds_path, world_name });
     defer allocator.free(game_path);
     const world_options: Game.WorldOptions = .{
         .generator_name = self.new_game.generator_name,
@@ -1045,7 +1046,7 @@ fn saveGeneratorConfig(self: *@This(), allocator: std.mem.Allocator, io: std.Io,
     const generator = self.new_game.generator orelse return;
     const config = self.new_game.config orelse return;
     generator.api.config_set_seeds(&io, config);
-    const config_dir = try std.fs.path.join(allocator, &.{ game_path, "config" });
+    const config_dir = try std.Io.Dir.path.join(allocator, &.{ game_path, "config" });
     defer allocator.free(config_dir);
     try generator.saveConfig(allocator, io, config_dir, config);
 }
@@ -1056,18 +1057,18 @@ fn newgameSpawnId(path: []const u8) u64 {
     return configId(newgame_spawn_id, path);
 }
 
-fn spawnFloatRow(label: []const u8, value: *f64, id: u64) void {
-    var as_f32: f32 = @floatCast(value.*);
+fn spawnFloatRow(label: []const u8, value: f64, id: u64) f64 {
+    var as_f32: f32 = @floatCast(value);
     configTextf32(label, &as_f32, id);
-    value.* = as_f32;
+    return as_f32;
 }
 
 /// Only the settings are editable; the resolved pos/found stay hidden here.
 fn drawSpawnConfig(spawn: *EntityRegistry.SpawnConfig) void {
     dvui.labelNoFmt(@src(), "Spawn", .{}, .{ .font = .{ .size = 24 } });
-    spawnFloatRow("Center X", &spawn.center[0], newgameSpawnId("center_x"));
-    spawnFloatRow("Center Y", &spawn.center[1], newgameSpawnId("center_y"));
-    spawnFloatRow("Center Z", &spawn.center[2], newgameSpawnId("center_z"));
+    spawn.center[0] = spawnFloatRow("Center X", spawn.center[0], newgameSpawnId("center_x"));
+    spawn.center[1] = spawnFloatRow("Center Y", spawn.center[1], newgameSpawnId("center_y"));
+    spawn.center[2] = spawnFloatRow("Center Z", spawn.center[2], newgameSpawnId("center_z"));
     var as_u64: u64 = spawn.range;
     configTextU64("Range", &as_u64, newgameSpawnId("range"));
     spawn.range = @intCast(@min(as_u64, std.math.maxInt(u32)));
@@ -1118,7 +1119,7 @@ pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool 
 
     var changed: bool = self.sidebar();
 
-    const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .r = 24, .g = 24, .b = 24, .a = 255 }, .expand = .both });
+    const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .color = .{ .r = 24, .g = 24, .b = 24, .a = 255 } }, .expand = .both });
     defer menu.deinit();
 
     const top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -1131,7 +1132,7 @@ pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool 
 }
 
 pub fn sidebar(self: *@This()) bool {
-    const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 48, .a = 225 }, .expand = .vertical, .min_size_content = .width(128) });
+    const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 48, .a = 225 } }, .expand = .vertical, .min_size_content = .width(128) });
     defer bar.deinit();
 
     if (dvui.button(@src(), "Home", .{}, .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } })) {
@@ -1209,7 +1210,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
 
         if (dvui.button(@src(), "Play", .{}, .{ .gravity_x = 0.0, .expand = .horizontal, .margin = .{ .x = 8, .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .blue, .corners = .all(2) })) {
             std.log.info("Joining game: {s}", .{item.name});
-            const jpath = try std.fs.path.join(allocator, &.{ self.worlds_path, item.name });
+            const jpath = try std.Io.Dir.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
             try self.openGame(io, allocator, jpath);
             self.menu_state.ingame = true;
@@ -1235,7 +1236,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         dvui.labelNoFmt(@src(), "Delete world", .{}, .{ .gravity_x = 0.5, .font = .{ .size = 24 } });
 
         var message_buffer: [512]u8 = undefined;
-        const message = std.fmt.bufPrint(&message_buffer, "Are you sure you want to delete \"{s}\"? This cannot be undone.", .{name}) catch unreachable;
+        const message = std.mem.print(&message_buffer, "Are you sure you want to delete \"{s}\"? This cannot be undone.", .{name}) catch unreachable;
         const message_text = dvui.textLayout(@src(), .{}, .{ .gravity_x = 0.5 });
         message_text.addText(message, .{});
         message_text.deinit();
@@ -1375,7 +1376,7 @@ fn drawParam(self: *@This(), allocator: std.mem.Allocator, param: *generator_api
     if (param.spec.description.len == 0) return;
     dvui.labelNoFmt(@src(), param.spec.description, .{}, .{
         .id_extra = @intCast(id),
-        .color_fill = .{ .r = 160, .g = 180, .b = 160, .a = 255 },
+        .color_fill = .{ .color = .{ .r = 160, .g = 180, .b = 160, .a = 255 } },
         .font = .{ .size = 11 },
         .padding = .{ .x = 8, .w = 8 },
     });
@@ -1399,7 +1400,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
         if (dvui.button(@src(), item_title, .{}, .{
             .expand = .horizontal,
             .id_extra = @intCast(configId(item_id, "header")),
-            .color_fill = .{ .r = 61, .g = 107, .b = 61, .a = 255 },
+            .color_fill = .{ .color = .{ .r = 61, .g = 107, .b = 61, .a = 255 } },
             .margin = .{ .y = 4 },
             .padding = .{ .y = 6, .h = 6 },
         })) {
@@ -1422,12 +1423,12 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
 
 fn configArrayTitle(name: []const u8, expanded: bool, count: usize, buffer: *[300]u8) []const u8 {
     const marker: []const u8 = if (expanded) "[-] " else "[+] ";
-    return std.fmt.bufPrint(buffer, "{s}{s} ({d})", .{ marker, name, count }) catch unreachable;
+    return std.mem.print(buffer, "{s}{s} ({d})", .{ marker, name, count }) catch unreachable;
 }
 
 fn configItemTitle(expanded: bool, index: usize, buffer: *[64]u8) []const u8 {
     const marker: []const u8 = if (expanded) "[-] " else "[+] ";
-    return std.fmt.bufPrint(buffer, "{s}Item {d}", .{ marker, index + 1 }) catch unreachable;
+    return std.mem.print(buffer, "{s}Item {d}", .{ marker, index + 1 }) catch unreachable;
 }
 
 fn configLabel(param: *const generator_api.Param, buffer: *[256]u8) []const u8 {
@@ -1455,7 +1456,7 @@ fn defaultSectionExpanded(name: []const u8) bool {
 
 fn configSectionTitle(label: []const u8, expanded: bool, buffer: *[260]u8) []const u8 {
     const marker: []const u8 = if (expanded) "[-] " else "[+] ";
-    return std.fmt.bufPrint(buffer, "{s}{s}", .{ marker, label }) catch unreachable;
+    return std.mem.print(buffer, "{s}{s}", .{ marker, label }) catch unreachable;
 }
 
 /// Horizontal row with the fixed-width label every config widget shares.
@@ -1495,7 +1496,7 @@ fn configTextRow(name: []const u8, buffer: []u8, id: u64) []u8 {
 
 fn configTextU64(name: []const u8, value: *u64, id: u64) void {
     var buffer: [24]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
+    const text = std.mem.print(&buffer, "{d}", .{value.*}) catch unreachable;
     buffer[text.len] = 0;
     const parsed = std.fmt.parseUnsigned(u64, configTextRow(name, &buffer, id), 10) catch return;
     value.* = parsed;
@@ -1504,7 +1505,7 @@ fn configTextU64(name: []const u8, value: *u64, id: u64) void {
 fn configTextf32(name: []const u8, value: *f32, id: u64) void {
     // "{d}" prints full decimal: the longest f32 expansion is 47 characters.
     var buffer: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
+    const text = std.mem.print(&buffer, "{d}", .{value.*}) catch unreachable;
     buffer[text.len] = 0;
     const parsed = std.fmt.parseFloat(f32, configTextRow(name, &buffer, id)) catch return;
     if (std.math.isFinite(parsed)) value.* = parsed;

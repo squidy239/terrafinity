@@ -9,45 +9,49 @@
 
     .dependencies = .{
         .zm = .{
-            .url = "git+https://codeberg.org/grius/zm#21b71aef4e28b91994e67b6ce002411776f4ea7e",
+            .url = "git+https://codeberg.org/grius/zm#63eb333870ebf949e722c4a8803822b6d21dadd0",
             .hash = "zm-0.5.1-cLX-WY_hAACaH6l57yntgfwAVbRcjdgTa0-9vHuKiMm5",
         },
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#7e55ad15655fc4d602ed3bcbe7fb487592063156",
-            .hash = "zigglgen-0.5.0-ziggltzDLwA0Gk0Pj6QMij1j6Z_jkvGEtGKBM6-YlI_s",
+            .url = "git+https://github.com/castholm/zigglgen#38bfc858ce2182fcb9d5d1819210f97beb4a19d3",
+            .hash = "zigglgen-0.5.1-ziggliTOLwAZfmk4DG9VLmHGE2BexC4o_O5yZKW37vfl",
         },
         .obj = .{
             .url = "git+https://github.com/chip2n/zig-obj#6070356009e761a4aef82256f1f431037ae97426",
             .hash = "obj-3.0.2-v8OfivnLAAAgz1LaweX7sbe5ffod4VglAnYFCyjcPr1m",
         },
         .rocksdb = .{
-            .url = "git+https://github.com/squidy239/rocksdb-zig#e150efe80e0f3a389dace66e00a65ad9e019c39b",
-            .hash = "rocksdb-11.1.1-z_CUTiF7AQBNJ8dXAFmcfp90gyu29NRJDmP5xcp-9dPm",
+            .url = "git+https://github.com/squidy239/rocksdb-zig#10bb4c5cad49af3d8c44abd813db8186171e7d51",
+            .hash = "rocksdb-11.1.1-z_CUTil7AQCub-eZcyKYBsVDkvYMryBsjCsVSjrdO8u5",
         },
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#c60c7e77a86e0296ae97f9e214a0fbebb32ce6ae",
-            .hash = "dvui-0.5.0-dev-AQFJmT15AAGINPu3mbIW9rUg9Ivqw3SAaZ9bFDC5EAr6",
+            .url = "git+https://github.com/david-vanderson/dvui#51a4c8c40e90a01dde68c811475c94dc0f09da9a",
+            .hash = "dvui-0.6.0-dev-AQFJmUYMBAEH-1VIlNmvI6nz6zH6ZSU4WVZCKrZMnry0",
         },
         .tracy = .{
-            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#64d3caa521e44b1ebce438c0958bd5537e250193",
-            .hash = "tracy-1.0.0+0.13.1-R7l8BUhQAQCLinsSpkKfLYpdgnI8aVTJG3v0XLBkJE5T",
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#70132c371693dc30c86992b87cc842f7f653cf35",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BXtBAQDkKtyPiCPtQn0WW5BVJodhxx6OKG39_T1K",
         },
         .vulkan_headers = .{
-            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#d2d8ded679e53c9f27c0c7a18750e661745886eb",
-            .hash = "N-V-__8AANfwegLyQiE2Gu22z5DK8pzxIaDKU9zzROf72i4l",
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#c46850864f4661461b0f6cb9922c058ffea4915e",
+            .hash = "N-V-__8AALu5iAL64sSFBjPrvXzTQ0ZMxT00hE0_7tezz3z4",
         },
         .vulkan = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
-            .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
+            .url = "git+https://github.com/Snektron/vulkan-zig#f9688c6f4ebcb930f67044698ddd1322442e714b",
+            .hash = "vulkan-0.0.0-r7Ytx4yGAwDZf0XsT6_L1ol_XUAkyOgOyBqamf8begA0",
         },
 
         .zignal = .{
-            .url = "git+https://github.com/arrufat/zignal#9c824ba7a600e611fb6e3a708fc243be9f5b7693",
-            .hash = "zignal-0.11.0-dev-OrZ3s58cKADge6xp3X_XwEFOC07xk_WyoxaMf3Su5a5w",
+            .url = "git+https://github.com/arrufat/zignal#722f1a87729cd5379138cac3a9d91fd91a3bab3f",
+            .hash = "zignal-0.11.0-dev-OrZ3s2R2KgD3y_5_qilxbh5RYNI3qaSI20ZaSjOg7Gm0",
         },
         .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#4a0b09b4125081a3b71d0dc5b2e943caa908f226",
-            .hash = "wio-0.0.0-8xHrr79VCABN3bQ1Q9XrQScWkAXvL8HCXjJ3iXU4jHtL",
+            .url = "git+https://github.com/ypsvlq/wio#9a74a3a8e114162bc0fdb13b7664e4018b7e3168",
+            .hash = "wio-0.0.0-8xHrr3oTCAAXDVug4r82SZYOjCKJUdLU2JlUrwjCQee_",
+        },
+        .tracy_options = .{
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_options#9cdddf9e6ff175f3975307b6a834a3697316bf1d",
+            .hash = "tracy_options-1.0.0+0.13.1-dtgOxE0eAACGuEeQfCFv0wTQZWTUVH5V1AUWWrA55qqg",
         },
     },
 

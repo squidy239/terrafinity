@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const dvui = @import("dvui");
+const tracy_options = @import("tracy_options");
 
 const Block = @import("src/world/Block.zig").Block;
 
@@ -19,18 +20,11 @@ pub fn build(b: *std.Build) void {
     const test_play = b.option(u32, "test_play", "Run test play") orelse null;
     const screenshot_after = b.option(u32, "screenshot_after", "Automatically take a screenshot after N seconds (like test_play)") orelse null;
 
-    const shader_include = b.path("src/Renderer/vulkan/shadow").getPath(b);
-    const occlusion_include = b.path("src/Renderer/vulkan/occlusion").getPath(b);
     const shader_base_cmd = .{
         "glslc",
         "--target-env=vulkan1.3",
         "-O",
-        if (optimize == .Debug) "-g" else "-Werror",
-        "-I",
-        shader_include,
-        "-I",
-        occlusion_include,
-        "-o",
+        if (optimize == .debug) "-g" else "-Werror",
     };
 
     const ShaderDef = struct {
@@ -58,8 +52,10 @@ pub fn build(b: *std.Build) void {
 
     for (shaders, 0..) |def, i| {
         const cmd = b.addSystemCommand(&shader_base_cmd);
-        const out = cmd.addOutputFileArg(def.out);
-        cmd.addFileArg(b.path(def.src));
+        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/shadow"), .{ .prefix = "-I" });
+        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/occlusion"), .{ .prefix = "-I" });
+        const out = cmd.addOutputFileArg2(def.out, .{ .prefix = "-o" });
+        cmd.addFileArg2(b.path(def.src), .{});
         for (def.deps) |dep| cmd.addFileInput(b.path(dep));
         shader_cmds[i] = cmd;
         shader_outs[i] = out;
@@ -119,8 +115,8 @@ pub fn build(b: *std.Build) void {
 
     const visible_count = comptime blk: {
         var count: usize = 0;
-        for (std.meta.fields(Block)) |field| {
-            if (!@field(Block, field.name).isVisible()) continue;
+        for (@typeInfo(Block).@"enum".field_names) |field_name| {
+            if (!@field(Block, field_name).isVisible()) continue;
             count += 1;
         }
         break :blk count;
@@ -128,9 +124,9 @@ pub fn build(b: *std.Build) void {
 
     var buffer: [visible_count][:0]const u8 = undefined;
     var default_textures: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).initBuffer(&buffer);
-    inline for (std.meta.fields(Block)) |field| {
-        if (!@field(Block, field.name).isVisible()) continue;
-        default_textures.appendAssumeCapacity(@embedFile("packs/default/blocks/" ++ field.name ++ ".png"));
+    inline for (@typeInfo(Block).@"enum".field_names) |field_name| {
+        if (!@field(Block, field_name).isVisible()) continue;
+        default_textures.appendAssumeCapacity(@embedFile("packs/default/blocks/" ++ field_name ++ ".png"));
     }
 
     var textures_options: *std.Build.Step.Options = .create(b);
@@ -150,7 +146,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -185,7 +181,7 @@ const Deps = struct {
     rocksdb: *std.Build.Module,
     obj: *std.Build.Module,
     tracy: *std.Build.Module,
-    tracy_impl: *std.Build.Module,
+    tracy_options: *std.Build.Module,
     wio: *std.Build.Module,
     dvui: *std.Build.Module,
     dvui_vulkan_renderer: *std.Build.Module,
@@ -198,7 +194,7 @@ const Deps = struct {
 fn createDependencies(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     sanitize: ThreadSanitizeMode,
     tracy_enabled: bool,
 ) Deps {
@@ -207,9 +203,9 @@ fn createDependencies(
         .enable_lz4 = true,
         .target = target,
         .optimize = switch (optimize) {
-            .Debug, .ReleaseSafe => std.builtin.OptimizeMode.ReleaseSafe,
-            .ReleaseFast => std.builtin.OptimizeMode.ReleaseFast,
-            .ReleaseSmall => std.builtin.OptimizeMode.ReleaseSmall,
+            .debug, .safe => std.lang.Optimize.safe,
+            .fast => .fast,
+            .small => .small,
         },
         .sanitize_thread = sanitize == .Full,
     });
@@ -226,7 +222,14 @@ fn createDependencies(
         .optimize = optimize,
     });
     const tracy_mod = tracy.module("tracy");
-    const tracy_impl_mod = if (tracy_enabled) tracy.module("tracy_impl_enabled") else tracy.module("tracy_impl_disabled");
+    const tracy_defs: tracy_options.Defs = .{
+        .TRACY_ENABLE = tracy_enabled,
+        .TRACY_ON_DEMAND = true,
+    };
+    const tracy_options_mod = b.dependency("tracy_options", tracy_defs.toArgs(.{
+        .target = target,
+        .optimize = optimize,
+    })).module("tracy_options");
 
     const wio_mod = b.dependency("wio", .{
         .target = target,
@@ -295,7 +298,7 @@ fn createDependencies(
         .rocksdb = rocksdb_mod,
         .obj = obj_mod,
         .tracy = tracy_mod,
-        .tracy_impl = tracy_impl_mod,
+        .tracy_options = tracy_options_mod,
         .wio = wio_mod,
         .dvui = dvui_mod,
         .dvui_vulkan_renderer = dvui_vulkan_renderer_mod,
@@ -310,7 +313,7 @@ fn configureModule(deps: *const Deps, mod: *std.Build.Module) void {
     mod.addImport("rocksdb", deps.rocksdb);
     mod.addImport("obj", deps.obj);
     mod.addImport("tracy", deps.tracy);
-    mod.addImport("tracy_impl", deps.tracy_impl);
+    mod.addImport("tracy_options", deps.tracy_options);
     mod.addImport("wio", deps.wio);
     mod.addImport("dvui", deps.dvui);
     mod.addImport("dvui_vulkan_renderer", deps.dvui_vulkan_renderer);

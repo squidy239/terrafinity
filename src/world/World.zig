@@ -654,7 +654,7 @@ pub const Editor = struct {
         if (old_sides) |os| {
             inline for (std.enums.values(Chunk.Encoding.FaceRotation), os) |side, old| {
                 const new = chunk.encoding.extractFace(side);
-                sides_changed[@intFromEnum(side)] = !std.meta.eql(new, old);
+                sides_changed[@backingInt(side)] = !std.meta.eql(new, old);
             }
         }
         return sides_changed;
@@ -1094,8 +1094,8 @@ const FuzzGenerator = @import("generators/Fuzz.zig").FuzzGenerator;
 
 test "fuzz world" {
     var world: World = undefined;
-    var dba: std.heap.DebugAllocator(.{}) = .init;
-    defer dba.deinitWithoutLeakChecks();
+    var dba: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer _ = dba.deinitLog(false);
     const allocator = dba.allocator();
 
     var threaded: std.Io.Threaded = .init(dba.allocator(), .{});

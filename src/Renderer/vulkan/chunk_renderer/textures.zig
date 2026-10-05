@@ -16,9 +16,9 @@ const visible_block_count = Block.visible_count;
 pub const visible_block_names: [visible_block_count][]const u8 = blk: {
     var names: [visible_block_count][]const u8 = undefined;
     var count: usize = 0;
-    for (std.meta.fields(Block)) |field| {
-        if (!@field(Block, field.name).isVisible()) continue;
-        names[count] = field.name;
+    for (@typeInfo(Block).@"enum".field_names) |name| {
+        if (!@field(Block, name).isVisible()) continue;
+        names[count] = name;
         count += 1;
     }
     break :blk names;
@@ -50,17 +50,17 @@ const Transition = struct {
 fn transitionFor(old: vk.ImageLayout, new: vk.ImageLayout) Transition {
     return switch (old) {
         .undefined => switch (new) {
-            .transfer_dst_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } } },
-            .transfer_src_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
+            .transfer_dst_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_write = true } } },
+            .transfer_src_optimal => .{ .src = .{ .stage = .{}, .access = .{} }, .dst = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_read = true } } },
             else => unreachable,
         },
         .transfer_dst_optimal => switch (new) {
-            .transfer_src_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } } },
-            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_write_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            .transfer_src_optimal => .{ .src = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_write = true } }, .dst = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_read = true } } },
+            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_write = true } }, .dst = .{ .stage = .{ .fragment_shader = true }, .access = .{ .shader_read = true } } },
             else => unreachable,
         },
         .transfer_src_optimal => switch (new) {
-            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer_bit = true }, .access = .{ .transfer_read_bit = true } }, .dst = .{ .stage = .{ .fragment_shader_bit = true }, .access = .{ .shader_read_bit = true } } },
+            .shader_read_only_optimal => .{ .src = .{ .stage = .{ .all_transfer = true }, .access = .{ .transfer_read = true } }, .dst = .{ .stage = .{ .fragment_shader = true }, .access = .{ .shader_read = true } } },
             else => unreachable,
         },
         else => unreachable,
@@ -96,7 +96,7 @@ pub const TextureManager = struct {
         if (pack.is_default) {
             const default_textures = @import("textures").default;
             for (visible_block_names, default_textures) |name, data| {
-                const filename = try std.fmt.allocPrint(allocator, "{s}.png", .{name});
+                const filename = try allocator.print("{s}.png", .{name});
                 defer allocator.free(filename);
 
                 if (pack.dir.openFile(io, filename, .{})) |f| {
@@ -129,7 +129,7 @@ pub const TextureManager = struct {
             self.destroyTexture(&self.default_texture);
         }
 
-        var entries: std.ArrayListUnmanaged(TextureEntry) = .empty;
+        var entries: std.ArrayList(TextureEntry) = .empty;
         defer {
             for (entries.items) |entry| allocator.free(entry.name);
             entries.deinit(allocator);
@@ -137,8 +137,8 @@ pub const TextureManager = struct {
 
         var dir_it = std.Io.Dir.iterate(dir);
         while (try dir_it.next(io)) |dir_entry| {
-            if (dir_entry.kind != .file or std.mem.indexOf(u8, dir_entry.name, keyword) == null) continue;
-            const dot = std.mem.indexOfScalar(u8, dir_entry.name, '.') orelse dir_entry.name.len;
+            if (dir_entry.kind != .file or std.mem.find(u8, dir_entry.name, keyword) == null) continue;
+            const dot = std.mem.findScalar(u8, dir_entry.name, '.') orelse dir_entry.name.len;
             const block_type = std.meta.stringToEnum(Block, dir_entry.name[0..dot]) orelse continue;
             if (!block_type.isVisible()) continue;
 
@@ -149,11 +149,13 @@ pub const TextureManager = struct {
 
         const format: vk.Format = if (self.gamma_correction) .r8g8b8a8_srgb else .r8g8b8a8_unorm;
 
-        var cmd = try self.services.single_time.begin();
-        errdefer if (cmd != .null_handle)
+        const cmd = try self.services.single_time.begin();
+        // `end` takes ownership of the command buffer whether or not it succeeds.
+        var cmd_pending = true;
+        errdefer if (cmd_pending)
             self.services.single_time.free(cmd);
 
-        var staging_slices: std.ArrayListUnmanaged([]u8) = .empty;
+        var staging_slices: std.ArrayList([]u8) = .empty;
         try staging_slices.ensureTotalCapacity(allocator, entries.items.len + 1);
         defer {
             for (staging_slices.items) |staging_slice| self.services.memory.cpuToGpu().free(staging_slice);
@@ -173,7 +175,7 @@ pub const TextureManager = struct {
         }
 
         const end_err = self.services.single_time.end(io, cmd);
-        cmd = .null_handle;
+        cmd_pending = false;
         try end_err;
 
         self.default_texture.view = try self.createTextureView(&self.default_texture, format);
@@ -197,7 +199,7 @@ pub const TextureManager = struct {
         defer allocator.free(content);
         if (try texture_file.readPositionalAll(io, content, 0) != content.len) return error.EndOfStream;
 
-        var loaded_img = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, content);
+        var loaded_img = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, content);
         defer loaded_img.deinit(allocator);
 
         const w: u32 = @intCast(loaded_img.cols);
@@ -224,24 +226,24 @@ pub const TextureManager = struct {
             .view_type = .@"2d",
             .format = format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
+            .subresource_range = .{ .aspect_mask = .{ .color = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
         }, &self.services.vk_ctx.vkalloc);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
         const num_textures = std.enums.EnumIndexer(Block).count;
-        const binding_flags = vk.DescriptorBindingFlags{ .update_after_bind_bit = true, .partially_bound_bit = true };
+        const binding_flags = vk.DescriptorBindingFlags{ .update_after_bind = true, .partially_bound = true };
         const flags_info = vk.DescriptorSetLayoutBindingFlagsCreateInfo{ .binding_count = 1, .p_binding_flags = (&binding_flags)[0..1] };
 
         self.descriptor_set_layout = try self.services.dev.createDescriptorSetLayout(&.{
-            .flags = .{ .update_after_bind_pool_bit = true },
+            .flags = .{ .update_after_bind_pool = true },
             .p_next = &flags_info,
             .binding_count = 1,
             .p_bindings = &.{.{
                 .binding = 0,
                 .descriptor_type = .combined_image_sampler,
                 .descriptor_count = @intCast(num_textures),
-                .stage_flags = .{ .fragment_bit = true },
+                .stage_flags = .{ .fragment = true },
                 .p_immutable_samplers = null,
             }},
         }, &self.services.vk_ctx.vkalloc);
@@ -251,7 +253,7 @@ pub const TextureManager = struct {
         }
 
         self.descriptor_pool = try self.services.dev.createDescriptorPool(&.{
-            .flags = .{ .update_after_bind_bit = true },
+            .flags = .{ .update_after_bind = true },
             .max_sets = 1,
             .pool_size_count = 1,
             .p_pool_sizes = &.{.{ .type = .combined_image_sampler, .descriptor_count = @intCast(num_textures) }},
@@ -314,9 +316,9 @@ pub const TextureManager = struct {
             .format = format,
             .tiling = .optimal,
             .initial_layout = .undefined,
-            .usage = .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
+            .usage = .{ .transfer_src = true, .transfer_dst = true, .sampled = true },
             .sharing_mode = .exclusive,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
         };
 
         var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
@@ -324,7 +326,7 @@ pub const TextureManager = struct {
 
         const memory = try self.services.dev.allocateMemory(&.{
             .allocation_size = mem_reqs2.memory_requirements.size,
-            .memory_type_index = try core.findMemoryType(self.services.vk_ctx.mem_props, mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local_bit = true }),
+            .memory_type_index = try core.findMemoryType(self.services.vk_ctx.mem_props, mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local = true }),
         }, &self.services.vk_ctx.vkalloc);
         errdefer self.services.dev.freeMemory(memory, &self.services.vk_ctx.vkalloc);
 
@@ -344,7 +346,7 @@ pub const TextureManager = struct {
             .buffer_offset = staging_info.offset,
             .buffer_row_length = 0,
             .buffer_image_height = 0,
-            .image_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+            .image_subresource = .{ .aspect_mask = .{ .color = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
             .image_offset = .{ .x = 0, .y = 0, .z = 0 },
             .image_extent = .{ .width = width, .height = height, .depth = 1 },
         }});
@@ -385,9 +387,9 @@ pub const TextureManager = struct {
 
             self.services.dev.cmdBlitImage(cmd, image, .transfer_src_optimal, image, .transfer_dst_optimal, &.{
                 vk.ImageBlit{
-                    .src_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip - 1, .base_array_layer = 0, .layer_count = 1 },
+                    .src_subresource = .{ .aspect_mask = .{ .color = true }, .mip_level = mip - 1, .base_array_layer = 0, .layer_count = 1 },
                     .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(sw), .y = @intCast(sh), .z = 1 } },
-                    .dst_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
+                    .dst_subresource = .{ .aspect_mask = .{ .color = true }, .mip_level = mip, .base_array_layer = 0, .layer_count = 1 },
                     .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = @intCast(dw), .y = @intCast(dh), .z = 1 } },
                 },
             }, .linear);
@@ -410,7 +412,7 @@ pub const TextureManager = struct {
         const transition = transitionFor(old_layout, new_layout);
         core.pipelineBarrier(cmd, self.services.dev, vk.ImageMemoryBarrier2, (&core.imageBarrier2Range(
             image,
-            .{ .aspect_mask = .{ .color_bit = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
+            .{ .aspect_mask = .{ .color = true }, .base_mip_level = base_mip, .level_count = mip_count, .base_array_layer = 0, .layer_count = 1 },
             old_layout,
             new_layout,
             transition.src.stage,
