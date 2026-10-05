@@ -2,7 +2,7 @@
 
 ## Commands
 
-Use these full commands without modification. After each change, run the gates the `verify-change` skill (`.agents/skills/verify-change/SKILL.md`) selects: always `zig fmt .` + `zig build`; filtered or full tests per environment; the play test only when the change is user-visible.
+Use these full commands without modification. Do not gate every micro-edit: batch related edits and run the gates the `verify-change` skill (`.agents/skills/verify-change/SKILL.md`) selects at a checkpoint — when a feature or fix is complete, or before reporting back on a group of edits. At a checkpoint: always `zig fmt .` + `zig build`; filtered or full tests per environment; the play test only when the change is user-visible.
 
 - normal build: `zig build`
 - run and open to menu: `zig build run`
@@ -29,7 +29,7 @@ Whenever you learn something new that would fit well here and be useful in the f
 
 ## Skills
 
-Repo skills live in `.agents/skills/`; the trigger list decides, not guesswork. `concurrency-io`: background tasks, locks, upload/staging, entity registry, `Io`. `generator-plugin`: generators, `generator_api`, config trees, config editor UI. `verify-change`: which gates to run after any change. `profile-tracy`: frame times, zones, contention. `prune`: dead-code scan, one candidate per turn. `debate`: competing designs. `fanout-orchestrate`: parallel workers. `simplify` + `style-review`: rewrite discipline and guideline review. `improve-anything`: open-ended improvement modes. `asd-ste100`: disambiguating agent-consumed English.
+Repo skills live in `.agents/skills/`; the trigger list decides, not guesswork. `concurrency-io`: background tasks, locks, upload/staging, entity registry, `Io`. `generator-plugin`: generators, `generator_api`, config trees, config editor UI. `verify-change`: which gates to run at a checkpoint (not after every micro-edit). `profile-tracy`: frame times, zones, contention. `prune`: dead-code scan, one candidate per turn. `debate`: competing designs. `fanout-orchestrate`: parallel workers. `simplify` + `style-review`: rewrite discipline and guideline review. `improve-anything`: open-ended improvement modes. `asd-ste100`: disambiguating agent-consumed English.
 
 `ideas.md` is an append-only research log plus periodic triage: `research` mode appends one short entry with links and never reorders; `triage` mode merges duplicates, drops done items, and sorts by benefit-to-effort.
 
@@ -223,6 +223,15 @@ row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
 - `level` scales the query position by `2^level` (`real_position = scale * position`). Querying position = `cell` with `scale == box_size` lands on the cell origin (`pos_in_box == 0`), reducing the in-range check to `jitter < scale` — always true when `inner_box_size < box_size`. This is the O(1) "which structure owns this cell" trick.
 - A sphere with a one-sided found region can never be found from all sides. Clamp the structure position inside its cell (`clamp(jitter, radius, box_size - radius)`) so the whole sphere stays in the owning cell; every block then finds it through its own cell.
 
+## Noise value inversion (`Noise.invert`)
+
+- `invert` negates sampled values at the value entry points (`genNoise2D`/`genNoise3D` and `fillGridDispatch`), so `fillGrid2D`/`fillNoise2DGrid`/`fillGrid3D`/`fillNoise3DGrid` and the ranged variants all flip. Domain warp is a displacement, not a value, so warp-only noise uses (`large_terrain_noise_warp` in Terrain) ignore the toggle; do not invert the warp instead, or a self-warping noise like `terrain_noise` would no longer be a pure sign swap.
+- The field lives on the shared `Noise` struct in `libs/fastnoise.zig`, so adding it surfaces an `invert` checkbox in every generator's noise group automatically; old `.zon` configs parse because the declaration default supplies `false`.
+
+## Terrain noise balance
+
+- `terrain_noise_balance` is a crossfade in `shapedRow`: 0 is the continental (`large_terrain_noise`) only, 1 the mountain (`terrain_noise`) only, applied before `height_power`. It replaced an additive `(large + b*small)/(1+b)` blend whose endpoints never isolated, so an old value `b` maps to `b/(1+b)` (default went 1 → 0.5, the Continental preset 0.3 → 0.3/1.3). Surface detail (`surface_noise`), erosion, and caves are separate and apply at any balance.
+
 # Config, Persistence & Plugins
 
 ## Config compat
@@ -249,7 +258,7 @@ Widget ids collide when the same `@src()` line runs for multiple params — pass
 
 # Testing
 
-Run the gates the `verify-change` skill selects after each change: `zig build test --summary all` where the environment supports it, else `zig build` plus `-Dtest_filter` for the touched areas (the full suite has pre-existing wio/wayland crashes in headless environments). Use `-Dtest_filter="substring"` for scoped runs; never as a substitute for the suite where the suite runs.
+Run the gates the `verify-change` skill selects at a checkpoint, not after every micro-edit (batch related edits first): `zig build test --summary all` where the environment supports it, else `zig build` plus `-Dtest_filter` for the touched areas (the full suite has pre-existing wio/wayland crashes in headless environments). Use `-Dtest_filter="substring"` for scoped runs; never as a substitute for the suite where the suite runs.
 Write few tests: just enough to cover possible bugs. Every file should have a `refAllDecls` test (forces every decl to compile). Allocation-failure tests are good. Skip useless tests that restate the implementation without covering a real failure mode.
 
 ## Allocation failure testing

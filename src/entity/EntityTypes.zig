@@ -15,6 +15,8 @@ pub const Player = struct {
     game_mode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32) = .init(1024),
     walk_speed: std.atomic.Value(f32) = .init(8),
+    /// Speed multiple while the sprint key is held; at least 1.
+    sprint_multiplier: std.atomic.Value(f32) = .init(1.6),
     jump_strength: std.atomic.Value(f32) = .init(8),
     fly_speed_linear: std.atomic.Value(f32) = .init(10),
     inventory_buffer: [10 * 16]?Item.Item = @splat(null),
@@ -22,9 +24,16 @@ pub const Player = struct {
     view_direction: @Vector(3, f32),
     view_direction_mutex: std.Io.Mutex = .init,
 
+    // Jump-feel state, driven only on the frame lane.
+    jump_held: bool = false,
+    jump_rising: bool = false,
+    /// Remaining window to still jump after leaving the ground.
+    coyote_ns: u64 = 0,
+    /// Remaining window for a jump pressed just before landing.
+    jump_buffer_ns: u64 = 0,
+
     physics: Physics.Interface(struct {
         gravity: Physics.Gravity,
-        resistance: Physics.Resistance,
         mover: Physics.Mover,
     }),
 
@@ -76,7 +85,6 @@ pub const Player = struct {
         self.physics.elements.mover.zero_velocity.store(is_spectator, .monotonic);
         self.physics.elements.mover.collisions.store(!is_spectator, .monotonic);
         self.physics.elements.gravity.enabled.store(is_survival, .monotonic);
-        self.physics.elements.resistance.enabled.store(!is_spectator, .monotonic);
     }
 
     pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable }!void {

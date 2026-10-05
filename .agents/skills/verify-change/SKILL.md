@@ -1,13 +1,15 @@
 ---
 name: verify-change
-description: Which gates to run after a change (format, build, filtered vs full tests, play test, Tracy). Use after every change to pick the cheapest sufficient verification.
+description: Which gates to run at a change checkpoint (format, build, filtered vs full tests, play test, Tracy). Use to pick the cheapest sufficient verification without gating every micro-edit.
 ---
 
 # Verify Change
 
 Run the cheapest gates that prove the change. Full commands live in AGENTS.md `## Commands`; this skill picks which ones apply.
 
-## Always
+Run them at a checkpoint, not after every micro-edit: batch related edits and verify once when a feature or fix is complete, or before reporting back on a group of edits. Re-running the gates per tiny edit wastes time and budget.
+
+## Always (at a checkpoint)
 
 1. `zig fmt .`
 2. `zig build` — exit 0.

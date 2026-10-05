@@ -8,6 +8,7 @@ pub const Action = enum {
     right,
     up,
     down,
+    sprint,
     escape_menu,
     hotbar_key_0,
     hotbar_key_1,

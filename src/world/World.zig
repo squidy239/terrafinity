@@ -972,7 +972,7 @@ test "ChunkPos" {
     try testing.expect(std.meta.eql(pos5, ChunkPos{ .level = -5, .position = .{ 32, 32, 32 } }));
 }
 
-fn makeTestingWorld(
+pub fn makeTestingWorld(
     world: *World,
     generator: *DefaultGenerator,
     allocator: std.mem.Allocator,

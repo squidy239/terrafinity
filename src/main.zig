@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = .d, .action = .right },
         .{ .key = .space, .action = .up },
         .{ .key = .left_shift, .action = .down },
+        .{ .key = .left_control, .action = .sprint },
         .{ .key = .mouse_left, .action = .use_item_primary },
         .{ .key = .mouse_right, .action = .use_item_secondary },
         .{ .key = .f, .action = .use_item_tertiary },

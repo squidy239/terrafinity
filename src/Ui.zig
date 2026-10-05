@@ -115,9 +115,11 @@ menu_state: struct {
     pending_world_recreate: bool = false,
     terrain_developer_settings: bool = false,
 
-    /// Reports whether gameplay input is active.
+    /// Reports whether gameplay input is active. Every menu is drawn full-screen over
+    /// the game view, so an open one takes the input the player would otherwise get.
     pub fn is_playing_game(self: @This()) bool {
-        return self.ingame and !self.settings and !self.main and !self.esc and !self.newgame;
+        const menu_open = self.settings or self.main or self.esc or self.newgame;
+        return self.ingame and !menu_open;
     }
 
     pub fn handle_esc(self: *@This()) void {
@@ -773,6 +775,17 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
         _ = configSlider("Scroll Sensitivity", &options.scroll_sensitivity, .{}, 0, 5, settingsId("controls.scroll_sensitivity"));
     }
 
+    if (self.settingsSection(@src(), "Player", settingsId("player"), true)) |section| {
+        defer section.deinit();
+        _ = configSlider("Width (blocks)", &options.player_width, .{}, 0.2, 8, settingsId("player.width"));
+        _ = configSlider("Height (blocks)", &options.player_height, .{}, 1, 16, settingsId("player.height"));
+        _ = configSlider("Step Height (blocks)", &options.step_height, .{}, 0, 4, settingsId("player.step_height"));
+        _ = configSlider("Step Climb Speed (blocks/s)", &options.step_climb_speed, .{}, 1, 64, settingsId("player.step_climb_speed"));
+        _ = configSlider("Jump Height (blocks)", &options.jump_height, .{}, 0, 8, settingsId("player.jump_height"));
+        _ = configSlider("Movement Speed (blocks/s)", &options.move_speed, .{}, 0, 64, settingsId("player.move_speed"));
+        _ = configSlider("Sprint Multiplier", &options.sprint_multiplier, .{}, 1, 3, settingsId("player.sprint_multiplier"));
+    }
+
     if (self.settingsSection(@src(), "World Streaming", settingsId("streaming"), true)) |section| {
         defer section.deinit();
         settingsSlider("Minimum Detail Level", &options.lowest_level, -8, 24, settingsId("streaming.lowest_level"));
@@ -870,13 +883,12 @@ pub fn crossHair(self: *@This()) void {
 const selected_slot_color: dvui.Color = .{ .r = 90, .g = 140, .b = 220, .a = 255 };
 const hotbar_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 160 };
 
-/// Hotbar along the bottom. Arrow keys move the selection; a slot click selects it
-/// when DVUI has a cursor (relative-mouse play sends none, so slots ignore clicks then).
+/// Hotbar along the bottom. Number keys move the selection. Slots do not take
+/// clicks: play has no cursor, and an open menu is drawn over the bar.
 fn hotbar(self: *@This(), io: std.Io) void {
     const inventory = &self.game.player.main_inventory;
     const selected_row = self.game.selectedRow();
     const selected_col = self.game.selectedCol();
-    const interactive = !self.menu_state.is_playing_game();
 
     const bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .gravity_x = 0.5,
@@ -891,28 +903,23 @@ fn hotbar(self: *@This(), io: std.Io) void {
     for (0..inventory.width) |index| {
         const col: u32 = @intCast(index);
         const item = inventory.get(io, selected_row, col);
-        if (self.hotbarSlot(col, item, col == selected_col, interactive)) {
-            self.game.selectSlot(selected_row, col);
-        }
+        self.hotbarSlot(col, item, col == selected_col);
     }
 }
 
-fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool, interactive: bool) bool {
-    var opts: dvui.Options = .{
+fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool) void {
+    const color_fill: dvui.Color = if (selected) selected_slot_color else .transparent;
+    const slot = dvui.box(@src(), .{}, .{
         .id_extra = index,
         .min_size_content = .{ .w = 40, .h = 40 },
         .padding = .all(2),
         .margin = .all(2),
         .border = .all(2),
         .color_border = hotbar_border_color,
+        .color_fill = color_fill,
         .background = true,
-    };
-    if (selected) opts.color_fill = selected_slot_color;
-
-    var button: dvui.ButtonWidget = undefined;
-    button.init(@src(), .{}, opts);
-    if (interactive) button.processEvents();
-    button.drawBackground();
+    });
+    defer slot.deinit();
 
     if (item) |it| {
         const texture = self.hotbar_item_textures.get(it.item_type) orelse self.hotbar_missing_texture;
@@ -925,11 +932,6 @@ fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool, inte
             });
         }
     }
-
-    if (interactive) button.drawFocus();
-    const clicked = button.clicked();
-    button.deinit();
-    return clicked;
 }
 
 fn selectNewGameGenerator(self: *@This(), allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {

@@ -234,8 +234,8 @@ pub const DefaultGenerator = struct {
         snow_slope_gain: f32 = 0.35,
         /// Slope at or above which high ground sheds snow to bare stone.
         snow_cliff_slope: f32 = 1.0,
-        /// Weight of the mountain (ridged) noise added on top of the continental noise.
-        terrain_noise_balance: f32 = 1,
+        /// Crossfades the continental noise (0) into the mountain (ridged) noise (1).
+        terrain_noise_balance: f32 = 0.5,
         terrain_noise: Noise.Noise(f32) = .{
             .frequency = 0.002,
             .noise_type = .perlin,
@@ -1262,10 +1262,9 @@ pub const DefaultGenerator = struct {
         const large_power_v: V = @splat(params.large_power);
         const small_power_v: V = @splat(params.small_power);
         const balance_v: V = @splat(params.terrain_noise_balance);
-        const sum_norm: V = @splat(1.0 / (1.0 + params.terrain_noise_balance));
-        // Shape each field independently; normalizing by 1 + balance keeps peaks from clamping into plateaus.
-        const warped = (signedPow(N, large, large_power_v) + signedPow(N, raw, small_power_v) * balance_v) * sum_norm;
-        return signedPow(N, warped, height_power_v);
+        // Shape each field independently, then crossfade: 0 is all continental, 1 is all mountain.
+        const shaped = std.math.lerp(signedPow(N, large, large_power_v), signedPow(N, raw, small_power_v), balance_v);
+        return signedPow(N, shaped, height_power_v);
     }
 
     const GradientScratch = struct {
@@ -1433,6 +1432,7 @@ const field_specs = .{
     .ping_pong_strength = .{ .min = 0, .max = 8, .advanced = true },
     .cellular_jitter_mod = .{ .min = 0, .max = 1, .advanced = true },
     .domain_warp_amp = .{ .min = 0, .max = 2000, .advanced = true },
+    .invert = .{ .label = "Invert", .description = "Swaps the sign of the generated noise, so peaks become valleys." },
     .terrain_scale = .{ .label = "Terrain Scale", .description = "Scales the generated terrain height range.", .min = 0.1, .max = 4 },
     .terrain_min = .{ .label = "Minimum Height", .min = -100000, .max = 0 },
     .terrain_max = .{ .label = "Maximum Height", .min = 0, .max = 100000 },
@@ -1463,7 +1463,7 @@ const field_specs = .{
     .surface_noise_gradient_influence = .{ .label = "Surface Noise Gradient Influence", .description = "How much the pre-erosion terrain gradient scales the applied amount; 0 applies it everywhere, 1 only in proportion to the gradient.", .min = 0, .max = 1 },
     .surface_noise_gradient_scale = .{ .label = "Surface Noise Gradient Scale", .description = "Pre-erosion gradient magnitude at which the surface noise applies in full.", .min = 0, .max = 1, .advanced = true },
     .surface_interp = .{ .label = "Surface Noise Resolution", .description = "Sampling density of the surface detail noise; coarser is faster and smoother. Full disables interpolation." },
-    .terrain_noise_balance = .{ .label = "Terrain Noise Balance", .min = 0, .max = 1 },
+    .terrain_noise_balance = .{ .label = "Terrain Noise Balance", .description = "Blends the continental noise (0) into the mountain (ridged) noise (1).", .min = 0, .max = 1 },
     .terrain_interp = .{ .label = "Terrain Detail Resolution", .description = "Sampling density of the mountain noise; warp and noise share the coarse lattice. Full disables interpolation." },
     .large_terrain_interp = .{ .label = "Continental Resolution", .description = "Sampling density of the continental noise; the large warp follows this setting. Full disables interpolation." },
     .height_power = .{ .label = "Height Power", .min = 0.25, .max = 4 },
@@ -1523,7 +1523,8 @@ const continental_preset = blk: {
     p.large_power = 1.5;
     p.small_power = 1.5;
     p.dirt_depth = 2.0;
-    p.terrain_noise_balance = 0.3;
+    // 0.3 under the old additive blend (mountain share 0.3/1.3), preserved for the crossfade.
+    p.terrain_noise_balance = 0.3 / 1.3;
     p.terrain_noise.frequency = 0.008;
     p.terrain_noise.fractal_type = .ping_pong;
     p.terrain_noise.domain_warp_type = .basic_grid;
@@ -1937,6 +1938,38 @@ test "interp densities round trip through the config tree" {
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.full, DefaultGenerator.Params.default.terrain_interp);
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.eighth, DefaultGenerator.Params.default.cave_interp_h);
     try std.testing.expectEqual(DefaultGenerator.InterpResolution.eighth, DefaultGenerator.Params.default.cave_interp_v);
+}
+
+test "terrain noise balance zero excludes the mountain noise" {
+    // balance is the mountain (ridged) noise weight; at zero nothing about that
+    // noise may change the height, even with erosion and surface detail enabled.
+    var params = DefaultGenerator.Params.default;
+    params.seed = 7;
+    params.setSeeds(std.testing.io);
+    params.terrain_noise_balance = 0;
+    const base = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 3 });
+
+    var changed = params;
+    changed.terrain_noise.frequency *= 3.7;
+    changed.terrain_noise.seed +%= 99991;
+    const mountain_changed = DefaultGenerator.genTerrainHeight(&changed, 0, .{ 2, 3 });
+    for (0..ChunkSize) |x| {
+        for (0..ChunkSize) |z| try std.testing.expectEqual(base[x][z], mountain_changed[x][z]);
+    }
+}
+
+test "terrain noise balance crossfades continental into mountain" {
+    // Default shape powers and height_power are 1, so shapedRow reduces to lerp(large, raw, balance).
+    const large: @Vector(1, f32) = .{0.8};
+    const raw: @Vector(1, f32) = .{0.2};
+    var params = DefaultGenerator.Params.default;
+
+    params.terrain_noise_balance = 0;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), DefaultGenerator.shapedRow(1, &params, large, raw)[0], 1e-5);
+    params.terrain_noise_balance = 1;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), DefaultGenerator.shapedRow(1, &params, large, raw)[0], 1e-5);
+    params.terrain_noise_balance = 0.5;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), DefaultGenerator.shapedRow(1, &params, large, raw)[0], 1e-5);
 }
 
 fn testGroundContext(overrides: anytype) DefaultGenerator.GroundContext {

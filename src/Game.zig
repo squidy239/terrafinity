@@ -19,8 +19,6 @@ const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const Chunk = @import("world/Chunk.zig");
 const generator_loader = @import("world/generator_loader.zig");
 const generator_api = @import("world/generators/generator_api.zig");
-const Cone = @import("world/structures/Cone.zig").Cone;
-const Sphere = @import("world/structures/Sphere.zig").Sphere;
 const World = @import("world/World.zig");
 
 const Game = @This();
@@ -289,6 +287,21 @@ pub const Options = struct {
 
     save_mode: World.WorldStorage.SaveMode = .only_modified,
 
+    /// Player body extent in blocks. Width spans X and Z; height spans Y.
+    player_width: f32 = 1.0,
+    player_height: f32 = 4.0,
+    /// Rise walked over automatically when a horizontal move is blocked.
+    step_height: f32 = 1.0,
+    /// Rate the body climbs a step, in blocks per second.
+    step_climb_speed: f32 = 20.0,
+    /// Peak jump height in blocks; converted to launch speed against gravity.
+    jump_height: f32 = 1.6,
+    /// Ground movement speed in blocks per second.
+    move_speed: f32 = 8.0,
+    /// Speed while the sprint key is held, as a multiple of `move_speed`. Clamped
+    /// to at least 1 so the key can never slow the player down.
+    sprint_multiplier: f32 = 1.6,
+
     render_options: Renderer.RenderOptions = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
@@ -527,13 +540,18 @@ pub fn init(
 
 const spawn_scan_above: f64 = 512;
 const spawn_scan_below: f64 = 1024;
-const spawn_required_air: u32 = 4;
 const spawn_max_nudges: u32 = 8;
 const spawn_rounds: u32 = 3;
 // Attempt budgets double as search reach (rings advance per sample):
 // phase 1 roams far for the canonical pick, phase 2 stays near home.
 const spawn_phase1_attempts: u32 = 128;
 const spawn_phase2_attempts: u32 = 64;
+
+/// Clear vertical blocks a spawn column needs for a body of this height. The clamp
+/// keeps the float-to-int cast defined for a config that names a negative height.
+fn spawnRequiredAir(height: f32) u32 {
+    return @max(1, @as(u32, @intFromFloat(@ceil(@max(height, 1.0)))));
+}
 
 const SpawnResolution = union(enum) {
     ok: @Vector(3, f64),
@@ -544,10 +562,13 @@ const SpawnResolution = union(enum) {
 
 /// Resolves one generator-proposed column to feet. The hint Y ignores erosion and structures, so scan down for solid ground with clear air above it.
 fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, x: f64, z: f64, y_hint: f64) !SpawnResolution {
+    const height: f64 = @floatCast(game.options.player_height);
+    const half_height = height / 2;
+    const required_air = spawnRequiredAir(game.options.player_height);
     const mover = Physics.Mover{
         .collisions = .init(true),
         .zero_velocity = .init(true),
-        .bounding_box = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
+        .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), height),
         .enabled = .init(true),
     };
     var reader = World.Reader{ .world = &game.world };
@@ -559,21 +580,23 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     const bottom: i64 = @intFromFloat(@floor(y_hint - spawn_scan_below));
     var air_run: u32 = 0;
     var air_wet: u32 = 0;
-    var saw_water = false;
+    var saw_liquid = false;
     while (y >= bottom) : (y -= 1) {
         const block = try reader.getBlock(io, allocator, .{ bx, y, bz }, World.standard_level);
-        if (block == .water) saw_water = true;
+        // Only buoyant fluids read as open water; a leaf canopy must not reject a spawn.
+        const liquid = if (block.fluidProperties()) |props| props.buoyancy > 0 else false;
+        if (liquid) saw_liquid = true;
         if (!block.isSolid()) {
             air_run += 1;
-            air_wet = (air_wet << 1 | @intFromBool(block == .water)) & 0xf;
+            air_wet = (air_wet << 1 | @intFromBool(liquid)) & 0xf;
             continue;
         }
-        if (air_run >= spawn_required_air) {
+        if (air_run >= required_air) {
             if (air_wet != 0) return .ocean;
             // The box overlaps neighbor columns, so nudge up on slopes instead of rejecting the spot.
-            var feet = @Vector(3, f64){ x, @as(f64, @floatFromInt(y)) + 0.5 + 2 + 0.01, z };
+            var feet = @Vector(3, f64){ x, @as(f64, @floatFromInt(y)) + 0.5 + half_height + 0.01, z };
             for (0..spawn_max_nudges + 1) |_| {
-                if (try mover.checkCollision(io, allocator, feet, &reader) == null) break;
+                if (!try mover.collides(io, allocator, feet, &reader)) break;
                 feet[1] += 1.0;
             } else return .blocked;
             return .{ .ok = feet };
@@ -581,7 +604,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
         air_run = 0;
         air_wet = 0;
     }
-    return if (saw_water) .ocean else .no_ground;
+    return if (saw_liquid) .ocean else .no_ground;
 }
 
 /// Runs one propose-plus-resolve batch for both spawn phases. Abstention fails hard because no fallback spawn exists without a radius bound.
@@ -730,6 +753,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 
     try restartFutures(self, io, allocator);
     try startEntityDrain(self, io, allocator);
+    // Apply any tuning edits before the body integrates this frame.
+    self.syncPlayerTuning(io);
     // The player is updated synchronously every frame so the camera never waits
     // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
@@ -940,9 +965,12 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     entity.release();
 }
 
+/// Runs the selected hotbar item for this frame's inputs. Item behavior lives in
+/// `Item.use`, so a raw click does nothing unless the matching tool is selected.
 fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "itemAction" });
     defer z.end();
+    const item = self.player.main_inventory.get(io, self.selectedRow(), self.selectedCol()) orelse return;
     const player_pos = self.getPlayerPos(io);
     const looking = self.getCameraFront(io);
 
@@ -953,14 +981,13 @@ fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
 
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
-    const cone_length: f32 = 100;
-    const cone_radius: f32 = 10;
-    const cone: Cone(f32) = .init(@floatCast(player_pos), looking, cone_length, cone_radius, cone_radius);
-    if (actions.contains(.use_item_primary)) try editor.placeSamplerShape(.air, cone, World.standard_level);
-    if (actions.contains(.use_item_secondary)) try editor.placeSamplerShape(.stone, cone, World.standard_level);
-    if (actions.contains(.use_item_tertiary)) {
-        try editor.placeSamplerShape(sphere_block, Sphere(f32).init(@floatCast(player_pos), @floatFromInt(sphere_size)), World.standard_level);
-    }
+    try item.use(.{
+        .editor = &editor,
+        .player_pos = player_pos,
+        .looking = looking,
+        .sphere_size = sphere_size,
+        .sphere_block = sphere_block,
+    }, actions);
     try editor.flush(io, self.allocator);
 }
 
@@ -996,39 +1023,196 @@ fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     self.player.physics.velocity = wishDirection(camera_front, speed, actions, true);
 }
 
+// Locomotion feel, in blocks and seconds. Horizontal speed comes from the player.
+const walk_accel_ground: f64 = 60.0;
+const walk_decel_ground: f64 = 90.0;
+const walk_accel_air: f64 = 20.0;
+const walk_terminal_speed: f64 = 60.0;
+const jump_coyote_ns: u64 = 100 * std.time.ns_per_ms;
+const jump_buffer_ns: u64 = 150 * std.time.ns_per_ms;
+/// Fraction of upward speed kept when the jump key is released early.
+const jump_cut_factor: f64 = 0.5;
+const max_physics_dt: f64 = 0.1;
+/// Step settle walks one block per resolve pass, so keep the step within reach.
+const max_step_height: f64 = 4.0;
+
+const fluid_drag: f64 = 8.0;
+const fluid_swim_accel: f64 = 24.0;
+const fluid_swim_speed: f64 = 4.0;
+const fluid_speed_loss: f64 = 1.0;
+/// Buoyancy-weighted submersion past which the body cannot jump.
+const fluid_jump_block: f64 = 0.3;
+const walk_accel_water: f64 = 40.0;
+const walk_decel_water: f64 = 40.0;
+
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "walkMove" });
     defer z.end();
     const now = std.Io.Timestamp.now(io, .awake);
-    const dt_ns = now.nanoseconds -| self.last_frametime.nanoseconds;
-    const dt_f64 = @as(f64, @floatFromInt(dt_ns)) / std.time.ns_per_s;
-    const camera_front = self.getCameraFront(io);
-    const speed: @Vector(3, f32) = @splat(self.player.walk_speed.load(.unordered));
+    const elapsed_ns: u64 = @intCast(@max(self.last_frametime.durationTo(now).nanoseconds, 0));
+    const dt_s = @min(@as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s, max_physics_dt);
 
     var block_reader: World.Reader = .{ .world = &self.world };
     defer block_reader.clear(io);
 
+    const mover = &self.player.physics.elements.mover;
     const player_pos = self.getPlayerPos(io);
-    const ground_dist = try self.player.physics.elements.mover.getShortestGroundDistance(io, self.allocator, player_pos - @Vector(3, f64){ 0.001, 0.001, 0.001 }, &block_reader);
-    const on_ground = ground_dist <= 0;
-    const speed_multiplier: @Vector(3, f64) = @splat(if (on_ground) 1.0 else 0.35);
+    const on_ground = try mover.isSupported(io, self.allocator, player_pos, &block_reader);
+    const climbing = mover.climb_target_y != null;
+    const medium = try mover.mediumAt(io, self.allocator, player_pos, &block_reader);
+    const fluid = medium.fluid_fraction;
+
+    const wish = wishDirectionHorizontal(self.getViewDirection(io), actions);
+    const base_speed: f64 = self.player.walk_speed.load(.unordered);
+    const sprint: f64 = if (actions.contains(.sprint)) self.player.sprint_multiplier.load(.unordered) else 1.0;
+    const jump_speed: f64 = self.player.jump_strength.load(.unordered);
+    const gravity: f64 = self.player.physics.elements.gravity.strength.load(.monotonic);
 
     self.player.physics.mutex.lockUncancelable(io);
     defer self.player.physics.mutex.unlock(io);
+    var velocity = self.player.physics.velocity;
+    const moving = wish[0] != 0 or wish[1] != 0;
+    const jump_pressed = actions.contains(.up);
 
-    if (actions.contains(.up) and on_ground) {
-        self.player.physics.velocity[1] = self.player.jump_strength.load(.unordered);
+    // A step in progress counts as ground, so the body can launch off it.
+    const buoyant = medium.buoyancy * fluid;
+    const jumped = self.applyJump(&velocity, on_ground or climbing, buoyant, jump_pressed, jump_speed, elapsed_ns);
+    if (jumped) mover.climb_target_y = null;
+
+    // Sprint scales the target, so it still has to fight the same fluid drag.
+    const speed = targetSpeed(base_speed, sprint, fluid, medium.resistance);
+    const control = if (fluid > 0) walk_accel_water else if (on_ground) walk_accel_ground else walk_accel_air;
+    const decel = if (fluid > 0) walk_decel_water else walk_decel_ground;
+    const steers = on_ground or fluid > 0;
+
+    const current: @Vector(2, f64) = .{ velocity[0], velocity[2] };
+    const target = wish * @as(@Vector(2, f64), @splat(speed));
+    const horizontal = if (steers or moving)
+        approachHorizontal(current, target, (if (moving) control else decel) * dt_s)
+    else
+        current;
+    velocity[0] = horizontal[0];
+    velocity[2] = horizontal[1];
+
+    if (fluid > 0) applyFluid(&velocity, medium, gravity, jump_pressed, dt_s);
+
+    velocity[1] = @max(velocity[1], -walk_terminal_speed);
+    self.player.physics.velocity = velocity;
+}
+
+/// Jump feel: coyote time, an input buffer, and release-to-shorten. A step in
+/// progress counts as ground; a jump abandons the step. Returns whether a jump
+/// fired, so the caller can cancel any pending climb.
+fn applyJump(self: *@This(), velocity: *@Vector(3, f64), grounded: bool, buoyant: f64, jump_pressed: bool, jump_speed: f64, dt_ns: u64) bool {
+    const can_jump = grounded and buoyant < fluid_jump_block;
+    const jump_edge = jump_pressed and !self.player.jump_held;
+    self.player.jump_held = jump_pressed;
+    self.player.coyote_ns = if (can_jump) jump_coyote_ns else self.player.coyote_ns -| dt_ns;
+    self.player.jump_buffer_ns = if (jump_edge) jump_buffer_ns else self.player.jump_buffer_ns -| dt_ns;
+    if (self.player.jump_buffer_ns > 0 and self.player.coyote_ns > 0) {
+        velocity[1] = jump_speed;
+        self.player.jump_buffer_ns = 0;
+        self.player.coyote_ns = 0;
+        self.player.jump_rising = true;
+        return true;
     }
+    if (!self.player.jump_rising) return false;
+    if (!jump_pressed and velocity[1] > 0) velocity[1] *= jump_cut_factor;
+    if (!jump_pressed or velocity[1] <= 0) self.player.jump_rising = false;
+    return false;
+}
 
-    const vel_diff = wishDirection(camera_front, speed, actions, false) * speed_multiplier;
+/// Target horizontal speed in blocks per second. Sprint scales the base speed and
+/// fluid divides it back down by how much of the body it covers and how hard it
+/// resists, so sprinting in water is still slower than sprinting on land.
+fn targetSpeed(base_speed: f64, sprint: f64, fluid: f64, resistance: f64) f64 {
+    return sprint * base_speed / (1 + fluid_speed_loss * fluid * resistance);
+}
 
-    if (on_ground) {
-        self.player.physics.velocity[0] = vel_diff[0];
-        self.player.physics.velocity[2] = vel_diff[2];
-    } else {
-        self.player.physics.velocity[0] += vel_diff[0] * dt_f64;
-        self.player.physics.velocity[2] += vel_diff[2] * dt_f64;
-    }
+/// Buoyancy lifts with the submerged fraction and drag drains every axis, scaled by
+/// the fluid's resistance. The swim clamp only applies to a buoyant fluid, so leaves
+/// slow the fall instead of holding the body at swim speed.
+fn applyFluid(velocity: *@Vector(3, f64), medium: Physics.Mover.Medium, gravity: f64, jump_pressed: bool, dt_s: f64) void {
+    const submerged = medium.fluid_fraction;
+    const buoyant = medium.buoyancy * submerged;
+    const drag = @min(1.0, fluid_drag * medium.resistance * dt_s * submerged);
+    velocity[0] -= velocity[0] * drag;
+    velocity[2] -= velocity[2] * drag;
+    velocity[1] += gravity * buoyant * dt_s;
+    velocity[1] -= velocity[1] * drag;
+    if (buoyant <= 0) return;
+    if (jump_pressed) velocity[1] = @min(velocity[1] + fluid_swim_accel * dt_s, fluid_swim_speed);
+    velocity[1] = std.math.clamp(velocity[1], -fluid_swim_speed, fluid_swim_speed);
+}
+
+/// Unit horizontal wish from yaw only, so looking up or down never scales walking.
+fn wishDirectionHorizontal(view_direction: @Vector(3, f32), actions: *const Key.ActionSet) @Vector(2, f64) {
+    const yaw = std.math.degreesToRadians(view_direction[1]);
+    const forward: @Vector(2, f64) = .{ @sin(yaw), @cos(yaw) };
+    const right: @Vector(2, f64) = .{ -forward[1], forward[0] };
+    var wish: @Vector(2, f64) = .{ 0, 0 };
+    if (actions.contains(.forward)) wish += forward;
+    if (actions.contains(.backward)) wish -= forward;
+    if (actions.contains(.right)) wish += right;
+    if (actions.contains(.left)) wish -= right;
+    const length = length2(wish);
+    return if (length > 0) wish / @as(@Vector(2, f64), @splat(length)) else wish;
+}
+
+fn length2(v: @Vector(2, f64)) f64 {
+    return @sqrt(v[0] * v[0] + v[1] * v[1]);
+}
+
+/// Moves a horizontal velocity toward a target by at most `max_delta`.
+fn approachHorizontal(current: @Vector(2, f64), target: @Vector(2, f64), max_delta: f64) @Vector(2, f64) {
+    const delta = target - current;
+    const length = length2(delta);
+    if (length == 0 or length <= max_delta) return target;
+    return current + delta / @as(@Vector(2, f64), @splat(length)) * @as(@Vector(2, f64), @splat(max_delta));
+}
+
+/// Applies the tunable body size, movement, step, and jump to the live player.
+/// Runs on the frame thread, the same lane the body integrates on.
+fn syncPlayerTuning(self: *@This(), io: std.Io) void {
+    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "syncPlayerTuning" });
+    defer z.end();
+    self.options_lock.lockSharedUncancelable(io);
+    const width: f64 = @floatCast(self.options.player_width);
+    const height: f64 = @floatCast(self.options.player_height);
+    const step: f64 = @floatCast(self.options.step_height);
+    const climb_speed: f64 = @floatCast(self.options.step_climb_speed);
+    const jump_height: f64 = @max(@as(f64, @floatCast(self.options.jump_height)), 0.0);
+    const move_speed: f64 = @floatCast(self.options.move_speed);
+    const sprint: f64 = @max(@as(f64, @floatCast(self.options.sprint_multiplier)), 1.0);
+    self.options_lock.unlockShared(io);
+
+    const mover = &self.player.physics.elements.mover;
+    mover.step_height = std.math.clamp(step, 0, max_step_height);
+    mover.step_climb_speed = @max(climb_speed, 1.0);
+
+    self.player.walk_speed.store(@floatCast(@max(move_speed, 0)), .monotonic);
+    self.player.sprint_multiplier.store(@floatCast(sprint), .monotonic);
+
+    const gravity = self.player.physics.elements.gravity.strength.load(.monotonic);
+    self.player.jump_strength.store(@floatCast(@sqrt(2 * gravity * jump_height)), .monotonic);
+
+    const new_box = Physics.Mover.boxFor(width, height);
+    const box_changed = !std.meta.eql(mover.bounding_box.min.data, new_box.min.data) or
+        !std.meta.eql(mover.bounding_box.max.data, new_box.max.data);
+    if (!box_changed) return;
+
+    self.player.physics.mutex.lockUncancelable(io);
+    defer self.player.physics.mutex.unlock(io);
+    // Keep the feet planted when the height changes.
+    const old_height = mover.bounding_box.size().data[1];
+    mover.bounding_box = new_box;
+    self.player.physics.pos[1] += (height - old_height) / 2;
+}
+
+fn getViewDirection(self: *@This(), io: std.Io) @Vector(3, f32) {
+    self.player.view_direction_mutex.lockUncancelable(io);
+    defer self.player.view_direction_mutex.unlock(io);
+    return self.player.view_direction;
 }
 
 pub fn getPlayerPos(self: *@This(), io: std.Io) @Vector(3, f64) {
@@ -1401,14 +1585,13 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
             .elements = .{
                 .mover = .{
                     .collisions = .init(false),
-                    .bounding_box = .init(.{ .data = .{ -0.5, -2, -0.5 } }, .{ .data = .{ 0.5, 2, 0.5 } }),
+                    .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), @floatCast(game.options.player_height)),
                     .enabled = .init(true),
                     .zero_velocity = .init(true),
                 },
                 .gravity = .{
                     .enabled = .init(false),
                 },
-                .resistance = .{ .fraction_per_second = .init(0.1), .enabled = .init(false) },
             },
             .pos = spawn_pos,
             .velocity = @splat(0),
@@ -1428,12 +1611,16 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         16,
         &game.player.inventory_buffer,
     );
-    // Placeholder starter row so the hotbar has icons to show; real item grants come later.
-    inline for (0..std.meta.fields(Item.ItemType).len) |col| {
-        if (col < game.player.main_inventory.width) {
-            const item_type: Item.ItemType = @enumFromInt(col);
-            _ = game.player.main_inventory.set(io, 0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
-        }
+    // Placeholder starter row so the hotbar has icons to show; real item grants come
+    // later. Tool items always get a slot, so block items are capped to fit the row.
+    const hotbar_width = game.player.main_inventory.width;
+    const tool_count: u32 = std.meta.fields(Item.ExtraItemType).len;
+    const block_slots = @min(@as(u32, @intCast(Item.block_types.len)), hotbar_width -| tool_count);
+    for (Item.block_types[0..block_slots], 0..) |block, col| {
+        _ = game.player.main_inventory.set(io, 0, @intCast(col), .{ .item_type = Item.fromBlock(block).?, .amount = 1 });
+    }
+    for (Item.extra_item_types, 0..) |item_type, i| {
+        _ = game.player.main_inventory.set(io, 0, block_slots + @as(u32, @intCast(i)), .{ .item_type = item_type, .amount = 1 });
     }
     game.player.view_direction_mutex.lockUncancelable(io);
     const view_direction = game.player.view_direction;

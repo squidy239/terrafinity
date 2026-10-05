@@ -314,6 +314,11 @@ pub fn Noise(comptime Float: type) type {
         ///
         /// Default: `1.0`
         domain_warp_amp: Float = 1.0,
+        /// Flips the sign of every generated value, mapping the `-1.0` to `1.0`
+        /// range to `1.0` to `-1.0`.
+        ///
+        /// Default: `false`
+        invert: bool = false,
         const Dim = enum { d2, d3 };
         /// Lanes processed per SIMD chunk, tuned to the target's vector width.
         const grid_lanes = std.simd.suggestVectorLength(Float) orelse 1;
@@ -354,7 +359,7 @@ pub fn Noise(comptime Float: type) type {
                 .value_cubic => genNoise2DFractal(.value_cubic, state, state.seed, xv, yv),
                 .value => genNoise2DFractal(.value, state, state.seed, xv, yv),
             };
-            return result[0];
+            return if (state.invert) -result[0] else result[0];
         }
 
         /// Fills `out` with 2D noise samples.
@@ -411,7 +416,7 @@ pub fn Noise(comptime Float: type) type {
                 .value_cubic => genNoise3DFractal(.value_cubic, state, state.seed, xv, yv, zv),
                 .value => genNoise3DFractal(.value, state, state.seed, xv, yv, zv),
             };
-            return result[0];
+            return if (state.invert) -result[0] else result[0];
         }
 
         /// Fills `out` with 3D noise samples.
@@ -598,6 +603,9 @@ pub fn Noise(comptime Float: type) type {
                 .ridged => fillGridDispatchNoise(N, dim, state, out, source, .ridged),
                 .ping_pong => fillGridDispatchNoise(N, dim, state, out, source, .ping_pong),
                 .progressive, .independent => fillGridDispatchNoise(N, dim, state, out, source, .none),
+            }
+            if (state.invert) {
+                for (out) |*v| v.* = -v.*;
             }
         }
 
@@ -2857,6 +2865,29 @@ test "3D batch paths match scalar genNoise3D" {
             }
         }
     }
+}
+
+test "invert negates generated values across every entry point" {
+    const normal = Noise(f32){ .frequency = 0.05, .seed = 7 };
+    var inverted = normal;
+    inverted.invert = true;
+
+    try std.testing.expectEqual(-normal.genNoise2D(1.3, -2.7), inverted.genNoise2D(1.3, -2.7));
+    try std.testing.expectEqual(-normal.genNoise3D(1.3, -2.7, 0.5), inverted.genNoise3D(1.3, -2.7, 0.5));
+
+    const xs = [_]f32{ 0.1, 3.2, -5.5, 8.8 };
+    const ys = [_]f32{ -1.1, 2.2, 4.4, -6.6 };
+    const zs = [_]f32{ 0.7, -0.3, 5.1, 2.9 };
+    var plain: [xs.len]f32 = undefined;
+    var flipped: [xs.len]f32 = undefined;
+
+    normal.fillNoise2DGrid(&plain, &xs, &ys);
+    inverted.fillNoise2DGrid(&flipped, &xs, &ys);
+    for (plain, flipped) |expected, actual| try std.testing.expectEqual(-expected, actual);
+
+    normal.fillNoise3DGrid(&plain, &xs, &ys, &zs);
+    inverted.fillNoise3DGrid(&flipped, &xs, &ys, &zs);
+    for (plain, flipped) |expected, actual| try std.testing.expectEqual(-expected, actual);
 }
 
 test "range mapping handles full int ranges without overflow" {

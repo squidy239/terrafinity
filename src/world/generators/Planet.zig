@@ -517,6 +517,7 @@ const field_specs = .{
     .ping_pong_strength = .{ .min = 0, .max = 8, .advanced = true },
     .cellular_jitter_mod = .{ .min = 0, .max = 1, .advanced = true },
     .domain_warp_amp = .{ .min = 0, .max = 2000, .advanced = true },
+    .invert = .{ .label = "Invert", .description = "Swaps the sign of the generated noise, so peaks become valleys." },
 };
 
 const PlanetInstance = struct {
