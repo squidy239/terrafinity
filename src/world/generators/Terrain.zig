@@ -59,7 +59,7 @@ pub const DefaultGenerator = struct {
         env: Envelope,
 
         fn init(params: *const Params, level: i32, chunk_pos: [2]i32) HeightCtx {
-            const scale = params.terrain_scale / World.ChunkPos.toScale(level);
+            const scale = @max(params.terrain_scale, 1e-6) / World.ChunkPos.toScale(level);
             const min: f32 = @floatFromInt(params.terrain_min);
             const max: f32 = @floatFromInt(params.terrain_max);
             return .{
@@ -348,11 +348,12 @@ pub const DefaultGenerator = struct {
 
         /// ErosionParams for the given LOD; coarser levels drop finest octaves whose wavelength falls below their spacing.
         fn erosionFilterParams(self: *const Params, level: i32) erosion.ErosionParams {
+            if (self.erosion_detail <= 0) std.log.warn("erosion: detail {d} <= 0; clamping", .{self.erosion_detail});
             const drop: u32 = @intCast(@max(level, 0));
             return .{
                 .filter_strength = self.erosion_filter_strength,
                 .gully_weight = self.erosion_gully_weight,
-                .detail = self.erosion_detail,
+                .detail = @max(self.erosion_detail, erosion.min_detail),
                 .octaves = @max(1, self.erosion_octaves -| drop),
                 .lacunarity = self.erosion_lacunarity,
                 .gain = self.erosion_gain,
@@ -464,9 +465,11 @@ pub const DefaultGenerator = struct {
         const slope_scale = self.params.grass_detail_slope_scale;
         const slope_interp = self.params.grass_detail_gradient_interp;
         var level_slopes = LevelSlopes{ .generator = self, .io = io, .interp = slope_interp };
+        // Hoisted so the pointer stored in the batch outlives the block below; left undefined (never read) when the branch is not taken.
+        var fine_slopes: [ChunkSize][ChunkSize]f32 = undefined;
         const batch: BladeBatch = blk: {
             if (self.params.grass_detail_gradient_source == .fine) {
-                var fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
+                fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
                 for (&fine_slopes) |*row| {
                     for (row) |*slope| slope.* = bladeHeightScale(slope.*, slope_scale);
                 }
@@ -726,8 +729,9 @@ pub const DefaultGenerator = struct {
     }
 
     fn generateTerrain(chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, heights: [ChunkSize][ChunkSize]f32, ctx: GenContext) void {
-        const terrain_scales: [2]f32 = .{ 1.0 / @as(f32, @floatFromInt(@abs(ctx.params.terrain_max))), 1.0 / @as(f32, @floatFromInt(@abs(ctx.params.terrain_min))) };
-        const scale = ctx.params.terrain_scale * ctx.chunk_scale;
+        // A zero bound would make the reciprocal infinite and turn a whole band into stone.
+        const terrain_scales: [2]f32 = .{ 1.0 / @as(f32, @floatFromInt(@max(@abs(ctx.params.terrain_max), 1))), 1.0 / @as(f32, @floatFromInt(@max(@abs(ctx.params.terrain_min), 1))) };
+        const scale = @max(ctx.params.terrain_scale, 1e-6) * ctx.chunk_scale;
         const one_d_terrain_scale: f32 = 1.0 / scale;
         const sea_level: i32 = ctx.params.sea_level;
         const sea_level_f: f32 = @floatFromInt(sea_level);
@@ -817,7 +821,7 @@ pub const DefaultGenerator = struct {
     /// Cave noise on an HxVxH lattice interpolated to the full grid; full/full samples every voxel directly.
     fn sampleCavesInterpolate(comptime H: usize, comptime V: usize, chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, chunk_scale: f32, gen_params: *const Params) void {
         const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
-        const one_d_scale: f32 = 1.0 / (gen_params.terrain_scale * chunk_scale);
+        const one_d_scale: f32 = 1.0 / (@max(gen_params.terrain_scale, 1e-6) * chunk_scale);
         const grid_origin = float_pos * @as(@Vector(3, f32), @splat(one_d_scale));
         if (comptime H == ChunkSize and V == ChunkSize) {
             carveCavesDirect(chunk_blocks, float_pos, grid_origin, one_d_scale, gen_params);
@@ -1434,8 +1438,8 @@ const field_specs = .{
     .domain_warp_amp = .{ .min = 0, .max = 2000, .advanced = true },
     .invert = .{ .label = "Invert", .description = "Swaps the sign of the generated noise, so peaks become valleys." },
     .terrain_scale = .{ .label = "Terrain Scale", .description = "Scales the generated terrain height range.", .min = 0.1, .max = 4 },
-    .terrain_min = .{ .label = "Minimum Height", .min = -100000, .max = 0 },
-    .terrain_max = .{ .label = "Maximum Height", .min = 0, .max = 100000 },
+    .terrain_min = .{ .label = "Minimum Height", .min = -100000, .max = -1 },
+    .terrain_max = .{ .label = "Maximum Height", .min = 1, .max = 100000 },
     .sea_level = .{ .label = "Sea Level", .min = -1000, .max = 1000 },
     .terrain_block_randomness = .{ .label = "Block Randomness", .min = 0, .max = 1 },
     .slope_randomness = .{ .label = "Slope Randomness", .min = 0, .max = 1 },
@@ -1582,16 +1586,20 @@ pub fn generatorConfigSetSeeds(io: *const std.Io, config: *generator_api.ConfigT
 }
 
 pub fn generatorCreate(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
+    return createInstance(opts, config) catch return null;
+}
+
+fn createInstance(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) !*TerrainInstance {
     var arena = std.heap.ArenaAllocator.init(opts.allocator);
     errdefer arena.deinit();
     var params: DefaultGenerator.Params = .default;
-    generator_api.fromTree(DefaultGenerator.Params, arena.allocator(), config, &params, field_specs) catch return null;
+    try generator_api.fromTree(DefaultGenerator.Params, arena.allocator(), config, &params, field_specs);
     if (params.seed == null) params.setSeeds(opts.io);
-    const instance = opts.allocator.create(TerrainInstance) catch return null;
+    const instance = try opts.allocator.create(TerrainInstance);
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
         .arena = arena,
-        .generator = DefaultGenerator.init(opts.allocator, opts.max_cache_bytes, params) catch return null,
+        .generator = try DefaultGenerator.init(opts.allocator, opts.max_cache_bytes, params),
         .source = .{
             .data = instance,
             .getTerrainHeight = null,

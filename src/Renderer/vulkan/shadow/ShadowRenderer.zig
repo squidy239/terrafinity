@@ -116,7 +116,7 @@ param_buffers: []ParamBuffer = &.{},
 
 /// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
 /// per-frame matrix by `viewProjAtOrigin`.
-committed: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+committed: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .split_radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
 /// Latched light direction the shadow maps use, stepped in `light_step_texels` increments (see `latchLight`).
 light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
 /// Per-cascade commit validity. The params cascade_count is the largest contiguous valid prefix,
@@ -125,7 +125,7 @@ valid: [Csm.max_cascades]bool = @splat(false),
 /// Cascades computed this frame, used only by the end-of-frame raster. Promoted into
 /// `committed` (the sampled state) at the start of the next prepareFrame, so a refreshed
 /// layer is only ever sampled with the matrix and box radius it was rasterized with.
-pending: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+pending: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .split_radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
 /// Per-cascade validity of `pending`; set when a cascade is computed this frame and
 /// cleared once it is promoted (or discarded on a light-direction reset).
 pending_valid: [Csm.max_cascades]bool = @splat(false),
@@ -311,6 +311,7 @@ fn teardownResources(self: *ShadowRenderer, io: std.Io, applied: Csm.ShadowConfi
     self.map_size = size;
     self.valid = @splat(false);
     self.pending_valid = @splat(false);
+    self.last_refresh = @splat(Csm.never_refreshed);
 }
 
 /// Allocates the shadow image and views, clears every layer to far depth, and rebuilds
@@ -465,9 +466,12 @@ pub fn prepareFrame(
     if ((active and !self.was_active) or light_dir_changed) {
         self.valid = @splat(false);
         self.pending_valid = @splat(false);
+        // Stale stamps would otherwise gate every cascade behind its long interval.
+        self.last_refresh = @splat(Csm.never_refreshed);
     }
     self.was_active = active;
 
+    const split_radii = if (active) Csm.splitRadii(config) else @as([Csm.max_cascades]f32, @splat(0.0));
     if (active) {
         self.promotePending();
         self.refreshCascades(count, .{
@@ -477,6 +481,8 @@ pub fn prepareFrame(
             .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
             .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
             .per_frame_dist = self.per_frame_dist,
+            .split_radii = split_radii,
+            .refresh_intervals = Csm.refreshIntervals(config),
         });
     }
 
@@ -557,7 +563,7 @@ fn refreshCascades(self: *ShadowRenderer, count: u32, ctx: Csm.CascadeContext) v
     // configured per-frame budget exceeds it, clamp so the buffers never overflow; the
     // scheduler still picks the most-overdue cascades first.
     const budget = @min(ctx.cfg.cascades_per_frame, gpu.shadow_slot_count);
-    const refresh_set = Csm.nextRefreshSet(count, budget, Csm.refreshIntervals(ctx.cfg), self.last_refresh, self.frame_number);
+    const refresh_set = Csm.nextRefreshSet(count, budget, ctx.refresh_intervals, self.last_refresh, self.frame_number);
 
     // The innermost selected texel drives the minimum chunk size for all cascades.
     var finest_texel: f32 = std.math.inf(f32);
@@ -604,19 +610,21 @@ fn writeParams(self: *ShadowRenderer, ctx: ParamsContext) void {
     while (active_count < ctx.count and self.valid[active_count]) active_count += 1;
     if (ctx.active and active_count > 0) {
         params.cascade_count = active_count;
-        const splits = Csm.splitRadii(ctx.config);
         for (self.committed[0..active_count], 0..) |committed, cascade| {
             const view_proj = Csm.viewProjAtOrigin(committed, ctx.view_pos);
             @memcpy(params.light_viewproj[cascade][0..], view_proj[0..]);
-            params.split_radius[cascade] = splits[cascade];
+            params.split_radius[cascade] = committed.split_radius;
             params.texel_world_size[cascade] = 2.0 * committed.radius / @as(f32, @floatFromInt(self.map_size));
             params.box_radius[cascade] = committed.radius;
         }
         params.normal_bias_scale = ctx.config.normal_bias_scale;
         params.blur_radius = ctx.config.blur_radius;
         params.blend_fraction = ctx.config.cascade_blend;
-        params.fade_start = ctx.config.max_shadow_distance * ctx.config.last_cascade_fade;
-        params.fade_end = ctx.config.max_shadow_distance;
+        // Fade is snapshotted from the outer committed cascade's split, not the live
+        // max_shadow_distance, so it cannot outrun the box that cascade was fitted for.
+        const fade_end = self.committed[active_count - 1].split_radius;
+        params.fade_start = fade_end * ctx.config.last_cascade_fade;
+        params.fade_end = fade_end;
         params.shadow_strength = ctx.config.shadow_strength;
         params.debug_colors = @intFromBool(ctx.config.debug_cascade_colors);
     }

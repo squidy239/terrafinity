@@ -18,7 +18,8 @@ Run them at a checkpoint, not after every micro-edit: batch related edits and ve
 
 - Touched area first: `zig build test -Dtest_filter="substring"` (substring over the fully-qualified `module.file.test.name`; name tests so they are filterable — unnamed `test {}` blocks always run and cannot be filtered).
 - Full suite where the environment supports it: `zig build test --summary all`. Headless environments hit the pre-existing wio/wayland crash — there, `zig build` plus filtered tests for the touched areas stand in for the suite; never treat the headless crash as your regression without evidence.
-- New `.zig` file invisible to `-Dtest_filter` until something reachable from `main.zig` references it. Bare `zig test` can exit 1 on success (toolchain quirk): all-OK output means pass; `error:`, `compile test ... N errors`, or failed build steps mean real failure.
+- Reachability gates every build: `zig build` and `zig build test` compile only the import closure of a root (`main.zig`, `generator_root.zig`, `build.zig`). An unreferenced `.zig` file — kept but orphaned, or new and not yet wired in — is never compiled, so a syntax error or stale decl passes all gates and its tests stay invisible to `-Dtest_filter`. `zig ast-check <file>` catches source-only errors; reference it from a reachable root for a full type check.
+- Bare `zig test` can exit 1 on success (toolchain quirk): all-OK output means pass; `error:`, `compile test ... N errors`, or failed build steps mean real failure.
 
 ## Play test (user-visible changes only)
 

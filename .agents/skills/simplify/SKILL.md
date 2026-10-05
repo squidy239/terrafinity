@@ -21,7 +21,7 @@ Stop after at most 3 passes, or when the adversarial check reports DONE — whic
 Files are the unit of work:
 
 - Spawn one sub-agent per file that needs simplification.
-- Each sub-agent receives the file path and the simplification principles (sections 1–3 below), reads the file itself, and edits it directly with the edit tool.
+- Each sub-agent receives the file path and the simplification principles (sections 1–4 below), reads the file itself, and edits it directly with the edit tool.
 - Sub-agents operate on disjoint files, so there are no merge conflicts.
 
 ## Simplification Principles
@@ -50,6 +50,10 @@ Include these principles verbatim in every simplify sub-agent prompt and in the 
 
 **Undefined Over Dummy Values:** When a value is always overwritten before any read, declare it `= undefined`, never a dummy zero or random filler. `undefined` signifies "no defined value" and lets safety-checked builds catch a missed write; a plausible placeholder hides that bug.
 
+### 4. Preserve Load-Bearing Differences
+
+Do not extract a shared helper just because two blocks look similar. When the difference is load-bearing for correctness, keeping them separate is the simpler, safer form; a parameterized helper that unifies them hides the invariant and can silently apply one site's rule to the other. In `Mesher.zig`, the uniform `addSideFaces` and the grid `addGridFaces` both greedily merge lane runs, but `addSideFaces` must never merge water (per-face shader displacement), so it carries a `block != water` condition the grid path does not. Extracting one helper across both would tempt a future caller to drop that condition. Pattern: if two blocks differ by a condition required for correctness at one site, leave them apart rather than add a parameter.
+
 ## Iterative Process
 
 This skill runs at most 3 passes, then reports what remains:
@@ -59,7 +63,7 @@ This skill runs at most 3 passes, then reports what remains:
 Spawn one sub-agent per file (disjoint files only, per the `fanout-orchestrate` skill). Do it to all code files provided, not just zig. Each sub-agent edits its file directly with the edit tool and returns a brief summary. Each sub-agent's prompt must include:
 
 - The file path
-- The complete Simplification Principles above (sections 1–3 verbatim)
+- The complete Simplification Principles above (sections 1–4 verbatim)
 - Simplifications MUST reduce net line count, not increase it
 - The instruction: "Edit this file to be simpler using the principles. Use precise, targeted edits. Return a brief summary of what you changed."
 - Skip gates, formatters, and tests; the orchestrator verifies once at the end.
@@ -85,7 +89,7 @@ Only when the simplification touches a user-visible path: `export VK_LOADER_LAYE
 Spawn a sub-agent whose sole job is to find remaining simplifications. Its prompt must include:
 
 - The full file contents of every file modified in this pass
-- The complete Simplification Principles above (sections 1–3 verbatim)
+- The complete Simplification Principles above (sections 1–4 verbatim)
 
 Its instructions:
 

@@ -103,6 +103,8 @@ pub const Cascade = struct {
     center_abs: Vec3d,
     /// Fitted slice radius plus staleness padding, in blocks.
     radius: f32,
+    /// Outer split radius this cascade was fitted for, before staleness padding.
+    split_radius: f32,
     /// World blocks per shadow texel: 2*radius / map_size.
     texel: f32,
     /// Ortho depth range along `light_dir`, in blocks.
@@ -121,6 +123,9 @@ pub const Cascade = struct {
 pub const CommittedCascade = struct {
     center_abs: Vec3d,
     radius: f32,
+    /// Outer split radius this cascade was fitted for. Classification and box must come
+    /// from one snapshot, so a live split edit cannot outrun the committed box.
+    split_radius: f32,
     near_plane: f32,
     far_plane: f32,
     light_dir: Vec3f,
@@ -135,6 +140,9 @@ pub const CascadeContext = struct {
     scene_max: Vec3d,
     /// Measured camera movement in blocks per frame, used for staleness padding.
     per_frame_dist: f32,
+    /// Config-only derivations, computed once per frame and shared by every cascade.
+    split_radii: [max_cascades]f32,
+    refresh_intervals: [max_cascades]u32,
 };
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
@@ -422,21 +430,22 @@ fn buildViewProj(committed: CommittedCascade, view_pos: Vec3d) [16]f32 {
 pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
     const count = @min(ctx.cfg.cascade_count, max_cascades);
     std.debug.assert(cascade_index < count);
-    const splits = splitRadii(ctx.cfg);
 
-    const radius = splits[cascade_index] + stalenessPadding(
-        refreshIntervals(ctx.cfg)[cascade_index],
+    const radius = ctx.split_radii[cascade_index] + stalenessPadding(
+        ctx.refresh_intervals[cascade_index],
         ctx.per_frame_dist,
     );
 
     const basis = buildLightBasis(ctx.light_dir, world_up);
     const center_snapped = snapCenter(ctx.view_pos, radius, ctx.cfg.shadow_map_size, basis);
     const range = depthRange(ctx.scene_min, ctx.scene_max, center_snapped, ctx.light_dir, radius, ctx.cfg.max_depth_range);
-    const committed = CommittedCascade{ .center_abs = center_snapped, .radius = radius, .near_plane = range.near, .far_plane = range.far, .light_dir = ctx.light_dir };
+    const split_radius = ctx.split_radii[cascade_index];
+    const committed = CommittedCascade{ .center_abs = center_snapped, .radius = radius, .split_radius = split_radius, .near_plane = range.near, .far_plane = range.far, .light_dir = ctx.light_dir };
 
     return .{
         .center_abs = center_snapped,
         .radius = radius,
+        .split_radius = split_radius,
         .texel = 2.0 * radius / @as(f32, @floatFromInt(ctx.cfg.shadow_map_size)),
         .near_plane = range.near,
         .far_plane = range.far,
@@ -460,6 +469,7 @@ pub fn committedOf(cascade: Cascade) CommittedCascade {
     return .{
         .center_abs = cascade.center_abs,
         .radius = cascade.radius,
+        .split_radius = cascade.split_radius,
         .near_plane = cascade.near_plane,
         .far_plane = cascade.far_plane,
         .light_dir = cascade.light_dir,
@@ -550,6 +560,8 @@ fn testCascadeContext(cfg: ShadowConfig, view_pos: Vec3d, scene_min: Vec3d, scen
         .scene_min = scene_min,
         .scene_max = scene_max,
         .per_frame_dist = 10.0 / 60.0,
+        .split_radii = splitRadii(cfg),
+        .refresh_intervals = refreshIntervals(cfg),
     };
 }
 

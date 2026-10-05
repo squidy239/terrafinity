@@ -85,40 +85,32 @@ pub const OitCompositor = struct {
             target.* = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, format, oit_usage, oit_aspect);
         }
 
-        if (self.descriptor_set_layout == .null_handle) {
-            const bindings: [4]vk.DescriptorSetLayoutBinding = .{
-                .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-                .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-                .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-                .{ .binding = 3, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
-            };
-            self.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, &bindings);
-        }
+        const bindings: [4]vk.DescriptorSetLayoutBinding = .{
+            .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 1, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 2, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+            .{ .binding = 3, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true }, .p_immutable_samplers = null },
+        };
+        self.descriptor_set_layout = try core.createDescriptorSetLayout(self.dev, &self.vk_ctx.vkalloc, .{}, &bindings);
 
-        if (self.composition_layout == .null_handle) {
-            const pc_range: vk.PushConstantRange = .{ .stage_flags = .{ .fragment_bit = true }, .offset = 0, .size = @sizeOf(CompositionPushConstants) };
-            self.composition_layout = try self.dev.createPipelineLayout(&.{
-                .flags = .{},
-                .set_layout_count = 1,
-                .p_set_layouts = (&self.descriptor_set_layout)[0..1],
-                .push_constant_range_count = 1,
-                .p_push_constant_ranges = (&pc_range)[0..1],
-            }, &self.vk_ctx.vkalloc);
-        }
+        const pc_range: vk.PushConstantRange = .{ .stage_flags = .{ .fragment_bit = true }, .offset = 0, .size = @sizeOf(CompositionPushConstants) };
+        self.composition_layout = try self.dev.createPipelineLayout(&.{
+            .flags = .{},
+            .set_layout_count = 1,
+            .p_set_layouts = (&self.descriptor_set_layout)[0..1],
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = (&pc_range)[0..1],
+        }, &self.vk_ctx.vkalloc);
 
-        if (self.composition_pipeline == .null_handle) {
-            const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_vert_spv);
-            defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
-            const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_frag_spv);
-            defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
+        const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_vert_spv);
+        defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
+        const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_frag_spv);
+        defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-            self.composition_pipeline = try core.buildGraphicsPipeline(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{core.opaqueBlendAttachment()}, self.composition_layout, core.emptyVertexInput());
-        }
+        self.composition_pipeline = try core.buildGraphicsPipeline(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{core.opaqueBlendAttachment()}, self.composition_layout, core.emptyVertexInput());
 
-        if (self.descriptor_pool == .null_handle) {
-            const pool_size: vk.DescriptorPoolSize = .{ .type = .combined_image_sampler, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
-            try core.createFrameDescriptorPool(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.descriptor_pool, self.descriptor_set_layout, &self.descriptor_sets_per_frame, (&pool_size)[0..1]);
-        }
+        const pool_size: vk.DescriptorPoolSize = .{ .type = .combined_image_sampler, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
+        try core.createFrameDescriptorPool(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.descriptor_pool, self.descriptor_set_layout, &self.descriptor_sets_per_frame, (&pool_size)[0..1]);
 
         self.updateOitDescriptorSets(color_view);
     }

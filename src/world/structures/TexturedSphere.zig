@@ -1,3 +1,4 @@
+// Will be used later; keep — do not delete as dead code.
 const std = @import("std");
 
 const Sphere = @import("Sphere.zig").Sphere;

@@ -106,9 +106,7 @@ pub const DomainWarpType = enum {
     basic_grid,
 };
 
-/// State for one noise generator.
-///
-/// Sampler calls read this state and never write it. Set fields directly to configure.
+/// State for one noise generator. Sampler calls read it, never write; set fields to configure.
 // Lookup tables are module-level so every Noise(Float) instantiation
 // shares one copy; the values are FastNoise's f32 tables. `f64` uses
 // them via `@floatCast` (exact for these values); not duplicated per-Float.
@@ -199,26 +197,15 @@ const grad_gy_table: [8]f32 = .{
 
 // The 16 warp gradient pairs split into two 8-entry tables for the AVX2
 // vpermps path; the high bit of the index picks the half.
-const warp_gx_lo: [8]f32 = blk: {
+fn warpTable(comptime offset: usize, comptime component: usize) [8]f32 {
     var t: [8]f32 = undefined;
-    for (0..8) |i| t[i] = warp_gradient_pairs[i][0];
-    break :blk t;
-};
-const warp_gy_lo: [8]f32 = blk: {
-    var t: [8]f32 = undefined;
-    for (0..8) |i| t[i] = warp_gradient_pairs[i][1];
-    break :blk t;
-};
-const warp_gx_hi: [8]f32 = blk: {
-    var t: [8]f32 = undefined;
-    for (0..8) |i| t[i] = warp_gradient_pairs[8 + i][0];
-    break :blk t;
-};
-const warp_gy_hi: [8]f32 = blk: {
-    var t: [8]f32 = undefined;
-    for (0..8) |i| t[i] = warp_gradient_pairs[8 + i][1];
-    break :blk t;
-};
+    for (0..8) |i| t[i] = warp_gradient_pairs[offset + i][component];
+    return t;
+}
+const warp_gx_lo = warpTable(0, 0);
+const warp_gy_lo = warpTable(0, 1);
+const warp_gx_hi = warpTable(8, 0);
+const warp_gy_hi = warpTable(8, 1);
 
 /// AVX2 vpermps over eight f32 lanes: `out[i] = table[idx[i] & 7]`.  Call
 /// sites gate on x86-64 with AVX2, so this is only instantiated there; the
@@ -253,71 +240,39 @@ pub fn Noise(comptime Float: type) type {
 
     return struct {
         const State = @This();
-        /// Seed used for all noise types.
-        ///
-        /// Default: `1337`
+        /// Seed used for all noise types. Default `1337`.
         seed: i32 = 1337,
-        /// The frequency for all noise types.
-        ///
-        /// Default: `0.01`
+        /// The frequency for all noise types. Default `0.01`.
         frequency: Float = 0.01,
-        /// The noise algorithm to be used.
-        ///
-        /// Default: `.simplex`
+        /// The noise algorithm to be used. Default `.simplex`.
         noise_type: NoiseType = .simplex,
-        /// Sets rotation type for 3D noise.
-        ///
-        /// Default: `.none`
+        /// Sets rotation type for 3D noise. Default `.none`.
         rotation_type: RotationType = .none,
-        /// The method used for combining octaves for all fractal noise types.
-        ///
-        /// Default: `.none`
+        /// The method used for combining octaves for all fractal noise types. Default `.none`.
         fractal_type: FractalType = .none,
-        /// The octave count for all fractal noise types.
-        ///
-        /// Default: `3`
+        /// The octave count for all fractal noise types. Default `3`.
         octaves: u32 = 3,
-        /// The octave lacunarity for all fractal noise types.
-        ///
-        /// Default: `2.0`
+        /// The octave lacunarity for all fractal noise types. Default `2.0`.
         lacunarity: Float = 2.0,
-        /// The octave gain for all fractal noise types.
-        ///
-        /// Default: `0.5`
+        /// The octave gain for all fractal noise types. Default `0.5`.
         gain: Float = 0.5,
-        /// The octave weighting for all non domain warp fractal types.
-        ///
-        /// Default: `0.0`
+        /// The octave weighting for all non domain warp fractal types. Default `0.0`.
         weighted_strength: Float = 0.0,
-        /// The strength of the fractal ping pong effect.
-        ///
-        /// Default: `2.0`
+        /// The strength of the fractal ping pong effect. Default `2.0`.
         ping_pong_strength: Float = 2.0,
-        /// The distance function used in cellular noise calculations.
-        ///
-        /// Default: `euclidean_sq`
+        /// The distance function used in cellular noise calculations. Default `euclidean_sq`.
         cellular_distance: CellularDistanceFunc = .euclidean_sq,
-        /// The cellular return type from cellular noise calculations.
-        ///
-        /// Default: `.distance`
+        /// The cellular return type from cellular noise calculations. Default `.distance`.
         cellular_return: CellularReturnType = .distance,
         /// The maximum distance a cellular point can move from its grid position.
-        /// Values above `1.0` cause artifacts.
-        ///
-        /// Default: `1.0`
+        /// Values above `1.0` cause artifacts. Default `1.0`.
         cellular_jitter_mod: Float = 1.0,
-        /// The warp algorithm when using domain warp.
-        ///
-        /// Default: `.simplex`
+        /// The warp algorithm when using domain warp. Default `.simplex`.
         domain_warp_type: DomainWarpType = .simplex,
-        /// The maximum warp distance from original position when using domain warp.
-        ///
-        /// Default: `1.0`
+        /// The maximum warp distance from original position when using domain warp. Default `1.0`.
         domain_warp_amp: Float = 1.0,
-        /// Flips the sign of every generated value, mapping the `-1.0` to `1.0`
-        /// range to `1.0` to `-1.0`.
-        ///
-        /// Default: `false`
+        /// Flips the sign of every generated value, mapping `-1.0..1.0` to `1.0..-1.0`.
+        /// Default `false`.
         invert: bool = false,
         const Dim = enum { d2, d3 };
         /// Lanes processed per SIMD chunk, tuned to the target's vector width.
@@ -487,7 +442,6 @@ pub fn Noise(comptime Float: type) type {
                 .basic_grid => singleDomainWarpBasicGrid3D(seed, amp, freq, x, y, z, xp, yp, zp),
             }
         }
-        // Utilities
 
         fn mapNoiseToRange(noise: Float, comptime T: type, min: T, max: T) T {
             @setFloatMode(.optimized);
@@ -516,6 +470,11 @@ pub fn Noise(comptime Float: type) type {
 
         inline fn floatFromInt(comptime T: type, value: anytype) T {
             return @floatFromInt(value);
+        }
+        fn iotaVec(comptime N: usize) @Vector(N, Float) {
+            var arr: [N]Float = undefined;
+            for (0..N) |i| arr[i] = @floatFromInt(i);
+            return arr;
         }
         inline fn lerp(a: anytype, b: @TypeOf(a), t: @TypeOf(a)) @TypeOf(a) {
             @setFloatMode(.optimized);
@@ -583,7 +542,6 @@ pub fn Noise(comptime Float: type) type {
             }
             return 1.0 / amp_fractal;
         }
-        // Grid Batching
 
         fn storeChunk(comptime N: usize, start: usize, out: []Float, result: @Vector(N, Float)) void {
             @setFloatMode(.optimized);
@@ -625,11 +583,7 @@ pub fn Noise(comptime Float: type) type {
             @setEvalBranchQuota(200_000);
             const FloatV = @Vector(N, Float);
             const frequency_v: FloatV = @splat(state.frequency);
-            const iota_v: FloatV = comptime blk: {
-                var arr: [N]Float = undefined;
-                for (0..N) |i| arr[i] = @floatFromInt(i);
-                break :blk arr;
-            };
+            const iota_v: FloatV = comptime iotaVec(N);
             const spacing_freq: Float = switch (source) {
                 .grid => |g| g.spacing * state.frequency,
                 .points => 0,
@@ -774,11 +728,7 @@ pub fn Noise(comptime Float: type) type {
                 .grid => |g| out.len / (g.width * g.depth),
                 .points => 0,
             };
-            const iota_v: FloatV = comptime blk: {
-                var arr: [N]Float = undefined;
-                for (0..N) |i| arr[i] = @floatFromInt(i);
-                break :blk arr;
-            };
+            const iota_v: FloatV = comptime iotaVec(N);
             const spacing_freq: Float = switch (source) {
                 .grid => |g| g.spacing * state.frequency,
                 .points => 0,
@@ -916,8 +866,6 @@ pub fn Noise(comptime Float: type) type {
                 storeChunk(N, start, out, result);
             }
         }
-
-        // Hashing
 
         inline fn hash3D(seed: i32, x_primed: i32, y_primed: i32, z_primed: i32) i32 {
             return (seed ^ x_primed ^ y_primed ^ z_primed) *% 0x27D4EB2D;
@@ -1129,8 +1077,6 @@ pub fn Noise(comptime Float: type) type {
                 .value => singleValue3D(N, seed, x, y, z),
             };
         }
-
-        // Single Noise
 
         // Primes the four cell corners and folds the seed/hash-multiplier into
         // each, returning the four final hashes in [00, 10, 01, 11] order.
@@ -1771,8 +1717,6 @@ pub fn Noise(comptime Float: type) type {
             return value * splat(FloatV, 1.0 / 0.0069091119803488254547119140625);
         }
 
-        // Cellular Noise
-
         inline fn cellularDelta2D(comptime N: usize, seed: i32, xi_primed: @Vector(N, i32), yi_primed: @Vector(N, i32), jitter: Float, vx_base: @Vector(N, Float), vy_base: @Vector(N, Float)) struct { vx: @Vector(N, Float), vy: @Vector(N, Float), hash: @Vector(N, i32) } {
             @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
@@ -2008,8 +1952,6 @@ pub fn Noise(comptime Float: type) type {
             return @max(splat(FloatV, -1.0), @min(splat(FloatV, 1.0), result));
         }
 
-        // Fractal
-
         // Maps one octave's raw noise to its contribution for the unweighted
         // even/odd chain. `fractal` is comptime, so the transform folds away.
         inline fn octaveNoise2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, xv: @Vector(N, Float), yv: @Vector(N, Float), strength: @Vector(N, Float)) @Vector(N, Float) {
@@ -2232,8 +2174,6 @@ pub fn Noise(comptime Float: type) type {
             return fractalWeighted3D(N, noise, fractal, state, seed, bounding, x, y, z);
         }
 
-        // Domain Warp Coordinate Transforms
-
         inline fn transformDomainWarpCoordinate2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
@@ -2276,7 +2216,6 @@ pub fn Noise(comptime Float: type) type {
                 },
             }
         }
-        // Domain Warp Single Wrapper
 
         fn domainWarpSingle2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
@@ -2295,7 +2234,6 @@ pub fn Noise(comptime Float: type) type {
             state.transformDomainWarpCoordinate3D(&xs, &ys, &zs);
             state.doSingleDomainWarp3D(state.seed, amp, state.frequency, xs, ys, zs, x, y, z);
         }
-        // Domain Warp Fractal
         // progressive and independent differ only in whether the simplex
         // rotation/transform runs inside the octave loop or once up front.
 
@@ -2345,7 +2283,6 @@ pub fn Noise(comptime Float: type) type {
                 octave_seed +%= 1;
             }
         }
-        // Domain Warp Basic Grid
 
         fn singleDomainWarpBasicGrid2DVec(comptime N: usize, seed: i32, warp_amp: Float, frequency: Float, x: @Vector(N, Float), y: @Vector(N, Float), xp: *@Vector(N, Float), yp: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
@@ -2462,7 +2399,6 @@ pub fn Noise(comptime Float: type) type {
             yp.* = @mulAdd(Float, warp_amp, @mulAdd(Float, zs, ly0z - ly0y, ly0y), yp.*);
             zp.* = @mulAdd(Float, warp_amp, @mulAdd(Float, zs, lz0z - lz0y, lz0y), zp.*);
         }
-        // Domain Warp Simplex/OpenSimplex2
 
         fn singleDomainWarpSimplexGradientVec(comptime N: usize, seed: i32, warp_amp: Float, frequency: Float, x: @Vector(N, Float), y: @Vector(N, Float), xr: *@Vector(N, Float), yr: *@Vector(N, Float)) void {
             @setFloatMode(.optimized);
@@ -2640,7 +2576,6 @@ pub fn Noise(comptime Float: type) type {
             yr.* += vy * warp_amp;
             zr.* += vz * warp_amp;
         }
-        // Domain Warp Batching
 
         inline fn warpVector2D(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
             switch (state.fractal_type) {

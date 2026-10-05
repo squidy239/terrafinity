@@ -426,13 +426,17 @@ const VoxelgameInstance = struct {
 };
 
 pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
+    return create_instance(opts, config) catch return null;
+}
+
+fn create_instance(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) !*VoxelgameInstance {
     var params: Generator.Params = .default;
-    generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs) catch return null;
+    try generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs);
     if (params.seed == null) params.setSeeds(opts.io);
-    const instance = opts.allocator.create(VoxelgameInstance) catch return null;
+    const instance = try opts.allocator.create(VoxelgameInstance);
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
-        .generator = Generator.init(opts.allocator, opts.max_cache_bytes, params) catch return null,
+        .generator = try Generator.init(opts.allocator, opts.max_cache_bytes, params),
         .source = undefined,
     };
     instance.source = .{

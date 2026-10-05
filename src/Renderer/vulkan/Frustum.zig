@@ -27,6 +27,7 @@ pub const Frustum = struct {
         return .{ .planes = planes };
     }
 
+    /// Will be used later; keep — do not delete as dead code.
     pub fn boxInFrustum(self: *const Frustum, b_min: @Vector(3, f32), b_max: @Vector(3, f32)) bool {
         for (self.planes) |plane| {
             const normal = @Vector(3, f32){ plane[0], plane[1], plane[2] };

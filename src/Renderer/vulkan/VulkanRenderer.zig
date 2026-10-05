@@ -76,6 +76,10 @@ msaa_depth: core.RenderTarget = .{},
 msaa_samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
 msaa_sample_count: u32 = 1,
 depth_resolve_mode: vk.ResolveModeFlags = .{},
+/// True when the MSAA depth resolve is conservative for the Hi-Z MIN-reduce (min mode,
+/// or no MSAA at all). Average/sample-zero resolves can sit nearer than the closest
+/// sample, so the pyramid would cull visible silhouettes.
+depth_resolve_conservative: bool = false,
 depth_format: vk.Format = .undefined,
 
 camera: core.Camera = .{},
@@ -188,7 +192,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         };
 
         self.dev.resetCommandPool(self.vk_ctx.upload_command_pool, .{}) catch |err| std.log.err("upload command pool reset failed during deinit: {}", .{err});
-        resetPoolQuiet(self.dev, self.vk_ctx.command_pool, .{ .release_resources_bit = true });
+        self.dev.resetCommandPool(self.vk_ctx.command_pool, .{ .release_resources_bit = true }) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
         // The UI command pool is owned by main and may be mid-recording when
         // deinit runs from a failed openGame inside the UI record path;
         // resetting it yanks the buffer under the recorder and the next
@@ -205,10 +209,6 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
     self.destroyRendererSwapchainResources();
     self.oit.deinit();
     self.memory.deinit();
-}
-
-fn resetPoolQuiet(dev: DeviceProxy, pool: vk.CommandPool, flags: vk.CommandPoolResetFlags) void {
-    dev.resetCommandPool(pool, flags) catch |err| std.log.err("command pool reset failed during deinit: {}", .{err});
 }
 
 fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
@@ -275,11 +275,14 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, a
         self.msaa_color = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment_bit = true }, .{ .color_bit = true }, self.msaa_samples);
         self.msaa_depth = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment_bit = true }, self.depthAspectMask(), self.msaa_samples);
         self.depth_resolve_mode = self.getDepthResolveMode();
+        self.depth_resolve_conservative = self.depth_resolve_mode.min_bit;
         std.log.info("VulkanRenderer: MSAA enabled {d}x (samples={any}) depth_resolve={any}", .{ resolved, self.msaa_samples, self.depth_resolve_mode });
     } else {
         self.msaa_color = .{};
         self.msaa_depth = .{};
         self.depth_resolve_mode = .{};
+        // Single-sample depth is the exact nearest sample: no resolve, so conservative.
+        self.depth_resolve_conservative = true;
         std.log.info("VulkanRenderer: MSAA disabled", .{});
     }
 
@@ -340,7 +343,13 @@ fn getDepthResolveMode(self: *const VulkanRenderer) vk.ResolveModeFlags {
     };
     props2.p_next = @ptrCast(&depth_resolve_props);
     self.vk_ctx.instance.getPhysicalDeviceProperties2(self.vk_ctx.pdev, &props2);
-    if (depth_resolve_props.supported_depth_resolve_modes.average_bit) {
+    const modes = depth_resolve_props.supported_depth_resolve_modes;
+    // The Hi-Z pyramid MIN-reduces the depth, so only a min resolve is conservative.
+    // Average/sample-zero can be nearer than the closest sample; the caller gates
+    // occlusion culling off in that case rather than culling visible silhouettes.
+    if (modes.min_bit) {
+        return .{ .min_bit = true };
+    } else if (modes.average_bit) {
         return .{ .average_bit = true };
     } else {
         return .{ .sample_zero_bit = true };
@@ -446,13 +455,12 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
         .shadow = &self.shadow,
-        .msaa_color_image = msaa_color_image,
         .msaa_color_view = msaa_color_view,
         .color_resolve_view = color_resolve_view,
-        .msaa_depth_image = msaa_depth_image,
         .msaa_depth_view = msaa_depth_view,
         .depth_resolve_view = depth_resolve_view,
         .depth_resolve_mode = self.depth_resolve_mode,
+        .depth_resolve_conservative = self.depth_resolve_conservative,
         .msaa_sample_count = self.msaa_sample_count,
     };
     self.sky.uploadParams(current_frame, &frame_sky.params);

@@ -712,6 +712,14 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
             .height = std.math.clamp(self.swapchain_extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
         };
 
+    // A 0x0 surface extent means the window is minimized; keep the existing swapchain
+    // instead of treating it as a failed recreate (which would spin the retry loop).
+    // On first creation there is none to keep, so fall through and fail loudly.
+    if (self.swapchain != .null_handle and (actual_extent.width == 0 or actual_extent.height == 0)) {
+        std.log.info("Swapchain: surface reports a 0x0 extent (window minimized), keeping existing swapchain", .{});
+        return;
+    }
+
     const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
     defer self.allocator.free(surface_formats);
 
@@ -930,6 +938,9 @@ pub fn requestSwapchainRecreate(self: *VulkanContext) void {
 }
 
 pub fn setExtentFromWindow(self: *VulkanContext, size: wio.Size) void {
+    // xdg-shell reports a 0x0 content size while the window is minimized; keep the last
+    // valid extent so rendering keeps working until the window is shown again.
+    if (size.width == 0 or size.height == 0) return;
     self.swapchain_extent = .{ .width = @as(u32, @intCast(size.width)), .height = @as(u32, @intCast(size.height)) };
     self.requestSwapchainRecreate();
 }
@@ -1073,6 +1084,7 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         .p_results = null,
     };
     const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
+    defer self.current_frame_idx.store(next_frame, .monotonic);
     const present_result = blk: {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "present_lock_queue" });
         self.queue_mutex.lockUncancelable(io);
@@ -1084,13 +1096,9 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         break :blk self.dev.queuePresentKHR(self.present_queue, &present_info) catch |err| switch (err) {
             error.OutOfDateKHR => {
                 self.swapchain_needs_recreate.store(true, .monotonic);
-                self.current_frame_idx.store(next_frame, .monotonic);
                 return error.OutOfDate;
             },
-            error.SurfaceLostKHR => {
-                self.current_frame_idx.store(next_frame, .monotonic);
-                return error.SurfaceLost;
-            },
+            error.SurfaceLostKHR => return error.SurfaceLost,
             else => return err,
         };
     };
@@ -1100,7 +1108,6 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         {
             self.swapchain_needs_recreate.store(true, .release);
         }
-        self.current_frame_idx.store(next_frame, .monotonic);
     }
 }
 

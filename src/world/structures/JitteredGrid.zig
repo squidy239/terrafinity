@@ -17,16 +17,18 @@ pub fn JitteredGrid(comptime n: usize, comptime T: type) type {
         inner_box_size: @Int(.unsigned, @bitSizeOf(T) - 1) = 128,
 
         pub fn getStructure(self: *const Self, position: Vector, level: std.math.Log2Int(T)) ?Vector {
-            std.debug.assert(self.box_size > 0);
-            std.debug.assert(self.inner_box_size > 0 and self.inner_box_size <= self.box_size);
+            // Mis-set placers would divide by zero or overshoot the cell; degrade instead.
+            var grid = self.*;
+            grid.box_size = @max(grid.box_size, 1);
+            grid.inner_box_size = @min(@max(grid.inner_box_size, 1), grid.box_size);
             const scale: T = @as(T, 1) << @intCast(level);
             std.debug.assert(scale > 0);
 
             const scale_vec: Vector = @splat(scale);
-            const box_size_vec: Vector = @splat(self.box_size);
+            const box_size_vec: Vector = @splat(grid.box_size);
             const real_position = scale_vec * position;
             const box_position = @divFloor(real_position, box_size_vec);
-            const structure_pos = self.findStructureInBox(box_position);
+            const structure_pos = grid.findStructureInBox(box_position);
             const pos_in_box = @mod(real_position, box_size_vec); // [0, box_size) for positive divisor
 
             const in_range = @reduce(.And, structure_pos >= pos_in_box) and

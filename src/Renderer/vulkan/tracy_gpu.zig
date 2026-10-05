@@ -4,10 +4,11 @@ const vk = @import("vulkan");
 
 const DeviceProxy = vk.DeviceProxy;
 
-const max_frames_in_flight: u32 = 2;
+const VulkanContext = @import("../../VulkanContext.zig");
+
 const queries_per_frame: u32 = 2048;
 const bootstrap_query: u32 = 0;
-const query_pool_count: u32 = bootstrap_query + max_frames_in_flight * queries_per_frame;
+const query_pool_count: u32 = bootstrap_query + VulkanContext.max_frames_in_flight * queries_per_frame;
 
 const timestamp_stage: vk.PipelineStageFlags2 = .{ .all_commands_bit = true };
 
@@ -23,7 +24,7 @@ pub const GpuProfiler = struct {
     query_pool: vk.QueryPool = .null_handle,
     vkalloc: *const vk.AllocationCallbacks = undefined,
     queue: tracy.GpuQueue = undefined,
-    frames: [max_frames_in_flight]FrameState = .{ .{}, .{} },
+    frames: [VulkanContext.max_frames_in_flight]FrameState = @splat(.{}),
     enabled: bool = false,
 
     pub fn init(
@@ -70,7 +71,7 @@ pub const GpuProfiler = struct {
     /// for the command buffer that will be recorded into that slot.
     pub fn prepareFrame(self: *GpuProfiler, frame_index: u32) void {
         if (!self.enabled) return;
-        std.debug.assert(frame_index < max_frames_in_flight);
+        std.debug.assert(frame_index < VulkanContext.max_frames_in_flight);
 
         const state = &self.frames[frame_index];
         if (state.submitted and state.query_count > 0) self.resolveFrame(frame_index, state.query_count);
@@ -82,14 +83,14 @@ pub const GpuProfiler = struct {
     /// reset is not enabled by the device, so every reused range is reset on the GPU.
     pub fn resetFrame(self: *GpuProfiler, cmd_buffer: vk.CommandBuffer, frame_index: u32) void {
         if (!self.enabled) return;
-        std.debug.assert(frame_index < max_frames_in_flight);
+        std.debug.assert(frame_index < VulkanContext.max_frames_in_flight);
         self.dev.cmdResetQueryPool(cmd_buffer, self.query_pool, queryOffset(frame_index), queries_per_frame);
     }
 
     /// Commits the query records for a frame only after its graphics submission succeeds.
     pub fn markSubmitted(self: *GpuProfiler, frame_index: u32) void {
         if (!self.enabled) return;
-        std.debug.assert(frame_index < max_frames_in_flight);
+        std.debug.assert(frame_index < VulkanContext.max_frames_in_flight);
         self.frames[frame_index].submitted = self.frames[frame_index].query_count > 0;
     }
 
@@ -100,7 +101,7 @@ pub const GpuProfiler = struct {
         comptime location_options: tracy.SourceLocation.InitOptions,
     ) Zone {
         if (!self.enabled) return .{};
-        std.debug.assert(frame_index < max_frames_in_flight);
+        std.debug.assert(frame_index < VulkanContext.max_frames_in_flight);
 
         const state = &self.frames[frame_index];
         std.debug.assert(state.query_count + 2 <= queries_per_frame);

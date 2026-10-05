@@ -158,6 +158,7 @@ pub fn main(init: std.process.Init) !void {
     const start_time: std.Io.Timestamp = .now(io, .awake);
     var frame_time: std.Io.Timestamp = start_time;
     var action_set = Key.ActionSet.empty;
+    var single_press_latch = Key.ActionSet.empty;
     var prev_window_size = window_size;
     var current_window_mode: wio.WindowMode = .maximized;
     var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
@@ -180,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, single_press, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
+        try handleEvents(io, &keymap, single_press, &single_press_latch, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
         if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
@@ -285,11 +286,19 @@ pub fn main(init: std.process.Init) !void {
                 .p_semaphores = (&vk_ctx.graphics_timeline_semaphore)[0..1],
                 .p_values = (&current_frame_val)[0..1],
             };
-            _ = vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch |err| {
-                std.log.err("Failed to wait for screenshot frame: {any}", .{err});
+            // The save reads the host-coherent staging buffer, so the frame's GPU work must
+            // finish first; a failed wait leaves undefined contents that must not be written.
+            const frame_ready = blk: {
+                _ = vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch |err| {
+                    std.log.err("Failed to wait for screenshot frame: {any}", .{err});
+                    break :blk false;
+                };
+                break :blk true;
             };
 
-            if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
+            if (!frame_ready) {
+                vk_ctx.screenshot_pending_save = false;
+            } else if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
                 std.log.info("Screenshot saved: {s}", .{saved_path});
                 if (screenshot_after_should_exit and !screenshot_after_saved) {
                     screenshot_after_saved = true;
@@ -458,6 +467,7 @@ fn handleEvents(
     io: std.Io,
     key_map: *Key.Map,
     single_press: Key.Singlepress,
+    latch: *Key.ActionSet,
     action_set: *Key.ActionSet,
     running: *std.atomic.Value(bool),
     backend: *dvui.backend,
@@ -475,19 +485,18 @@ fn handleEvents(
         backend.setCursor(ui_window.cursorRequested());
     }
 
-    var it = action_set.iterator();
-    while (it.next()) |action| {
-        if (single_press.contains(action)) action_set.remove(action);
-    }
+    // Latch single-press actions one frame so a same-batch release cannot cancel them.
+    action_set.* = action_set.differenceWith(single_press).unionWith(latch.*);
+    latch.* = .empty;
 
     while (events.pop()) |event| {
         _ = try backend.addEvent(ui_window, event);
         switch (event) {
             .button_press => |key| if (key_map.getAction(.{ .key = key })) |action| {
-                action_set.insert(action);
+                if (single_press.contains(action)) latch.insert(action) else action_set.insert(action);
             },
             .button_release => |key| if (key_map.getAction(.{ .key = key })) |action| {
-                action_set.remove(action);
+                if (!single_press.contains(action)) action_set.remove(action);
             },
             .close => running.store(false, .unordered),
             .scroll_vertical => |scroll| if (ui.menu_state.is_playing_game()) {

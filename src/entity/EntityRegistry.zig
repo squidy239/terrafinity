@@ -133,8 +133,7 @@ pub fn spawn(
     var random_uuid: Handle = undefined;
     io.random(std.mem.asBytes(&random_uuid));
 
-    const Impl = @TypeOf(entity);
-    const impl = try allocator.create(Impl);
+    const impl = try allocator.create(@TypeOf(entity));
     errdefer allocator.destroy(impl);
     impl.* = entity;
 
@@ -149,7 +148,6 @@ pub fn spawn(
     errdefer self.freeSlotLocked(slot);
 
     const result = try self.insert(io, .{
-        .type = Impl.Type,
         .uuid = random_uuid,
         .ptr = @ptrCast(impl),
         .ref_count = .init(2),
@@ -212,9 +210,7 @@ fn unloadEntity(io: std.Io, allocator: std.mem.Allocator, world: *World, entity:
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    const save = !entity.deleted.load(.seq_cst);
-    entity.vtable.unload(entity.ptr, io, world, entity.uuid, allocator, save) catch |err|
-        std.log.err("error unloading entity: {any}", .{err});
+    entity.vtable.unload(entity.ptr, io, world, entity.uuid, allocator);
 }
 
 /// Returns the entity with an added caller-owned reference, or null on miss.
@@ -253,11 +249,8 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: Handle) DeleteResult {
         return .marked;
     }
     // Only postpone an already-later deadline; soon-due timers keep their deadline.
-    const stale = switch (node.bucket) {
-        .parked => true,
-        else => node.deadline_ns > retry_deadline,
-    };
-    if (stale) self.linkLocked(entity.timer_slot, uuid, retry_deadline, self.drain_seq -| 1, now);
+    if (node.bucket == .parked or node.deadline_ns > retry_deadline)
+        self.linkLocked(entity.timer_slot, uuid, retry_deadline, self.drain_seq -| 1, now);
     return .marked;
 }
 
@@ -323,7 +316,10 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    const seq = self.beginDrain(io);
+    self.scheduler_mutex.lockUncancelable(io);
+    self.drain_seq += 1;
+    const seq = self.drain_seq;
+    self.scheduler_mutex.unlock(io);
     const ctx: DrainCtx = .{
         .io = io,
         .allocator = allocator,
@@ -332,8 +328,7 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
         .seq = seq,
     };
 
-    var splices: u32 = 0;
-    while (splices < drain_splices_max) : (splices += 1) {
+    for (0..drain_splices_max) |splices| {
         try io.checkCancel();
         var batch: [drain_batch]Due = undefined;
         const batch_len = try self.spliceDue(ctx, &batch, splices == 0);
@@ -347,13 +342,6 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
             };
         }
     }
-}
-
-fn beginDrain(self: *@This(), io: std.Io) u64 {
-    self.scheduler_mutex.lockUncancelable(io);
-    defer self.scheduler_mutex.unlock(io);
-    self.drain_seq += 1;
-    return self.drain_seq;
 }
 
 /// Cascades overflow into the wheel, then detaches due timers older than this drain.
@@ -592,7 +580,8 @@ fn pushFrontLocked(self: *@This(), head: *u32, slot: u32) void {
 }
 
 /// Unloads every entity. Callers must stop all registry activity first: no live
-/// references, no running drains, no concurrent spawn/schedule/markDeleted.
+/// references, no running drains, no concurrent spawn/schedule/markDeleted, so
+/// the scheduler lock is not taken here.
 pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -601,30 +590,17 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
     // No drain runs here, so no slot is ever in flight.
     for (self.timers.items, 0..) |_, i| {
         const idx: u32 = @intCast(i);
-        self.scheduler_mutex.lockUncancelable(io);
-        if (!self.timers.items[idx].used) {
-            self.scheduler_mutex.unlock(io);
-            continue;
-        }
+        if (!self.timers.items[idx].used) continue;
         const uuid = self.timers.items[idx].uuid;
-        self.scheduler_mutex.unlock(io);
 
         const entity = self.getAndAddRef(io, uuid) orelse {
-            self.scheduler_mutex.lockUncancelable(io);
-            defer self.scheduler_mutex.unlock(io);
-            const node = &self.timers.items[idx];
-            std.debug.assert(!node.in_flight);
-            if (node.used and node.uuid == uuid) self.freeSlotLocked(idx);
+            self.freeSlotIfMatches(idx, uuid);
             continue;
         };
         if (entity.ref_count.load(.seq_cst) != 2)
             std.debug.panic("entity {d} still referenced during shutdown", .{uuid});
         if (self.map.remove(io, uuid)) |removed| {
-            self.scheduler_mutex.lockUncancelable(io);
-            const node = &self.timers.items[idx];
-            std.debug.assert(!node.in_flight);
-            if (node.used and node.uuid == uuid) self.freeSlotLocked(idx);
-            self.scheduler_mutex.unlock(io);
+            self.freeSlotIfMatches(idx, uuid);
             unloadEntity(io, allocator, world, removed);
         } else {
             entity.release();
@@ -638,6 +614,13 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
     std.log.info("entities unloaded", .{});
 }
 
+/// Frees a timer slot when the uuid still owns it.
+fn freeSlotIfMatches(self: *@This(), idx: u32, uuid: Handle) void {
+    const node = &self.timers.items[idx];
+    std.debug.assert(!node.in_flight);
+    if (node.used and node.uuid == uuid) self.freeSlotLocked(idx);
+}
+
 const testing = std.testing;
 
 const test_world: *World = undefined;
@@ -645,8 +628,6 @@ const test_world: *World = undefined;
 var test_unloaded: std.atomic.Value(u32) = .init(0);
 
 const TestEntity = struct {
-    pub const Type = Entity.Type.Player;
-
     unloaded: *std.atomic.Value(u32),
     updates: ?*std.atomic.Value(u32) = null,
     del: bool = false,
@@ -658,11 +639,10 @@ const TestEntity = struct {
         return .{ .unload = unloadFn, .update = updateFn };
     }
 
-    fn unloadFn(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    fn unloadFn(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator) void {
         _ = io;
         _ = world;
         _ = uuid;
-        _ = save;
         const self: *@This() = @ptrCast(@alignCast(ptr));
         _ = self.unloaded.fetchAdd(1, .seq_cst);
         allocator.destroy(self);

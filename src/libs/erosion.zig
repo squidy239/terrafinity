@@ -66,7 +66,7 @@ const unit_ramp: f32 = 1.0;
 /// Floor for the config-controlled `detail` exponent; keeps the hoisted
 /// reciprocal finite in release builds where the debug assert is compiled
 /// out.
-const min_detail: f32 = 1e-6;
+pub const min_detail: f32 = 1e-6;
 /// Gradient magnitude below which the seeded direction is float noise; the
 /// seed blends toward the assumed-slope direction there so flats stay
 /// deterministic across build modes.
@@ -84,8 +84,7 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
     else
         1.0;
     // Keep `detail` positive: zero latches the mask open, and a negative
-    // value inverts the crush. Assert in debug; clamp in release.
-    if (params.detail <= 0) std.log.warn("erosion: detail {d} <= 0; clamping to {d}", .{ params.detail, min_detail });
+    // value inverts the crush. The caller warns; this per-sample path clamps.
     std.debug.assert(params.detail > 0);
     const inv_detail: f32 = 1.0 / @max(params.detail, min_detail);
     var octave: Octave = .{ .strength = params.filter_strength };

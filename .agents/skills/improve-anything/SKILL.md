@@ -48,6 +48,10 @@ Read all of `ideas.md`, merge duplicates, delete what is done or no longer appli
 
 Diff recent commits against their parents for added lines and complexity (nesting, helpers, config surface). For each regression: delete or narrow it, keeping behavior identical; final net line count must be neutral or negative — bank deletions first if fixes add lines. Verify with `zig fmt .`, `zig build`, and scoped tests.
 
+## Fanout Dispatch
+
+When dispatched as one of several parallel workers under an orchestrator, the dispatch's scope and gates override this skill's own: edit only the assigned files, run no build/formatter/test (the orchestrator runs one gate across the union at phase end), and leave shared ledgers (`AGENTS.md`, `issues.md`) to the orchestrator — report the files you touched instead. See the `fanout-orchestrate` skill for the ownership and verification rules; this never relaxes one-mode-per-run.
+
 ## Rules
 
 - One mode per run. State the chosen mode and why in one sentence at the start.

@@ -320,6 +320,18 @@ pub const Gravity = struct {
     }
 };
 
+/// Installs a single chunk source on a testing world; the other slots stay empty.
+fn setTestSource(world: *World, get_blocks: anytype) void {
+    world.chunk_sources = .{ .{
+        .data = undefined,
+        .getBlocks = get_blocks,
+        .placeStructures = null,
+        .save = null,
+        .getTerrainHeight = null,
+        .deinit = null,
+    }, null, null, null };
+}
+
 test "Mover box is centered on the position" {
     const box = Mover.boxFor(2, 6);
     try std.testing.expectEqual(@as(f64, -1), box.min.data[0]);
@@ -433,14 +445,7 @@ test "Mover lands on a flat floor and reports support" {
             return .{ .from_disk = false, .structures = false };
         }
     };
-    world.chunk_sources = .{ .{
-        .data = undefined,
-        .getBlocks = FlatSource.getBlocks,
-        .placeStructures = null,
-        .save = null,
-        .getTerrainHeight = null,
-        .deinit = null,
-    }, null, null, null };
+    setTestSource(&world, FlatSource.getBlocks);
 
     const physics_interface = Interface(struct { mover: Mover });
     var physics_object = physics_interface{
@@ -526,14 +531,7 @@ test "Mover steps up a one-block rise" {
             return .{ .from_disk = false, .structures = false };
         }
     };
-    world.chunk_sources = .{ .{
-        .data = undefined,
-        .getBlocks = StepSource.getBlocks,
-        .placeStructures = null,
-        .save = null,
-        .getTerrainHeight = null,
-        .deinit = null,
-    }, null, null, null };
+    setTestSource(&world, StepSource.getBlocks);
 
     const physics_interface = Interface(struct { mover: Mover });
     var physics_object = physics_interface{
@@ -590,14 +588,7 @@ test "Mover medium measures fluid and leaf overlap" {
             return .{ .from_disk = false, .structures = false };
         }
     };
-    world.chunk_sources = .{ .{
-        .data = undefined,
-        .getBlocks = MixedSource.getBlocks,
-        .placeStructures = null,
-        .save = null,
-        .getTerrainHeight = null,
-        .deinit = null,
-    }, null, null, null };
+    setTestSource(&world, MixedSource.getBlocks);
 
     const mover: Mover = .{
         .collisions = .init(true),

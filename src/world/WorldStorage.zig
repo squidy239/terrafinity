@@ -61,7 +61,7 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode
             .compression = .zstd,
             .block_size = @sizeOf([ChunkSize][ChunkSize][ChunkSize]Block),
         } },
-        .{ .name = "default", .options = .{} }, // RocksDB requires a default column.
+        .{ .name = "default" }, // RocksDB requires a default column.
     };
     storage.database, const columns = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
     storage.chunkdata_column = columns[0];
@@ -160,7 +160,6 @@ pub fn saveChunk(self: *@This(), io: std.Io, chunk: *Chunk, chunk_pos: World.Chu
             try self.database.write(write, &err_str);
         },
     }
-    chunk.saved.store(true, .unordered);
 }
 
 pub fn getBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {

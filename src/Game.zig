@@ -70,6 +70,8 @@ deferred_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(
 options: *Options,
 options_lock: *std.Io.RwLock,
 running: std.atomic.Value(bool),
+/// True when `handleButtonActions` ran this frame; otherwise the frame zeroes stale movement.
+input_handled: bool = false,
 
 last_frametime: std.Io.Timestamp,
 
@@ -83,8 +85,6 @@ debug_menu: struct {
     frustum_culled: std.atomic.Value(u32) = .init(0),
     opaque_faces: std.atomic.Value(u64) = .init(0),
     transparent_faces: std.atomic.Value(u64) = .init(0),
-    shadow_faces: std.atomic.Value(u64) = .init(0),
-    shadow_cascade: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
 } = .{},
 
 const NodeData = struct {
@@ -176,16 +176,11 @@ fn markSubtree(
         bubble_up = was_covering != is_covering;
     }
 
-    if (bubble_up) {
-        try self.markSubtree(io, allocator, parent, covered, highest);
-    }
+    if (bubble_up) try self.markSubtree(io, allocator, parent, covered, highest);
 }
 
 fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: World.ChunkPos) bool {
-    if (chunk_pos.level < 0) {
-        if (!view.keepChunkLoaded(chunk_pos)) return true;
-        return false;
-    }
+    if (chunk_pos.level < 0) return !view.keepChunkLoaded(chunk_pos);
     var parent = chunk_pos;
     if (parent.level > view.highest_level) return true;
     while (parent.level < view.highest_level) {
@@ -256,9 +251,17 @@ fn tryRemoveChunkFromLoaded(
             try bucket.hash_map.put(allocator, chunk_pos, state);
         }
     }
-    if (was_covering and !is_covering) {
-        try self.markSubtree(io, allocator, chunk_pos, false, view.highest_level);
-    }
+    if (was_covering and !is_covering) try self.markSubtree(io, allocator, chunk_pos, false, view.highest_level);
+}
+
+/// Removes a chunk's mesh and loaded entry once it falls outside the keep gate.
+/// Returns whether the chunk was actually unloaded.
+fn removeChunkIfUnloadable(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos, view: ViewSnapshot) !bool {
+    if (view.keepChunkLoaded(chunk_pos)) return false;
+    if (!self.canUnloadMeshView(io, view, chunk_pos)) return false;
+    try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos, view);
+    try self.renderer.removeChunk(io, chunk_pos);
+    return true;
 }
 
 pub const Options = struct {
@@ -305,30 +308,11 @@ pub const Options = struct {
     render_options: Renderer.RenderOptions = .{},
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{
-        .highest_level = .{ .number = .{
-            .display = .read_write,
-            .min = 1,
-            .max = 24,
-            .widget_type = .slider,
-        } },
-        .lowest_level = .{ .number = .{
-            .display = .none,
-        } },
-        .render_distance_x = .{ .number = .{
-            .min = 6,
-            .max = 32,
-            .widget_type = .slider,
-        } },
-        .mouse_sensitivity = .{ .number = .{
-            .min = 0,
-            .max = 5,
-            .widget_type = .slider,
-        } },
-        .render_distance_y = .{ .number = .{
-            .min = 6,
-            .max = 32,
-            .widget_type = .slider,
-        } },
+        .highest_level = .{ .number = .{ .display = .read_write, .min = 1, .max = 24, .widget_type = .slider } },
+        .lowest_level = .{ .number = .{ .display = .none } },
+        .render_distance_x = .{ .number = .{ .min = 6, .max = 32, .widget_type = .slider } },
+        .mouse_sensitivity = .{ .number = .{ .min = 0, .max = 5, .widget_type = .slider } },
+        .render_distance_y = .{ .number = .{ .min = 6, .max = 32, .widget_type = .slider } },
     }, null);
 };
 
@@ -415,9 +399,7 @@ pub const WorldOptions = struct {
     }
 };
 
-const GeneratorSelection = struct {
-    generator: []const u8 = "Terrain",
-};
+const GeneratorSelection = struct { generator: []const u8 = "Terrain" };
 
 pub fn init(
     game: *@This(),
@@ -477,11 +459,7 @@ pub fn init(
 
     generator_plugin.api.config_set_seeds(&io, generator_config);
 
-    const create_opts: generator_api.CreateOptions = .{
-        .allocator = allocator,
-        .io = io,
-        .max_cache_bytes = game.options.terrain_height_cache_bytes,
-    };
+    const create_opts: generator_api.CreateOptions = .{ .allocator = allocator, .io = io, .max_cache_bytes = game.options.terrain_height_cache_bytes };
     const generator_instance = generator_plugin.api.create(&create_opts, generator_config) orelse return error.OutOfMemory;
     const generator_source = generator_plugin.api.get_source(generator_instance).*;
 
@@ -553,12 +531,7 @@ fn spawnRequiredAir(height: f32) u32 {
     return @max(1, @as(u32, @intFromFloat(@ceil(@max(height, 1.0)))));
 }
 
-const SpawnResolution = union(enum) {
-    ok: @Vector(3, f64),
-    ocean,
-    no_ground,
-    blocked,
-};
+const SpawnResolution = union(enum) { ok: @Vector(3, f64), ocean, no_ground, blocked };
 
 /// Resolves one generator-proposed column to feet. The hint Y ignores erosion and structures, so scan down for solid ground with clear air above it.
 fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, x: f64, z: f64, y_hint: f64) !SpawnResolution {
@@ -644,12 +617,7 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
         try world_options.save(io, folder);
         return pos;
     }
-    std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{
-        spawn_rounds,
-        game.spawn.center[0],
-        game.spawn.center[1],
-        game.spawn.center[2],
-    });
+    std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{ spawn_rounds, game.spawn.center[0], game.spawn.center[1], game.spawn.center[2] });
     return error.GeneratorSpawnFailed;
 }
 
@@ -691,9 +659,7 @@ pub fn recreateWorld(
     const game_options = self.options;
     const options_lock = self.options_lock;
     const player_pos = self.getPlayerPos(io);
-    self.player.view_direction_mutex.lockUncancelable(io);
-    const view_direction = self.player.view_direction;
-    self.player.view_direction_mutex.unlock(io);
+    const view_direction = self.getViewDirection(io);
     const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
     defer allocator.free(world_path);
 
@@ -755,6 +721,15 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     try startEntityDrain(self, io, allocator);
     // Apply any tuning edits before the body integrates this frame.
     self.syncPlayerTuning(io);
+    // A menu gates gameplay input off, so no movement step replaced the velocity
+    // this frame; zero the stale drift (Survival keeps Y so gravity still pulls).
+    if (!self.input_handled) {
+        const physics = &self.player.physics;
+        physics.mutex.lockUncancelable(io);
+        physics.velocity = if (self.player.game_mode.load(.unordered) == .Survival) @Vector(3, f64){ 0, physics.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
+        physics.mutex.unlock(io);
+    }
+    self.input_handled = false;
     // The player is updated synchronously every frame so the camera never waits
     // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
@@ -770,8 +745,6 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     self.debug_menu.frustum_culled.store(self.vulkan_renderer.frame_stats.frustum_culled, .unordered);
     self.debug_menu.opaque_faces.store(self.vulkan_renderer.frame_stats.opaque_faces, .unordered);
     self.debug_menu.transparent_faces.store(self.vulkan_renderer.frame_stats.transparent_faces, .unordered);
-    self.debug_menu.shadow_faces.store(self.vulkan_renderer.frame_stats.shadow_faces, .unordered);
-    self.debug_menu.shadow_cascade.store(if (self.vulkan_renderer.frame_stats.shadow_cascade) |c| c else std.math.maxInt(u32), .unordered);
 
     try self.handleErrors();
 }
@@ -822,10 +795,7 @@ fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 
     defer self.entity_update_is_running.store(false, .seq_cst);
     // Cancellation is teardown, not a fault; every other update error is fatal.
-    self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io)) catch |err| switch (err) {
-        error.Canceled => {},
-        else => return err,
-    };
+    self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io)) catch |err| if (err != error.Canceled) return err;
 }
 
 /// Starts the drain when the previous pass finished, mirroring restartFuture
@@ -844,10 +814,7 @@ fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
 /// Runs the player on the frame thread, outside the wheel.
 fn updatePlayer(self: *@This(), io: std.Io, allocator: std.mem.Allocator, now_ns: u64) !void {
     // Cancellation is teardown, not a fault; every other update error is fatal.
-    self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, now_ns) catch |err| switch (err) {
-        error.Canceled => {},
-        else => return err,
-    };
+    self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, now_ns) catch |err| if (err != error.Canceled) return err;
 }
 
 fn handleErrors(self: *@This()) !void {
@@ -910,6 +877,7 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
 pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
     defer z.end();
+    self.input_handled = true;
     switch (self.player.game_mode.load(.unordered)) {
         .Creative, .Spectator => try self.flyMove(io, actions),
         .Survival => try self.walkMove(io, actions),
@@ -1231,10 +1199,7 @@ fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
     return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
 }
 
-const Levels = struct {
-    lowest: i32,
-    highest: i32,
-};
+const Levels = struct { lowest: i32, highest: i32 };
 
 fn getLevels(self: *@This(), io: std.Io) Levels {
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "getLevels" });
@@ -1311,11 +1276,7 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
     defer self.clearQueuedFlag(io, chunk_pos);
     // Queued tasks capture a stale segment snapshot, so re-snapshot the keep gate here. The passed view remains only the coverage cutoff.
     const gate_view = self.snapshotView(io);
-    if (!gate_view.keepChunkLoaded(chunk_pos) and self.canUnloadMeshView(io, gate_view, chunk_pos)) {
-        try self.renderer.removeChunk(io, chunk_pos);
-        try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos, gate_view);
-        return;
-    }
+    if (try self.removeChunkIfUnloadable(io, chunk_pos, gate_view)) return;
 
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
@@ -1385,7 +1346,16 @@ fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocato
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    game.addChunkToRender(io, allocator, chunk_pos, false, game.snapshotView(io)) catch return error.OnEditFailed;
+    // A transient remesh failure leaves the edited chunk active but unmessed until the
+    // next edit; log it and continue. A storage-level Unrecoverable still aborts.
+    game.addChunkToRender(io, allocator, chunk_pos, false, game.snapshotView(io)) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Unrecoverable => {
+            std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, err });
+            return error.OnEditFailed;
+        },
+        else => |e| std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, e }),
+    };
 }
 
 fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
@@ -1467,22 +1437,19 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
             first_segment = false;
         } else {
             const fresh = game.snapshotView(io);
+            view = fresh;
+            player_pos = fresh.player_pos;
+            outer_radius = fresh.render_distance;
+            inner_radius = fresh.innerGenRadius(level);
+
             const fresh_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(fresh.player_pos), level);
             if (!std.meta.eql(player_chunk_pos, fresh_chunk_pos)) {
-                view = fresh;
-                player_pos = fresh.player_pos;
                 player_chunk_pos = fresh_chunk_pos;
-                outer_radius = fresh.render_distance;
-                inner_radius = fresh.innerGenRadius(level);
                 segment_index = 0;
                 spiral_pos = .{ 0, 0 };
                 amount_tested = 0;
                 continue;
             }
-            view = fresh;
-            player_pos = fresh.player_pos;
-            outer_radius = fresh.render_distance;
-            inner_radius = fresh.innerGenRadius(level);
         }
 
         try io.checkCancel();
@@ -1528,25 +1495,15 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
         io: std.Io,
         view: ViewSnapshot,
         chunks: u64 = 0,
-        unloaded: u64 = 0,
         err: ?anyerror = null,
 
         pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) error{Failed}!void {
             const ctx: *@This() = @ptrCast(@alignCast(userdata));
             ctx.chunks += 1;
-            if (ctx.view.keepChunkLoaded(chunk_pos)) return;
-            if (!ctx.game.canUnloadMeshView(ctx.io, ctx.view, chunk_pos)) return;
-
-            ctx.game.tryRemoveChunkFromLoaded(ctx.io, ctx.game.allocator, chunk_pos, ctx.view) catch |err| {
+            _ = ctx.game.removeChunkIfUnloadable(ctx.io, chunk_pos, ctx.view) catch |err| {
                 ctx.err = err;
                 return error.Failed;
             };
-
-            ctx.game.renderer.removeChunk(ctx.io, chunk_pos) catch |err| {
-                ctx.err = err;
-                return error.Failed;
-            };
-            ctx.unloaded += 1;
         }
     };
     var ctx = ChunkCollector{
@@ -1622,10 +1579,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
     for (Item.extra_item_types, 0..) |item_type, i| {
         _ = game.player.main_inventory.set(io, 0, block_slots + @as(u32, @intCast(i)), .{ .item_type = item_type, .amount = 1 });
     }
-    game.player.view_direction_mutex.lockUncancelable(io);
-    const view_direction = game.player.view_direction;
-    game.player.view_direction_mutex.unlock(io);
-    game.renderer.updateCameraDirection(view_direction);
+    game.renderer.updateCameraDirection(game.getViewDirection(io));
 }
 
 fn spiralSegmentEnd(start: [2]i32, segment_index: *usize) [2]i32 {

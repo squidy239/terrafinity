@@ -128,15 +128,20 @@ menu_state: struct {
     }
 },
 
+/// RGBA texture upload shared by the background and item icons.
+fn createTexture(self: *@This(), pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !dvui.Texture {
+    return self.ui_window.backend.textureCreate(pixels, .{
+        .width = width,
+        .height = height,
+        .format = .rgba_32,
+        .interpolation = interpolation,
+    });
+}
+
 pub fn initAssets(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(allocator, menu_background_image);
     defer image.deinit(allocator);
-    self.menu_background = try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
-        .width = @intCast(image.cols),
-        .height = @intCast(image.rows),
-        .format = .rgba_32,
-        .interpolation = .linear,
-    });
+    self.menu_background = try self.createTexture(@ptrCast(image.asBytes().ptr), @intCast(image.cols), @intCast(image.rows), .linear);
     try self.loadItemTextures(io, allocator);
 }
 
@@ -149,12 +154,7 @@ fn loadItemTextures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
     defer pack.dir.close(io);
 
     const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
-    self.hotbar_missing_texture = try self.ui_window.backend.textureCreate(@ptrCast(&missing_pixels), .{
-        .width = 1,
-        .height = 1,
-        .format = .rgba_32,
-        .interpolation = .nearest,
-    });
+    self.hotbar_missing_texture = try self.createTexture(@ptrCast(&missing_pixels), 1, 1, .nearest);
 
     inline for (std.meta.fields(Item.ItemType)) |field| {
         const item_type: Item.ItemType = @enumFromInt(field.value);
@@ -184,12 +184,7 @@ fn loadItemTexture(self: *@This(), io: std.Io, allocator: std.mem.Allocator, dir
     };
     defer image.deinit(allocator);
 
-    return try self.ui_window.backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
-        .width = @intCast(image.cols),
-        .height = @intCast(image.rows),
-        .format = .rgba_32,
-        .interpolation = .nearest,
-    });
+    return try self.createTexture(@ptrCast(image.asBytes().ptr), @intCast(image.cols), @intCast(image.rows), .nearest);
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -346,24 +341,35 @@ fn menuCard(src: std.builtin.SourceLocation, init_opts: dvui.BoxWidget.InitOptio
     return card;
 }
 
+/// Centered, fixed-width column shared by the settings and new-game pages.
+fn pageContent(id_extra: usize) *dvui.BoxWidget {
+    return dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .id_extra = id_extra,
+        .max_size_content = .width(960),
+        .gravity_x = 0.5,
+        .padding = .{ .x = 24, .w = 24, .y = 16, .h = 16 },
+    });
+}
+
 pub fn escMenu(self: *@This(), io: std.Io) !bool {
     _ = io;
     std.debug.assert(self.menu_state.ingame);
-    const size = @Vector(2, usize){ 640, 480 };
+    const button_width: f32 = 640 * 0.75;
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .r = 0, .g = 200, .b = 200, .a = 150 }, .expand = .both });
     defer menu.deinit();
-    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
+    if (dvui.button(@src(), "Back To Game", .{}, .{ .min_size_content = .width(button_width), .gravity_x = 0.5 })) {
         self.menu_state.esc = false;
         return true;
     }
 
-    if (dvui.button(@src(), "Settings", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
+    if (dvui.button(@src(), "Settings", .{}, .{ .min_size_content = .width(button_width), .gravity_x = 0.5 })) {
         self.menu_state.settings = true;
         self.menu_state.esc = false;
         return true;
     }
 
-    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(@as(f32, @floatFromInt(size[0])) * 0.75), .gravity_x = 0.5 })) {
+    if (dvui.button(@src(), "Quit", .{}, .{ .min_size_content = .width(button_width), .gravity_x = 0.5 })) {
         self.menu_state.main = true;
         self.menu_state.esc = false;
         self.menu_state.ingame = false;
@@ -463,12 +469,7 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     });
     defer settings.deinit();
 
-    const content = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .max_size_content = .width(960),
-        .gravity_x = 0.5,
-        .padding = .{ .x = 24, .w = 24, .y = 16, .h = 16 },
-    });
+    const content = pageContent(0);
     defer content.deinit();
 
     if (self.menu_state.ingame) {
@@ -554,20 +555,25 @@ fn toggleConfigSection(self: *@This(), src: std.builtin.SourceLocation, title: [
     return true;
 }
 
+/// Indented, framed container for a config section or array item.
+fn configBox(src: std.builtin.SourceLocation, id: u64, color_fill: dvui.Color, padding: dvui.Rect) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .id_extra = @intCast(id),
+        .background = true,
+        .color_fill = color_fill,
+        .margin = .{ .x = 12, .w = 12 },
+        .padding = padding,
+    });
+}
+
 fn settingsSection(self: *@This(), src: std.builtin.SourceLocation, label: []const u8, id: u64, default_open: bool) ?*dvui.BoxWidget {
     const expanded = self.config_section_states.get(id) orelse default_open;
     var title_buffer: [260]u8 = undefined;
     const title = configSectionTitle(label, expanded, &title_buffer);
     if (self.toggleConfigSection(@src(), title, id, expanded)) return null;
     if (!expanded) return null;
-    return dvui.box(src, .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .id_extra = @intCast(id),
-        .background = true,
-        .color_fill = .{ .r = 24, .g = 40, .b = 28, .a = 255 },
-        .margin = .{ .x = 12, .w = 12 },
-        .padding = .{ .x = 16, .w = 16, .y = 8, .h = 8 },
-    });
+    return configBox(src, id, .{ .r = 24, .g = 40, .b = 28, .a = 255 }, .{ .x = 16, .w = 16, .y = 8, .h = 8 });
 }
 
 fn settingsSlider(name: []const u8, value: anytype, min: f64, max: f64, id: u64) void {
@@ -583,16 +589,14 @@ fn settingsInterval(name: []const u8, value: *u64, id: u64) void {
 }
 
 fn settingsCheckbox(label: []const u8, value: *bool, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    const row = configRow(label, id);
     defer row.deinit();
-    dvui.labelNoFmt(@src(), label, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     _ = dvui.checkbox(@src(), value, "", .{ .id_extra = @intCast(configId(id, "value")) });
 }
 
 fn settingsEnum(label: []const u8, comptime T: type, value: *T, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    const row = configRow(label, id);
     defer row.deinit();
-    dvui.labelNoFmt(@src(), label, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     _ = dvui.dropdownEnum(@src(), T, .{ .choice = value }, .{ .null_selectable = false }, .{
         .id_extra = @intCast(configId(id, "value")),
         .expand = .horizontal,
@@ -607,22 +611,20 @@ fn settingsSubheading(label: []const u8, id: u64) void {
     });
 }
 
-fn settingsColor(label: []const u8, color: *[4]f32, id: u64) void {
-    const components: [4][]const u8 = .{ "Red", "Green", "Blue", "Alpha" };
-    for (color, components) |*channel, component| {
+fn settingsComponents(label: []const u8, names: []const []const u8, values: []f32, min: f64, max: f64, id: u64) void {
+    for (values, names) |*value, name| {
         var label_buffer: [96]u8 = undefined;
-        const channel_label = std.fmt.bufPrint(&label_buffer, "{s} {s}", .{ label, component }) catch unreachable;
-        _ = configSlider(channel_label, channel, .{}, 0, 1, configId(id, component));
+        const component_label = std.fmt.bufPrint(&label_buffer, "{s} {s}", .{ label, name }) catch unreachable;
+        _ = configSlider(component_label, value, .{}, min, max, configId(id, name));
     }
 }
 
+fn settingsColor(label: []const u8, color: *[4]f32, id: u64) void {
+    settingsComponents(label, &.{ "Red", "Green", "Blue", "Alpha" }, color, 0, 1, id);
+}
+
 fn settingsVector(label: []const u8, vector: *[4]f32, id: u64) void {
-    const components: [3][]const u8 = .{ "X", "Y", "Z" };
-    for (vector[0..3], components) |*component, axis| {
-        var label_buffer: [96]u8 = undefined;
-        const component_label = std.fmt.bufPrint(&label_buffer, "{s} {s}", .{ label, axis }) catch unreachable;
-        _ = configSlider(component_label, component, .{}, -1, 1, configId(id, axis));
-    }
+    settingsComponents(label, &.{ "X", "Y", "Z" }, vector[0..3], -1, 1, id);
 }
 
 fn drawAdvancedSkySettings(sky: *SkyConfig, root_id: u64) void {
@@ -971,12 +973,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .r = 48, .g = 77, .b = 84, .a = 225 } });
     defer options.deinit();
 
-    const content = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .max_size_content = .width(960),
-        .gravity_x = 0.5,
-        .padding = .{ .x = 24, .w = 24, .y = 16, .h = 16 },
-    });
+    const content = pageContent(1);
     defer content.deinit();
 
     try self.ensureNewGameGenerator(allocator);
@@ -1362,14 +1359,7 @@ fn drawParam(self: *@This(), allocator: std.mem.Allocator, param: *generator_api
             const title = configSectionTitle(label, expanded, &title_buffer);
             if (self.toggleConfigSection(@src(), title, id, expanded)) return;
             if (!expanded) return;
-            const box = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .id_extra = @intCast(id),
-                .background = true,
-                .color_fill = .{ .r = 24, .g = 40, .b = 28, .a = 255 },
-                .margin = .{ .x = 12, .w = 12 },
-                .padding = .{ .x = 16, .w = 16, .y = 4, .h = 4 },
-            });
+            const box = configBox(@src(), id, .{ .r = 24, .g = 40, .b = 28, .a = 255 }, .{ .x = 16, .w = 16, .y = 4, .h = 4 });
             defer box.deinit();
             drawParams(self, allocator, &group.params, id);
         },
@@ -1398,14 +1388,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
     if (self.toggleConfigSection(@src(), title, id, expanded)) return;
     if (!expanded) return;
 
-    const contents = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .id_extra = @intCast(configId(id, "contents")),
-        .background = true,
-        .color_fill = .{ .r = 16, .g = 24, .b = 16, .a = 255 },
-        .margin = .{ .x = 12, .w = 12 },
-        .padding = .{ .x = 8, .w = 8, .y = 4, .h = 4 },
-    });
+    const contents = configBox(@src(), configId(id, "contents"), .{ .r = 16, .g = 24, .b = 16, .a = 255 }, .{ .x = 8, .w = 8, .y = 4, .h = 4 });
     defer contents.deinit();
 
     for (array.items, 0..) |*item, i| {
@@ -1425,14 +1408,7 @@ fn drawArray(self: *@This(), allocator: std.mem.Allocator, name: []const u8, arr
         }
         if (!item_expanded) continue;
 
-        const item_box = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .id_extra = @intCast(configId(item_id, "contents")),
-            .background = true,
-            .color_fill = .{ .r = 24, .g = 40, .b = 28, .a = 255 },
-            .margin = .{ .x = 12, .w = 12 },
-            .padding = .{ .x = 12, .w = 12, .y = 4, .h = 4 },
-        });
+        const item_box = configBox(@src(), configId(item_id, "contents"), .{ .r = 24, .g = 40, .b = 28, .a = 255 }, .{ .x = 12, .w = 12, .y = 4, .h = 4 });
         defer item_box.deinit();
         if (item.value == .group) drawParams(self, allocator, &item.value.group.params, item_id);
         if (dvui.button(@src(), "Remove", .{}, .{ .id_extra = @intCast(configId(item_id, "remove")) })) {
@@ -1479,15 +1455,19 @@ fn defaultSectionExpanded(name: []const u8) bool {
 
 fn configSectionTitle(label: []const u8, expanded: bool, buffer: *[260]u8) []const u8 {
     const marker: []const u8 = if (expanded) "[-] " else "[+] ";
-    @memcpy(buffer[0..marker.len], marker);
-    @memcpy(buffer[marker.len..][0..label.len], label);
-    return buffer[0 .. marker.len + label.len];
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ marker, label }) catch unreachable;
+}
+
+/// Horizontal row with the fixed-width label every config widget shares.
+fn configRow(name: []const u8, id: u64) *dvui.BoxWidget {
+    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
+    return row;
 }
 
 fn configSlider(name: []const u8, value: *f32, spec: generator_api.Spec, default_min: f64, default_max: f64, id: u64) bool {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    const row = configRow(name, id);
     defer row.deinit();
-    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     const min: f32 = @floatCast(spec.min orelse default_min);
     const max: f32 = @floatCast(spec.max orelse default_max);
     const step: ?f32 = if (spec.step) |s| @floatCast(s) else null;
@@ -1504,44 +1484,38 @@ fn configSliderUInt(name: []const u8, value: *u32, spec: generator_api.Spec, id:
     if (configSlider(name, &float_value, spec, 0, 100, id) and float_value >= 0) value.* = @intFromFloat(float_value);
 }
 
-fn configTextU64(name: []const u8, value: *u64, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+/// Labeled text entry over `buffer`; returns the text the user typed.
+fn configTextRow(name: []const u8, buffer: []u8, id: u64) []u8 {
+    const row = configRow(name, id);
     defer row.deinit();
-    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
+    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
+    defer widget.deinit();
+    return widget.textGet();
+}
+
+fn configTextU64(name: []const u8, value: *u64, id: u64) void {
     var buffer: [24]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
     buffer[text.len] = 0;
-    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
-    defer widget.deinit();
-    const parsed = std.fmt.parseUnsigned(u64, widget.textGet(), 10) catch return;
+    const parsed = std.fmt.parseUnsigned(u64, configTextRow(name, &buffer, id), 10) catch return;
     value.* = parsed;
 }
 
 fn configTextf32(name: []const u8, value: *f32, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
-    defer row.deinit();
-    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     // "{d}" prints full decimal: the longest f32 expansion is 47 characters.
     var buffer: [64]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{value.*}) catch unreachable;
     buffer[text.len] = 0;
-    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
-    defer widget.deinit();
-    const parsed = std.fmt.parseFloat(f32, widget.textGet()) catch return;
-    value.* = parsed;
+    const parsed = std.fmt.parseFloat(f32, configTextRow(name, &buffer, id)) catch return;
+    if (std.math.isFinite(parsed)) value.* = parsed;
 }
 
 fn configTextString(allocator: std.mem.Allocator, name: []const u8, value: *[]const u8, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
-    defer row.deinit();
-    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     var buffer: [256]u8 = undefined;
     const cur_len = @min(value.len, buffer.len - 1);
     @memcpy(buffer[0..cur_len], value.*[0..cur_len]);
     buffer[cur_len] = 0;
-    var widget = dvui.textEntry(@src(), .{ .text = .{ .buffer = &buffer }, .placeholder = name }, .{ .id_extra = @intCast(id), .expand = .horizontal });
-    defer widget.deinit();
-    const text = widget.textGet();
+    const text = configTextRow(name, &buffer, id);
     if (std.mem.eql(u8, value.*, text)) return;
     const new_value = allocator.dupe(u8, text) catch return;
     if (value.len > 0) allocator.free(value.*);
@@ -1549,9 +1523,8 @@ fn configTextString(allocator: std.mem.Allocator, name: []const u8, value: *[]co
 }
 
 fn configChoiceDropdown(name: []const u8, spec: generator_api.Spec, choice: *usize, id: u64) void {
-    const row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = @intCast(configId(id, "row")), .padding = .{ .y = 3, .h = 3 } });
+    const row = configRow(name, id);
     defer row.deinit();
-    dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = @intCast(id), .min_size_content = .width(240), .gravity_y = 0.5 });
     if (choice.* >= spec.entries.len and spec.entries.len > 0) choice.* = 0;
     _ = dvui.dropdown(@src(), spec.entries, .{ .choice = choice }, .{}, .{ .id_extra = @intCast(id), .expand = .horizontal });
 }

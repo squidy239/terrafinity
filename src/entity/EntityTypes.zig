@@ -10,7 +10,6 @@ const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
 
 pub const Player = struct {
-    pub const Type = Entity.Type.Player;
     player_name: Name,
     game_mode: std.atomic.Value(GameMode),
     fly_speed: std.atomic.Value(f32) = .init(1024),
@@ -59,11 +58,10 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator) void {
         _ = io;
         _ = world;
         _ = uuid;
-        _ = save;
         const self: *@This() = @ptrCast(@alignCast(ptr));
         allocator.destroy(self);
     }
@@ -105,17 +103,17 @@ pub const Player = struct {
 };
 
 pub const Explosive = struct {
-    pub const Type: Entity.Type = .Explosive;
     /// Blocks travelled per second along the unit direction.
     const travel_speed: f32 = 10;
     /// Blast sphere radius in blocks.
     const blast_radius: f32 = 8;
+    /// Largest integration step; a long drain gap must not skip past the blast radius.
+    const max_step_s: f32 = 0.1;
 
     pos: @Vector(3, f64),
     /// Unit travel direction fixed at spawn; `update` integrates it into `pos` without renormalizing.
     dir: @Vector(3, f32),
     timestamp: i96,
-    lock: std.Io.RwLock = .init,
 
     pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp: i96) @This() {
         const unit = if (std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 }))
@@ -129,8 +127,6 @@ pub const Explosive = struct {
         const u = tracy.Zone.begin(.{ .src = @src(), .name = "updateExplosive" });
         defer u.end();
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockUncancelable(ctx.io);
-        defer self.lock.unlock(ctx.io);
         const len_sq = @reduce(.Add, self.dir * self.dir);
         std.debug.assert(len_sq == 0 or std.math.approxEqAbs(f32, len_sq, 1, 1e-5));
 
@@ -139,7 +135,7 @@ pub const Explosive = struct {
 
         // The drain supplies the watermark; sampling the wall here would drift under late firing.
         const now_i96: i96 = @intCast(ctx.now_ns);
-        const dt = @as(f32, @floatFromInt(now_i96 - self.timestamp)) / std.time.ns_per_s;
+        const dt = @min(@as(f32, @floatFromInt(now_i96 - self.timestamp)) / std.time.ns_per_s, max_step_s);
         self.timestamp = now_i96;
 
         const move = self.dir * @as(@Vector(3, f32), @splat(travel_speed * dt));
@@ -154,24 +150,16 @@ pub const Explosive = struct {
         ctx.reschedule(0);
     }
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void {
+    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator) void {
         _ = io;
         _ = world;
         _ = uuid;
-        _ = save;
         const self: *@This() = @ptrCast(@alignCast(ptr));
         allocator.destroy(self);
     }
 
-    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
-        return self.pos;
-    }
-
     pub fn getInterface(self: *const @This()) Entity.Interface {
         _ = self;
-        return .{ .getPos = getPos, .unload = unload, .update = update };
+        return .{ .unload = unload, .update = update };
     }
 };

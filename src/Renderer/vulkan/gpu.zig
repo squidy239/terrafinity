@@ -167,16 +167,18 @@ pub const StagingRing = struct {
         return result;
     }
 
+    fn findEntryIndex(self: *StagingRing, slice: []const u8) ?usize {
+        for (self.entries.items, 0..) |entry, i| {
+            if (entry.ptr == slice.ptr) return i;
+        }
+        return null;
+    }
+
     pub fn bind(self: *StagingRing, io: std.Io, slice: []const u8, timeline_value: u64) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        for (self.entries.items) |*e| {
-            if (e.ptr == slice.ptr) {
-                e.timeline_value = timeline_value;
-                return;
-            }
-        }
+        if (self.findEntryIndex(slice)) |index| self.entries.items[index].timeline_value = timeline_value;
     }
 
     pub fn retire(self: *StagingRing, io: std.Io, current_transfer_val: u64) void {
@@ -197,21 +199,17 @@ pub const StagingRing = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        for (self.entries.items, 0..) |e, i| {
-            if (e.ptr == slice.ptr) {
-                std.debug.assert(e.timeline_value == null);
-                _ = self.entries.orderedRemove(i);
-                if (i == self.entries.items.len) {
-                    // Cancelled the tail entry: retract head so its space is
-                    // immediately reusable instead of stranded until wrap-around.
-                    const aligned = std.mem.alignForward(vk.DeviceSize, slice.len, transfer_alignment);
-                    std.debug.assert(self.head >= aligned);
-                    self.head -= aligned;
-                }
-                if (self.entries.items.len == 0) self.head = 0;
-                return;
-            }
+        const index = self.findEntryIndex(slice) orelse return;
+        std.debug.assert(self.entries.items[index].timeline_value == null);
+        _ = self.entries.orderedRemove(index);
+        if (index == self.entries.items.len) {
+            // Cancelled the tail entry: retract head so its space is
+            // immediately reusable instead of stranded until wrap-around.
+            const aligned = std.mem.alignForward(vk.DeviceSize, slice.len, transfer_alignment);
+            std.debug.assert(self.head >= aligned);
+            self.head -= aligned;
         }
+        if (self.entries.items.len == 0) self.head = 0;
     }
 };
 
@@ -284,29 +282,19 @@ pub const GpuRegionAllocator = struct {
         if (buffer == .null_handle) return null;
         const buffer_offset = self.buffer_offset.load(.monotonic);
 
+        var offset: vk.DeviceSize = undefined;
+        var safe_graphics: u64 = 0;
         if (self.findFreeRegion(length)) |found| {
-            return .{
-                .offset = found.offset,
-                .buffer = buffer,
-                .buffer_offset = buffer_offset,
-                .safe_graphics = found.safe_graphics,
-            };
-        }
-
-        const current_used = self.used.load(.monotonic);
-        const new_used, const overflow = @addWithOverflow(current_used, length);
-        if (overflow == 0 and new_used <= self.buffer_slice.len) {
-            const offset = current_used;
+            offset = found.offset;
+            safe_graphics = found.safe_graphics;
+        } else {
+            const current_used = self.used.load(.monotonic);
+            const new_used, const overflow = @addWithOverflow(current_used, length);
+            if (overflow != 0 or new_used > self.buffer_slice.len) return null;
+            offset = current_used;
             self.used.store(new_used, .monotonic);
-            return .{
-                .offset = offset,
-                .buffer = buffer,
-                .buffer_offset = buffer_offset,
-                .safe_graphics = 0,
-            };
         }
-
-        return null;
+        return .{ .offset = offset, .buffer = buffer, .buffer_offset = buffer_offset, .safe_graphics = safe_graphics };
     }
 
     fn overlaps(offset: vk.DeviceSize, length: vk.DeviceSize, region: Region) bool {
@@ -534,6 +522,30 @@ const RetiredFaceBuffer = struct {
     graphics_timeline_value: u64,
 };
 
+/// Frees entries whose graphics timeline has passed, scanning from the tail so
+/// `swapRemove` never revisits a moved element. Callers hold the list's mutex.
+fn sweepRetired(alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
+    var i: usize = items.items.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = items.items[i];
+        if (frontier >= entry.graphics_timeline_value) {
+            alloc.free(entry.slice);
+            _ = items.swapRemove(i);
+        }
+    }
+}
+
+/// Waits for a timeline semaphore to reach `value`, or times out. Returns the raw
+/// Vulkan wait result so callers can distinguish completion from a stall.
+fn waitTimelineValue(dev: DeviceProxy, semaphore: vk.Semaphore, value: u64, timeout: u64) !vk.Result {
+    return dev.waitSemaphores(&.{
+        .semaphore_count = 1,
+        .p_semaphores = (&semaphore)[0..1],
+        .p_values = (&value)[0..1],
+    }, timeout);
+}
+
 /// Async transfer-queue upload pipeline for instanced geometry. Owns the staging ring,
 /// the shared GPU face buffer, the command pool reservoir, and the transfer submission
 /// machinery (timeline semaphores, queue mutex, growth of the face buffer).
@@ -705,11 +717,7 @@ pub const MeshUploader = struct {
         const completed = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
         if (completed >= last_submitted) return;
         const wait_value = completed + 1;
-        const result = try self.dev.waitSemaphores(&.{
-            .semaphore_count = 1,
-            .p_semaphores = (&self.transfer.semaphore)[0..1],
-            .p_values = (&wait_value)[0..1],
-        }, transfer_wait_timeout_ns);
+        const result = try waitTimelineValue(self.dev, self.transfer.semaphore, wait_value, transfer_wait_timeout_ns);
         if (result != .success) self.logTransferStall(io, wait_value, completed, last_submitted);
     }
 
@@ -765,13 +773,7 @@ pub const MeshUploader = struct {
             try self.drainInFlightFrames();
 
             const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
-            if (transfer_done_val > 0) {
-                _ = try self.dev.waitSemaphores(&.{
-                    .semaphore_count = 1,
-                    .p_semaphores = (&self.transfer.semaphore)[0..1],
-                    .p_values = (&transfer_done_val)[0..1],
-                }, std.math.maxInt(u64));
-            }
+            if (transfer_done_val > 0) _ = try waitTimelineValue(self.dev, self.transfer.semaphore, transfer_done_val, std.math.maxInt(u64));
 
             // Exclude concurrent transfer submits across the buffer swap and copy: a
             // submit referencing the old buffer must not race the graphics-side copy.
@@ -878,15 +880,7 @@ pub const MeshUploader = struct {
 
     pub fn drainInFlightFrames(self: *MeshUploader) !void {
         const frame_to_wait = self.vk_ctx.frame_number.load(.acquire);
-        if (frame_to_wait > 0) {
-            const wait_value: u64 = frame_to_wait;
-            const wait_info: vk.SemaphoreWaitInfo = .{
-                .semaphore_count = 1,
-                .p_semaphores = (&self.transfer.graphics_timeline_semaphore)[0..1],
-                .p_values = (&wait_value)[0..1],
-            };
-            _ = try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64));
-        }
+        if (frame_to_wait > 0) _ = try waitTimelineValue(self.dev, self.transfer.graphics_timeline_semaphore, frame_to_wait, std.math.maxInt(u64));
     }
 
     pub fn retireStaging(self: *MeshUploader, io: std.Io, current_transfer_val: u64) void {
@@ -898,58 +892,44 @@ pub const MeshUploader = struct {
         // mutex): iterating the list while another thread reallocates it is a race.
         self.vk_ctx.queue_mutex.lockUncancelable(io);
         defer self.vk_ctx.queue_mutex.unlock(io);
-        const items = &self.retired_face_buffers;
-        var i: usize = items.items.len;
-        while (i > 0) {
-            i -= 1;
-            const entry = items.items[i];
-            if (current_graphics_val >= entry.graphics_timeline_value) {
-                self.memory.gpuOnly().free(entry.slice);
-                _ = items.swapRemove(i);
-            }
-        }
+        sweepRetired(self.memory.gpuOnly(), &self.retired_face_buffers, current_graphics_val);
     }
 
-    /// Acquire side of the cross-queue memory dependency: makes the upload batch's
-    /// transfer writes to the face buffer visible to this frame's vertex reads.
-    pub fn cmdAcquireFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
+    fn faceBufferBarrier(
+        self: *MeshUploader,
+        cmd_buffer: vk.CommandBuffer,
+        src_stage: vk.PipelineStageFlags2,
+        src_access: vk.AccessFlags2,
+        dst_stage: vk.PipelineStageFlags2,
+        dst_access: vk.AccessFlags2,
+    ) void {
         const used = self.region_allocator.used.load(.monotonic);
         if (used == 0) return;
         // The buffer is momentarily null while allocRegion grows it; the per-frame
         // transfer semaphore wait already covers the cross-queue sync in that window.
         const buffer = self.region_allocator.buffer.load(.acquire);
         if (buffer == .null_handle) return;
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&vk.BufferMemoryBarrier2{
-            .src_stage_mask = .{ .all_transfer_bit = true },
-            .src_access_mask = .{ .transfer_write_bit = true },
-            .dst_stage_mask = .{ .vertex_attribute_input_bit = true },
-            .dst_access_mask = .{ .vertex_attribute_read_bit = true },
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .buffer = buffer,
-            .offset = self.region_allocator.buffer_offset.load(.monotonic),
-            .size = used,
-        })[0..1]);
+        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(
+            buffer,
+            self.region_allocator.buffer_offset.load(.monotonic),
+            used,
+            src_stage,
+            src_access,
+            dst_stage,
+            dst_access,
+        ))[0..1]);
+    }
+
+    /// Acquire side of the cross-queue memory dependency: makes the upload batch's
+    /// transfer writes to the face buffer visible to this frame's vertex reads.
+    pub fn cmdAcquireFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
+        self.faceBufferBarrier(cmd_buffer, .{ .all_transfer_bit = true }, .{ .transfer_write_bit = true }, .{ .vertex_attribute_input_bit = true }, .{ .vertex_attribute_read_bit = true });
     }
 
     /// Release side: makes this frame's vertex reads available before the next upload
     /// batch writes the same regions on the transfer queue.
     pub fn cmdReleaseFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
-        const used = self.region_allocator.used.load(.monotonic);
-        if (used == 0) return;
-        const buffer = self.region_allocator.buffer.load(.acquire);
-        if (buffer == .null_handle) return;
-        core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&vk.BufferMemoryBarrier2{
-            .src_stage_mask = .{ .vertex_attribute_input_bit = true },
-            .src_access_mask = .{ .vertex_attribute_read_bit = true },
-            .dst_stage_mask = .{ .all_transfer_bit = true },
-            .dst_access_mask = .{},
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .buffer = buffer,
-            .offset = self.region_allocator.buffer_offset.load(.monotonic),
-            .size = used,
-        })[0..1]);
+        self.faceBufferBarrier(cmd_buffer, .{ .vertex_attribute_input_bit = true }, .{ .vertex_attribute_read_bit = true }, .{ .all_transfer_bit = true }, .{});
     }
 
     const face_vertex_binding: vk.VertexInputBindingDescription = .{ .binding = 0, .stride = face_stride, .input_rate = .instance };
@@ -1301,57 +1281,51 @@ pub const IndirectScene = struct {
         sweepRetired(self.memory.gpuOnly(), &self.retired_visibility_slices, current_graphics_val);
     }
 
-    fn sweepRetired(alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
-        var i: usize = items.items.len;
-        while (i > 0) {
-            i -= 1;
-            const entry = items.items[i];
-            if (frontier >= entry.graphics_timeline_value) {
-                alloc.free(entry.slice);
-                _ = items.swapRemove(i);
-            }
-        }
-    }
+    fn fillFrameData(self: *IndirectScene, frame: *PerFrameData, slices: FrameSlices) void {
+        slices.stats[0] = CullCount.zeroed();
 
-    fn fillFrameData(
-        self: *IndirectScene,
-        frame: *PerFrameData,
-        mesh_data_slice: []MeshData,
-        indirect_draw_slice: []vk.DrawIndirectCommand,
-        count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-        stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    ) void {
-        stats_slice[0] = CullCount.zeroed();
-
-        const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, mesh_data_slice.ptr);
-        const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, indirect_draw_slice.ptr);
-        const count_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, count_slice.ptr);
-        const stats_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, stats_slice.ptr);
+        const mesh_data_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slices.mesh_data.ptr);
+        const indirect_draw_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slices.indirect_draw.ptr);
+        const count_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, slices.count.ptr);
+        const stats_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slices.stats.ptr);
 
         frame.* = .{
             .mesh_data = mesh_data_info.buffer,
-            .mesh_data_mapped = mesh_data_slice.ptr,
+            .mesh_data_mapped = slices.mesh_data.ptr,
             .mesh_data_offset = mesh_data_info.offset,
             .indirect_draw = indirect_draw_info.buffer,
-            .indirect_draw_mapped = indirect_draw_slice.ptr,
+            .indirect_draw_mapped = slices.indirect_draw.ptr,
             .indirect_draw_offset = indirect_draw_info.offset,
             .count = count_info.buffer,
-            .count_slice = count_slice,
+            .count_slice = slices.count,
             .count_offset = count_info.offset,
             .stats = stats_info.buffer,
-            .stats_mapped = stats_slice.ptr,
-            .stats_slice = stats_slice,
+            .stats_mapped = slices.stats.ptr,
+            .stats_slice = slices.stats,
             .stats_offset = stats_info.offset,
         };
     }
 
-    fn allocateIndirectBuffers(self: *IndirectScene, frame: *PerFrameData) !void {
-        const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, self.draw_capacity * slot_count);
-        const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, self.draw_capacity * slot_count);
-        const count_slice = try self.memory.gpuOnly().alignedAlloc(CullCount, cull_buffer_alignment, 1);
-        const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
+    const FrameSlices = struct {
+        mesh_data: []MeshData,
+        indirect_draw: []vk.DrawIndirectCommand,
+        count: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+        stats: []align(cull_buffer_alignment.toByteUnits()) CullCount,
+    };
 
-        self.fillFrameData(frame, mesh_data_slice, indirect_draw_slice, count_slice, stats_slice);
+    fn allocFrameSlices(self: *IndirectScene, capacity: u32) !FrameSlices {
+        const mesh_data = try self.memory.cpuToGpu().alloc(MeshData, capacity * slot_count);
+        errdefer self.memory.cpuToGpu().free(mesh_data);
+        const indirect_draw = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, capacity * slot_count);
+        errdefer self.memory.cpuToGpu().free(indirect_draw);
+        const count = try self.memory.gpuOnly().alignedAlloc(CullCount, cull_buffer_alignment, 1);
+        errdefer self.memory.gpuOnly().free(count);
+        const stats = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
+        return .{ .mesh_data = mesh_data, .indirect_draw = indirect_draw, .count = count, .stats = stats };
+    }
+
+    fn allocateIndirectBuffers(self: *IndirectScene, frame: *PerFrameData) !void {
+        self.fillFrameData(frame, try self.allocFrameSlices(self.draw_capacity));
     }
 
     /// Doubles the draw capacity until it covers `min_capacity`, failing when the device's
@@ -1384,53 +1358,35 @@ pub const IndirectScene = struct {
         const old_draw_capacity = self.draw_capacity;
         const num_frames = self.frame_buffers.items.len;
 
-        const new_mesh_data = try self.allocator.alloc([*]MeshData, num_frames);
-        defer self.allocator.free(new_mesh_data);
-        const new_indirect = try self.allocator.alloc([*]vk.DrawIndirectCommand, num_frames);
-        defer self.allocator.free(new_indirect);
-        const new_count_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_frames);
-        defer self.allocator.free(new_count_slices);
-        const new_stats_slices = try self.allocator.alloc([]align(cull_buffer_alignment.toByteUnits()) CullCount, num_frames);
-        defer self.allocator.free(new_stats_slices);
+        const new_frames = try self.allocator.alloc(FrameSlices, num_frames);
+        defer self.allocator.free(new_frames);
 
         var allocated_frames: usize = 0;
         errdefer {
-            for (new_mesh_data[0..allocated_frames], new_indirect[0..allocated_frames], new_count_slices[0..allocated_frames], new_stats_slices[0..allocated_frames]) |mesh, indirect, count, stats| {
-                self.memory.cpuToGpu().free(mesh[0 .. new_capacity * slot_count]);
-                self.memory.cpuToGpu().free(indirect[0 .. new_capacity * slot_count]);
-                self.memory.gpuOnly().free(count);
-                self.memory.cpuToGpu().free(stats);
+            for (new_frames[0..allocated_frames]) |slices| {
+                self.memory.cpuToGpu().free(slices.mesh_data);
+                self.memory.cpuToGpu().free(slices.indirect_draw);
+                self.memory.gpuOnly().free(slices.count);
+                self.memory.cpuToGpu().free(slices.stats);
             }
         }
-        for (new_mesh_data, new_indirect, new_count_slices, new_stats_slices) |*mesh_dst, *indirect_dst, *count_dst, *stats_dst| {
-            const mesh_data_slice = try self.memory.cpuToGpu().alloc(MeshData, new_capacity * slot_count);
-            errdefer self.memory.cpuToGpu().free(mesh_data_slice);
-            const indirect_draw_slice = try self.memory.cpuToGpu().alloc(vk.DrawIndirectCommand, new_capacity * slot_count);
-            errdefer self.memory.cpuToGpu().free(indirect_draw_slice);
-            const count_slice = try self.memory.gpuOnly().alignedAlloc(CullCount, cull_buffer_alignment, 1);
-            errdefer self.memory.gpuOnly().free(count_slice);
-            const stats_slice = try self.memory.cpuToGpu().alignedAlloc(CullCount, cull_buffer_alignment, 1);
-            errdefer self.memory.cpuToGpu().free(stats_slice);
-
-            mesh_dst.* = mesh_data_slice.ptr;
-            indirect_dst.* = indirect_draw_slice.ptr;
-            count_dst.* = count_slice;
-            stats_dst.* = stats_slice;
+        for (new_frames) |*dst| {
+            dst.* = try self.allocFrameSlices(new_capacity);
             allocated_frames += 1;
         }
 
-        for (self.frame_buffers.items[0..num_frames], new_mesh_data, new_indirect, new_count_slices, new_stats_slices) |*frame, new_mesh, new_ind, new_count, new_stats| {
+        for (self.frame_buffers.items, new_frames) |*frame, new_slices| {
             const old_mesh = frame.mesh_data_mapped.?;
             const old_ind = frame.indirect_draw_mapped.?;
             const old_count = frame.count_slice;
             const old_stats = frame.stats_slice;
 
             if (old_draw_capacity > 0) {
-                @memcpy(new_mesh[0 .. old_draw_capacity * slot_count], old_mesh[0 .. old_draw_capacity * slot_count]);
-                @memcpy(new_ind[0 .. old_draw_capacity * slot_count], old_ind[0 .. old_draw_capacity * slot_count]);
+                @memcpy(new_slices.mesh_data[0 .. old_draw_capacity * slot_count], old_mesh[0 .. old_draw_capacity * slot_count]);
+                @memcpy(new_slices.indirect_draw[0 .. old_draw_capacity * slot_count], old_ind[0 .. old_draw_capacity * slot_count]);
             }
 
-            self.fillFrameData(frame, new_mesh[0 .. new_capacity * slot_count], new_ind[0 .. new_capacity * slot_count], new_count, new_stats);
+            self.fillFrameData(frame, new_slices);
 
             self.memory.cpuToGpu().free(old_mesh[0 .. old_draw_capacity * slot_count]);
             self.memory.cpuToGpu().free(old_ind[0 .. old_draw_capacity * slot_count]);

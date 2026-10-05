@@ -16,7 +16,7 @@ Do not git stash, commit, checkout, or reset; it can mess up git history. Read-o
 - `zig build test -Dtest_filter="substring"` (wired in build.zig via `b.addTest(.{ .filters })`) runs only matching tests at compile time; the full suite has pre-existing crashes (wio/wayland) in headless environments.
 - `-Dtest_filter` only sees tests from files reachable in the module import graph. A new `.zig` file with tests is invisible until something reachable from `main.zig` references it (e.g. `pub const Csm = @import(...)` in Renderer.zig, or a field type like `shadow: Csm.ShadowConfig` in RenderOptions forces its analysis).
 - `-Dtest_filter` substring-matches the fully-qualified test name (`module.file.test.name`); unnamed `test {}` blocks are exempt and always run, so name a test if it must be filterable.
-- Due to a zig issue bare `zig test` can exit 1 on success: ignore it when every test reports OK, but `error:`, `compile test ... N errors`, or a `Build Summary` with failed steps means a real failure.
+- Due to a zig issue `zig test`/`zig build test` report a failed command on success whenever a test writes to stdout (e.g. benchmarks): ignore a failed-step summary with no `error:` and no failing test; `error:` or `compile test ... N errors` is a real failure.
 - glslc `#include` dependencies must be registered as build inputs: glslc resolves `#include "shadow.glsl"` internally, but the Zig build graph only knows inputs declared with `addFileArg`/`addFileInput`. An unregistered include does NOT invalidate the glslc cache, so the SPIR-V goes stale while Zig source (e.g. `ShadowParams` layout) recompiles — a silent layout mismatch (no shadows). Symptom: the `.spv` mtime predates your edit and `spirv-dis` shows old member offsets. Fix: `frag_cmd.addFileArg(b.path("src/Renderer/vulkan/chunk_renderer/fragshader.frag"));` plus `frag_cmd.addFileInput(b.path("src/Renderer/vulkan/shadow/shadow.glsl"));` (`addFileInput` tracks without appending to argv). Verify std430 offsets after layout changes with `spirv-dis <spv> | grep "OpMemberDecorate %ShadowParamsBuffer"` against the Zig `@offsetOf` asserts.
 
 ## Verify before writing
@@ -146,7 +146,7 @@ I/O is an interface: anything that can block or introduce nondeterminism takes a
 
 ## ConcurrentHashMap compound ops
 
-`Bucket.getPtr`/`get` release the shard lock before returning, so never read-modify-write through them. For locked compound sequences use `getBucket(key)` plus explicit `bucket.lock` / `bucket.hash_map` access, holding one bucket lock at a time and never nesting.
+`Bucket.get` releases the shard lock before returning, so never read-modify-write through it. For locked compound sequences use `getBucket(key)` plus explicit `bucket.lock` / `bucket.hash_map` access, holding one bucket lock at a time and never nesting.
 
 ## Mesh upload backpressure: all-or-nothing reservation under an admission mutex
 

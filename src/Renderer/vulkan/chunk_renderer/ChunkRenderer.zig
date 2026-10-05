@@ -168,13 +168,14 @@ pub const PassContext = struct {
     frame_sequence: u64,
     /// Shared shadow state; null until VulkanRenderer wires it in.
     shadow: ?*ShadowRenderer,
-    msaa_color_image: ?vk.Image = null,
     msaa_color_view: ?vk.ImageView = null,
     color_resolve_view: ?vk.ImageView = null,
-    msaa_depth_image: ?vk.Image = null,
     msaa_depth_view: ?vk.ImageView = null,
     depth_resolve_view: ?vk.ImageView = null,
     depth_resolve_mode: vk.ResolveModeFlags = .{},
+    /// Whether the depth resolve is conservative for the Hi-Z MIN-reduce. A
+    /// non-conservative (average/sample-zero) resolve disables occlusion culling.
+    depth_resolve_conservative: bool = false,
     msaa_sample_count: u32 = 1,
 };
 
@@ -296,12 +297,10 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
     }
     for (self.retired_meshes.items) |entry| self.uploader.freeMesh(io, entry.mesh, 0);
     self.retired_meshes.deinit(self.allocator);
-    for (self.pending_publications.items) |publication| switch (publication) {
-        .retire => |r| self.uploader.freeMesh(io, r.mesh, 0),
-        .remove => {},
-        .free_index => {},
-    };
+    self.freePublications(io, self.pending_publications.items);
     self.pending_publications.deinit(self.allocator);
+    // publishPending keeps a failed unapplied tail here; free those meshes too.
+    self.freePublications(io, self.publish_scratch.items);
     self.publish_scratch.deinit(self.allocator);
 
     var it = self.meshes.iterator();
@@ -325,6 +324,14 @@ fn destroyGraphicsState(self: *ChunkRenderer) void {
     core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.graphics_state.opaque_pipeline_layout, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.graphics_state.transparent_pipeline_layout, &self.vk_ctx.vkalloc);
+}
+
+fn freePublications(self: *ChunkRenderer, io: std.Io, publications: []const Publication) void {
+    for (publications) |publication| switch (publication) {
+        .retire => |r| self.uploader.freeMesh(io, r.mesh, 0),
+        .remove => {},
+        .free_index => {},
+    };
 }
 
 fn flushUploads(ctx: *anyopaque, io: std.Io) !void {
@@ -545,7 +552,11 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
         // or holds the front item out as the peek; in both cases the next put
         // succeeds against the freed slot.
         try self.retireCompletedUploads(io);
-        if (self.peeked_upload) |front| {
+        // Writers set this under retire_mutex; read a stable copy under the same lock.
+        self.retire_mutex.lockUncancelable(io);
+        const front = self.peeked_upload;
+        self.retire_mutex.unlock(io);
+        if (front) |front_upload| {
             // The front item's batch is the oldest pending transfer, so waiting on
             // its timeline value is satisfied by already-submitted work; the next
             // retire pass then consumes it and frees its slot. The wait is bounded
@@ -554,9 +565,9 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
             const result = try self.dev.waitSemaphores(&.{
                 .semaphore_count = 1,
                 .p_semaphores = (&self.uploader.transfer.semaphore)[0..1],
-                .p_values = (&front.timeline_value)[0..1],
+                .p_values = (&front_upload.timeline_value)[0..1],
             }, gpu.transfer_wait_timeout_ns);
-            if (result != .success) std.log.warn("ChunkRenderer: pending upload queue stalled waiting for transfer value {d}; GPU may be stuck", .{front.timeline_value});
+            if (result != .success) std.log.warn("ChunkRenderer: pending upload queue stalled waiting for transfer value {d}; GPU may be stuck", .{front_upload.timeline_value});
         }
     }
 }
@@ -584,13 +595,23 @@ fn destroyPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUp
     if (pending.pool != .null_handle) self.uploader.returnPool(pending.pool);
 }
 
-fn enqueueRetiredMesh(self: *ChunkRenderer, io: std.Io, gpu_index: u32, mesh: gpu.MeshBuffer, free_index: bool) !void {
+/// Reserves capacity for one retirement before a map mutation, so the matching
+/// enqueueRetiredMesh append cannot fail once the mutation is applied.
+fn reserveRetiredMesh(self: *ChunkRenderer, io: std.Io) !void {
+    self.retired_meshes_mutex.lockUncancelable(io);
+    defer self.retired_meshes_mutex.unlock(io);
+    try self.retired_meshes.ensureUnusedCapacity(self.allocator, 1);
+}
+
+/// Appends a retirement; the caller must have reserved via reserveRetiredMesh first.
+/// The frame thread is the only appender, so the reservation survives until here.
+fn enqueueRetiredMesh(self: *ChunkRenderer, io: std.Io, gpu_index: u32, mesh: gpu.MeshBuffer, free_index: bool) void {
     const retire_frame = self.vk_ctx.frame_number.load(.acquire);
     // The frame publishes while the drain task frees due entries, so the list needs
     // its own lock: publishPending never holds retire_mutex across an apply.
     self.retired_meshes_mutex.lockUncancelable(io);
     defer self.retired_meshes_mutex.unlock(io);
-    try self.retired_meshes.append(self.allocator, .{
+    self.retired_meshes.appendAssumeCapacity(.{
         .gpu_index = gpu_index,
         .mesh = mesh,
         .graphics_timeline_value = retire_frame + VulkanContext.max_frames_in_flight,
@@ -616,7 +637,7 @@ fn applyRemoveUpload(self: *ChunkRenderer, io: std.Io, key: RenderBufferKey) !vo
     const existing = self.meshes.fetchRemove(io, key);
     if (existing) |old_mesh| {
         self.scene.markInactive(old_mesh.gpu_index);
-        try self.enqueueRetiredMesh(io, old_mesh.gpu_index, old_mesh, true);
+        self.enqueueRetiredMesh(io, old_mesh.gpu_index, old_mesh, true);
     }
 }
 
@@ -651,7 +672,7 @@ fn applyRetireUpload(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuff
         new_mesh.gpu_index = old_mesh.gpu_index;
         self.scene.writeCandidate(old_mesh.gpu_index, new_mesh, is_transparent, transform);
         const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
-        if (removed) |old| try self.enqueueRetiredMesh(io, old.gpu_index, old, false);
+        if (removed) |old| self.enqueueRetiredMesh(io, old.gpu_index, old, false);
     } else {
         const gpu_idx = try self.scene.allocIndex(io);
         new_mesh.gpu_index = gpu_idx;
@@ -667,7 +688,7 @@ fn applyRetireUpload(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuff
         };
         if (removed) |old| {
             self.scene.markInactive(old.gpu_index);
-            try self.enqueueRetiredMesh(io, old.gpu_index, old, true);
+            self.enqueueRetiredMesh(io, old.gpu_index, old, true);
         }
     }
 }
@@ -741,8 +762,15 @@ pub fn publishPending(self: *ChunkRenderer, io: std.Io) void {
 
 fn applyPublication(self: *ChunkRenderer, io: std.Io, publication: Publication) !void {
     switch (publication) {
-        .retire => |r| try self.applyRetireUpload(io, r.mesh, r.key, r.chunk_pos),
-        .remove => |key| try self.applyRemoveUpload(io, key),
+        .retire => |r| {
+            // Reserve before any map mutation so the displaced mesh can always be retired.
+            try self.reserveRetiredMesh(io);
+            try self.applyRetireUpload(io, r.mesh, r.key, r.chunk_pos);
+        },
+        .remove => |key| {
+            try self.reserveRetiredMesh(io);
+            try self.applyRemoveUpload(io, key);
+        },
         .free_index => |gpu_index| self.scene.releaseCandidate(io, gpu_index),
     }
 }
@@ -1018,31 +1046,13 @@ pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format, samples: v
     try self.createTransparentPipeline(vert_module, depth_format);
 }
 
-fn graphicsPushConstantRange() vk.PushConstantRange {
-    return .{
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
-        .offset = 0,
-        .size = push_constants_size,
-    };
-}
-
 fn createOpaquePipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
     const set_layouts: [3]vk.DescriptorSetLayout = .{
         self.texture_manager.descriptor_set_layout,
         self.scene.mesh_data_descriptor_set_layout,
         self.shadow.shadow_set_layout,
     };
-    const blend = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = .false,
-        .src_color_blend_factor = .src_alpha,
-        .dst_color_blend_factor = .one_minus_src_alpha,
-        .color_blend_op = .add,
-        .src_alpha_blend_factor = .src_alpha,
-        .dst_alpha_blend_factor = .one_minus_src_alpha,
-        .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-    };
-    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{blend}, core.depthStencilState(true, .greater, true), &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline, samples);
+    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{core.opaqueBlendAttachment()}, core.depthStencilState(true, .greater, true), &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline, samples);
 }
 
 fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format) !void {
@@ -1076,7 +1086,11 @@ fn buildChunkPipeline(
     pipeline: *vk.Pipeline,
     samples: vk.SampleCountFlags,
 ) !void {
-    const pc_range = graphicsPushConstantRange();
+    const pc_range: vk.PushConstantRange = .{
+        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+        .offset = 0,
+        .size = push_constants_size,
+    };
     pipeline_layout.* = try self.dev.createPipelineLayout(&.{
         .flags = .{},
         .set_layout_count = @intCast(set_layouts.len),
@@ -1089,7 +1103,7 @@ fn buildChunkPipeline(
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
     if (samples.@"1_bit") {
-        pipeline.* = try core.buildGraphicsPipelineWithTopology(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip);
+        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, .{ .@"1_bit" = true });
     } else {
         pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, samples);
     }
@@ -1107,10 +1121,14 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
         .time = ctx.elapsed_sec,
         .mesh_base = 0,
     };
+    // The Hi-Z test is only sound against a conservative depth resolve: an average or
+    // sample-zero MSAA resolve can sit nearer than the closest sample, which would cull
+    // visible silhouettes. Disable occlusion culling rather than test a bad pyramid.
+    const hiz_enabled = ctx.occlusion_culling and ctx.depth_resolve_conservative;
     // The late cull projects with this frame's matrix and camera: the pyramid it
     // tests against is built from this frame's early opaque depth below.
     const occlusion_player_pos: [4]f32 = .{ @floatCast(ctx.view_pos[0]), @floatCast(ctx.view_pos[1]), @floatCast(ctx.view_pos[2]), 1.0 };
-    self.pyramid.writeParams(ctx.frame_idx, pc.projview, occlusion_player_pos, ctx.occlusion_culling);
+    self.pyramid.writeParams(ctx.frame_idx, pc.projview, occlusion_player_pos, hiz_enabled);
 
     if (ctx.total_candidates > 0) {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "cull" });
@@ -1125,14 +1143,18 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     // Build the occlusion pyramid from the early pass's depth so the late cull judges
     // skipped chunks with the current view: camera disocclusions draw this frame, in the
     // late pass, instead of vanishing for a frame. Late-pass geometry is not in it; that
-    // only costs a wasted draw for chunks it newly revealed, never a hole.
-    self.depthToSampledBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
-    {
-        const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
-        defer gpu_zone.end();
-        self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
+    // only costs a wasted draw for chunks it newly revealed, never a hole. Skipped when
+    // no Hi-Z test consumes it: the barrier pair is layout-neutral and the late opaque
+    // pass already expects the depth in attachment layout.
+    if (hiz_enabled) {
+        self.depthToSampledBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
+        {
+            const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_build" });
+            defer gpu_zone.end();
+            self.pyramid.recordBuild(ctx.cmd_buffer, ctx.depth_sampled_view);
+        }
+        self.depthToAttachmentBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
     }
-    self.depthToAttachmentBarrier(ctx, .{ .compute_shader_bit = true }, .{ .shader_read_bit = true });
     {
         const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(ctx.cmd_buffer, ctx.frame_idx, .{ .src = @src(), .name = "hiz_late_cull" });
         defer gpu_zone.end();

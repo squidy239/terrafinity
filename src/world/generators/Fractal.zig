@@ -112,7 +112,7 @@ pub const FractalTerrainGenerator = struct {
                     const is_solid = isSierpinskiTetrahedron(bx, by, bz, scale_divider);
 
                     if (is_solid) {
-                        const block_above_solid = isSierpinskiTetrahedron(bx, by + 1, bz, scale_divider);
+                        const block_above_solid = isSierpinskiTetrahedron(bx, by + block_scale, bz, scale_divider);
 
                         if (!block_above_solid and by >= self.params.SeaLevel) {
                             block_grid[x][y][z] = .grass;

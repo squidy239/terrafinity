@@ -32,7 +32,6 @@ pub const UpdateContext = struct {
     }
 };
 
-type: Type,
 uuid: Handle,
 ptr: *Implementation,
 ref_count: std.atomic.Value(u32),
@@ -45,7 +44,7 @@ pub const Interface = struct {
     /// Call ctx.reschedule to keep running or ctx.delete to remove; return parks.
     update: ?*const fn (ptr: *Implementation, ctx: UpdateContext) UpdateError!void = null,
     /// Frees the implementation. Must not acquire locks held where the entity system runs.
-    unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator, save: bool) error{SavingFailed}!void,
+    unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator) void,
     getPos: ?*const fn (ptr: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
@@ -61,7 +60,7 @@ pub fn release(self: *@This()) void {
     _ = self.ref_count.fetchSub(1, .seq_cst);
 }
 
-/// Flags deletion; unloads once unreferenced, deleting saved state.
+/// Flags deletion; unloads once unreferenced.
 pub fn markDeleted(self: *@This()) void {
     self.deleted.store(true, .seq_cst);
 }
@@ -71,8 +70,3 @@ pub fn markDeleted(self: *@This()) void {
 /// returned `*Entity` carries a caller-owned reference the caller must release.
 /// A handle does not keep its entity resident; some owner must hold that ref.
 pub const Handle = u64;
-
-pub const Type = enum(u32) {
-    Player = 0,
-    Explosive = 2,
-};

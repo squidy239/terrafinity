@@ -38,6 +38,7 @@ Check every one before reporting a candidate. Each has produced a real false pos
 - **C-ABI / `extern struct`:** types crossing the generator boundary (`generator_api.Spec`, `ConfigTree`, vtable structs) are ABI, not code.
 - **Third-party root declarations:** the Tracy package reads `@hasDecl(root, "tracy_impl")` and `root.tracy_options` from `src/main.zig`; deleting those silently disables Tracy. The dvui package names its backend methods by comptime field lookup, so every method in `src/dvui_backend_wio.zig` it names is live even with zero in-repo callers.
 - **Re-exports in `src/main.zig`:** e.g. `pub const Chunk = @import("world/Chunk.zig");`. The test root module is `main.zig`, so deleting a re-export can silently drop a file's tests from `zig build test` while `zig build` still passes. Trace re-exports to test reachability before removing.
+- **Reserved work, and the green build:** unreferenced is not dead. A file kept for planned use — `src/world/structures/TexturedSphere.zig` opens `// Will be used later; keep — do not delete as dead code`, with the backlog in `ideas.md` — is reserved; skip it, don't report it. For a genuine candidate, a passing build is not evidence: verify-change records that an unreferenced `.zig` file sits outside every root's import closure, so its removal (or a broken restore) is invisible to every gate. Clear files with the File-level import grep, and a non-file decl by confirming the name occurs only in its own definition — cite that, not the build.
 
 ## One-at-a-Time Review
 

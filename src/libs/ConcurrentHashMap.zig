@@ -21,41 +21,10 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return &self.buckets[bucket_index];
         }
 
-        pub fn contains(self: *Self, io: std.Io, key: K) bool {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].contains(io, key);
-        }
-
-        /// Returns null if item wasn't present, else returns old value and adds a ref to it.
-        pub fn putNoOverrideAddRef(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return try self.buckets[bucket_index].putNoOverrideAddRef(io, allocator, key, value);
-        }
-
-        pub fn getOrPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !Map.Bkt.Map.Entry {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return try self.buckets[bucket_index].getOrPut(io, allocator, key, value);
-        }
-
-        pub fn getAndAddRef(self: *Self, io: std.Io, key: K) ?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].getAndAddRef(io, key);
-        }
-
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
             const hash_code = self.ctx.hash(key);
             const bucket_index = @mod(hash_code, bucket_amount);
             return self.buckets[bucket_index].fetchRemove(io, key);
-        }
-
-        pub fn getPtr(self: *Self, io: std.Io, key: K) ?*V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].getPtr(io, key);
         }
 
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
@@ -183,12 +152,6 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
             return self.hash_map.get(key);
         }
 
-        pub fn contains(self: *Self, io: std.Io, key: K) bool {
-            self.lock.lockSharedUncancelable(io);
-            defer self.lock.unlockShared(io);
-            return self.hash_map.contains(key);
-        }
-
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
@@ -196,42 +159,11 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
             return kv.value;
         }
 
-        pub fn getAndAddRef(self: *Self, io: std.Io, key: K) ?V {
-            self.lock.lockSharedUncancelable(io);
-            defer self.lock.unlockShared(io);
-            const val = self.hash_map.get(key) orelse return null;
-            _ = val.ref_count.fetchAdd(1, .seq_cst);
-            return val;
-        }
-
-        pub fn getPtr(self: *Self, io: std.Io, key: K) ?*V {
-            self.lock.lockSharedUncancelable(io);
-            defer self.lock.unlockShared(io);
-            return self.hash_map.getPtr(key);
-        }
-
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
             const kv = try self.hash_map.fetchPut(allocator, key, value);
             return if (kv) |kv_val| kv_val.value else null;
-        }
-
-        pub fn putNoOverrideAddRef(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
-            if (self.hash_map.get(key)) |val| {
-                _ = val.ref_count.fetchAdd(1, .seq_cst);
-                return val;
-            }
-            try self.hash_map.put(allocator, key, value);
-            return null;
-        }
-
-        pub fn getOrPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !Map.Entry {
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
-            return try self.hash_map.getOrPut(allocator, key, value);
         }
 
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {

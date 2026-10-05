@@ -27,7 +27,7 @@ pub const Face = packed struct(u64) {
     _: @Int(.unsigned, 64 - (6 * @bitSizeOf(CoordInChunk) + @bitSizeOf(FaceRotation) + @bitSizeOf(Block.Tag))) = undefined,
 };
 
-/// One side exposes at most ChunkSize*ChunkSize faces, since the uniform path merges nothing.
+/// One side exposes at most ChunkSize*ChunkSize faces (an unmerged uniform side is the worst case).
 /// Six rotations emit at most this many faces into one list, so one reserve per list covers the loop.
 const max_uniform_faces_per_list = 6 * ChunkSize * ChunkSize;
 pub fn mesh(allocator: std.mem.Allocator, main_grid: Chunk.Encoding, noalias neighbor_faces: *const [6]Chunk.Encoding.Face, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
@@ -132,18 +132,31 @@ inline fn addSideFaces(comptime len: usize, mask_start: @Int(.unsigned, len), co
         .zplus => ChunkSize - 1,
         .xminus, .xplus, .yminus, .yplus => undefined,
     };
+    // Mirror addGridFaces: merge a contiguous run along z (the lane axis of the
+    // x/y rotations, whose face plane contains it) and never water, whose
+    // shader animation is anchored per face. z rotations keep one face per lane.
+    const merge_block = block != Block.water;
+    var last: Face = undefined;
+    var pending = false;
     while (mask != 0) {
         const lane = @ctz(mask);
         mask &= (mask - 1);
         const lane_coord: Face.CoordInChunk = @intCast(lane);
-        faces.addOneAssumeCapacity().* = .{
+        if (pending and !y_is_lane and merge_block and lane_coord == last.z + last.z_length + 1) {
+            last.z_length += 1;
+            continue;
+        }
+        if (pending) faces.appendAssumeCapacity(last);
+        last = .{
             .x = x_fixed,
             .y = if (y_is_lane) lane_coord else y_fixed,
             .z = if (y_is_lane) z_fixed else lane_coord,
             .rotation = comptime rotation,
             .block_type = @intFromEnum(block),
         };
+        pending = true;
     }
+    if (pending) faces.appendAssumeCapacity(last);
 }
 
 /// Worst-case faces for one x-slice: each (y, rotation) row emits at most ChunkSize faces.
@@ -314,10 +327,10 @@ test "MeshBehavior - Uniform Air and Solid Chunks" {
     try std.testing.expectEqual(@as(usize, 0), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 
-    // Phase 2: uniform solid exposed to air emits every boundary face.
+    // Phase 2: uniform solid exposed to air emits its boundary faces (merged along z per row).
     const solid_grid: Chunk.Encoding = .{ .uniform = .stone };
     try mesh(std.testing.allocator, solid_grid, &air_neighbors, &opaque_faces, &transparent_faces);
-    try std.testing.expectEqual(6 * (ChunkSize * ChunkSize), opaque_faces.items.len);
+    try std.testing.expectEqual(4 * ChunkSize + 2 * (ChunkSize * ChunkSize), opaque_faces.items.len);
     try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
 }
 
@@ -413,7 +426,7 @@ test "MeshBehavior - Chunk Boundary Culling Uniform and Grid" {
         var neighbor_faces: [6]Chunk.Encoding.Face = @splat(.{ .uniform = .air });
         neighbor_faces[@intFromEnum(FaceRotation.yminus)] = .{ .uniform = .stone };
         try mesh(std.testing.allocator, .{ .uniform = .stone }, &neighbor_faces, &opaque_faces, &transparent_faces);
-        try std.testing.expectEqual(5 * (ChunkSize * ChunkSize), opaque_faces.items.len);
+        try std.testing.expectEqual(3 * ChunkSize + 2 * (ChunkSize * ChunkSize), opaque_faces.items.len);
         try std.testing.expectEqual(@as(usize, 0), transparent_faces.items.len);
         opaque_faces.clearRetainingCapacity();
     }

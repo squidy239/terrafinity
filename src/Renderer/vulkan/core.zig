@@ -336,6 +336,7 @@ pub const VulkanBackingAllocator = struct {
             .memory_type_index = mem_type,
             .p_next = @ptrCast(&vk.MemoryAllocateFlagsInfo{ .flags = .{ .device_address_bit = true }, .device_mask = 0 }),
         }, &self.vkalloc);
+        errdefer self.dev.freeMemory(memory, &self.vkalloc);
         try self.dev.bindBufferMemory(buffer, memory, 0);
 
         return .{ buffer, memory, mem_reqs.size };
@@ -950,7 +951,7 @@ pub fn buildGraphicsPipeline(
     layout: vk.PipelineLayout,
     vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
 ) !vk.Pipeline {
-    return buildGraphicsPipelineWithTopology(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list);
+    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list, .{ .@"1_bit" = true });
 }
 
 pub fn buildGraphicsPipelineWithSamples(
@@ -968,23 +969,6 @@ pub fn buildGraphicsPipelineWithSamples(
     samples: vk.SampleCountFlags,
 ) !vk.Pipeline {
     return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, .triangle_list, samples);
-}
-
-pub fn buildGraphicsPipelineWithTopology(
-    dev: DeviceProxy,
-    vkalloc: *const vk.AllocationCallbacks,
-    pipeline_creation_feedback: bool,
-    vert_module: vk.ShaderModule,
-    frag_module: vk.ShaderModule,
-    color_formats: []const vk.Format,
-    depth_format: vk.Format,
-    depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo,
-    blend_attachments: []const vk.PipelineColorBlendAttachmentState,
-    layout: vk.PipelineLayout,
-    vertex_input_info: vk.PipelineVertexInputStateCreateInfo,
-    topology: vk.PrimitiveTopology,
-) !vk.Pipeline {
-    return buildGraphicsPipelineWithTopologyAndSamples(dev, vkalloc, pipeline_creation_feedback, vert_module, frag_module, color_formats, depth_format, depth_stencil_state, blend_attachments, layout, vertex_input_info, topology, .{ .@"1_bit" = true });
 }
 
 pub fn buildGraphicsPipelineWithTopologyAndSamples(

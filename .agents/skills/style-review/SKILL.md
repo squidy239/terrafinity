@@ -37,6 +37,7 @@ When reviewing or fixing code, enforce these comment standards, and ensure EACH 
 - **Keep comments short.** One or two plain English sentences. If you need a paragraph, the code is too complex.
 - **When to comment:** comments MUST explain _why_ behind a non-obvious decision, flag `TODO` items, or document genuinely confusing logic that absolutely cannot be clarified through renaming or restructuring.
 - **What to flag:** comments that state the obvious (`// increment i`), decorative cruft (`// =====`), or ASCII art (`// /\_/\  meow`).
+- **False reasons.** A comment present, short, and non-decorative can still be wrong: check it names the reason this code actually has, by reading the branch and the real consumer. A comment that justifies a case with a distinction the code never makes is a finding, not a cosmetic nit — e.g. an `.air`-vs-`.null` comment where the consumer only tests `.null`.
 - **Doc comments (`///`):** expected on public functions when the name is not self-explanatory. They must follow the same rules: no decorative characters, no banners, plain and direct.
 
 ```zig
@@ -51,6 +52,10 @@ When reviewing or fixing code, enforce these comment standards, and ensure EACH 
 // ✗ WRONG — stating the obvious
 // increment i by 1
 i += 1;
+
+// ✗ WRONG — false reason
+// The mesher emits .air for missing neighbors, which this skips.
+if (block == .null) continue;
 
 // ✓ CORRECT — explains why
 // The order matters here: upstream expects sorted keys.

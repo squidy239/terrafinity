@@ -71,7 +71,6 @@ pub fn deinit(back: *@This()) void {
     const r = &(back.renderer orelse return);
     if (back.device) |dev| dev.deviceWaitIdle() catch |err| {
         std.log.err("DVUI Vulkan renderer could not wait for device idle: {}", .{err});
-        return;
     };
     r.deinit();
     back.renderer = null;
@@ -344,16 +343,7 @@ pub fn textureReadTarget(_: *@This(), _: dvui.TextureTarget, _: [*]u8) !void {
 pub fn textureClearTarget(_: *@This(), _: dvui.Texture.Target) void {}
 
 pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {
-    const r = self.getRenderer();
-    r.textureDestroy(.{
-        .ptr = texture.ptr,
-        .width = texture.width,
-        .height = texture.height,
-        .format = texture.format,
-        .interpolation = texture.interpolation,
-        .wrap_u = texture.wrap_u,
-        .wrap_v = texture.wrap_v,
-    });
+    self.getRenderer().textureDestroy(self.textureFromTarget(texture));
 }
 
 pub fn textureFromTarget(_: *@This(), target: dvui.TextureTarget) dvui.Texture {

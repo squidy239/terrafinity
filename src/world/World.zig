@@ -4,6 +4,10 @@ const builtin = @import("builtin");
 const tracy = @import("tracy");
 
 const Cache = @import("../libs/Cache.zig").Cache;
+const SetAssociativeCache = @import("../libs/SetAssociativeCache.zig");
+
+/// Layout shared by the chunk and grid caches, so eviction budgets stay in sync.
+const chunk_cache_layout: SetAssociativeCache.Layout = .{};
 pub const Block = @import("Block.zig").Block;
 const Chunk = @import("Chunk.zig");
 pub const ChunkSize = Chunk.ChunkSize;
@@ -198,12 +202,19 @@ const ChunkMapType = Cache(
     ChunkValue,
     ChunkValue.keyFromValue,
     chunkPosHash,
-    .{},
+    chunk_cache_layout,
     if (builtin.is_test) 1 else 256,
 );
 
+/// `skip_victim` re-arms the way it skips, so a fully pinned set never yields a
+/// null victim; cap the tries per insert so a pathological set fails loudly
+/// instead of spinning. This is a bound, not a guarantee: the selector can
+/// cycle past an evictable way.
+const max_victim_skips = ChunkMapType.Shard.value_count_max_multiple *
+    (1 << chunk_cache_layout.clock_bits);
+
 chunks: ChunkMapType,
-grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, if (builtin.is_test) 1 else 256),
+grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, chunk_cache_layout, if (builtin.is_test) 1 else 256),
 config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
@@ -248,7 +259,6 @@ pub fn loadChunk(
 
     const new_chunk: Chunk = .{
         .encoding = encoding,
-        .saved = .init(metadata.from_disk),
         .structures_generated = .init(metadata.structures),
         .ref_count = .init(2),
     };
@@ -258,6 +268,7 @@ pub fn loadChunk(
         .existing => |existing| existing,
         .inserted => |inserted| inserted,
     };
+    errdefer chunk.release();
 
     if (structures) try self.tryGenStructures(io, allocator, chunk, chunk_pos);
     return chunk;
@@ -294,9 +305,8 @@ pub fn trySaveAll(self: *World, io: std.Io) !void {
     var group: std.Io.Group = .init;
     defer group.cancel(io);
 
-    var failed = std.atomic.Value(bool).init(false);
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-        group.async(io, saveShard, .{ self, shard, lock, io, false, &failed });
+        group.async(io, saveShard, .{ self, shard, lock, io, false, null });
     }
     try group.await(io);
 }
@@ -313,7 +323,7 @@ fn saveShard(
     lock: *std.Io.Mutex,
     io: std.Io,
     blocking: bool,
-    failed: *std.atomic.Value(bool),
+    failed: ?*std.atomic.Value(bool),
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -355,7 +365,7 @@ fn saveShard(
 
             self.save(io, item.chunk, item.pos) catch |err| {
                 save_failed = true;
-                failed.store(true, .release);
+                if (failed) |f| f.store(true, .release);
                 std.log.err("error saving chunk: {any}, {any}\n", .{ item.pos, err });
             };
             item.chunk.release();
@@ -382,17 +392,6 @@ pub const Reader = struct {
         errdefer chunk.release();
         try chunk.lockShared(io);
         self.last_chunk_read_cache = .{ .chunk_pos = chunk_pos, .chunk = chunk };
-        return readBlockFromEncoding(chunk.encoding, local_pos);
-    }
-
-    pub fn getBlockUncached(self: *Reader, io: std.Io, allocator: std.mem.Allocator, block_pos: BlockPos, level: i32) !Block {
-        const chunk_pos: ChunkPos = .fromLocalBlockPos(block_pos, level);
-        const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
-
-        const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-        errdefer chunk.release();
-        try chunk.lockShared(io);
-        defer chunk.releaseAndUnlockShared(io);
         return readBlockFromEncoding(chunk.encoding, local_pos);
     }
 
@@ -633,6 +632,9 @@ pub const Editor = struct {
         const track_face_changes = if (world.edit_callback) |cb| cb.on_neighbor_face_change else false;
         const old_sides = if (track_face_changes) chunk.encoding.extractAllFaces() else null;
         const was_grid = chunk.encoding == .grid;
+        // A uniform chunk that merges into a grid borrows `grid_buffer`; restore
+        // this if the grid cannot be placed, or the chunk keeps a dead pointer.
+        const old_encoding = chunk.encoding;
 
         chunk.encoding.merge(merge, &grid_buffer);
 
@@ -643,7 +645,10 @@ pub const Editor = struct {
             defer zone_shard.end();
             lock.lockUncancelable(io);
             defer lock.unlock(io);
-            world.ownGrid(io, chunk, chunk_pos, shard);
+            world.ownGrid(io, chunk, chunk_pos, shard) catch |err| {
+                chunk.encoding = old_encoding;
+                return err;
+            };
         }
 
         if (old_sides) |os| {
@@ -687,7 +692,10 @@ pub const Editor = struct {
         };
         defer chunk.release();
 
-        const sides_changed = try mergeChunk(self.world, io, chunk_pos, chunk, encoding);
+        const sides_changed = mergeChunk(self.world, io, chunk_pos, chunk, encoding) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+        };
 
         for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
             if (!changed) continue;
@@ -817,6 +825,7 @@ fn putChunk(
     std.debug.assert(chunk.ref_count.raw == 2);
 
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
+    var skips: usize = 0;
     while (true) {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "putChunk_lock_shard" });
         defer zone_lock.end();
@@ -830,6 +839,8 @@ fn putChunk(
 
         if (shard.peek_victim(chunk_pos)) |victim| {
             if (!canEvict(&victim.chunk, io)) {
+                if (skips >= max_victim_skips) return error.Unrecoverable;
+                skips += 1;
                 shard.skip_victim(chunk_pos);
                 continue;
             }
@@ -841,7 +852,11 @@ fn putChunk(
         _ = shard.upsert(&.{ .chunk = chunk, .pos = chunk_pos });
         const chunk_ptr = &shard.get(chunk_pos).?.chunk;
         chunk_ptr.encoding_lock.lockUncancelable(io);
-        self.ownGrid(io, chunk_ptr, chunk_pos, shard);
+        self.ownGrid(io, chunk_ptr, chunk_pos, shard) catch |err| {
+            chunk_ptr.encoding_lock.unlock(io);
+            _ = shard.remove(chunk_pos);
+            return err;
+        };
         chunk_ptr.encoding_lock.unlock(io);
         return .{ .inserted = chunk_ptr };
     }
@@ -851,7 +866,7 @@ fn freeGrid(self: *World, io: std.Io, chunk_pos: ChunkPos) void {
     _ = self.grids.remove(io, chunk_pos);
 }
 
-fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) void {
+fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) error{Unrecoverable}!void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len);
@@ -864,16 +879,23 @@ fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chu
     lock.lockUncancelable(io);
     defer lock.unlock(io);
 
+    var skips: usize = 0;
     while (grid_shard.peek_victim(chunk_pos)) |victim| {
         std.debug.assert(victim.chunk != chunk_ptr);
         if (!canEvict(victim.chunk, io)) {
+            if (skips >= max_victim_skips) return error.Unrecoverable;
+            skips += 1;
             grid_shard.skip_victim(chunk_pos);
             continue;
         }
-        defer victim.chunk.encoding_lock.unlockShared(io);
-        std.debug.assert(victim.chunk.encoding == .grid);
-        save(self, io, victim.chunk, victim.pos) catch |err|
-            std.log.err("Failed to save chunk: {}", .{err});
+        // Release the encoding lock before `remove` poisons the owning value.
+        {
+            defer victim.chunk.encoding_lock.unlockShared(io);
+            std.debug.assert(victim.chunk.encoding == .grid);
+            // A failed save must abort the eviction: falling through would remove
+            // the victim from `chunks` and overwrite its grids slot, losing it.
+            try save(self, io, victim.chunk, victim.pos);
+        }
         _ = chunks_shard.remove(victim.pos);
         break;
     }

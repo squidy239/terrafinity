@@ -27,3 +27,4 @@ Generators are `.so` plugins built from one shared root and `dlopen`ed at runtim
 ## Verification
 
 - Gates per the `verify-change` skill. Startup loads every generator, so a play test covers registration; use exclusive access (or a private `cwd`) to avoid the `./generators/` race.
+- Tests: the only test module roots at `main.zig`; `generator_root.zig` compiles the generators as separate `.so` roots, so `@import`ing a generator there does not run its tests. Planet/Voxelgame/Fractal/Sponge are reachable only through `generator_root.zig` and their `test` blocks are silently skipped under `zig build test` (`Terrain.zig`, `Fuzz.zig`, and `generator_api.zig` are reachable via `World.zig`/`Game.zig`). Put a generator regression test in a main-reachable file, or wire the generator into the test module.

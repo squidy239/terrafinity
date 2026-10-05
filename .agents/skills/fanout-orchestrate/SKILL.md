@@ -18,6 +18,8 @@ Parallel workers share no context and race on shared files. Every collision in t
 
 - **Workers never verify, lint, or format.** Every dispatch says: skip gates/formatters/tests, edit only. The orchestrator formats once and verifies once across the union at phase end — never mid-flight while siblings still edit (builds then prove nothing).
 - **Wait with ID filters** so unrelated completions don't hijack the wakeup. Never bare-wait when background researchers are running.
+- **Refill onto unowned files only.** Rolling refill (a replacement the moment a worker finishes) keeps throughput up but grows the unverified union; never dispatch onto a file a live worker is editing. When a mid-flight build fails, attribute it to the file first, then its owner — a sibling's partial edit otherwise falsely implicates a completed worker.
+- **Drain before the central gate.** Let a cohort reach zero live editors before the phase-end gate when practical; otherwise bound the unverified backlog rather than letting it grow without limit.
 
 ## Broadcast hygiene
 

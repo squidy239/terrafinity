@@ -15,8 +15,6 @@ structures_generated: std.atomic.Value(bool) = .init(false),
 
 /// True if the chunk changed since load.
 modified: std.atomic.Value(bool) = .init(false),
-/// True if storage holds a version of this chunk. Use modified to test the current version.
-saved: std.atomic.Value(bool) = .init(false),
 
 pub const Encoding = union(enum(u1)) {
     pub const GridAlignment = 64;
