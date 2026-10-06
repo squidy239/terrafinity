@@ -22,12 +22,12 @@ Bring code to the best possible quality while preserving all functionality: simp
 `simplify <files or dir> [time]`
 
 - `<files or dir>` — the files just written, or a target directory. Every code file under it is in scope, not just Zig. With no target, use the files changed in `git status`.
-- `[time]` — optional budget such as `45m`, `2h`, or `1h30m`.
+- `[time]` — optional budget such as `45m`, `2h`, or `1h30m`. A budget in plain words ("for 10 minutes", "keep going for an hour") is the same budget.
 
-Record the start with `date +%s` and, when a budget is given, the deadline. Check the clock before starting each round.
+**A time budget is STRICT.** It is a hard requirement, not an estimate, and it applies to every budget size, including short ones. As the first action, run `date +%s` and record the start and the deadline (start + budget). Use only `date` to measure time; never estimate elapsed time. Run `date +%s` again before each round and before every report.
 
 - **With a time budget, the run MUST last until the budget is used up.** Do not stop, report, or ask the user anything before the deadline. Nothing ends the run early: all slices reporting DONE, deeper rounds that find nothing, stuck slices, or a sense that the code is already good do not count. The stuck-slice rule does not apply; a stuck slice moves to the next deeper-round angle instead of being dropped.
-  - Reserve the last ~10% of the budget (at least 10 minutes) for the final verification. Do not start a round that the previous round's duration says cannot finish before that reserve.
+  - Reserve the last ~10% of the budget (at least 10 minutes, or half of a budget under 20 minutes) for the final verification. Do not start a round that the previous round's duration says cannot finish before that reserve.
   - When every slice reports DONE before the reserve, run deeper rounds (see Round Types), each with a new angle, until the reserve begins.
   - If the final verification finishes before the deadline, use the remaining time for another round on the angle most likely to pay off, then run the final verification again. Repeat until the deadline.
   - Before writing the final report, run `date +%s` and confirm that the deadline has passed. If it has not, continue working. The report states the start time, the deadline, and the finish time.

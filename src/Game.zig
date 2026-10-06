@@ -219,7 +219,6 @@ fn tryRemoveChunkFromLoaded(
     chunk_pos: World.ChunkPos,
     view: ViewSnapshot,
 ) !void {
-    if (!self.canUnloadMeshView(io, view, chunk_pos)) return;
     const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
     var was_covering: bool = false;
     var is_covering: bool = false;
@@ -332,40 +331,26 @@ pub const WorldOptions = struct {
         const world_config_file = try world_folder.openFile(io, "config/World.zon", .{ .lock = .shared });
         defer world_config_file.close(io);
 
-        var generator_name: []const u8 = "Terrain";
-        const generator_config_file = world_folder.openFile(io, "config/generator.zon", .{ .lock = .shared }) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
-        if (generator_config_file) |file| {
-            defer file.close(io);
-            const selection = try utils.loadZon(GeneratorSelection, io, file, allocator, allocator);
-            generator_name = selection.generator;
-        }
-
-        var spawn_state: EntityRegistry.SpawnConfig = .{};
-        const spawn_config_file = world_folder.openFile(io, "config/Spawn.zon", .{ .lock = .shared }) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
-        if (spawn_config_file) |file| {
-            defer file.close(io);
-            spawn_state = try utils.loadZon(EntityRegistry.SpawnConfig, io, file, allocator, allocator);
-        }
-
+        const selection = try loadOptionalZon(GeneratorSelection, io, world_folder, "config/generator.zon", allocator);
         return .{
-            .generator_name = generator_name,
+            .generator_name = selection.generator,
             .world_config = try utils.loadZon(World.WorldConfig, io, world_config_file, allocator, allocator),
-            .spawn = spawn_state,
+            .spawn = try loadOptionalZon(EntityRegistry.SpawnConfig, io, world_folder, "config/Spawn.zon", allocator),
         };
+    }
+
+    /// Loads `sub_path`, or returns the type's defaults when the file does not exist.
+    fn loadOptionalZon(comptime T: type, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, allocator: std.mem.Allocator) !T {
+        const file = dir.openFile(io, sub_path, .{ .lock = .shared }) catch |err| switch (err) {
+            error.FileNotFound => return .{},
+            else => return err,
+        };
+        defer file.close(io);
+        return utils.loadZon(T, io, file, allocator, allocator);
     }
 
     /// Writes the world options into the config directory of the given folder, creating missing files.
     pub fn save(self: WorldOptions, io: std.Io, folder: []const u8) !void {
-        var wbuffer: [1024]u8 = undefined;
-        var gbuffer: [1024]u8 = undefined;
-        var sbuffer: [1024]u8 = undefined;
-
         var world_folder = try std.Io.Dir.cwd().openDir(io, folder, .{});
         defer world_folder.close(io);
 
@@ -374,28 +359,9 @@ pub const WorldOptions = struct {
             else => return err,
         };
 
-        const world_config_file = try world_folder.createFile(io, "config/World.zon", .{ .lock = .exclusive });
-        defer world_config_file.close(io);
-
-        var world_config_writer = world_config_file.writer(io, &wbuffer);
-
-        const generator_config_file = try world_folder.createFile(io, "config/generator.zon", .{ .lock = .exclusive });
-        defer generator_config_file.close(io);
-
-        var generator_config_writer = generator_config_file.writer(io, &gbuffer);
-
-        const spawn_config_file = try world_folder.createFile(io, "config/Spawn.zon", .{ .lock = .exclusive });
-        defer spawn_config_file.close(io);
-
-        var spawn_config_writer = spawn_config_file.writer(io, &sbuffer);
-
-        try std.zon.stringify.serialize(self.world_config, .{}, &world_config_writer.interface);
-        try std.zon.stringify.serialize(GeneratorSelection{ .generator = self.generator_name }, .{}, &generator_config_writer.interface);
-        try std.zon.stringify.serialize(self.spawn, .{}, &spawn_config_writer.interface);
-
-        try world_config_writer.end();
-        try generator_config_writer.end();
-        try spawn_config_writer.end();
+        try utils.saveZon(io, world_folder, "config/World.zon", self.world_config);
+        try utils.saveZon(io, world_folder, "config/generator.zon", GeneratorSelection{ .generator = self.generator_name });
+        try utils.saveZon(io, world_folder, "config/Spawn.zon", self.spawn);
     }
 };
 
@@ -483,11 +449,10 @@ pub fn init(
     }
 
     game.options_lock.lockSharedUncancelable(io);
-    const chunk_cache_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.chunk_cache_bytes / @sizeOf(World.ChunkValue))), @TypeOf(game.world.chunks).value_count_min);
-    const chunk_grid_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.grid_cache_bytes / @sizeOf(World.GridValue))), @TypeOf(game.world.grids).value_count_min);
+    const chunk_cache_capacity = cacheCapacity(World.ChunkValue, @TypeOf(game.world.chunks).value_count_min, game.options.chunk_cache_bytes, "chunk");
+    const chunk_grid_capacity = cacheCapacity(World.GridValue, @TypeOf(game.world.grids).value_count_min, game.options.grid_cache_bytes, "grid");
+    const entity_cache_capacity = cacheCapacity(EntityRegistry.Entity, @TypeOf(game.entity_registry.map).value_count_min, game.options.entity_cache_bytes, "entity");
     game.options_lock.unlockShared(io);
-    std.log.info("Creating chunk cache with size {d} ({d} bytes)", .{ chunk_cache_capacity, chunk_cache_capacity * @sizeOf(World.ChunkValue) });
-    std.log.info("Creating grid cache with size {d} ({d} bytes)", .{ chunk_grid_capacity, chunk_grid_capacity * @sizeOf(World.GridValue) });
 
     game.world = .{
         .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
@@ -503,17 +468,19 @@ pub fn init(
     errdefer game.world.deinit(io, allocator);
     source_deinited = true;
 
-    game.options_lock.lockSharedUncancelable(io);
-    const entity_cache_capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, game.options.entity_cache_bytes / @sizeOf(EntityRegistry.Entity))), @TypeOf(game.entity_registry.map).value_count_min);
-    game.options_lock.unlockShared(io);
-    std.log.info("Creating entity cache with size {d} ({d} bytes)", .{ entity_cache_capacity, entity_cache_capacity * @sizeOf(EntityRegistry.Entity) });
-
     game.entity_registry = try .init(game.allocator, entity_cache_capacity);
     errdefer game.entity_registry.deinit(io, game.allocator, &game.world);
 
     game.spawn = world_options.spawn;
     const spawn_pos = try game.resolveSpawnPos(io, allocator, folder, &world_options);
     try game.spawnPlayer(io, allocator, spawn_pos);
+}
+
+/// Converts a byte budget into a power-of-two cache capacity of at least `min` values.
+fn cacheCapacity(comptime V: type, min: u64, bytes: u64, name: []const u8) u64 {
+    const capacity = @max(std.math.floorPowerOfTwo(u64, @max(1, bytes / @sizeOf(V))), min);
+    std.log.info("Creating {s} cache with size {d} ({d} bytes)", .{ name, capacity, capacity * @sizeOf(V) });
+    return capacity;
 }
 
 const spawn_scan_above: f64 = 512;
@@ -601,6 +568,15 @@ fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, cent
 }
 
 /// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
+/// Forgets the found spawn so the next world load searches again, and persists that.
+pub fn resetSpawn(self: *@This(), io: std.Io) !void {
+    self.spawn.pos = .{ 0, 0, 0 };
+    self.spawn.found = false;
+    var world_folder = try std.Io.Dir.cwd().openDir(io, self.world_path, .{});
+    defer world_folder.close(io);
+    try utils.saveZon(io, world_folder, "config/Spawn.zon", self.spawn);
+}
+
 fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, folder: []const u8, world_options: *WorldOptions) !@Vector(3, f64) {
     if (game.spawn.found) {
         // Same radius on retry: growing it would abandon the island.
@@ -773,13 +749,17 @@ fn restartFuture(
     comptime function: anytype,
     args: anytype,
 ) !void {
-    if (!running.load(.seq_cst) and last.durationTo(.now(io, .awake)).toMilliseconds() > frequency_ms) {
-        if (future.*) |*f| try f.await(io);
+    if (running.load(.seq_cst)) return;
+    if (last.durationTo(.now(io, .awake)).toMilliseconds() <= frequency_ms) return;
+    last.* = .now(io, .awake);
+    try spawnTask(io, running, future, function, args);
+}
 
-        running.store(true, .seq_cst);
-        last.* = .now(io, .awake);
-        future.* = io.concurrent(function, args) catch io.async(function, args);
-    }
+/// Reaps the finished previous pass and starts the next one with `running` set.
+fn spawnTask(io: std.Io, running: *std.atomic.Value(bool), future: anytype, comptime function: anytype, args: anytype) !void {
+    if (future.*) |*f| try f.await(io);
+    running.store(true, .seq_cst);
+    future.* = io.concurrent(function, args) catch io.async(function, args);
 }
 
 fn saveFuture(self: *@This(), io: std.Io) !void {
@@ -805,10 +785,7 @@ fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
     if (self.entity_update_is_running.load(.seq_cst)) return;
     // Never spawn into teardown; stopBackgroundWork owns shutdown from here.
     if (!self.running.load(.unordered)) return;
-    if (self.entity_drain_future) |*f| try f.await(io);
-
-    self.entity_update_is_running.store(true, .seq_cst);
-    self.entity_drain_future = io.concurrent(updateEntities, .{ self, io, allocator }) catch io.async(updateEntities, .{ self, io, allocator });
+    try spawnTask(io, &self.entity_update_is_running, &self.entity_drain_future, updateEntities, .{ self, io, allocator });
 }
 
 /// Runs the player on the frame thread, outside the wheel.
@@ -1194,9 +1171,7 @@ pub fn getPlayerPos(self: *@This(), io: std.Io) @Vector(3, f64) {
 fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
     const z = tracy.Zone.begin(.{ .src = @src(), .name = "getCameraFront" });
     defer z.end();
-    self.player.view_direction_mutex.lockUncancelable(io);
-    defer self.player.view_direction_mutex.unlock(io);
-    return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
+    return Renderer.cameraFrontFromViewDirection(self.getViewDirection(io));
 }
 
 const Levels = struct { lowest: i32, highest: i32 };
@@ -1415,45 +1390,27 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
     const spiral_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "loadChunksSpiral" });
     defer spiral_zone.end();
     var view = game.snapshotView(io);
-    var player_pos = view.player_pos;
-    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(player_pos), level);
-
-    var outer_radius = view.render_distance;
-    var inner_radius = view.innerGenRadius(level);
-
-    var amount_loaded: u64 = 0;
+    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(view.player_pos), level);
     var amount_tested: u64 = 0;
-
     var spiral_pos: [2]i32 = .{ 0, 0 };
     var segment_index: usize = 0;
-    var first_segment = true;
 
-    while (true) {
+    // One snapshot per segment keeps the filter and its tasks on the same center and radii. A player-chunk crossing resets the spiral.
+    while (true) : (view = game.snapshotView(io)) {
         if (!game.running.load(.unordered)) return;
-        if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
-
-        // One snapshot per segment keeps the filter and its tasks on the same center and radii. A player-chunk crossing resets the spiral.
-        if (first_segment) {
-            first_segment = false;
-        } else {
-            const fresh = game.snapshotView(io);
-            view = fresh;
-            player_pos = fresh.player_pos;
-            outer_radius = fresh.render_distance;
-            inner_radius = fresh.innerGenRadius(level);
-
-            const fresh_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(fresh.player_pos), level);
-            if (!std.meta.eql(player_chunk_pos, fresh_chunk_pos)) {
-                player_chunk_pos = fresh_chunk_pos;
-                segment_index = 0;
-                spiral_pos = .{ 0, 0 };
-                amount_tested = 0;
-                continue;
-            }
+        const fresh_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(view.player_pos), level);
+        if (!std.meta.eql(player_chunk_pos, fresh_chunk_pos)) {
+            player_chunk_pos = fresh_chunk_pos;
+            segment_index = 0;
+            spiral_pos = .{ 0, 0 };
+            amount_tested = 0;
         }
+        const outer_radius = view.render_distance;
+        if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
 
         try io.checkCancel();
 
+        const inner_radius = view.innerGenRadius(level);
         const segment_end = spiralSegmentEnd(spiral_pos, &segment_index);
         var line_step: i32 = 0;
         while (advanceSpiralLine(&spiral_pos, &line_step, segment_end)) {
@@ -1464,7 +1421,7 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
             while (y <= outer_radius[1]) : (y += 1) {
                 const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ spiral_pos[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], spiral_pos[1] + player_chunk_pos.position[2] }, .level = level };
 
-                if (!keepLoaded(null, null, player_pos, chunk_pos, inner_radius, outer_radius)) continue;
+                if (!keepLoaded(null, null, view.player_pos, chunk_pos, inner_radius, outer_radius)) continue;
 
                 const needs_load = if (game.loaded_or_meshed.get(io, chunk_pos)) |node_data|
                     (!node_data.is_active and !node_data.is_queued) or !node_data.structures_generated
@@ -1472,7 +1429,6 @@ fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, le
                     true;
 
                 if (needs_load) {
-                    amount_loaded += 1;
                     game.addChunkToRenderAsync(io, allocator, chunk_pos, true, view) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => |e| error_int.store(@intFromError(e), .unordered),
@@ -1526,7 +1482,7 @@ fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
         if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
 
         it.pause(io);
-        try self.tryRemoveChunkFromLoaded(io, self.allocator, key, view);
+        if (self.canUnloadMeshView(io, view, key)) try self.tryRemoveChunkFromLoaded(io, self.allocator, key, view);
         try it.unpause(io);
     }
 }

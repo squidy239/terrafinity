@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var config: Config = try .load(gpa, io, config_path);
     defer config.deinit(gpa);
     try config.save(io, config_path, &config_lock);
+    defer config.save(io, config_path, &config_lock) catch |err| std.log.err("Saving config on exit failed: {any}", .{err});
 
     try writeEmbeddedGenerators(io);
     var generators = try generator_loader.Registry.init(gpa, io, "generators");
@@ -177,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
     while (running.load(.unordered)) {
         wio.update();
         try handleEvents(io, &keymap, single_press, &single_press_latch, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
-        if (action_set.contains(.escape_menu)) ui.menu_state.handle_esc();
+        if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
                 current_window_mode = pre_fullscreen_window_mode;
@@ -472,7 +473,7 @@ fn handleEvents(
     ui: *Ui,
     vk_ctx: *VulkanContext,
 ) !void {
-    if (ui.menu_state.is_playing_game()) {
+    if (ui.menu_state.isPlayingGame()) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();
@@ -492,10 +493,10 @@ fn handleEvents(
                 if (!single_press.contains(action)) action_set.remove(action);
             },
             .close => running.store(false, .unordered),
-            .scroll_vertical => |scroll| if (ui.menu_state.is_playing_game()) {
+            .scroll_vertical => |scroll| if (ui.menu_state.isPlayingGame()) {
                 try ui.game.handleScroll(io, scroll);
             },
-            .mouse_relative => |mouse| if (ui.menu_state.is_playing_game() and (mouse.x != 0 or mouse.y != 0)) {
+            .mouse_relative => |mouse| if (ui.menu_state.isPlayingGame() and (mouse.x != 0 or mouse.y != 0)) {
                 ui.game.handleMouseMotion(io, mouse);
             },
             .size_logical => |size| window_logical_size = size,
@@ -509,7 +510,7 @@ fn handleEvents(
         }
     }
 
-    if (ui.menu_state.is_playing_game()) {
+    if (ui.menu_state.isPlayingGame()) {
         try ui.game.handleButtonActions(io, action_set);
     }
 }

@@ -23,6 +23,16 @@ pub fn loadZon(comptime T: type, io: std.Io, file: std.Io.File, temp_allocator: 
     };
 }
 
+/// Serializes `value` as zon into `sub_path`, replacing the file under an exclusive lock.
+pub fn saveZon(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: anytype) !void {
+    const file = try dir.createFile(io, sub_path, .{ .lock = .exclusive });
+    defer file.close(io);
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    try std.zon.stringify.serialize(value, .{}, &writer.interface);
+    try writer.end();
+}
+
 pub const PackDir = struct {
     path: []u8,
     dir: std.Io.Dir,

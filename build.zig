@@ -41,31 +41,20 @@ pub fn build(b: *std.Build) void {
         .{ .name = "comp_vert", .out = "composite_vert.spv", .src = "src/Renderer/vulkan/composite_vert.vert" },
         .{ .name = "comp_frag", .out = "composite_frag.spv", .src = "src/Renderer/vulkan/composite_frag.frag" },
         .{ .name = "cull", .out = "cull.spv", .src = "src/Renderer/vulkan/chunk_renderer/cull.comp", .deps = &.{"src/Renderer/vulkan/occlusion/occlusion.glsl"} },
-        .{ .name = "pyramid", .out = "depth_pyramid.spv", .src = "src/Renderer/vulkan/occlusion/depth_pyramid.comp" },
+        .{ .name = "depth_pyramid", .out = "depth_pyramid.spv", .src = "src/Renderer/vulkan/occlusion/depth_pyramid.comp" },
         .{ .name = "sky_vert", .out = "sky_vert.spv", .src = "src/Renderer/vulkan/sky/sky.vert" },
         .{ .name = "sky_frag", .out = "sky_frag.spv", .src = "src/Renderer/vulkan/sky/sky.frag" },
         .{ .name = "shadow_vert", .out = "shadow_vert.spv", .src = "src/Renderer/vulkan/shadow/shadow.vert", .deps = &.{"src/Renderer/vulkan/shadow/face_decode.glsl"} },
     };
 
-    var shader_cmds: [shaders.len]*std.Build.Step.Run = undefined;
-    var shader_outs: [shaders.len]std.Build.LazyPath = undefined;
-
-    for (shaders, 0..) |def, i| {
-        const cmd = b.addSystemCommand(&shader_base_cmd);
-        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/shadow"), .{ .prefix = "-I" });
-        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/occlusion"), .{ .prefix = "-I" });
-        const out = cmd.addOutputFileArg2(def.out, .{ .prefix = "-o" });
-        cmd.addFileArg2(b.path(def.src), .{});
-        for (def.deps) |dep| cmd.addFileInput(b.path(dep));
-        shader_cmds[i] = cmd;
-        shader_outs[i] = out;
-    }
+    const sanitize_thread = sanitize != .None;
+    const use_llvm: ?bool = if (tracy_enabled) true else null;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .sanitize_thread = sanitize != .None,
+        .sanitize_thread = sanitize_thread,
     });
 
     const deps = createDependencies(b, target, optimize, sanitize, tracy_enabled);
@@ -74,63 +63,57 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "terrafinity",
         .root_module = root_module,
-        .use_llvm = if (tracy_enabled) true else null,
+        .use_llvm = use_llvm,
     });
 
-    for (shader_cmds) |cmd| exe.step.dependOn(&cmd.step);
-
-    const shader_import_names = [_][]const u8{
-        "vert_spv", "frag_spv",          "trans_frag_spv", "comp_vert_spv", "comp_frag_spv",
-        "cull_spv", "depth_pyramid_spv", "sky_vert_spv",   "sky_frag_spv",  "shadow_vert_spv",
-    };
-    for (shader_import_names, shader_outs) |import_name, out| {
-        exe.root_module.addAnonymousImport(import_name, .{ .root_source_file = out });
+    for (shaders) |def| {
+        const cmd = b.addSystemCommand(&shader_base_cmd);
+        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/shadow"), .{ .prefix = "-I" });
+        cmd.addDirectoryArg2(b.path("src/Renderer/vulkan/occlusion"), .{ .prefix = "-I" });
+        const out = cmd.addOutputFileArg2(def.out, .{ .prefix = "-o" });
+        cmd.addFileArg2(b.path(def.src), .{});
+        for (def.deps) |dep| cmd.addFileInput(b.path(dep));
+        exe.root_module.addAnonymousImport(b.fmt("{s}_spv", .{def.name}), .{ .root_source_file = out });
     }
 
-    for (generator_sources) |generator_source| {
+    inline for (comptime std.enums.values(GeneratorKind)) |kind| {
+        const kind_name = @tagName(kind);
         const generator = b.addLibrary(.{
-            .name = generator_source.name,
+            .name = kind_name ++ "_generator",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/generator_root.zig"),
                 .target = target,
                 .optimize = optimize,
-                .sanitize_thread = sanitize != .None,
+                .sanitize_thread = sanitize_thread,
             }),
-            .use_llvm = if (tracy_enabled) true else null,
+            .use_llvm = use_llvm,
         });
         const generator_options = b.addOptions();
-        generator_options.addOption(GeneratorKind, "generator", generator_source.kind);
+        generator_options.addOption(GeneratorKind, "generator", kind);
         generator.root_module.addOptions("generator_select", generator_options);
         configureModule(&deps, generator.root_module);
         exe.step.dependOn(&b.addInstallFileWithDir(
             generator.getEmittedBin(),
             .{ .custom = "generators" },
-            generator_source.file_name,
+            kind_name ++ ".generator",
         ).step);
-        exe.root_module.addAnonymousImport(generator_source.embed_name, .{
+        exe.root_module.addAnonymousImport(kind_name ++ "_generator_bin", .{
             .root_source_file = generator.getEmittedBin(),
         });
     }
 
-    const visible_count = comptime blk: {
-        var count: usize = 0;
+    const default_textures = comptime blk: {
+        var textures: []const [:0]const u8 = &.{};
         for (@typeInfo(Block).@"enum".field_names) |field_name| {
             if (!@field(Block, field_name).isVisible()) continue;
-            count += 1;
+            textures = textures ++ .{@embedFile("packs/default/blocks/" ++ field_name ++ ".png")};
         }
-        break :blk count;
+        break :blk textures;
     };
 
-    var buffer: [visible_count][:0]const u8 = undefined;
-    var default_textures: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).initBuffer(&buffer);
-    inline for (@typeInfo(Block).@"enum".field_names) |field_name| {
-        if (!@field(Block, field_name).isVisible()) continue;
-        default_textures.appendAssumeCapacity(@embedFile("packs/default/blocks/" ++ field_name ++ ".png"));
-    }
-
     var textures_options: *std.Build.Step.Options = .create(b);
-    textures_options.addOption([]const [:0]const u8, "default", default_textures.items);
+    textures_options.addOption([]const [:0]const u8, "default", default_textures);
     exe.root_module.addOptions("textures", textures_options);
 
     var materials_options: *std.Build.Step.Options = .create(b);
@@ -140,7 +123,7 @@ pub fn build(b: *std.Build) void {
     var build_options: *std.Build.Step.Options = .create(b);
     build_options.addOption(?u32, "test_play", test_play);
     build_options.addOption(?u32, "screenshot_after", screenshot_after);
-    build_options.addOption(bool, "sanitize_thread", sanitize != .None);
+    build_options.addOption(bool, "sanitize_thread", sanitize_thread);
     exe.root_module.addOptions("options", build_options);
     b.installArtifact(exe);
 
@@ -153,7 +136,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = root_module,
-        .use_llvm = if (tracy_enabled) true else null,
+        .use_llvm = use_llvm,
         .filters = b.option([]const []const u8, "test_filter", "Only run tests whose name contains the given substrings") orelse &.{},
     });
 
@@ -167,15 +150,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
+/// Each kind builds `<kind>_generator`, installed as `<kind>.generator` and embedded as `<kind>_generator_bin`.
 const GeneratorKind = enum { terrain, planet, voxelgame, sponge, fractal };
-
-const generator_sources = [_]struct { kind: GeneratorKind, name: []const u8, file_name: []const u8, embed_name: []const u8 }{
-    .{ .kind = .terrain, .name = "terrain_generator", .file_name = "terrain.generator", .embed_name = "terrain_generator_bin" },
-    .{ .kind = .voxelgame, .name = "voxelgame_generator", .file_name = "voxelgame.generator", .embed_name = "voxelgame_generator_bin" },
-    .{ .kind = .planet, .name = "planet_generator", .file_name = "planet.generator", .embed_name = "planet_generator_bin" },
-    .{ .kind = .fractal, .name = "fractal_generator", .file_name = "fractal.generator", .embed_name = "fractal_generator_bin" },
-    .{ .kind = .sponge, .name = "sponge_generator", .file_name = "sponge.generator", .embed_name = "sponge_generator_bin" },
-};
 
 const Deps = struct {
     rocksdb: *std.Build.Module,
