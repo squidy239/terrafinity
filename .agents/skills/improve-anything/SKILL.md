@@ -22,7 +22,7 @@ Never `git stash`, `git commit`, or `git checkout`. Revert mistakes with the edi
 
 ### 1. Simplify
 
-Walk code sequentially until you find code that is overcomplex or violates AGENTS.md. Fix one spot: extract a helper, flatten nesting with guard clauses, narrow variable scope, or remove dead code. Follow the `simplify` and `style-review` skills for the actual rewrite discipline. Verify with `zig fmt .`, `zig build`, and `zig build run -Dtest_play=5` with validation layers enabled per AGENTS.md.
+Walk code sequentially until you find code that is overcomplex or violates AGENTS.md. Fix one spot: extract a helper, flatten nesting with guard clauses, narrow variable scope, or remove dead code. Follow the `simplify` skill for the actual rewrite discipline. Verify with `zig fmt .`, `zig build`, and `zig build run -Dtest_play=5` with validation layers enabled per AGENTS.md.
 
 ### 2. Optimize
 

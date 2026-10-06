@@ -5,7 +5,7 @@
 Use these commands without modification:
 
 - build: `zig build`
-- format: `zig fmt .`
+- format: `zig fmt .` (it aborts on vendored `zig-pkg/` sources that still use the removed `**`; when it does, run `zig fmt` on the touched files and do not edit `zig-pkg/` to fix it)
 - measure size: `zig fmt --check --complexity <files or dirs>` prints per-file `tokens=`/`nodes=` (AST nodes) and a total to stderr without modifying files. Counts ignore formatting, so net token count (not line count) is the hard requirement for "simpler/smaller" in the simplify, prune, and improve-anything skills; node count is informational.
 - run to the menu: `zig build run`
 - run into a game: `export VK_LOADER_LAYERS_ENABLE="*validation" && zig build run -Dtest_play=[seconds, 5-10 is a good default]`
@@ -21,7 +21,7 @@ Do not git stash, commit, checkout, or reset; read-only git (`diff`, `log`, `sta
 
 ## Skills and logs
 
-Repo skills live in `.agents/skills/`; the trigger list decides, not guesswork. `concurrency-io`: background tasks, locks, upload/staging, entity registry, `Io`. `generator-plugin`: generators, `generator_api`, config trees, config editor UI. `verify-change`: which gates to run at a checkpoint. `profile-tracy`: frame times, zones, contention. `prune`: dead-code scan, one candidate per turn. `debate`: competing designs. `fanout-orchestrate`: parallel workers. `simplify` + `style-review`: rewrite discipline and guideline review. `improve-anything`: open-ended improvement modes. `asd-ste100`: disambiguating agent-consumed English.
+Repo skills live in `.agents/skills/`; the trigger list decides, not guesswork. `concurrency-io`: background tasks, locks, upload/staging, entity registry, `Io`. `generator-plugin`: generators, `generator_api`, config trees, config editor UI. `verify-change`: which gates to run at a checkpoint. `profile-tracy`: frame times, zones, contention. `prune`: dead-code scan, one candidate per turn. `debate`: competing designs. `fanout-orchestrate`: parallel workers. `simplify`: run on newly written code to simplify it and enforce every guideline in this file. `improve-anything`: open-ended improvement modes. `asd-ste100`: disambiguating agent-consumed English.
 
 `ideas.md` is an append-only research log plus periodic triage: `research` mode appends one short entry with links and never reorders; `triage` mode merges duplicates, drops done items, and sorts by benefit-to-effort.
 
@@ -67,6 +67,7 @@ std.sort.insertion(Key, keys, {}, Key.lessThan);
 
 ## State and mutation
 
+- **Float precision is not sacred:** reordering or reassociating float math, and results that differ by a few ULPs or lose a little precision, are acceptable unless the code documents an exactness requirement (such as the erosion pipeline's build-stability rule).
 - Declare variables in the deepest scope, close to first use. Never rely on hidden state; a mutating function's name and signature must make that obvious. Bind magic numbers to named constants.
 - **Minimize unsafe casts:** `@bitCast` over `@ptrCast`/`@alignCast`; `@ptrCast` is almost only for opaque pointers.
 - **Never use `std.mem.zeroes`:** it bypasses field defaults, so a later non-zero default silently changes every zeroed site. Use `.{}` with defaulted fields, `@splat(0)`, or a named `fn zeroed() T`.
@@ -125,6 +126,7 @@ Anything that can block or introduce nondeterminism takes an `Io` instance.
 ## Footguns
 
 - **`std.atomic.Value(i128)` fails codegen in Debug** (seen on 0.16). Never pad non-power-of-2 atomics (i96 timestamps) to i128; lock the plain integer or truncate to i64.
+- **`@bitCast` of a nested array inside a generic type's function segfaults the 0.17 compiler in ReleaseFast** (Debug and ReleaseSafe compile). Reinterpret with `std.mem.bytesAsValue(T, std.mem.asBytes(&x)).*`, or take the target shape as the parameter type so the caller's `@bitCast` does the work.
 - **Never `@splat` a runtime bool into a bool vector** (silent lane garbage in Debug on 0.16). Splat a comptime bool or build the mask from a vector comparison; verify against a scalar reference.
 - **Dead code hides bugs:** uninstantiated functions are never analyzed, so a removed API can survive in an uncalled function.
 - **`@typeInfo` has no `.slice`:** slices are `.pointer` with `size == .slice`.
