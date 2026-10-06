@@ -27,31 +27,20 @@ pub const Inventory = struct {
     pub fn get(self: *Inventory, io: std.Io, row: u32, col: u32) ?Item {
         self.lock.lockSharedUncancelable(io);
         defer self.lock.unlockShared(io);
-        std.debug.assert(row < self.height and col < self.width);
-        const index = (row * self.width) + col;
-        return self.items[index];
+        return self.items[self.index(row, col)];
     }
 
     pub fn set(self: *Inventory, io: std.Io, row: u32, col: u32, item: Item) ?Item {
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
-        std.debug.assert(row < self.height and col < self.width);
-        const index = (row * self.width) + col;
-        const previous = self.items[index];
-        self.items[index] = item;
-        return previous;
+        const slot = &self.items[self.index(row, col)];
+        defer slot.* = item;
+        return slot.*;
     }
 
-    pub fn swap(self: *Inventory, io: std.Io, row1: u32, col1: u32, row2: u32, col2: u32) void {
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
-        std.debug.assert(row1 < self.height and col1 < self.width);
-        std.debug.assert(row2 < self.height and col2 < self.width);
-        const index1 = (row1 * self.width) + col1;
-        const index2 = (row2 * self.width) + col2;
-        const temp = self.items[index1];
-        self.items[index1] = self.items[index2];
-        self.items[index2] = temp;
+    fn index(self: *const Inventory, row: u32, col: u32) usize {
+        std.debug.assert(row < self.height and col < self.width);
+        return row * self.width + col;
     }
 };
 
@@ -115,9 +104,9 @@ pub const block_types: [Block.visible_count]Block = blk: {
 pub const BlockItemType = blk: {
     var names: [block_types.len][]const u8 = undefined;
     var values: [block_types.len]u16 = undefined;
-    for (block_types, 0..) |block, i| {
-        names[i] = @tagName(block);
-        values[i] = @intCast(i);
+    for (block_types, &names, &values, 0..) |block, *name, *value, i| {
+        name.* = @tagName(block);
+        value.* = @intCast(i);
     }
     break :blk @Enum(u16, .exhaustive, &names, &values);
 };

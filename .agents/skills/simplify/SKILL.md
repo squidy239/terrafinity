@@ -1,6 +1,6 @@
 ---
 name: simplify
-description: Bring code to the best possible quality while keeping all functionality - simplify it and make it follow every AGENTS.md guideline (naming, comments, toolchain facts, footguns, project patterns, test conventions). Invoke on the files you just wrote, or on a directory, with an optional time budget (e.g. `src/world 2h`); without a budget it runs until the target is fully simplified and guideline-clean. Use after writing code, and when asked to simplify, refactor, clean up, review style, or check code against the guidelines.
+description: Bring code to the best possible quality while keeping all functionality - simplify it and make it follow every AGENTS.md guideline (naming, comments, toolchain facts, footguns, project patterns, test conventions). Invoke on the files you just wrote, or on a directory, with an optional time budget (e.g. `src/world 2h`); with a budget it MUST keep working until the budget is used up, and without a budget it runs until the target is fully simplified and guideline-clean. Use after writing code, and when asked to simplify, refactor, clean up, review style, or check code against the guidelines.
 ---
 
 # Simplify
@@ -26,7 +26,11 @@ Bring code to the best possible quality while preserving all functionality: simp
 
 Record the start with `date +%s` and, when a budget is given, the deadline. Check the clock before starting each round.
 
-- **With a time budget:** keep running rounds until the budget has elapsed; there is no early exit. Reserve the last ~10% of the budget (at least 10 minutes) for the final verification, and do not start a round that the previous round's duration says cannot finish before that reserve. When every slice reports DONE before the deadline, keep going with deeper rounds (see Round Types), each with a new angle, until the reserve begins. A deeper round that finds nothing does not end the run; pick the next angle.
+- **With a time budget, the run MUST last until the budget is used up.** Do not stop, report, or ask the user anything before the deadline. Nothing ends the run early: all slices reporting DONE, deeper rounds that find nothing, stuck slices, or a sense that the code is already good do not count. The stuck-slice rule does not apply; a stuck slice moves to the next deeper-round angle instead of being dropped.
+  - Reserve the last ~10% of the budget (at least 10 minutes) for the final verification. Do not start a round that the previous round's duration says cannot finish before that reserve.
+  - When every slice reports DONE before the reserve, run deeper rounds (see Round Types), each with a new angle, until the reserve begins.
+  - If the final verification finishes before the deadline, use the remaining time for another round on the angle most likely to pay off, then run the final verification again. Repeat until the deadline.
+  - Before writing the final report, run `date +%s` and confirm that the deadline has passed. If it has not, continue working. The report states the start time, the deadline, and the finish time.
 - **Small targets:** when the whole target is one slice of a few hundred lines, run the rounds yourself instead of spawning sub-agents, and still run the adversarial check as a separate sub-agent so a fresh reader judges the result.
 - **Without a time budget:** run rounds until every slice's adversarial check reports DONE. There is no round cap. A slice that goes two consecutive rounds without lowering its net token count while still drawing findings is marked stuck, dropped from later rounds, and listed in the final report with its open findings — those need human judgment.
 
@@ -197,7 +201,7 @@ Run the `verify-change` skill gates:
 
 Report:
 
-- the elapsed time, and the remaining budget if one was given
+- the start time, the finish time, and, when a budget was given, the deadline (the finish time must be at or after it)
 - the number of rounds run and the slices used
 - the token totals before → after, overall and per slice
 - the guideline fixes made, and any guideline findings left open with the reason (cross-slice rename, human judgment)

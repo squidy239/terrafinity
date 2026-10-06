@@ -48,6 +48,15 @@ pub const Interface = struct {
     getPos: ?*const fn (ptr: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
+/// An unload that only destroys the `T` behind the implementation pointer.
+pub fn DestroyUnload(comptime T: type) type {
+    return struct {
+        pub fn unload(ptr: *Implementation, _: std.Io, _: *World, _: Handle, allocator: std.mem.Allocator) void {
+            allocator.destroy(@as(*T, @ptrCast(@alignCast(ptr))));
+        }
+    };
+}
+
 pub inline fn keyFromValue(self: *const @This()) Handle {
     return self.uuid;
 }

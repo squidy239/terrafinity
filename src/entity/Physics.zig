@@ -196,8 +196,9 @@ pub const Mover = struct {
     pub fn collides(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !bool {
         var cells = self.overlappingCells(pos);
         while (cells.next()) |block_pos| {
+            if (self.blockOverlap(block_pos, pos) == null) continue;
             const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
-            if (block.isSolid() and self.blockOverlap(block_pos, pos) != null) return true;
+            if (block.isSolid()) return true;
         }
         return false;
     }
@@ -224,9 +225,9 @@ pub const Mover = struct {
         var resistance: f64 = 0;
         var cells = self.overlappingCells(pos);
         while (cells.next()) |block_pos| {
+            const overlap = self.blockOverlap(block_pos, pos) orelse continue;
             const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
             const props = block.fluidProperties() orelse continue;
-            const overlap = self.blockOverlap(block_pos, pos) orelse continue;
             const volume = overlap[0] * overlap[1] * overlap[2];
             fluid_volume += volume;
             buoyancy += props.buoyancy * volume;
@@ -244,10 +245,10 @@ pub const Mover = struct {
         var best: f64 = 0;
         var cells = self.overlappingCells(pos);
         while (cells.next()) |block_pos| {
-            const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
-            if (!block.isSolid()) continue;
             const push = self.pushForBlockOnAxis(block_pos, pos, axis);
-            if (@abs(push) > @abs(best)) best = push;
+            if (@abs(push) <= @abs(best)) continue;
+            const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
+            if (block.isSolid()) best = push;
         }
         return best;
     }
@@ -269,15 +270,10 @@ pub const Mover = struct {
     }
 
     fn pushForBlockOnAxis(self: *const @This(), block_pos: World.BlockPos, pos: @Vector(3, f64), comptime axis: usize) f64 {
-        const lo = self.lowCorner(pos);
-        const hi = self.highCorner(pos);
-        inline for (0..3) |a| {
-            if (overlapOnAxis(lo[a], hi[a], @floatFromInt(block_pos[a])) <= 0) return 0;
-        }
-        const self_center = (lo[axis] + hi[axis]) * 0.5;
+        const overlap = self.blockOverlap(block_pos, pos) orelse return 0;
+        const self_center = (self.lowCorner(pos)[axis] + self.highCorner(pos)[axis]) * 0.5;
         const block_center: f64 = @floatFromInt(block_pos[axis]);
-        const overlap = overlapOnAxis(lo[axis], hi[axis], block_center);
-        return if (self_center < block_center) -overlap else overlap;
+        return if (self_center < block_center) -overlap[axis] else overlap[axis];
     }
 
     fn lowCorner(self: *const @This(), pos: @Vector(3, f64)) @Vector(3, f64) {
@@ -309,16 +305,45 @@ pub const Gravity = struct {
     up: @Vector(3, f64) = .{ 0, 1, 0 },
     strength: std.atomic.Value(f64) = .init(20.0),
 
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
+    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, _: *World, _: std.mem.Allocator) !void {
         if (!self.enabled.load(.monotonic)) return;
-        _ = world;
-        _ = allocator;
         const offset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic) * delta_t)) * self.up;
         physics.mutex.lockUncancelable(io);
         defer physics.mutex.unlock(io);
         physics.velocity -= offset;
     }
 };
+
+fn testMover(collisions: bool, width: f64, height: f64) Mover {
+    return .{
+        .collisions = .init(collisions),
+        .zero_velocity = .init(false),
+        .bounding_box = Mover.boxFor(width, height),
+        .enabled = .init(true),
+    };
+}
+
+/// `below` fills chunks under y = 0, and a `band` of `band_height` layers sits on
+/// it over world x in [0, 16); everything else is air.
+fn BandSource(comptime below: World.Block, comptime band: World.Block, comptime band_height: usize) type {
+    return struct {
+        fn getBlocks(_: World.ChunkSource, _: std.Io, _: std.mem.Allocator, _: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [World.ChunkSize][World.ChunkSize][World.ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
+            if (chunk_pos.position[1] != 0) {
+                blocks.* = .{ .uniform = if (chunk_pos.position[1] < 0) below else .air };
+                return .{ .from_disk = false, .structures = false };
+            }
+            const base_x: i64 = @as(i64, chunk_pos.position[0]) * World.ChunkSize;
+            for (grid_buffer, 0..) |*plane, x| {
+                const world_x = base_x + @as(i64, @intCast(x));
+                for (plane, 0..) |*column, y| {
+                    column.* = @splat(if (y < band_height and world_x >= 0 and world_x < 16) band else .air);
+                }
+            }
+            blocks.* = .{ .grid = grid_buffer };
+            return .{ .from_disk = false, .structures = false };
+        }
+    };
+}
 
 /// Installs a single chunk source on a testing world; the other slots stay empty.
 fn setTestSource(world: *World, get_blocks: anytype) void {
@@ -341,30 +366,15 @@ test "Mover box is centered on the position" {
 }
 
 test "Mover substep follows the smallest extent" {
-    const small = Mover{
-        .collisions = .init(true),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(0.2, 0.2),
-        .enabled = .init(true),
-    };
+    const small = testMover(true, 0.2, 0.2);
     try std.testing.expectApproxEqAbs(@as(f64, 0.1), small.maxSubstep(), 1e-9);
 
-    const big = Mover{
-        .collisions = .init(true),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(4, 16),
-        .enabled = .init(true),
-    };
+    const big = testMover(true, 4, 16);
     try std.testing.expectApproxEqAbs(Mover.max_substep_size, big.maxSubstep(), 1e-9);
 }
 
 test "Mover push direction and overlap" {
-    const mover = Mover{
-        .collisions = .init(true),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(1, 4),
-        .enabled = .init(true),
-    };
+    const mover = testMover(true, 1, 4);
 
     // Body centered on the origin with a block directly below: push out upward.
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), mover.pushForBlockOnAxis(.{ 0, -1, 0 }, .{ 0, 0, 0 }, 1), 1e-9);
@@ -395,12 +405,7 @@ test "Mover update dispatch" {
     const testing = std.testing;
     const physics_interface = Interface(struct { mover: Mover });
     var physics_object = physics_interface{
-        .elements = .{ .mover = .{
-            .collisions = .init(false),
-            .zero_velocity = .init(false),
-            .bounding_box = Mover.boxFor(1, 1),
-            .enabled = .init(true),
-        } },
+        .elements = .{ .mover = testMover(false, 1, 1) },
         .last_update = .now(testing.io, .awake),
         .pos = .{ 0, 0, 0 },
         .velocity = .{ 4, 0, 0 },
@@ -449,12 +454,7 @@ test "Mover lands on a flat floor and reports support" {
 
     const physics_interface = Interface(struct { mover: Mover });
     var physics_object = physics_interface{
-        .elements = .{ .mover = .{
-            .collisions = .init(true),
-            .zero_velocity = .init(false),
-            .bounding_box = Mover.boxFor(1, 2),
-            .enabled = .init(true),
-        } },
+        .elements = .{ .mover = testMover(true, 1, 2) },
         .last_update = .now(io, .awake),
         .pos = .{ 0.5, 0.6, 0.5 },
         .velocity = .{ 0, -5, 0 },
@@ -477,12 +477,7 @@ test "Mover lands on a flat floor and reports support" {
 }
 
 test "Mover climb advances at a bounded rate" {
-    var mover = Mover{
-        .collisions = .init(true),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(1, 2),
-        .enabled = .init(true),
-    };
+    var mover = testMover(true, 1, 2);
     var physics: struct { pos: @Vector(3, f64), velocity: @Vector(3, f64) } = .{
         .pos = .{ 0, 0, 0 },
         .velocity = .{ 0, -9, 0 },
@@ -512,35 +507,11 @@ test "Mover steps up a one-block rise" {
     defer world.deinit(io, allocator);
 
     // Floor below the y = 0 chunk boundary, and a one-block plateau over world x in [0, 16).
-    const StepSource = struct {
-        fn getBlocks(_: World.ChunkSource, _: std.Io, _: std.mem.Allocator, _: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [World.ChunkSize][World.ChunkSize][World.ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-            if (chunk_pos.position[1] != 0) {
-                blocks.* = .{ .uniform = if (chunk_pos.position[1] < 0) .stone else .air };
-                return .{ .from_disk = false, .structures = false };
-            }
-            const base_x: i64 = @as(i64, chunk_pos.position[0]) * World.ChunkSize;
-            for (0..World.ChunkSize) |x| {
-                for (0..World.ChunkSize) |y| {
-                    for (0..World.ChunkSize) |z| {
-                        const world_x = base_x + @as(i64, @intCast(x));
-                        grid_buffer[x][y][z] = if (y == 0 and world_x >= 0 and world_x < 16) .stone else .air;
-                    }
-                }
-            }
-            blocks.* = .{ .grid = grid_buffer };
-            return .{ .from_disk = false, .structures = false };
-        }
-    };
-    setTestSource(&world, StepSource.getBlocks);
+    setTestSource(&world, BandSource(.stone, .stone, 1).getBlocks);
 
     const physics_interface = Interface(struct { mover: Mover });
     var physics_object = physics_interface{
-        .elements = .{ .mover = .{
-            .collisions = .init(true),
-            .zero_velocity = .init(false),
-            .bounding_box = Mover.boxFor(1, 2),
-            .enabled = .init(true),
-        } },
+        .elements = .{ .mover = testMover(true, 1, 2) },
         .last_update = .now(io, .awake),
         .pos = .{ -2, 0.5, 0.5 },
         .velocity = .{ 4, 0, 0 },
@@ -569,33 +540,9 @@ test "Mover medium measures fluid and leaf overlap" {
     defer world.deinit(io, allocator);
 
     // Water below the chunk boundary, a leaf band in the y = 0 chunk's lowest layers.
-    const MixedSource = struct {
-        fn getBlocks(_: World.ChunkSource, _: std.Io, _: std.mem.Allocator, _: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [World.ChunkSize][World.ChunkSize][World.ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-            if (chunk_pos.position[1] != 0) {
-                blocks.* = .{ .uniform = if (chunk_pos.position[1] < 0) .water else .air };
-                return .{ .from_disk = false, .structures = false };
-            }
-            const base_x: i64 = @as(i64, chunk_pos.position[0]) * World.ChunkSize;
-            for (0..World.ChunkSize) |x| {
-                for (0..World.ChunkSize) |y| {
-                    for (0..World.ChunkSize) |z| {
-                        const world_x = base_x + @as(i64, @intCast(x));
-                        grid_buffer[x][y][z] = if (y < 4 and world_x >= 0 and world_x < 16) .leaves else .air;
-                    }
-                }
-            }
-            blocks.* = .{ .grid = grid_buffer };
-            return .{ .from_disk = false, .structures = false };
-        }
-    };
-    setTestSource(&world, MixedSource.getBlocks);
+    setTestSource(&world, BandSource(.water, .leaves, 4).getBlocks);
 
-    const mover: Mover = .{
-        .collisions = .init(true),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(1, 2),
-        .enabled = .init(true),
-    };
+    const mover = testMover(true, 1, 2);
     var reader = World.Reader{ .world = &world };
     defer reader.clear(io);
 

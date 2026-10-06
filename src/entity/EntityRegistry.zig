@@ -157,7 +157,7 @@ pub fn spawn(
 
     self.timers.items[slot].uuid = random_uuid;
     if (options.initial_delay_ms) |delay| {
-        self.linkLocked(slot, random_uuid, now +| delay *| std.time.ns_per_ms, self.drain_seq -| 1, now);
+        self.linkLocked(slot, now +| delay *| std.time.ns_per_ms, self.drain_seq -| 1, now);
     }
     if (result.evicted) |victim| {
         // Freeing an in-flight slot is safe: the victim is out of the cache, so its
@@ -250,7 +250,7 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: Handle) DeleteResult {
     }
     // Only postpone an already-later deadline; soon-due timers keep their deadline.
     if (node.bucket == .parked or node.deadline_ns > retry_deadline)
-        self.linkLocked(entity.timer_slot, uuid, retry_deadline, self.drain_seq -| 1, now);
+        self.linkLocked(entity.timer_slot, retry_deadline, self.drain_seq -| 1, now);
     return .marked;
 }
 
@@ -282,7 +282,7 @@ pub fn rescheduleAt(self: *@This(), io: std.Io, uuid: Handle, base_ns: u64, dela
         node.pending_deadline_ns = deadline;
         return true;
     }
-    self.linkLocked(slot, uuid, deadline, self.drain_seq -| 1, base_ns);
+    self.linkLocked(slot, deadline, self.drain_seq -| 1, base_ns);
     return true;
 }
 
@@ -367,12 +367,11 @@ fn cascadeOverflowLocked(self: *@This(), watermark: u64) void {
     var next_ns: u64 = std.math.maxInt(u64);
     var curr = self.overflow_head;
     while (curr != none) {
-        const next = self.timers.items[curr].next;
         const node = &self.timers.items[curr];
+        const next = node.next;
         if (node.deadline_ns -| watermark <= horizon_ns) {
-            const slot = curr;
-            self.unlinkLocked(slot);
-            self.pushWheelLocked(slot);
+            self.unlinkLocked(curr);
+            self.pushWheelLocked(curr);
         } else {
             next_ns = @min(next_ns, node.deadline_ns);
         }
@@ -391,17 +390,14 @@ fn detachDueLocked(self: *@This(), watermark: u64, seq: u64, batch: *[drain_batc
         if (batch_len >= batch.len) break;
         var curr = head.*;
         while (curr != none and batch_len < batch.len) {
-            const next = self.timers.items[curr].next;
             const node = &self.timers.items[curr];
-            if (node.in_flight or node.armed_gen >= seq or node.deadline_ns > watermark) {
-                curr = next;
-                continue;
-            }
-            batch[batch_len] = .{ .slot = curr, .uuid = node.uuid };
+            const slot = curr;
+            curr = node.next;
+            if (node.in_flight or node.armed_gen >= seq or node.deadline_ns > watermark) continue;
+            batch[batch_len] = .{ .slot = slot, .uuid = node.uuid };
             batch_len += 1;
-            self.unlinkLocked(curr);
-            self.timers.items[curr].in_flight = true;
-            curr = next;
+            self.unlinkLocked(slot);
+            node.in_flight = true;
         }
     }
     return batch_len;
@@ -446,29 +442,20 @@ fn reapDeleted(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: 
 }
 
 fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: Handle) Entity.UpdateError!void {
-    const update_fn = entity.vtable.update orelse {
+    // A failed update parks too; a reschedule or delete recorded during the update wins in settleClaim.
+    defer {
         entity.release();
         self.settleClaim(ctx, slot, uuid, .park);
-        return;
-    };
-
-    const update_ctx: Entity.UpdateContext = .{
+    }
+    const update_fn = entity.vtable.update orelse return;
+    try update_fn(entity.ptr, .{
         .io = ctx.io,
         .world = ctx.world,
         .allocator = ctx.allocator,
         .now_ns = ctx.watermark,
         .uuid = uuid,
         .registry = self,
-    };
-    update_fn(entity.ptr, update_ctx) catch |err| {
-        // No retry: a failed update parks like any update that did not reschedule.
-        entity.release();
-        self.settleClaim(ctx, slot, uuid, .park);
-        return err;
-    };
-    // A reschedule or delete recorded during the update wins in settleClaim.
-    entity.release();
-    self.settleClaim(ctx, slot, uuid, .park);
+    });
 }
 
 /// Ends one detached claim; a mid-flight wake wins over the fallback. Re-arms
@@ -485,14 +472,14 @@ fn settleClaim(self: *@This(), ctx: DrainCtx, slot: u32, uuid: Handle, action: S
     if (node.pending_armed) {
         node.pending_armed = false;
         const pending = node.pending_deadline_ns;
-        self.linkLocked(slot, uuid, pending, ctx.seq, ctx.watermark);
+        self.linkLocked(slot, pending, ctx.seq, ctx.watermark);
         return;
     }
     switch (action) {
         .free => self.freeSlotLocked(slot),
         .park => {},
-        .link => |deadline| self.linkLocked(slot, uuid, deadline, ctx.seq, ctx.watermark),
-        .keep => self.linkLocked(slot, uuid, node.deadline_ns, ctx.seq, ctx.watermark),
+        .link => |deadline| self.linkLocked(slot, deadline, ctx.seq, ctx.watermark),
+        .keep => self.linkLocked(slot, node.deadline_ns, ctx.seq, ctx.watermark),
     }
 }
 
@@ -505,8 +492,7 @@ fn allocSlotLocked(self: *@This(), allocator: std.mem.Allocator) !u32 {
         self.free_head = self.timers.items[popped].next;
         break :blk popped;
     } else blk: {
-        try self.timers.ensureUnusedCapacity(allocator, 1);
-        self.timers.appendAssumeCapacity(.{});
+        try self.timers.append(allocator, .{});
         break :blk @intCast(self.timers.items.len - 1);
     };
     self.timers.items[slot] = .{ .used = true };
@@ -519,8 +505,6 @@ fn freeSlotLocked(self: *@This(), slot: u32) void {
     std.debug.assert(node.used);
     self.unlinkLocked(slot);
     node.used = false;
-    node.in_flight = false;
-    node.pending_armed = false;
     node.next = self.free_head;
     self.free_head = slot;
     self.timer_used -= 1;
@@ -546,11 +530,10 @@ fn unlinkLocked(self: *@This(), slot: u32) void {
     node.bucket = .parked;
 }
 
-fn linkLocked(self: *@This(), slot: u32, uuid: Handle, deadline_ns: u64, armed_gen: u64, now_ns: u64) void {
+fn linkLocked(self: *@This(), slot: u32, deadline_ns: u64, armed_gen: u64, now_ns: u64) void {
     self.unlinkLocked(slot);
     const node = &self.timers.items[slot];
     std.debug.assert(node.used);
-    node.uuid = uuid;
     node.deadline_ns = deadline_ns;
     node.armed_gen = armed_gen;
     node.in_flight = false;
@@ -588,23 +571,15 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
 
     // Every resident entity holds a timer slot, so the slab is the census.
     // No drain runs here, so no slot is ever in flight.
-    for (self.timers.items, 0..) |_, i| {
-        const idx: u32 = @intCast(i);
-        if (!self.timers.items[idx].used) continue;
-        const uuid = self.timers.items[idx].uuid;
-
-        const entity = self.getAndAddRef(io, uuid) orelse {
-            self.freeSlotIfMatches(idx, uuid);
-            continue;
-        };
+    for (self.timers.items, 0..) |node, i| {
+        if (!node.used) continue;
+        std.debug.assert(!node.in_flight);
+        const entity = self.getAndAddRef(io, node.uuid).?;
         if (entity.ref_count.load(.seq_cst) != 2)
-            std.debug.panic("entity {d} still referenced during shutdown", .{uuid});
-        if (self.map.remove(io, uuid)) |removed| {
-            self.freeSlotIfMatches(idx, uuid);
-            unloadEntity(io, allocator, world, removed);
-        } else {
-            entity.release();
-        }
+            std.debug.panic("entity {d} still referenced during shutdown", .{node.uuid});
+        const removed = self.map.remove(io, node.uuid).?;
+        self.freeSlotLocked(@intCast(i));
+        unloadEntity(io, allocator, world, removed);
     }
     std.debug.assert(self.map.count() == 0);
     std.debug.assert(self.timer_used == 0);
@@ -612,13 +587,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
     self.map.deinit(allocator);
     self.timers.deinit(allocator);
     std.log.info("entities unloaded", .{});
-}
-
-/// Frees a timer slot when the uuid still owns it.
-fn freeSlotIfMatches(self: *@This(), idx: u32, uuid: Handle) void {
-    const node = &self.timers.items[idx];
-    std.debug.assert(!node.in_flight);
-    if (node.used and node.uuid == uuid) self.freeSlotLocked(idx);
 }
 
 const testing = std.testing;
@@ -634,15 +602,11 @@ const TestEntity = struct {
     delay_ms: u64 = 0,
     run_limit: u32 = std.math.maxInt(u32),
 
-    pub fn getInterface(self: *const @This()) Entity.Interface {
-        _ = self;
+    pub fn getInterface(_: *const @This()) Entity.Interface {
         return .{ .unload = unloadFn, .update = updateFn };
     }
 
-    fn unloadFn(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator) void {
-        _ = io;
-        _ = world;
-        _ = uuid;
+    fn unloadFn(ptr: *Entity.Implementation, _: std.Io, _: *World, _: Handle, allocator: std.mem.Allocator) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         _ = self.unloaded.fetchAdd(1, .seq_cst);
         allocator.destroy(self);

@@ -58,13 +58,7 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator) void {
-        _ = io;
-        _ = world;
-        _ = uuid;
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        allocator.destroy(self);
-    }
+    pub const unload = Entity.DestroyUnload(@This()).unload;
 
     pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -96,8 +90,7 @@ pub const Player = struct {
         };
     }
 
-    pub fn getInterface(self: *const @This()) Entity.Interface {
-        _ = self;
+    pub fn getInterface(_: *const @This()) Entity.Interface {
         return .{ .getPos = getPos, .unload = unload, .update = update };
     }
 };
@@ -150,16 +143,9 @@ pub const Explosive = struct {
         ctx.reschedule(0);
     }
 
-    pub fn unload(ptr: *Entity.Implementation, io: std.Io, world: *World, uuid: Entity.Handle, allocator: std.mem.Allocator) void {
-        _ = io;
-        _ = world;
-        _ = uuid;
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        allocator.destroy(self);
-    }
+    pub const unload = Entity.DestroyUnload(@This()).unload;
 
-    pub fn getInterface(self: *const @This()) Entity.Interface {
-        _ = self;
+    pub fn getInterface(_: *const @This()) Entity.Interface {
         return .{ .unload = unload, .update = update };
     }
 };
